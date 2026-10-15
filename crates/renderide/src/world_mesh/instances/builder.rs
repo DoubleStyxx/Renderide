@@ -8,8 +8,8 @@ use super::batch_window::{BatchWindow, build_group};
 use super::prepass::{depth_prepass_group_eligible, phase_is_pre_skybox_forward};
 use super::scratch::InstancePlanScratch;
 use super::{
-    DrawGroup, InstancePlan, MergedGroupedWindowGroup, PendingSubmissionGroup, WorldMeshPhase,
-    debug_assert_plan_group_order,
+    DrawGroup, InstancePlan, MergedGroupedWindowGroup, PendingSubmissionGroup,
+    SubmissionGroupMembers, WorldMeshPhase, debug_assert_plan_group_order,
 };
 
 /// Mutable output and scratch buffers used while building one [`InstancePlan`].
@@ -68,11 +68,18 @@ impl InstancePlanBuilder {
         groups: Vec<PendingSubmissionGroup>,
     ) {
         for pending in groups {
-            let group = build_group(
-                &mut self.slab_layout,
-                pending.representative_draw_idx,
-                &pending.members,
-            );
+            let group = match &pending.members {
+                SubmissionGroupMembers::One(draw_idx) => build_group(
+                    &mut self.slab_layout,
+                    pending.representative_draw_idx,
+                    &[*draw_idx],
+                ),
+                SubmissionGroupMembers::Many(members) => build_group(
+                    &mut self.slab_layout,
+                    pending.representative_draw_idx,
+                    members,
+                ),
+            };
             self.queue_group_to_phase(draws, pending.phase, group);
         }
     }

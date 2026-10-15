@@ -18,8 +18,7 @@ use crate::scene::SceneSpaceRead;
 #[cfg(test)]
 pub(crate) use eval::mesh_draw_passes_cpu_cull;
 pub(crate) use eval::{
-    CpuCullFailure, mesh_cpu_cull_with_geometry, overlay_rect_clip_visible,
-    world_aabb_visible_for_cull,
+    CpuCullFailure, PreparedSpaceCull, SpaceCullCache, overlay_rect_clip_visible,
 };
 pub(crate) use geometry::{
     MeshCullGeometry, MeshCullTarget, mesh_world_geometry_for_cull_with_head,

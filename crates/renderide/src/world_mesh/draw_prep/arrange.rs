@@ -181,22 +181,31 @@ impl BatchIdTable {
     /// Builds compact batch IDs from the flattened draw list.
     fn build_from_items(items: &[WorldMeshDrawItem], allow_parallel: bool) -> Self {
         profiling::scope!("mesh::arrange_draws_by_phase_bins::batch_ids");
-        let mut sorted_indices = (0..items.len()).collect::<Vec<_>>();
-        sort_batch_indices(&mut sorted_indices, items, allow_parallel);
+        // Sort a 16-byte `(hash, index)` key instead of chasing `WorldMeshDrawItem` on every
+        // compare. Hash ties still fall back to the full batch key, so identical identities get
+        // the same dense id and distinct identities keep the previous total order.
+        let mut keys = Vec::with_capacity(items.len());
+        for (index, item) in items.iter().enumerate() {
+            keys.push(BatchSortKey {
+                hash: item.batch_key_hash,
+                index,
+            });
+        }
+        sort_batch_keys(&mut keys, items, allow_parallel);
 
         let mut draw_ids = vec![u32::MAX; items.len()];
         let mut previous = None::<usize>;
         let mut batch_id = 0u32;
-        for &index in &sorted_indices {
+        for key in &keys {
             if let Some(previous_index) = previous
-                && !same_batch_identity(&items[previous_index], &items[index])
+                && !same_batch_identity(&items[previous_index], &items[key.index])
             {
                 batch_id = batch_id.saturating_add(1);
             }
-            if let Some(slot) = draw_ids.get_mut(index) {
+            if let Some(slot) = draw_ids.get_mut(key.index) {
                 *slot = batch_id;
             }
-            previous = Some(index);
+            previous = Some(key.index);
         }
 
         Self { draw_ids }
@@ -257,22 +266,29 @@ impl WorldMeshDrawArrangementOrder {
     }
 }
 
-/// Sorts flattened draw indices by material batch identity.
-fn sort_batch_indices(indices: &mut [usize], items: &[WorldMeshDrawItem], allow_parallel: bool) {
-    if allow_parallel && indices.len() >= ARRANGE_PARALLEL_MIN_DRAWS {
-        profiling::scope!("mesh::arrange_draws_by_phase_bins::batch_ids_sort_parallel");
-        indices.par_sort_unstable_by(|&a, &b| cmp_batch_identity(&items[a], &items[b]));
-    } else {
-        profiling::scope!("mesh::arrange_draws_by_phase_bins::batch_ids_sort_serial");
-        indices.sort_unstable_by(|&a, &b| cmp_batch_identity(&items[a], &items[b]));
-    }
+/// Compact batch-identity sort key. `index` points back at the flattened draw.
+#[derive(Clone, Copy)]
+struct BatchSortKey {
+    /// Precomputed batch-key hash. Distinct hashes never compare the full key.
+    hash: u64,
+    /// Flattened draw index.
+    index: usize,
 }
 
-/// Compares the full material batch identity, using the precomputed hash as the common fast path.
-fn cmp_batch_identity(a: &WorldMeshDrawItem, b: &WorldMeshDrawItem) -> Ordering {
-    a.batch_key_hash
-        .cmp(&b.batch_key_hash)
-        .then_with(|| a.batch_key.cmp(&b.batch_key))
+/// Sorts compact batch keys by hash, then by the full material key on hash ties.
+fn sort_batch_keys(keys: &mut [BatchSortKey], items: &[WorldMeshDrawItem], allow_parallel: bool) {
+    let cmp = |a: &BatchSortKey, b: &BatchSortKey| {
+        a.hash
+            .cmp(&b.hash)
+            .then_with(|| items[a.index].batch_key.cmp(&items[b.index].batch_key))
+    };
+    if allow_parallel && keys.len() >= ARRANGE_PARALLEL_MIN_DRAWS {
+        profiling::scope!("mesh::arrange_draws_by_phase_bins::batch_ids_sort_parallel");
+        keys.par_sort_unstable_by(cmp);
+    } else {
+        profiling::scope!("mesh::arrange_draws_by_phase_bins::batch_ids_sort_serial");
+        keys.sort_unstable_by(cmp);
+    }
 }
 
 /// Returns whether two draws share the same material batch identity.
@@ -379,10 +395,60 @@ pub(super) fn validate_arranged_draw_order(order: &[usize], draw_count: usize) -
 
 /// Applies a prevalidated draw order by moving each item exactly once.
 pub(super) fn apply_validated_arranged_draw_order(
-    items: Vec<WorldMeshDrawItem>,
+    mut items: Vec<WorldMeshDrawItem>,
     order: &[usize],
 ) -> Vec<WorldMeshDrawItem> {
     profiling::scope!("mesh::arrange_draws_by_phase_bins::materialize");
+    if !apply_arranged_draw_order_in_place(&mut items, order) {
+        return gather_arranged_draw_order(items, order);
+    }
+    items
+}
+
+/// Permutes `items` so index `dest` receives the draw previously at `order[dest]`.
+///
+/// Follows cycles with swaps, so the large draw records stay in this allocation. Returns `false`
+/// when `order` is not a permutation; the slice is then left unchanged.
+fn apply_arranged_draw_order_in_place(items: &mut [WorldMeshDrawItem], order: &[usize]) -> bool {
+    let Some(mut where_to) = destination_by_source(order, items.len()) else {
+        return false;
+    };
+    let mut index = 0usize;
+    while index < items.len() {
+        while where_to[index] != index {
+            let dest = where_to[index];
+            items.swap(index, dest);
+            where_to.swap(index, dest);
+        }
+        index = index.saturating_add(1);
+    }
+    true
+}
+
+/// Maps each source index to the destination that should receive it.
+///
+/// `order[dest] == source`. A complete unique mapping is a permutation, which the cycle walk can
+/// apply without a second buffer of draw items.
+fn destination_by_source(order: &[usize], draw_count: usize) -> Option<Vec<usize>> {
+    if order.len() != draw_count {
+        return None;
+    }
+    let mut where_to = vec![usize::MAX; draw_count];
+    for (dest, &source) in order.iter().enumerate() {
+        let slot = where_to.get_mut(source)?;
+        if *slot != usize::MAX {
+            return None;
+        }
+        *slot = dest;
+    }
+    Some(where_to)
+}
+
+/// Fallback materialize used when `order` does not cover every draw exactly once.
+fn gather_arranged_draw_order(
+    items: Vec<WorldMeshDrawItem>,
+    order: &[usize],
+) -> Vec<WorldMeshDrawItem> {
     let mut slots = items.into_iter().map(Some).collect::<Vec<_>>();
     let mut arranged = Vec::with_capacity(order.len());
     for &index in order {
