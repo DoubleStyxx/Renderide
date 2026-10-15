@@ -190,6 +190,11 @@ impl RasterPass for MotionVectorsPass {
         let params = self
             .state_cache
             .compute_motion_vector_params(ctx.device, frame);
+        // History has already advanced. The velocity target was cleared to zero, and the
+        // shader stores the same zero when history is invalid, so the draw is redundant.
+        if !motion_vector_draw_needed(params.history_valid) {
+            return Ok(());
+        }
         let state = self.state_cache.ensure(ctx.device, frame.view.view_id);
         ctx.write_buffer(
             &state.motion_vector_params_buffer,
@@ -527,6 +532,14 @@ fn view_proj_pair(
     )
 }
 
+/// Whether the velocity fullscreen draw would store anything other than the cleared zero.
+///
+/// The velocity target is cleared to black before this pass records. The shader returns
+/// `vec2(0)` when `history_valid <= 0`, which is the same value the clear already wrote.
+fn motion_vector_draw_needed(history_valid: f32) -> bool {
+    history_valid > 0.0
+}
+
 /// Returns a current-clip to previous-clip transform, falling back to identity when invalid.
 fn current_to_previous_clip_matrix(current: Mat4, previous: Mat4, valid: bool) -> Mat4 {
     if !valid {
@@ -557,6 +570,12 @@ mod tests {
                 | wgpu::TextureUsages::TEXTURE_BINDING,
             alias: true,
         }
+    }
+
+    #[test]
+    fn invalid_history_skips_velocity_draw() {
+        assert!(!motion_vector_draw_needed(0.0));
+        assert!(motion_vector_draw_needed(1.0));
     }
 
     #[test]
