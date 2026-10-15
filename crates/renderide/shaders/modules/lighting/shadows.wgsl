@@ -65,17 +65,27 @@ fn point_face_up(face: u32) -> vec3<f32> {
     }
 }
 
+struct PointFaceBasis {
+    direction: vec3<f32>,
+    up: vec3<f32>,
+    right: vec3<f32>,
+}
+
+fn point_face_basis(face: u32) -> PointFaceBasis {
+    let direction = point_face_direction(face);
+    let up = point_face_up(face);
+    return PointFaceBasis(direction, up, cross(direction, up));
+}
+
 fn point_face_right(face: u32) -> vec3<f32> {
-    return cross(point_face_direction(face), point_face_up(face));
+    return point_face_basis(face).right;
 }
 
 fn point_shadow_face_uv(direction: vec3<f32>) -> PointShadowFaceUv {
     let face = point_face_index(direction);
-    let face_direction = point_face_direction(face);
-    let face_up = point_face_up(face);
-    let face_right = point_face_right(face);
-    let denom = max(dot(direction, face_direction), 1e-6);
-    let ndc = vec2<f32>(dot(direction, face_right), dot(direction, face_up)) / denom;
+    let basis = point_face_basis(face);
+    let denom = max(dot(direction, basis.direction), 1e-6);
+    let ndc = vec2<f32>(dot(direction, basis.right), dot(direction, basis.up)) / denom;
     let local_uv = clamp(
         vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5),
         vec2<f32>(0.0),
@@ -84,11 +94,13 @@ fn point_shadow_face_uv(direction: vec3<f32>) -> PointShadowFaceUv {
     return PointShadowFaceUv(face, local_uv);
 }
 
-fn point_shadow_direction_for_face_uv(face: u32, local_uv: vec2<f32>) -> vec3<f32> {
+fn point_shadow_direction_for_basis(basis: PointFaceBasis, local_uv: vec2<f32>) -> vec3<f32> {
     let ndc = vec2<f32>(local_uv.x * 2.0 - 1.0, 1.0 - local_uv.y * 2.0);
-    return point_face_direction(face)
-        + point_face_right(face) * ndc.x
-        + point_face_up(face) * ndc.y;
+    return basis.direction + basis.right * ndc.x + basis.up * ndc.y;
+}
+
+fn point_shadow_direction_for_face_uv(face: u32, local_uv: vec2<f32>) -> vec3<f32> {
+    return point_shadow_direction_for_basis(point_face_basis(face), local_uv);
 }
 
 fn shadow_view_kind(shadow_view: ft::GpuShadowView) -> u32 {
@@ -182,6 +194,7 @@ fn sample_point_hard_shadow(light: ft::GpuLight, start: u32, direction: vec3<f32
 
 fn sample_point_soft_shadow(light: ft::GpuLight, start: u32, direction: vec3<f32>, compare_depth: f32) -> f32 {
     let base = point_shadow_face_uv(direction);
+    let basis = point_face_basis(base.face);
     let base_shadow_view = rg::shadow_views[start + min(base.face, light.shadow_view_count - 1u)];
     let texel = max(base_shadow_view.params.y, 1e-6);
     var sum = 0.0;
@@ -189,7 +202,7 @@ fn sample_point_soft_shadow(light: ft::GpuLight, start: u32, direction: vec3<f32
     for (var y: i32 = -1; y <= 1; y = y + 1) {
         for (var x: i32 = -1; x <= 1; x = x + 1) {
             let tap_uv = base.local_uv + vec2<f32>(f32(x), f32(y)) * texel;
-            let tap_direction = point_shadow_direction_for_face_uv(base.face, tap_uv);
+            let tap_direction = point_shadow_direction_for_basis(basis, tap_uv);
             sum = sum + sample_point_shadow_compare(
                 light,
                 start,

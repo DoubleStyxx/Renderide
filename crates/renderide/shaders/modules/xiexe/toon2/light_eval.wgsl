@@ -15,7 +15,7 @@ fn sample_light(light: ft::GpuLight, world_pos: vec3<f32>, world_normal: vec3<f3
         let dir_len_sq = dot(light.direction.xyz, light.direction.xyz);
         let shadow_visibility = shadows::visibility(light, world_pos, world_normal);
         return xb::LightSample(
-            select(vec3<f32>(0.0, 0.0, 1.0), normalize(-light.direction.xyz), dir_len_sq > 1e-16),
+            select(vec3<f32>(0.0, 0.0, 1.0), -light.direction.xyz / sqrt(dir_len_sq), dir_len_sq > 1e-16),
             bl::light_radiance(light) * shadow_visibility,
             bl::direct_light_scale() * cookies::multiplier(light, world_pos),
             shadow_visibility,
@@ -24,8 +24,12 @@ fn sample_light(light: ft::GpuLight, world_pos: vec3<f32>, world_normal: vec3<f3
     }
 
     let to_light = light.position.xyz - world_pos;
-    let dist = length(to_light);
-    let l = xb::safe_normalize(to_light, vec3<f32>(0.0, 1.0, 0.0));
+    let dist_sq = dot(to_light, to_light);
+    let dist = sqrt(dist_sq);
+    var l = vec3<f32>(0.0, 1.0, 0.0);
+    if (dist_sq > 1e-12) {
+        l = to_light * inverseSqrt(dist_sq);
+    }
     var visibility = bl::distance_visibility(dist, light.range);
     if (light.light_type == 2u) {
         visibility = visibility * bl::spot_angle_attenuation(light, l);

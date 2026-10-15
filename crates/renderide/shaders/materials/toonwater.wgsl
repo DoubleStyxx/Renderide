@@ -231,11 +231,11 @@ fn fs_main(
         rg::frame.cluster_count_x, rg::frame.cluster_count_y, rg::frame.cluster_count_z,
         rg::frame.near_clip, rg::frame.far_clip,
     );
-    let count = pcls::cluster_light_count_at(cluster_id);
-    let i_max = count;
+    let range = pcls::cluster_light_range_at(cluster_id);
+    let count = range.y;
     var lo = vec3<f32>(0.0);
-    for (var i = 0u; i < i_max; i++) {
-        let li = pcls::cluster_light_index_at(cluster_id, i);
+    for (var i = 0u; i < count; i++) {
+        let li = pcls::cluster_light_index_from_range(range, i);
         if (li >= rg::frame.light_count) {
             continue;
         }
@@ -244,13 +244,14 @@ fn fs_main(
         var attenuation: f32;
         if (light.light_type == 1u) {
             let dir_len_sq = dot(light.direction, light.direction);
-            l = select(vec3<f32>(0.0, 0.0, 1.0), normalize(-light.direction), dir_len_sq > 1e-16);
+            l = select(vec3<f32>(0.0, 0.0, 1.0), -light.direction / sqrt(dir_len_sq), dir_len_sq > 1e-16);
             attenuation = bl::direct_light_scale();
             attenuation = attenuation * cookies::multiplier(light, world_pos);
         } else {
             let to_light = light.position - world_pos;
-            let dist = length(to_light);
-            l = normalize(to_light);
+            let dist_sq = dot(to_light, to_light);
+            let dist = sqrt(dist_sq);
+            l = to_light / dist;
             attenuation = brdf::distance_attenuation(dist, light.range);
             if (light.light_type == 2u) {
                 attenuation = attenuation * bl::spot_angle_attenuation(light, l);

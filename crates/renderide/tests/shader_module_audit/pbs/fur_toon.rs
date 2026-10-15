@@ -202,8 +202,8 @@ fn xiexe_pbs_and_fur_stay_on_shared_modern_brdf() -> io::Result<()> {
             "pbs/lighting.wgsl",
             [
                 "#import renderide::pbs::brdf as brdf",
-                "brdf::direct_radiance_metallic(",
-                "brdf::direct_radiance_specular(",
+                "brdf::direct_radiance_metallic_prepared(",
+                "brdf::direct_radiance_specular_prepared(",
                 "brdf::indirect_specular_visibility(",
             ],
         ),
@@ -211,7 +211,7 @@ fn xiexe_pbs_and_fur_stay_on_shared_modern_brdf() -> io::Result<()> {
             "xiexe/toon2/lighting.wgsl",
             [
                 "#import renderide::pbs::brdf as brdf",
-                "brdf::eval_direct_specular_lobe(",
+                "brdf::eval_direct_specular_lobe_prepared(",
                 "brdf::fd_burley(",
                 "brdf::indirect_specular_visibility(",
             ],
@@ -220,7 +220,7 @@ fn xiexe_pbs_and_fur_stay_on_shared_modern_brdf() -> io::Result<()> {
             "fur/lighting.wgsl",
             [
                 "#import renderide::pbs::brdf as brdf",
-                "brdf::direct_radiance_specular(",
+                "brdf::direct_radiance_specular_prepared(",
                 "brdf::indirect_diffuse_specular(",
                 "brdf::indirect_specular_visibility(",
             ],
@@ -432,8 +432,9 @@ fn fur_lighting_uses_full_pbs_brdf_stack() -> io::Result<()> {
     let fur_lighting = module_source("fur/lighting.wgsl")?;
     for required in [
         "let aa_roughness = brdf::filter_perceptual_roughness(s.roughness, s.normal, s.geometric_normal);",
-        "direct = direct + brdf::direct_radiance_specular(",
-        "aa_roughness,\n                s.roughness,",
+        "direct = direct + brdf::direct_radiance_specular_prepared(",
+        "brdf::direct_alpha_from_perceptual_roughness(aa_roughness);",
+        "f90,\n                s.roughness,",
         "let direct_roughness = brdf::direct_perceptual_roughness(s.roughness);",
         "let direct_dfg = brdf::sample_ibl_dfg_lut(direct_roughness, n_dot_v);",
         "let energy_compensation = brdf::energy_compensation_from_dfg(direct_dfg, f0);",
