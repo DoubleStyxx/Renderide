@@ -420,16 +420,25 @@ fn collect_deform_work_for_chunk(
     }
 }
 
+struct AggressiveDeformCollect<'a> {
+    specs: &'a mut Vec<DeformCollectChunkSpec>,
+    chunks: &'a mut Vec<Vec<DeformWorkItem>>,
+    work: &'a mut Vec<DeformWorkItem>,
+}
+
 fn collect_deform_work_for_space_aggressive(
     scene: &(impl MeshDeformSceneRead + Sync + ?Sized),
     mesh_pool: &MeshPool,
     visible_filter: Option<&HashSet<SkinCacheKey>>,
     render_contexts: &[RenderingContext],
     space_id: RenderSpaceId,
-    mut specs: &mut Vec<DeformCollectChunkSpec>,
-    chunks: &mut Vec<Vec<DeformWorkItem>>,
-    work: &mut Vec<DeformWorkItem>,
+    buffers: &mut AggressiveDeformCollect<'_>,
 ) {
+    let AggressiveDeformCollect {
+        specs,
+        chunks,
+        work,
+    } = buffers;
     work.clear();
     if renderer_count_for_deform_space(scene, space_id) < DEFORM_COLLECT_PARALLEL_MIN_RENDERERS {
         collect_deform_work_for_space(
@@ -451,12 +460,12 @@ fn collect_deform_work_for_space_aggressive(
 
     specs.clear();
     push_deform_collect_chunks(
-        &mut specs,
+        specs,
         DeformCollectChunkKind::Static,
         scene.static_mesh_renderers(space_id).map_or(0, |r| r.len()),
     );
     push_deform_collect_chunks(
-        &mut specs,
+        specs,
         DeformCollectChunkKind::Skinned,
         scene
             .skinned_mesh_renderers(space_id)
@@ -558,9 +567,11 @@ fn collect_deform_work_into_scratch(
                 visible_filter,
                 render_contexts,
                 space_id,
-                &mut scratch.collect_specs,
-                &mut scratch.chunks,
-                &mut scratch.work,
+                &mut AggressiveDeformCollect {
+                    specs: &mut scratch.collect_specs,
+                    chunks: &mut scratch.chunks,
+                    work: &mut scratch.work,
+                },
             );
             return;
         }

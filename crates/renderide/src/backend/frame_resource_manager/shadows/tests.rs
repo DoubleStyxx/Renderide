@@ -254,7 +254,8 @@ fn shadow_caster_plan_merges_forward_material_state_changes() {
     second.batch_key.shader_asset_id = 55;
     second.batch_key.property_block_slot0 = Some(66);
 
-    let plan = super::build_shadow_caster_plan(&[first, second], true);
+    let mut scratch = super::ShadowCasterPlanScratch::default();
+    let plan = super::build_shadow_caster_plan(&[first, second], true, &mut scratch);
 
     assert_eq!(plan.slab_layout, vec![0, 1]);
     assert_eq!(plan.phase_len(WorldMeshPhase::ForwardOpaque), 1);
@@ -271,7 +272,8 @@ fn shadow_caster_plan_keeps_deformed_draws_singleton() {
     let mut second = pbs_draw(2, ShadowCastMode::On);
     second.blendshape_deformed = true;
 
-    let plan = super::build_shadow_caster_plan(&[first, second], true);
+    let mut scratch = super::ShadowCasterPlanScratch::default();
+    let plan = super::build_shadow_caster_plan(&[first, second], true, &mut scratch);
 
     assert_eq!(plan.slab_layout, vec![0, 1]);
     assert_eq!(plan.phase_len(WorldMeshPhase::ForwardOpaque), 2);
@@ -290,7 +292,8 @@ fn shadow_caster_plan_keeps_downlevel_draws_singleton() {
     let first = pbs_draw(1, ShadowCastMode::On);
     let second = pbs_draw(2, ShadowCastMode::On);
 
-    let plan = super::build_shadow_caster_plan(&[first, second], false);
+    let mut scratch = super::ShadowCasterPlanScratch::default();
+    let plan = super::build_shadow_caster_plan(&[first, second], false, &mut scratch);
 
     assert_eq!(plan.slab_layout, vec![0, 1]);
     assert_eq!(plan.phase_len(WorldMeshPhase::ForwardOpaque), 2);

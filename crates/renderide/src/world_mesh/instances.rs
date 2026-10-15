@@ -234,6 +234,7 @@ impl WorldMeshPhase {
     /// Tracy debug-group label for this phase.
     ///
     /// Matches `format!("world_mesh_forward::{self:?}")` without allocating on the record path.
+    #[cfg(any(test, feature = "tracy"))]
     pub const fn debug_group_label(self) -> &'static str {
         match self {
             Self::DepthOnly => "world_mesh_forward::DepthOnly",
