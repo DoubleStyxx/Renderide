@@ -20,8 +20,13 @@ pub fn make_transforms(n: usize) -> Vec<RenderTransform> {
         .map(|_| RenderTransform {
             position: Vec3::new(next() * 100.0, next() * 100.0, next() * 100.0),
             scale: Vec3::splat(0.5 + next().abs()),
-            rotation: Quat::from_euler(glam::EulerRot::YXZ, next() * 3.0, next() * 3.0, next() * 3.0)
-                .normalize(),
+            rotation: Quat::from_euler(
+                glam::EulerRot::YXZ,
+                next() * 3.0,
+                next() * 3.0,
+                next() * 3.0,
+            )
+            .normalize(),
         })
         .collect()
 }

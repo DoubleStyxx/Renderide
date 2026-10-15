@@ -120,5 +120,11 @@ fn scratch_reuse(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, transforms_compose, frustum_cull, ipc_transform_rows, scratch_reuse);
+criterion_group!(
+    benches,
+    transforms_compose,
+    frustum_cull,
+    ipc_transform_rows,
+    scratch_reuse
+);
 criterion_main!(benches);
