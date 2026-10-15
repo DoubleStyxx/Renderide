@@ -1,0 +1,607 @@
+//! Shared draw-candidate evaluation for world-mesh collection.
+
+use glam::{Mat4, Vec3};
+
+use crate::materials::host_data::MaterialPropertyLookupIds;
+use crate::materials::{RasterFrontFace, RasterPrimitiveTopology};
+use crate::particles::ParticleDrawParams;
+use crate::reflection_probes::specular::ReflectionProbeDrawSelection;
+use crate::scene::{MeshRendererInstanceId, RenderSpaceId};
+use crate::shared::ShadowCastMode;
+use crate::world_mesh::culling::overlay_rect_clip_visible;
+use crate::world_mesh::materials::{
+    FrameMaterialBatchCache, MaterialResolveCtx, apply_render_buffer_mesh_pipeline_override,
+    batch_key_for_slot_cached, compute_batch_key_hash, normalized_material_slot,
+};
+
+use super::super::item::{MaterialStackOrder, WorldMeshDrawItem};
+use super::DrawCollectionInputs;
+
+/// View-local material-slot draw candidate shared by scene-walk and prepared collection.
+pub(super) struct DrawCandidate {
+    /// Render space containing the source renderer.
+    pub(super) space_id: RenderSpaceId,
+    /// Scene node id used for transform and filter decisions.
+    pub(super) node_id: i32,
+    /// Dense renderer index inside the static or skinned renderer table selected by [`Self::skinned`].
+    pub(super) renderable_index: usize,
+    /// Renderer-local identity that survives dense table reindexing.
+    pub(super) instance_id: MeshRendererInstanceId,
+    /// Mesh asset id referenced by the source renderer.
+    pub(super) mesh_asset_id: i32,
+    /// Material slot index within the source renderer.
+    pub(super) slot_index: usize,
+    /// Material-stack ordering marker when this slot reuses the final submesh.
+    pub(super) material_stack_order: Option<MaterialStackOrder>,
+    /// First index in the mesh index buffer.
+    pub(super) first_index: u32,
+    /// Number of indices emitted by the draw.
+    pub(super) index_count: u32,
+    /// Overlay layer flag copied into cull and draw metadata.
+    pub(super) is_overlay: bool,
+    /// Renderer sorting order copied into transparent ordering.
+    pub(super) sorting_order: i32,
+    /// Host shadow-caster mode copied from the source renderer.
+    pub(super) shadow_cast_mode: ShadowCastMode,
+    /// Whether this draw uses skinned vertex streams.
+    pub(super) skinned: bool,
+    /// Whether skinning writes world-space positions.
+    pub(super) world_space_deformed: bool,
+    /// Whether blendshape scatter writes cache-backed positions for this draw.
+    pub(super) blendshape_deformed: bool,
+    /// Whether active blendshape tangent deltas should deform this draw if the material reads tangents.
+    pub(super) tangent_blendshape_deform_active: bool,
+    /// Material asset after render-context override resolution.
+    pub(super) material_asset_id: i32,
+    /// Property block associated with material slot zero.
+    pub(super) property_block_id: Option<i32>,
+    /// World-space object AABB used for transparent sorting and CPU reflection-probe selection.
+    pub(super) world_aabb: Option<(Vec3, Vec3)>,
+    /// Particle renderer metadata for generated render-buffer draws.
+    pub(super) particle_draw: ParticleDrawParams,
+}
+
+/// Builds a draw item from a cull-surviving material-slot candidate without allocating.
+pub(super) fn evaluate_draw_candidate(
+    ctx: &DrawCollectionInputs<'_>,
+    cache: &FrameMaterialBatchCache,
+    candidate: DrawCandidate,
+    front_face: RasterFrontFace,
+    primitive_topology: RasterPrimitiveTopology,
+    rigid_world_matrix: Option<Mat4>,
+    alpha_distance_sq: f32,
+) -> Option<WorldMeshDrawItem> {
+    if candidate.index_count == 0 {
+        return None;
+    }
+    let (material_asset_id, property_block_id) =
+        normalized_material_slot(candidate.material_asset_id, candidate.property_block_id)?;
+    let lookup_ids = MaterialPropertyLookupIds {
+        material_asset_id,
+        mesh_property_block_slot0: property_block_id,
+        mesh_renderer_property_block_id: None,
+    };
+    let (mut batch_key, ui_rect_clip_local) = batch_key_for_slot_cached(
+        material_asset_id,
+        property_block_id,
+        candidate.skinned,
+        front_face,
+        primitive_topology,
+        cache,
+        MaterialResolveCtx {
+            dict: ctx.materials.dict,
+            router: ctx.materials.router,
+            pipeline_property_ids: ctx.materials.pipeline_property_ids,
+            shader_perm: ctx.materials.shader_perm,
+        },
+    );
+    apply_render_buffer_mesh_pipeline_override(
+        &mut batch_key,
+        candidate.mesh_asset_id,
+        ctx.materials.shader_perm,
+    );
+    // Per-slot UI rect-mask CPU cull: the per-renderer cull above runs once per renderer (and
+    // bypasses overlay anyway), so the actual rect-vs-viewport check has to live here, where
+    // `_Rect` / `_RectClip` are finally known per material slot. Without this, every off-screen
+    // masked UI element still hits the GPU and only `discard`s in the fragment shader -- which
+    // is what tanks the friend list FPS.
+    if candidate.is_overlay
+        && let (Some(rect), Some(model), Some(culling)) =
+            (ui_rect_clip_local, rigid_world_matrix, ctx.view.culling)
+        && !overlay_rect_clip_visible(
+            ctx.scene_assets.scene,
+            candidate.space_id,
+            culling,
+            rect,
+            model,
+        )
+    {
+        return None;
+    }
+    let blendshape_deformed = candidate.blendshape_deformed
+        || (candidate.tangent_blendshape_deform_active && batch_key.embedded_needs_tangent);
+    let camera_distance_sq = if batch_key.uses_transparent_sorting() {
+        transparent_sort_distance_sq(
+            ctx.view.view_origin_world,
+            candidate.world_aabb,
+            alpha_distance_sq,
+        )
+    } else {
+        0.0
+    };
+    let batch_key_hash = compute_batch_key_hash(&batch_key);
+    // Precompute the opaque depth bucket here so the sort comparator does not redo `sqrt + log2`
+    // on every pairwise compare. The argument matches the previous comparator-side computation
+    // (`opaque_depth_bucket(item.camera_distance_sq)`) so the resulting order is stable:
+    // transparent-sorted draws use the class-compatible sort metric preserved on
+    // `camera_distance_sq`, while opaque-queue draws feed `0.0` and bucket to `0`,
+    // leaving batch-key tiebreaking intact.
+    let opaque_depth_bucket =
+        crate::world_mesh::draw_prep::sort::opaque_depth_bucket(camera_distance_sq);
+    let sort_prefix = crate::world_mesh::draw_prep::sort::pack_sort_prefix(
+        candidate.is_overlay,
+        batch_key.render_queue,
+        batch_key.uses_transparent_sorting(),
+        opaque_depth_bucket,
+        batch_key_hash,
+    );
+    let reflection_probes = match (ctx.view.reflection_probes, candidate.world_aabb) {
+        (Some(selection), Some(aabb)) => selection.select(candidate.space_id, aabb),
+        _ => ReflectionProbeDrawSelection::default(),
+    };
+    Some(WorldMeshDrawItem {
+        space_id: candidate.space_id,
+        node_id: candidate.node_id,
+        renderable_index: candidate.renderable_index,
+        instance_id: candidate.instance_id,
+        render_context: ctx.view.render_context,
+        mesh_asset_id: candidate.mesh_asset_id,
+        slot_index: candidate.slot_index,
+        material_stack_order: candidate.material_stack_order,
+        first_index: candidate.first_index,
+        index_count: candidate.index_count,
+        is_overlay: candidate.is_overlay,
+        sorting_order: candidate.sorting_order,
+        shadow_cast_mode: candidate.shadow_cast_mode,
+        skinned: candidate.skinned,
+        world_space_deformed: candidate.world_space_deformed,
+        blendshape_deformed,
+        collect_order: 0,
+        camera_distance_sq,
+        world_aabb: candidate.world_aabb,
+        lookup_ids,
+        batch_key,
+        batch_key_hash,
+        _opaque_depth_bucket: opaque_depth_bucket,
+        sort_prefix,
+        rigid_world_matrix,
+        reflection_probes,
+        ui_rect_clip_local,
+        particle_draw: candidate.particle_draw,
+    })
+}
+
+/// Returns the transparent back-to-front sort metric for a draw candidate.
+fn transparent_sort_distance_sq(
+    view_origin_world: Vec3,
+    world_aabb: Option<(Vec3, Vec3)>,
+    fallback_distance_sq: f32,
+) -> f32 {
+    let fallback = finite_nonnegative_distance_sq(fallback_distance_sq).unwrap_or(0.0);
+    let Some((min, max)) = world_aabb else {
+        return fallback;
+    };
+    if !view_origin_world.is_finite() || !min.is_finite() || !max.is_finite() {
+        return fallback;
+    }
+    let lo = min.min(max);
+    let hi = min.max(max);
+    let dx = (lo.x - view_origin_world.x)
+        .abs()
+        .max((hi.x - view_origin_world.x).abs());
+    let dy = (lo.y - view_origin_world.y)
+        .abs()
+        .max((hi.y - view_origin_world.y).abs());
+    let dz = (lo.z - view_origin_world.z)
+        .abs()
+        .max((hi.z - view_origin_world.z).abs());
+    finite_nonnegative_distance_sq(dx.mul_add(dx, dy.mul_add(dy, dz * dz))).unwrap_or(fallback)
+}
+
+/// Returns finite non-negative distance values unchanged.
+fn finite_nonnegative_distance_sq(value: f32) -> Option<f32> {
+    (value.is_finite() && value >= 0.0).then_some(value)
+}
+
+#[cfg(test)]
+mod tests {
+    //! CPU-only draw-candidate identity tests.
+
+    use glam::{Mat4, Vec3};
+
+    use super::*;
+    use crate::gpu_pools::MeshPool;
+    use crate::materials::host_data::{
+        MaterialDictionary, MaterialPropertyStore, MaterialPropertyValue, PropertyIdRegistry,
+    };
+    use crate::materials::{
+        MaterialPipelinePropertyIds, MaterialRouter, RasterPipelineKind, ShaderPermutation,
+    };
+    use crate::scene::SceneCoordinator;
+    use crate::shared::RenderingContext;
+    use crate::world_mesh::draw_prep::collect::{
+        DrawCollectionFrameCaches, DrawCollectionMaterialInputs, DrawCollectionSceneAssets,
+        DrawCollectionViewInputs,
+    };
+
+    fn test_draw_context<'a>(
+        scene: &'a SceneCoordinator,
+        mesh_pool: &'a MeshPool,
+        material_dict: &'a MaterialDictionary<'a>,
+        router: &'a MaterialRouter,
+        property_ids: &'a MaterialPipelinePropertyIds,
+    ) -> DrawCollectionInputs<'a> {
+        DrawCollectionInputs {
+            scene_assets: DrawCollectionSceneAssets { scene, mesh_pool },
+            materials: DrawCollectionMaterialInputs {
+                dict: material_dict,
+                router,
+                pipeline_property_ids: property_ids,
+                shader_perm: ShaderPermutation::default(),
+            },
+            view: DrawCollectionViewInputs {
+                render_context: RenderingContext::UserView,
+                head_output_transform: Mat4::IDENTITY,
+                view_origin_world: Vec3::ZERO,
+                culling: None,
+                mesh_lod_bias: 2.0,
+                transform_filter: None,
+                transform_filter_space: None,
+                render_space_scope: crate::world_mesh::ViewRenderSpaceScope::AllActive,
+                layer_policy: crate::world_mesh::ViewLayerPolicy::MainView,
+                reflection_probes: None,
+            },
+            caches: DrawCollectionFrameCaches {
+                material_cache: None,
+                prepared: None,
+            },
+        }
+    }
+
+    #[test]
+    fn evaluate_draw_candidate_preserves_renderer_identity_separate_from_node_id() {
+        let scene = SceneCoordinator::new();
+        let mesh_pool = MeshPool::default_pool();
+        let store = MaterialPropertyStore::new();
+        let material_dict = MaterialDictionary::new(&store);
+        let router = MaterialRouter::new(RasterPipelineKind::Null);
+        let registry = PropertyIdRegistry::new();
+        let property_ids = MaterialPipelinePropertyIds::new(&registry);
+        let cache = FrameMaterialBatchCache::new();
+        let ctx = test_draw_context(&scene, &mesh_pool, &material_dict, &router, &property_ids);
+        let candidate = DrawCandidate {
+            space_id: RenderSpaceId(3),
+            node_id: 9,
+            renderable_index: 42,
+            instance_id: MeshRendererInstanceId(99),
+            mesh_asset_id: 7,
+            slot_index: 0,
+            material_stack_order: None,
+            first_index: 0,
+            index_count: 3,
+            is_overlay: false,
+            sorting_order: 0,
+            shadow_cast_mode: ShadowCastMode::On,
+            skinned: true,
+            world_space_deformed: true,
+            blendshape_deformed: true,
+            tangent_blendshape_deform_active: false,
+            material_asset_id: 11,
+            property_block_id: None,
+            world_aabb: None,
+            particle_draw: ParticleDrawParams::default(),
+        };
+
+        let item = evaluate_draw_candidate(
+            &ctx,
+            &cache,
+            candidate,
+            RasterFrontFace::Clockwise,
+            RasterPrimitiveTopology::TriangleList,
+            None,
+            0.0,
+        )
+        .expect("draw item");
+
+        assert_eq!(item.node_id, 9);
+        assert_eq!(item.renderable_index, 42);
+        assert_eq!(item.instance_id, MeshRendererInstanceId(99));
+    }
+
+    #[test]
+    fn evaluate_draw_candidate_routes_missing_material_to_null_fallback() {
+        let scene = SceneCoordinator::new();
+        let mesh_pool = MeshPool::default_pool();
+        let store = MaterialPropertyStore::new();
+        let material_dict = MaterialDictionary::new(&store);
+        let router = MaterialRouter::new(RasterPipelineKind::Null);
+        let registry = PropertyIdRegistry::new();
+        let property_ids = MaterialPipelinePropertyIds::new(&registry);
+        let cache = FrameMaterialBatchCache::new();
+        let ctx = test_draw_context(&scene, &mesh_pool, &material_dict, &router, &property_ids);
+        let candidate = DrawCandidate {
+            space_id: RenderSpaceId(3),
+            node_id: 9,
+            renderable_index: 42,
+            instance_id: MeshRendererInstanceId(99),
+            mesh_asset_id: 7,
+            slot_index: 0,
+            material_stack_order: None,
+            first_index: 0,
+            index_count: 3,
+            is_overlay: false,
+            sorting_order: 0,
+            shadow_cast_mode: ShadowCastMode::On,
+            skinned: false,
+            world_space_deformed: false,
+            blendshape_deformed: false,
+            tangent_blendshape_deform_active: false,
+            material_asset_id: -1,
+            property_block_id: Some(100),
+            world_aabb: None,
+            particle_draw: ParticleDrawParams::default(),
+        };
+
+        let item = evaluate_draw_candidate(
+            &ctx,
+            &cache,
+            candidate,
+            RasterFrontFace::Clockwise,
+            RasterPrimitiveTopology::TriangleList,
+            None,
+            0.0,
+        )
+        .expect("missing material draw item");
+
+        assert_eq!(item.lookup_ids.material_asset_id, -1);
+        assert_eq!(item.lookup_ids.mesh_property_block_slot0, None);
+        assert_eq!(item.batch_key.material_asset_id, -1);
+        assert_eq!(item.batch_key.property_block_slot0, None);
+        assert_eq!(item.batch_key.shader_asset_id, -1);
+        assert_eq!(item.batch_key.pipeline, RasterPipelineKind::Null);
+    }
+
+    #[test]
+    fn evaluate_draw_candidate_rejects_malformed_negative_material_id() {
+        let scene = SceneCoordinator::new();
+        let mesh_pool = MeshPool::default_pool();
+        let store = MaterialPropertyStore::new();
+        let material_dict = MaterialDictionary::new(&store);
+        let router = MaterialRouter::new(RasterPipelineKind::Null);
+        let registry = PropertyIdRegistry::new();
+        let property_ids = MaterialPipelinePropertyIds::new(&registry);
+        let cache = FrameMaterialBatchCache::new();
+        let ctx = test_draw_context(&scene, &mesh_pool, &material_dict, &router, &property_ids);
+        let candidate = DrawCandidate {
+            space_id: RenderSpaceId(3),
+            node_id: 9,
+            renderable_index: 42,
+            instance_id: MeshRendererInstanceId(99),
+            mesh_asset_id: 7,
+            slot_index: 0,
+            material_stack_order: None,
+            first_index: 0,
+            index_count: 3,
+            is_overlay: false,
+            sorting_order: 0,
+            shadow_cast_mode: ShadowCastMode::On,
+            skinned: false,
+            world_space_deformed: false,
+            blendshape_deformed: false,
+            tangent_blendshape_deform_active: false,
+            material_asset_id: -2,
+            property_block_id: None,
+            world_aabb: None,
+            particle_draw: ParticleDrawParams::default(),
+        };
+
+        assert!(
+            evaluate_draw_candidate(
+                &ctx,
+                &cache,
+                candidate,
+                RasterFrontFace::Clockwise,
+                RasterPrimitiveTopology::TriangleList,
+                None,
+                0.0,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn evaluate_draw_candidate_preserves_overlay_depth_policy() {
+        let scene = SceneCoordinator::new();
+        let mesh_pool = MeshPool::default_pool();
+        let store = MaterialPropertyStore::new();
+        let material_dict = MaterialDictionary::new(&store);
+        let router = MaterialRouter::new(RasterPipelineKind::Null);
+        let registry = PropertyIdRegistry::new();
+        let property_ids = MaterialPipelinePropertyIds::new(&registry);
+        let cache = FrameMaterialBatchCache::new();
+        let ctx = test_draw_context(&scene, &mesh_pool, &material_dict, &router, &property_ids);
+        let candidate = DrawCandidate {
+            space_id: RenderSpaceId(3),
+            node_id: 9,
+            renderable_index: 42,
+            instance_id: MeshRendererInstanceId(99),
+            mesh_asset_id: 7,
+            slot_index: 0,
+            material_stack_order: None,
+            first_index: 0,
+            index_count: 3,
+            is_overlay: true,
+            sorting_order: 0,
+            shadow_cast_mode: ShadowCastMode::On,
+            skinned: false,
+            world_space_deformed: false,
+            blendshape_deformed: false,
+            tangent_blendshape_deform_active: false,
+            material_asset_id: 11,
+            property_block_id: None,
+            world_aabb: None,
+            particle_draw: ParticleDrawParams::default(),
+        };
+
+        let item = evaluate_draw_candidate(
+            &ctx,
+            &cache,
+            candidate,
+            RasterFrontFace::Clockwise,
+            RasterPrimitiveTopology::TriangleList,
+            None,
+            0.0,
+        )
+        .expect("overlay draw item");
+
+        assert_eq!(item.batch_key.render_state.depth_write, None);
+        assert_eq!(item.batch_key.render_state.depth_compare, None);
+    }
+
+    #[test]
+    fn evaluate_draw_candidate_uses_alpha_stem_sort_distance_after_geometry_last() {
+        let scene = SceneCoordinator::new();
+        let mesh_pool = MeshPool::default_pool();
+        let mut store = MaterialPropertyStore::new();
+        let registry = PropertyIdRegistry::new();
+        let property_ids = MaterialPipelinePropertyIds::new(&registry);
+        store.set_shader_asset_for_material(11, 22);
+        store.set_material(
+            11,
+            property_ids.render_queue[0],
+            MaterialPropertyValue::Float(
+                crate::materials::UNITY_TRANSPARENT_RENDER_QUEUE_MIN as f32,
+            ),
+        );
+        let material_dict = MaterialDictionary::new(&store);
+        let mut router = MaterialRouter::new(RasterPipelineKind::Null);
+        router.set_shader_pipeline(
+            22,
+            RasterPipelineKind::EmbeddedStem(std::sync::Arc::<str>::from("ui_unlit_default")),
+        );
+        let cache = FrameMaterialBatchCache::new();
+        let ctx = test_draw_context(&scene, &mesh_pool, &material_dict, &router, &property_ids);
+        let candidate = DrawCandidate {
+            space_id: RenderSpaceId(3),
+            node_id: 9,
+            renderable_index: 42,
+            instance_id: MeshRendererInstanceId(99),
+            mesh_asset_id: 7,
+            slot_index: 0,
+            material_stack_order: None,
+            first_index: 0,
+            index_count: 3,
+            is_overlay: false,
+            sorting_order: 0,
+            shadow_cast_mode: ShadowCastMode::On,
+            skinned: false,
+            world_space_deformed: false,
+            blendshape_deformed: false,
+            tangent_blendshape_deform_active: false,
+            material_asset_id: 11,
+            property_block_id: None,
+            world_aabb: Some((Vec3::new(9.0, -2.0, 0.0), Vec3::new(11.0, 2.0, 0.0))),
+            particle_draw: ParticleDrawParams::default(),
+        };
+
+        let item = evaluate_draw_candidate(
+            &ctx,
+            &cache,
+            candidate,
+            RasterFrontFace::Clockwise,
+            RasterPrimitiveTopology::TriangleList,
+            None,
+            4.0,
+        )
+        .expect("draw item");
+
+        assert!(item.batch_key.alpha_blended);
+        assert!(item.batch_key.uses_transparent_sorting());
+        assert_eq!(item.camera_distance_sq, 125.0);
+    }
+
+    #[test]
+    fn transparent_sort_distance_uses_bounds_farthest_corner() {
+        let distance = transparent_sort_distance_sq(
+            Vec3::ZERO,
+            Some((Vec3::new(9.0, -2.0, 0.0), Vec3::new(11.0, 2.0, 0.0))),
+            100.0,
+        );
+
+        assert_eq!(distance, 125.0);
+    }
+
+    #[test]
+    fn transparent_sort_distance_falls_back_without_valid_bounds() {
+        assert_eq!(transparent_sort_distance_sq(Vec3::ZERO, None, 16.0), 16.0);
+        assert_eq!(
+            transparent_sort_distance_sq(Vec3::ZERO, Some((Vec3::NAN, Vec3::ONE)), 16.0),
+            16.0
+        );
+        assert_eq!(
+            transparent_sort_distance_sq(Vec3::ZERO, None, f32::NAN),
+            0.0
+        );
+    }
+
+    #[test]
+    fn evaluate_draw_candidate_preserves_zero_scale_rigid_world_matrix() {
+        let scene = SceneCoordinator::new();
+        let mesh_pool = MeshPool::default_pool();
+        let store = MaterialPropertyStore::new();
+        let material_dict = MaterialDictionary::new(&store);
+        let router = MaterialRouter::new(RasterPipelineKind::Null);
+        let registry = PropertyIdRegistry::new();
+        let property_ids = MaterialPipelinePropertyIds::new(&registry);
+        let cache = FrameMaterialBatchCache::new();
+        let ctx = test_draw_context(&scene, &mesh_pool, &material_dict, &router, &property_ids);
+        let candidate = DrawCandidate {
+            space_id: RenderSpaceId(3),
+            node_id: 9,
+            renderable_index: 42,
+            instance_id: MeshRendererInstanceId(99),
+            mesh_asset_id: 7,
+            slot_index: 0,
+            material_stack_order: None,
+            first_index: 0,
+            index_count: 3,
+            is_overlay: false,
+            sorting_order: 0,
+            shadow_cast_mode: ShadowCastMode::On,
+            skinned: false,
+            world_space_deformed: false,
+            blendshape_deformed: false,
+            tangent_blendshape_deform_active: false,
+            material_asset_id: 11,
+            property_block_id: None,
+            world_aabb: None,
+            particle_draw: ParticleDrawParams::default(),
+        };
+
+        let item = evaluate_draw_candidate(
+            &ctx,
+            &cache,
+            candidate,
+            RasterFrontFace::Clockwise,
+            RasterPrimitiveTopology::TriangleList,
+            Some(Mat4::from_scale(Vec3::new(0.0, 1.0, 1.0))),
+            0.0,
+        )
+        .expect("draw item");
+        let matrix = item.rigid_world_matrix.expect("rigid world matrix");
+
+        assert_eq!(matrix.col(0).x, 0.0);
+        assert_eq!(matrix.col(1).y, 1.0);
+        assert_eq!(matrix.col(2).z, 1.0);
+    }
+}

@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Renderide discussion thread
+    url: https://discord.com/channels/1040316820650991766/1156348246973751487
+    about: Use the Resonite Discord thread for open-ended discussion, support, and early investigation before filing a focused issue.

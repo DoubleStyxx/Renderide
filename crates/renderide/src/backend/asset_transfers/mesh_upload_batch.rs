@@ -1,0 +1,628 @@
+//! Deferred mesh buffer upload batch for asset integration.
+
+use std::cell::RefCell;
+use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
+
+use parking_lot::Mutex;
+
+use crate::assets::mesh::MeshBufferUploadSink;
+use crate::upload_arena::{PersistentUploadArena, UploadArenaAcquireStats, UploadArenaPressure};
+use crate::upload_stats::{UploadArenaStats, UploadTrafficStats};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WritePlan {
+    Stage { staging_offset: u64, len: u64 },
+    Fallback,
+}
+
+struct QueueWrite {
+    order: u64,
+    buffer: wgpu::Buffer,
+    offset: u64,
+    data: Range<usize>,
+}
+
+#[derive(Default)]
+struct RecordedMeshUploads {
+    writes: Vec<QueueWrite>,
+    bytes: Vec<u8>,
+}
+
+impl RecordedMeshUploads {
+    fn push_bytes(&mut self, data: &[u8]) -> Range<usize> {
+        let start = self.bytes.len();
+        self.bytes.extend_from_slice(data);
+        start..self.bytes.len()
+    }
+
+    fn push_buffer_write(&mut self, order: u64, buffer: &wgpu::Buffer, offset: u64, data: &[u8]) {
+        let data = self.push_bytes(data);
+        self.writes.push(QueueWrite {
+            order,
+            buffer: buffer.clone(),
+            offset,
+            data,
+        });
+    }
+
+    fn push_padded_buffer_write(
+        &mut self,
+        order: u64,
+        buffer: &wgpu::Buffer,
+        offset: u64,
+        data: &[u8],
+        padded_size: usize,
+    ) {
+        let start = self.bytes.len();
+        self.bytes.extend_from_slice(data);
+        self.bytes.resize(start + padded_size, 0);
+        self.writes.push(QueueWrite {
+            order,
+            buffer: buffer.clone(),
+            offset,
+            data: start..start + padded_size,
+        });
+    }
+
+    fn append_with_base_order(&mut self, base_order: u64, mut other: RecordedMeshUploads) {
+        let byte_base = self.bytes.len();
+        self.bytes.append(&mut other.bytes);
+        self.writes.extend(other.writes.drain(..).map(|mut write| {
+            write.order = write.order.saturating_add(base_order);
+            write.data = write.data.start + byte_base..write.data.end + byte_base;
+            write
+        }));
+    }
+}
+
+/// Counters describing one mesh upload batch drain.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct MeshUploadBatchStats {
+    /// Queue-write and staging-copy traffic.
+    pub(crate) traffic: UploadTrafficStats,
+    /// Persistent upload arena acquire and pressure counters.
+    pub(crate) arena: UploadArenaStats,
+    /// Writes replayed because the queue gate was busy.
+    pub(crate) queue_gate_fallbacks: usize,
+    /// Adjacent writes merged before staging or queue fallback replay.
+    pub(crate) coalesced_writes: usize,
+    /// CPU time spent finishing the upload command encoder.
+    pub(crate) finish_ms: f64,
+}
+
+impl MeshUploadBatchStats {
+    /// Builds the profiling sample emitted for this upload batch.
+    pub(crate) fn profile_sample(self) -> crate::profiling::MeshUploadBatchProfileSample {
+        crate::profiling::MeshUploadBatchProfileSample {
+            traffic: self.traffic,
+            queue_gate_fallbacks: self.queue_gate_fallbacks,
+            coalesced_writes: self.coalesced_writes,
+        }
+    }
+
+    fn apply_arena_acquire(&mut self, stats: UploadArenaAcquireStats) {
+        self.arena.apply_acquire(stats);
+    }
+
+    fn apply_arena_pressure(&mut self, pressure: UploadArenaPressure) {
+        self.arena.apply_pressure(pressure);
+    }
+}
+
+/// Pending GPU submission and completion callback produced by a mesh upload batch drain.
+pub(crate) struct MeshUploadFlush {
+    /// Copy command buffer for staged writes.
+    pub(crate) command_buffer: Option<wgpu::CommandBuffer>,
+    /// Callback that recycles a persistent staging slot after GPU completion.
+    pub(crate) on_submitted_work_done: Option<Box<dyn FnOnce() + Send + 'static>>,
+    /// Batch traffic and staging stats.
+    pub(crate) stats: MeshUploadBatchStats,
+}
+
+/// Ordered deferred upload batch for mesh buffer writes.
+pub(crate) struct MeshUploadStagingBatch {
+    recorded: Mutex<RecordedMeshUploads>,
+    sequence: AtomicU64,
+}
+
+/// Per-task mesh upload recorder merged into [`MeshUploadStagingBatch`] with one global lock.
+pub(crate) struct MeshUploadRecorder<'a> {
+    batch: &'a MeshUploadStagingBatch,
+    recorded: RefCell<RecordedMeshUploads>,
+    local_sequence: AtomicU64,
+}
+
+impl MeshUploadStagingBatch {
+    /// Creates an empty mesh upload staging batch.
+    pub(crate) fn new() -> Self {
+        Self {
+            recorded: Mutex::new(RecordedMeshUploads::default()),
+            sequence: AtomicU64::new(0),
+        }
+    }
+
+    /// Drains recorded writes and returns staged copy work or queue-write fallback results.
+    pub(crate) fn drain_and_flush(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        max_buffer_size: u64,
+        upload_arena: &mut PersistentUploadArena,
+        force_queue_fallback: bool,
+    ) -> Option<MeshUploadFlush> {
+        profiling::scope!("mesh_upload::drain_and_flush");
+        let (writes, payload_bytes, mut stats) = self.take_recorded_uploads()?;
+        if force_queue_fallback {
+            force_queue_fallback_stats(&mut stats);
+            replay_all_writes_through_queue(queue, &writes, &payload_bytes);
+            stats.queue_gate_fallbacks = stats.traffic.writes;
+            stats.apply_arena_pressure(upload_arena.pressure());
+            self.restore_recorded_upload_capacity(writes, payload_bytes);
+            crate::profiling::plot_mesh_upload_batch(&stats.profile_sample());
+            return Some(MeshUploadFlush {
+                command_buffer: None,
+                on_submitted_work_done: None,
+                stats,
+            });
+        }
+
+        let shapes = writes
+            .iter()
+            .map(|write| (write.offset, (write.data.end - write.data.start) as u64));
+        let (plans, staging_size) = plan_staging_shapes(shapes, &mut stats);
+        let staging = upload_arena.prepare_staging_buffer(
+            device,
+            max_buffer_size,
+            staging_size,
+            stats.traffic.staged_writes,
+        );
+        stats.apply_arena_acquire(staging.acquire_stats());
+        if let Some(staging_buffer) = staging.buffer() {
+            fill_staging_buffer(staging_buffer, &writes, &plans, &payload_bytes);
+        }
+        if staging.requires_queue_fallback() {
+            stats.traffic.copy_ops = 0;
+        }
+        let staging = staging.finish(upload_arena);
+        let (command_buffer, finish_ms) = record_upload_command_buffer(
+            device,
+            queue,
+            &writes,
+            &plans,
+            &payload_bytes,
+            staging.buffer.as_ref(),
+        );
+        stats.finish_ms = finish_ms;
+        stats.apply_arena_pressure(upload_arena.pressure());
+        self.restore_recorded_upload_capacity(writes, payload_bytes);
+        crate::profiling::plot_mesh_upload_batch(&stats.profile_sample());
+        Some(MeshUploadFlush {
+            command_buffer,
+            on_submitted_work_done: staging.on_submitted_work_done,
+            stats,
+        })
+    }
+
+    fn take_recorded_uploads(&self) -> Option<(Vec<QueueWrite>, Vec<u8>, MeshUploadBatchStats)> {
+        profiling::scope!("mesh_upload::take_recorded");
+        let (writes, bytes, stats) = {
+            let mut recorded = self.recorded.lock();
+            if recorded.writes.is_empty() {
+                return None;
+            }
+            let stats = MeshUploadBatchStats {
+                traffic: UploadTrafficStats {
+                    writes: recorded.writes.len(),
+                    bytes: recorded.bytes.len(),
+                    ..UploadTrafficStats::default()
+                },
+                ..MeshUploadBatchStats::default()
+            };
+            if !recorded.writes.is_sorted_by_key(|write| write.order) {
+                recorded.writes.sort_by_key(|write| write.order);
+            }
+            (
+                std::mem::take(&mut recorded.writes),
+                std::mem::take(&mut recorded.bytes),
+                stats,
+            )
+        };
+        let (writes, bytes, stats) = coalesce_sorted_recorded_uploads(writes, bytes, stats);
+        Some((writes, bytes, stats))
+    }
+
+    fn restore_recorded_upload_capacity(
+        &self,
+        mut writes: Vec<QueueWrite>,
+        mut payload_bytes: Vec<u8>,
+    ) {
+        profiling::scope!("mesh_upload::restore_capacity");
+        writes.clear();
+        payload_bytes.clear();
+        let mut recorded = self.recorded.lock();
+        recorded.writes = writes;
+        recorded.bytes = payload_bytes;
+    }
+
+    fn append_recorded_uploads(&self, recorded: RecordedMeshUploads) {
+        if recorded.writes.is_empty() {
+            return;
+        }
+        let base_order = self
+            .sequence
+            .fetch_add(recorded.writes.len() as u64, Ordering::Relaxed);
+        self.recorded
+            .lock()
+            .append_with_base_order(base_order, recorded);
+    }
+}
+
+impl Default for MeshUploadStagingBatch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MeshBufferUploadSink for MeshUploadStagingBatch {
+    fn write_buffer(&self, buffer: &wgpu::Buffer, offset: wgpu::BufferAddress, contents: &[u8]) {
+        if contents.is_empty() {
+            return;
+        }
+        profiling::scope!("mesh_upload::record_write");
+        let order = self.sequence.fetch_add(1, Ordering::Relaxed);
+        self.recorded
+            .lock()
+            .push_buffer_write(order, buffer, offset, contents);
+    }
+
+    fn write_buffer_padded(
+        &self,
+        buffer: &wgpu::Buffer,
+        offset: wgpu::BufferAddress,
+        contents: &[u8],
+        padded_size: usize,
+    ) {
+        if contents.is_empty() {
+            return;
+        }
+        profiling::scope!("mesh_upload::record_padded_write");
+        let order = self.sequence.fetch_add(1, Ordering::Relaxed);
+        self.recorded
+            .lock()
+            .push_padded_buffer_write(order, buffer, offset, contents, padded_size);
+    }
+}
+
+impl<'a> MeshUploadRecorder<'a> {
+    /// Creates a recorder that defers writes into `batch`.
+    pub(crate) fn new(batch: &'a MeshUploadStagingBatch) -> Self {
+        Self {
+            batch,
+            recorded: RefCell::new(RecordedMeshUploads::default()),
+            local_sequence: AtomicU64::new(0),
+        }
+    }
+
+    /// Merges all recorded writes into the shared staging batch.
+    pub(crate) fn flush(self) {
+        profiling::scope!("mesh_upload::recorder_flush");
+        self.batch
+            .append_recorded_uploads(self.recorded.into_inner());
+    }
+}
+
+impl MeshBufferUploadSink for MeshUploadRecorder<'_> {
+    fn write_buffer(&self, buffer: &wgpu::Buffer, offset: wgpu::BufferAddress, contents: &[u8]) {
+        if contents.is_empty() {
+            return;
+        }
+        profiling::scope!("mesh_upload::record_local_write");
+        let order = self.local_sequence.fetch_add(1, Ordering::Relaxed);
+        self.recorded
+            .borrow_mut()
+            .push_buffer_write(order, buffer, offset, contents);
+    }
+
+    fn write_buffer_padded(
+        &self,
+        buffer: &wgpu::Buffer,
+        offset: wgpu::BufferAddress,
+        contents: &[u8],
+        padded_size: usize,
+    ) {
+        if contents.is_empty() {
+            return;
+        }
+        profiling::scope!("mesh_upload::record_local_padded_write");
+        let order = self.local_sequence.fetch_add(1, Ordering::Relaxed);
+        self.recorded.borrow_mut().push_padded_buffer_write(
+            order,
+            buffer,
+            offset,
+            contents,
+            padded_size,
+        );
+    }
+}
+
+fn coalesce_sorted_recorded_uploads(
+    writes: Vec<QueueWrite>,
+    payload_bytes: Vec<u8>,
+    mut stats: MeshUploadBatchStats,
+) -> (Vec<QueueWrite>, Vec<u8>, MeshUploadBatchStats) {
+    profiling::scope!("mesh_upload::coalesce_recorded");
+    if writes.len() < 2 {
+        return (writes, payload_bytes, stats);
+    }
+
+    let mut coalesced = Vec::<QueueWrite>::with_capacity(writes.len());
+    for write in writes {
+        let Some(last) = coalesced.last_mut() else {
+            coalesced.push(write);
+            continue;
+        };
+        let last_len = (last.data.end - last.data.start) as u64;
+        let adjacent_target =
+            last.buffer == write.buffer && last.offset.saturating_add(last_len) == write.offset;
+        let adjacent_payload = last.data.end == write.data.start;
+        if adjacent_target && adjacent_payload {
+            last.data.end = write.data.end;
+            stats.coalesced_writes = stats.coalesced_writes.saturating_add(1);
+        } else {
+            coalesced.push(write);
+        }
+    }
+    stats.traffic.writes = coalesced.len();
+    (coalesced, payload_bytes, stats)
+}
+
+fn force_queue_fallback_stats(stats: &mut MeshUploadBatchStats) {
+    stats.traffic.force_queue_fallback();
+    stats.arena.clear_acquire();
+}
+
+fn replay_all_writes_through_queue(
+    queue: &wgpu::Queue,
+    writes: &[QueueWrite],
+    payload_bytes: &[u8],
+) {
+    profiling::scope!("mesh_upload::queue_fallback");
+    for write in writes {
+        queue.write_buffer(
+            &write.buffer,
+            write.offset,
+            &payload_bytes[write.data.clone()],
+        );
+    }
+}
+
+fn plan_staging_shapes<I>(shapes: I, stats: &mut MeshUploadBatchStats) -> (Vec<WritePlan>, u64)
+where
+    I: IntoIterator<Item = (u64, u64)>,
+{
+    profiling::scope!("mesh_upload::plan_staging");
+    let mut plans = Vec::new();
+    let mut staging_size = 0u64;
+    for (offset, len) in shapes {
+        let aligned = len > 0
+            && offset.is_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT)
+            && len.is_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT);
+        if aligned {
+            let aligned_offset = staging_size.next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT);
+            plans.push(WritePlan::Stage {
+                staging_offset: aligned_offset,
+                len,
+            });
+            staging_size = aligned_offset + len;
+            stats.traffic.staged_writes = stats.traffic.staged_writes.saturating_add(1);
+        } else {
+            plans.push(WritePlan::Fallback);
+            stats.traffic.fallback_writes = stats.traffic.fallback_writes.saturating_add(1);
+        }
+    }
+    stats.traffic.staging_bytes = staging_size;
+    stats.traffic.copy_ops = stats.traffic.staged_writes;
+    (plans, staging_size)
+}
+
+fn fill_staging_buffer(
+    buffer: &wgpu::Buffer,
+    writes: &[QueueWrite],
+    plans: &[WritePlan],
+    payload_bytes: &[u8],
+) {
+    profiling::scope!("mesh_upload::copy_to_staging");
+    let mut mapped = buffer.slice(..).get_mapped_range_mut();
+    for (write, plan) in writes.iter().zip(plans.iter()) {
+        let WritePlan::Stage {
+            staging_offset,
+            len,
+        } = plan
+        else {
+            continue;
+        };
+        let dst_start = *staging_offset as usize;
+        let dst_end = dst_start + *len as usize;
+        mapped
+            .slice(dst_start..dst_end)
+            .copy_from_slice(&payload_bytes[write.data.clone()]);
+    }
+}
+
+fn record_upload_command_buffer(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    writes: &[QueueWrite],
+    plans: &[WritePlan],
+    payload_bytes: &[u8],
+    staging: Option<&wgpu::Buffer>,
+) -> (Option<wgpu::CommandBuffer>, f64) {
+    profiling::scope!("mesh_upload::record_encoder");
+    let needs_copy_commands = staging.is_some()
+        && plans
+            .iter()
+            .any(|plan| matches!(plan, WritePlan::Stage { .. }));
+    let mut encoder = needs_copy_commands.then(|| {
+        device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mesh_upload_staging_batch"),
+        })
+    });
+    if let Some(encoder_ref) = encoder.as_mut() {
+        let copy_scope = crate::profiling::GpuEncoderScope::begin(
+            Option::<&crate::profiling::GpuProfilerHandle>::None,
+            "asset::mesh_upload_staging_batch_copy",
+            encoder_ref,
+        );
+        for (write, plan) in writes.iter().zip(plans.iter()) {
+            record_upload_write(
+                Some(&mut *encoder_ref),
+                queue,
+                write,
+                plan,
+                payload_bytes,
+                staging,
+            );
+        }
+        copy_scope.end(encoder_ref);
+    } else {
+        for (write, plan) in writes.iter().zip(plans.iter()) {
+            record_upload_write(None, queue, write, plan, payload_bytes, staging);
+        }
+    }
+    if let Some(encoder) = encoder {
+        let finish_start = Instant::now();
+        let command_buffer = encoder.finish();
+        let finish_ms = finish_start.elapsed().as_secs_f64() * 1000.0;
+        (Some(command_buffer), finish_ms)
+    } else {
+        (None, 0.0)
+    }
+}
+
+fn record_upload_write(
+    encoder: Option<&mut wgpu::CommandEncoder>,
+    queue: &wgpu::Queue,
+    write: &QueueWrite,
+    plan: &WritePlan,
+    payload_bytes: &[u8],
+    staging: Option<&wgpu::Buffer>,
+) {
+    match plan {
+        WritePlan::Stage {
+            staging_offset,
+            len,
+        } => {
+            if let (Some(staging), Some(encoder)) = (staging, encoder) {
+                encoder.copy_buffer_to_buffer(
+                    staging,
+                    *staging_offset,
+                    &write.buffer,
+                    write.offset,
+                    *len,
+                );
+            } else {
+                queue.write_buffer(
+                    &write.buffer,
+                    write.offset,
+                    &payload_bytes[write.data.clone()],
+                );
+            }
+        }
+        WritePlan::Fallback => {
+            queue.write_buffer(
+                &write.buffer,
+                write.offset,
+                &payload_bytes[write.data.clone()],
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn staging_plan_separates_aligned_and_unaligned_writes() {
+        let mut stats = MeshUploadBatchStats::default();
+        let (plans, staging_size) = plan_staging_shapes([(0, 4), (2, 4), (8, 3)], &mut stats);
+
+        assert_eq!(
+            plans,
+            vec![
+                WritePlan::Stage {
+                    staging_offset: 0,
+                    len: 4
+                },
+                WritePlan::Fallback,
+                WritePlan::Fallback,
+            ]
+        );
+        assert_eq!(staging_size, 4);
+        assert_eq!(stats.traffic.staged_writes, 1);
+        assert_eq!(stats.traffic.fallback_writes, 2);
+    }
+
+    #[test]
+    fn staging_plan_preserves_order_while_aligning_staging_offsets() {
+        let mut stats = MeshUploadBatchStats::default();
+        let (plans, staging_size) = plan_staging_shapes([(4, 4), (0, 8)], &mut stats);
+
+        assert_eq!(
+            plans,
+            vec![
+                WritePlan::Stage {
+                    staging_offset: 0,
+                    len: 4
+                },
+                WritePlan::Stage {
+                    staging_offset: 4,
+                    len: 8
+                },
+            ]
+        );
+        assert_eq!(staging_size, 12);
+        assert_eq!(stats.traffic.copy_ops, 2);
+    }
+
+    #[test]
+    fn zero_length_writes_use_fallback_plan() {
+        let mut stats = MeshUploadBatchStats::default();
+        let (plans, staging_size) = plan_staging_shapes([(0, 0)], &mut stats);
+
+        assert_eq!(plans, vec![WritePlan::Fallback]);
+        assert_eq!(staging_size, 0);
+        assert_eq!(stats.traffic.fallback_writes, 1);
+    }
+
+    #[test]
+    fn forced_queue_fallback_clears_copy_stats() {
+        let mut stats = MeshUploadBatchStats {
+            traffic: UploadTrafficStats {
+                writes: 3,
+                staged_writes: 3,
+                staging_bytes: 16,
+                copy_ops: 3,
+                ..UploadTrafficStats::default()
+            },
+            arena: UploadArenaStats {
+                acquire: UploadArenaAcquireStats {
+                    persistent_staging_bytes: 16,
+                    persistent_slot_reuses: 1,
+                    ..UploadArenaAcquireStats::default()
+                },
+                ..UploadArenaStats::default()
+            },
+            ..MeshUploadBatchStats::default()
+        };
+
+        force_queue_fallback_stats(&mut stats);
+
+        assert_eq!(stats.traffic.fallback_writes, 3);
+        assert_eq!(stats.traffic.staged_writes, 0);
+        assert_eq!(stats.traffic.copy_ops, 0);
+        assert_eq!(stats.arena.acquire.persistent_slot_reuses, 0);
+    }
+}

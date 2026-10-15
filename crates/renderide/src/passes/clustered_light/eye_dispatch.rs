@@ -1,0 +1,391 @@
+//! Per-eye dispatch driver for the clustered-light compute pass.
+//!
+//! Walks the resolved [`ClusterFrameParams`] for each eye, clears the cluster-range slice for
+//! that eye, uploads the corresponding `ClusterParams` uniform slot, and dispatches the compute
+//! shader. Mono and stereo paths share the loop; eye 0 is always the mono / left-eye row.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use crate::camera::HostCameraFrame;
+use crate::frame_upload_batch::GraphUploadSink;
+use crate::gpu::{CLUSTER_LIGHT_RANGE_WORDS, CLUSTER_PARAMS_UNIFORM_SIZE, GpuLimits};
+use crate::graph_inputs::OffscreenWriteTarget;
+use crate::profiling::GpuEncoderScope;
+use crate::scene::SceneSpaceRead;
+use crate::world_mesh::cluster::{
+    CLUSTER_COUNT_Z, ClusterFrameParams, cluster_frame_params, cluster_frame_params_stereo,
+};
+
+use super::pipeline::{
+    ClusterParamsDesc, build_params, froxel_reconstruction_flags_for_projection,
+    write_cluster_params_padded,
+};
+
+/// GPU and uniform state for per-eye clustered light compute dispatches.
+pub(super) struct ClusteredLightEyePassEnv<'a> {
+    /// Active command encoder for this recording slice.
+    pub encoder: &'a mut wgpu::CommandEncoder,
+    /// Deferred graph upload sink shared with the rest of the frame.
+    pub uploads: GraphUploadSink<'a>,
+    /// Clustered-light compute pipeline.
+    pub pipeline: &'a wgpu::ComputePipeline,
+    /// Bind group with light/cluster/params resources.
+    pub bind_group: &'a wgpu::BindGroup,
+    /// Per-cluster light-range storage cleared before each eye dispatch.
+    pub cluster_light_counts: &'a wgpu::Buffer,
+    /// Uniform buffer holding per-eye [`ClusterFrameParams`].
+    pub params_buffer: &'a wgpu::Buffer,
+    /// Per-eye cluster frame params (one or two entries).
+    pub eye_params: &'a [ClusterFrameParams],
+    /// Number of clusters produced per eye.
+    pub clusters_per_eye: u32,
+    /// Scene light count (driving workgroup extent in Z).
+    pub light_count: u32,
+    /// Target viewport size in pixels.
+    pub viewport: (u32, u32),
+    /// Adapter limits for validating dispatch extents.
+    pub gpu_limits: &'a GpuLimits,
+    /// GPU profiler for the pass-level timestamp query on each eye's compute pass.
+    pub profiler: Option<&'a crate::profiling::GpuProfilerHandle>,
+}
+
+/// Per-eye cluster compute dispatches (params upload + 3D grid).
+pub(super) fn run_clustered_light_eye_passes(env: ClusteredLightEyePassEnv<'_>) {
+    profiling::scope!("clustered_light::eye_passes");
+    for (eye_idx, cfp) in env.eye_params.iter().enumerate() {
+        let Some(cluster_offset) = (eye_idx as u32).checked_mul(env.clusters_per_eye) else {
+            logger::warn!(
+                "ClusteredLight: eye index {eye_idx} with {} clusters per eye overflows u32",
+                env.clusters_per_eye
+            );
+            continue;
+        };
+        let Some((count_clear_offset, count_clear_size)) =
+            cluster_count_clear_range(cluster_offset, env.clusters_per_eye)
+        else {
+            logger::warn!(
+                "ClusteredLight: count clear range overflow for offset={} clusters={}",
+                cluster_offset,
+                env.clusters_per_eye
+            );
+            continue;
+        };
+        let clear_scope = GpuEncoderScope::begin(
+            env.profiler,
+            "clustered_light::clear_eye_cluster_counts",
+            env.encoder,
+        );
+        env.encoder.clear_buffer(
+            env.cluster_light_counts,
+            count_clear_offset,
+            Some(count_clear_size),
+        );
+        clear_scope.end(env.encoder);
+        let buf_offset = (eye_idx as u64) * CLUSTER_PARAMS_UNIFORM_SIZE;
+        let (near, far) = cfp.sanitized_clip_planes();
+        let params = build_params(ClusterParamsDesc {
+            scene_view: cfp.world_to_view,
+            proj: cfp.proj,
+            viewport: env.viewport,
+            cluster_count_x: cfp.cluster_count_x,
+            cluster_count_y: cfp.cluster_count_y,
+            light_count: env.light_count,
+            near,
+            far,
+            cluster_offset,
+            world_to_view_scale: cfp.world_to_view_scale_max(),
+            froxel_reconstruction_flags: froxel_reconstruction_flags_for_projection(cfp.proj),
+        });
+        write_cluster_params_padded(env.uploads, env.params_buffer, &params, buf_offset);
+
+        let dx = cfp.cluster_count_x.div_ceil(8);
+        let dy = cfp.cluster_count_y.div_ceil(8);
+        let dz = CLUSTER_COUNT_Z;
+        if !env.gpu_limits.compute_dispatch_fits(dx, dy, dz) {
+            logger::warn!(
+                "ClusteredLight: dispatch {}x{}x{} exceeds max_compute_workgroups_per_dimension ({})",
+                dx,
+                dy,
+                dz,
+                env.gpu_limits.max_compute_workgroups_per_dimension()
+            );
+            continue;
+        }
+
+        let pass_query = env
+            .profiler
+            .map(|p| p.begin_pass_query("clustered_light", env.encoder));
+        let timestamp_writes = crate::profiling::compute_pass_timestamp_writes(pass_query.as_ref());
+        {
+            let mut pass = env
+                .encoder
+                .begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("clustered_light"),
+                    timestamp_writes,
+                });
+            pass.set_pipeline(env.pipeline);
+            pass.set_bind_group(0, env.bind_group, &[buf_offset as u32]);
+            pass.dispatch_workgroups(dx, dy, dz);
+        };
+        if let (Some(p), Some(q)) = (env.profiler, pass_query) {
+            p.end_query(env.encoder, q);
+        }
+    }
+}
+
+/// Resolves mono or stereo [`ClusterFrameParams`] rows for the current host camera and viewport.
+pub(super) fn clustered_light_eye_params_for_viewport(
+    stereo: bool,
+    hc: &HostCameraFrame,
+    scene: &(impl SceneSpaceRead + ?Sized),
+    viewport: (u32, u32),
+    offscreen_write_target: OffscreenWriteTarget,
+) -> Option<Vec<ClusterFrameParams>> {
+    if stereo {
+        if let Some((left, right)) = cluster_frame_params_stereo(hc, scene, viewport) {
+            Some(vec![
+                apply_render_target_projection(left, offscreen_write_target),
+                apply_render_target_projection(right, offscreen_write_target),
+            ])
+        } else {
+            cluster_frame_params(hc, scene, viewport)
+                .map(|mono| vec![apply_render_target_projection(mono, offscreen_write_target)])
+        }
+    } else {
+        cluster_frame_params(hc, scene, viewport)
+            .map(|mono| vec![apply_render_target_projection(mono, offscreen_write_target)])
+    }
+}
+
+fn apply_render_target_projection(
+    mut params: ClusterFrameParams,
+    offscreen_write_target: OffscreenWriteTarget,
+) -> ClusterFrameParams {
+    params.proj = offscreen_write_target.render_projection(params.proj);
+    params
+}
+
+/// Returns the byte range for a contiguous cluster-range slice.
+pub(super) fn cluster_count_clear_range(
+    cluster_offset: u32,
+    cluster_count: u32,
+) -> Option<(u64, u64)> {
+    let range_bytes = CLUSTER_LIGHT_RANGE_WORDS.checked_mul(size_of::<u32>() as u64)?;
+    let byte_offset = u64::from(cluster_offset).checked_mul(range_bytes)?;
+    let byte_size = u64::from(cluster_count).checked_mul(range_bytes)?;
+    Some((byte_offset, byte_size))
+}
+
+/// Returns the number of clusters in one eye's grid.
+pub(super) fn clusters_per_eye_for_params(params: &ClusterFrameParams) -> Option<u32> {
+    params
+        .cluster_count_x
+        .checked_mul(params.cluster_count_y)?
+        .checked_mul(CLUSTER_COUNT_Z)
+}
+
+/// Clears the shared cluster-range rows when there are no active lights.
+pub(super) fn clear_zero_light_cluster_counts(
+    encoder: &mut wgpu::CommandEncoder,
+    cluster_light_counts: &wgpu::Buffer,
+    clusters_per_eye: u32,
+    eye_count: usize,
+    profiler: Option<&crate::profiling::GpuProfilerHandle>,
+) {
+    let Some(total_clusters) = u64::from(clusters_per_eye).checked_mul(eye_count as u64) else {
+        logger::warn!(
+            "ClusteredLight: zero-light cluster clear overflows for clusters_per_eye={} eyes={}",
+            clusters_per_eye,
+            eye_count
+        );
+        return;
+    };
+    let Some(range_bytes) = CLUSTER_LIGHT_RANGE_WORDS.checked_mul(size_of::<u32>() as u64) else {
+        logger::warn!("ClusteredLight: zero-light range row byte size overflows");
+        return;
+    };
+    let Some(counts_bytes) = total_clusters.checked_mul(range_bytes) else {
+        logger::warn!(
+            "ClusteredLight: zero-light range clear byte size overflows for {total_clusters} clusters"
+        );
+        return;
+    };
+    let clear_scope = GpuEncoderScope::begin(
+        profiler,
+        "clustered_light::clear_zero_light_counts",
+        encoder,
+    );
+    encoder.clear_buffer(cluster_light_counts, 0, Some(counts_bytes));
+    clear_scope.end(encoder);
+}
+
+/// Logs the clustered-light activation banner once per pass instance.
+pub(super) fn log_clustered_light_active_once(
+    logged_active_once: &AtomicBool,
+    first_eye_params: &ClusterFrameParams,
+    light_count: u32,
+    eye_count: usize,
+) {
+    if logged_active_once
+        .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+
+    logger::info!(
+        "ClusteredLight active (grid {}x{}x{} lights={} eyes={})",
+        first_eye_params.cluster_count_x,
+        first_eye_params.cluster_count_y,
+        CLUSTER_COUNT_Z,
+        light_count,
+        eye_count,
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use glam::{Mat4, Vec3};
+
+    use crate::camera::{EyeView, HostCameraFrame, StereoViewMatrices};
+    use crate::graph_inputs::OffscreenWriteTarget;
+    use crate::scene::SceneCoordinator;
+    use crate::world_mesh::cluster::{CLUSTER_NEAR_CLIP_MIN, sanitize_cluster_clip_planes};
+
+    use super::super::pipeline::{
+        ClusterParamsDesc, build_params, froxel_reconstruction_flags_for_projection,
+    };
+    use super::{
+        cluster_count_clear_range, clustered_light_eye_params_for_viewport,
+        clusters_per_eye_for_params,
+    };
+
+    fn projection_with_non_unit_y(y: f32) -> Mat4 {
+        Mat4::from_cols_array(&[
+            2.0, 0.0, 0.0, 0.0, 0.0, y, 0.0, 0.0, 0.25, 0.5, 1.0, 1.0, 0.0, 0.0, 0.1, 0.0,
+        ])
+    }
+
+    fn explicit_camera(proj: Mat4) -> HostCameraFrame {
+        HostCameraFrame {
+            explicit_view: Some(EyeView::new(Mat4::IDENTITY, proj, proj, Vec3::ZERO)),
+            ..HostCameraFrame::default()
+        }
+    }
+
+    /// Compute params apply the same cluster clip-plane sanitization as fragment lookup.
+    #[test]
+    fn cluster_params_use_shared_clip_plane_sanitization() {
+        let params = build_params(ClusterParamsDesc {
+            scene_view: Mat4::IDENTITY,
+            proj: Mat4::IDENTITY,
+            viewport: (1, 1),
+            cluster_count_x: 1,
+            cluster_count_y: 1,
+            light_count: 0,
+            near: 0.00001,
+            far: 10.0,
+            cluster_offset: 0,
+            world_to_view_scale: 1.0,
+            froxel_reconstruction_flags: froxel_reconstruction_flags_for_projection(Mat4::IDENTITY),
+        });
+        let (near, far) = sanitize_cluster_clip_planes(0.00001, 10.0);
+
+        assert_eq!(params.near_clip, near);
+        assert_eq!(params.near_clip, CLUSTER_NEAR_CLIP_MIN);
+        assert_eq!(params.far_clip, far);
+    }
+
+    /// Range clears address two `u32` words per cluster.
+    #[test]
+    fn cluster_count_clear_range_uses_range_row_stride() {
+        assert_eq!(cluster_count_clear_range(3, 5), Some((24, 40)));
+    }
+
+    /// Reasonable grids fit in the checked per-eye cluster count.
+    #[test]
+    fn clusters_per_eye_checked_math_handles_reasonable_grid() {
+        let params = crate::world_mesh::cluster::ClusterFrameParams {
+            near_clip: 0.1,
+            far_clip: 1000.0,
+            world_to_view: Mat4::IDENTITY,
+            proj: Mat4::IDENTITY,
+            cluster_count_x: 4,
+            cluster_count_y: 3,
+            viewport_width: 128,
+            viewport_height: 96,
+            projection_flags: 0,
+        };
+
+        assert_eq!(
+            clusters_per_eye_for_params(&params),
+            Some(4 * 3 * super::CLUSTER_COUNT_Z)
+        );
+    }
+
+    #[test]
+    fn clustered_light_eye_params_keep_primary_projection_unchanged() {
+        let scene = SceneCoordinator::new();
+        let proj = projection_with_non_unit_y(3.0);
+        let eye_params = clustered_light_eye_params_for_viewport(
+            false,
+            &explicit_camera(proj),
+            &scene,
+            (128, 96),
+            OffscreenWriteTarget::None,
+        )
+        .expect("cluster params");
+
+        assert_eq!(eye_params[0].proj, proj);
+    }
+
+    #[test]
+    fn clustered_light_eye_params_use_offscreen_render_projection() {
+        let scene = SceneCoordinator::new();
+        let proj = projection_with_non_unit_y(3.0);
+        let write_target = OffscreenWriteTarget::host_render_texture(77);
+        let eye_params = clustered_light_eye_params_for_viewport(
+            false,
+            &explicit_camera(proj),
+            &scene,
+            (128, 96),
+            write_target,
+        )
+        .expect("cluster params");
+
+        assert_eq!(eye_params[0].proj, write_target.render_projection(proj));
+    }
+
+    #[test]
+    fn stereo_clustered_light_eye_params_use_offscreen_render_projection_per_eye() {
+        let scene = SceneCoordinator::new();
+        let left_proj = projection_with_non_unit_y(3.0);
+        let right_proj = projection_with_non_unit_y(4.0);
+        let host_camera = HostCameraFrame {
+            vr_active: true,
+            stereo: Some(StereoViewMatrices::new(
+                EyeView::new(Mat4::IDENTITY, left_proj, left_proj, Vec3::ZERO),
+                EyeView::new(Mat4::IDENTITY, right_proj, right_proj, Vec3::X),
+            )),
+            ..HostCameraFrame::default()
+        };
+        let write_target = OffscreenWriteTarget::Untracked;
+        let eye_params = clustered_light_eye_params_for_viewport(
+            true,
+            &host_camera,
+            &scene,
+            (128, 96),
+            write_target,
+        )
+        .expect("cluster params");
+
+        assert_eq!(
+            eye_params[0].proj,
+            write_target.render_projection(left_proj)
+        );
+        assert_eq!(
+            eye_params[1].proj,
+            write_target.render_projection(right_proj)
+        );
+    }
+}

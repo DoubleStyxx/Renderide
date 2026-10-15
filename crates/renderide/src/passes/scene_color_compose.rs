@@ -1,0 +1,228 @@
+//! Samples HDR scene color into the per-view display target (swapchain / XR / offscreen RT).
+//!
+//! This pass is the integration point for a future post-processing stack (exposure, bloom, tonemap,
+//! color grading): insert additional passes before this node, or extend the compose shader.
+
+mod pipeline;
+
+use std::num::NonZeroU32;
+use std::sync::LazyLock;
+
+use pipeline::SceneColorComposePipelineCache;
+
+use crate::passes::helpers::{
+    imported_color_attachment, missing_pass_resource, read_fragment_sampled_texture,
+};
+use crate::present::SWAPCHAIN_CLEAR_COLOR;
+use crate::render_graph::ViewPostProcessing;
+use crate::render_graph::context::RasterPassCtx;
+use crate::render_graph::error::{RenderPassError, SetupError};
+use crate::render_graph::gpu_cache::raster_stereo_mask_override;
+use crate::render_graph::pass::RenderPassTemplate;
+use crate::render_graph::pass::params::{
+    GraphPassParameters, PassParameterField, PassParameterSchema,
+};
+use crate::render_graph::pass::{PassBuilder, RasterPass};
+use crate::render_graph::resources::{ImportedTextureHandle, TextureHandle};
+
+/// Graph handles for [`SceneColorComposePass`].
+#[derive(Clone, Copy, Debug)]
+pub struct SceneColorComposeGraphResources {
+    /// Raw resolved single-sample HDR scene color before post-processing.
+    pub scene_color_hdr: TextureHandle,
+    /// Final HDR scene color after the post-processing chain, or `scene_color_hdr` when no effects are active.
+    pub post_processed_scene_color_hdr: TextureHandle,
+    /// Imported frame color (output).
+    pub frame_color: ImportedTextureHandle,
+}
+
+/// Fullscreen blit from HDR scene color to the displayable color target.
+pub struct SceneColorComposePass {
+    resources: SceneColorComposeGraphResources,
+    pipelines: &'static SceneColorComposePipelineCache,
+}
+
+impl SceneColorComposePass {
+    /// Creates a scene-color compose pass instance.
+    pub fn new(resources: SceneColorComposeGraphResources) -> Self {
+        Self {
+            resources,
+            pipelines: compose_pipelines(),
+        }
+    }
+}
+
+fn compose_pipelines() -> &'static SceneColorComposePipelineCache {
+    static CACHE: LazyLock<SceneColorComposePipelineCache> =
+        LazyLock::new(SceneColorComposePipelineCache::default);
+    &CACHE
+}
+
+fn scene_color_compose_input(
+    resources: SceneColorComposeGraphResources,
+    post_processing: ViewPostProcessing,
+) -> TextureHandle {
+    if post_processing.is_enabled() {
+        resources.post_processed_scene_color_hdr
+    } else {
+        resources.scene_color_hdr
+    }
+}
+
+impl GraphPassParameters for SceneColorComposeGraphResources {
+    fn schema(&self) -> PassParameterSchema {
+        PassParameterSchema::new("SceneColorComposeGraphResources")
+            .with_field(PassParameterField::new("scene_color_hdr", "sampled_input"))
+            .with_field(PassParameterField::new(
+                "post_processed_scene_color_hdr",
+                "sampled_input",
+            ))
+            .with_field(PassParameterField::new("frame_color", "color_output"))
+    }
+
+    fn declare(&self, b: &mut PassBuilder<'_>) -> Result<(), SetupError> {
+        read_fragment_sampled_texture(b, self.scene_color_hdr);
+        if self.post_processed_scene_color_hdr != self.scene_color_hdr {
+            read_fragment_sampled_texture(b, self.post_processed_scene_color_hdr);
+        }
+        imported_color_attachment(
+            b,
+            self.frame_color,
+            wgpu::LoadOp::Clear(SWAPCHAIN_CLEAR_COLOR),
+        );
+        Ok(())
+    }
+}
+
+impl RasterPass for SceneColorComposePass {
+    fn name(&self) -> &str {
+        "SceneColorCompose"
+    }
+
+    fn setup(&mut self, b: &mut PassBuilder<'_>) -> Result<(), SetupError> {
+        b.never_merge();
+        b.never_parallel();
+        b.parameters(&self.resources)
+    }
+
+    fn multiview_mask_override(
+        &self,
+        ctx: &RasterPassCtx<'_, '_>,
+        template: &RenderPassTemplate,
+    ) -> Option<NonZeroU32> {
+        raster_stereo_mask_override(ctx, template)
+    }
+
+    fn record(
+        &self,
+        ctx: &mut RasterPassCtx<'_, '_>,
+        rpass: &mut wgpu::RenderPass<'_>,
+    ) -> Result<(), RenderPassError> {
+        profiling::scope!("scene_color_compose::record");
+        let frame = &ctx.frame;
+        let graph_resources = ctx.graph_resources;
+        let input = scene_color_compose_input(self.resources, frame.view.post_processing);
+        let Some(tex) = graph_resources.transient_texture(input) else {
+            return Err(missing_pass_resource(
+                self.name(),
+                format_args!("missing transient scene_color_hdr {input:?}"),
+            ));
+        };
+        let pipeline = self.pipelines.pipeline(
+            ctx.device,
+            frame.view.surface_format,
+            frame.view.multiview_stereo,
+        );
+        let bind_group =
+            self.pipelines
+                .bind_group(ctx.device, &tex.texture, frame.view.multiview_stereo);
+        rpass.set_pipeline(pipeline.as_ref());
+        rpass.set_bind_group(0, &bind_group, &[]);
+        rpass.draw(0..3, 0..1);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod setup_tests {
+    use super::*;
+    use crate::render_graph::pass::PassBuilder;
+
+    use crate::render_graph::builder::GraphBuilder;
+    use crate::render_graph::pass::node::PassKind;
+    use crate::render_graph::resources::{
+        AccessKind, FrameTargetRole, ImportSource, ImportedTextureDecl, TextureAccess,
+        TransientArrayLayers, TransientExtent, TransientSampleCount, TransientTextureDesc,
+        TransientTextureFormat,
+    };
+
+    #[test]
+    fn setup_declares_sampled_hdr_and_frame_color_raster() {
+        let mut builder = GraphBuilder::new();
+        let hdr = builder.create_texture(TransientTextureDesc {
+            label: "scene_color_hdr",
+            format: TransientTextureFormat::SceneColorHdr,
+            extent: TransientExtent::Custom {
+                width: 4,
+                height: 4,
+            },
+            mip_levels: 1,
+            sample_count: TransientSampleCount::Fixed(1),
+            dimension: wgpu::TextureDimension::D2,
+            array_layers: TransientArrayLayers::Fixed(1),
+            base_usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            alias: true,
+        });
+        let frame_color = builder.import_texture(ImportedTextureDecl {
+            label: "frame_color",
+            source: ImportSource::Frame(FrameTargetRole::ColorAttachment),
+            initial_access: TextureAccess::ColorAttachment {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+                resolve_to: None,
+            },
+            final_access: TextureAccess::Present,
+        });
+        let mut pass = SceneColorComposePass::new(SceneColorComposeGraphResources {
+            scene_color_hdr: hdr,
+            post_processed_scene_color_hdr: hdr,
+            frame_color,
+        });
+        let mut b = PassBuilder::new("SceneColorCompose");
+        pass.setup(&mut b).expect("setup");
+        let setup = b.finish().expect("finish");
+        assert_eq!(setup.kind, PassKind::Raster);
+        assert!(
+            setup.accesses.iter().any(|a| {
+                matches!(
+                    &a.access,
+                    AccessKind::Texture(TextureAccess::Sampled {
+                        stages: wgpu::ShaderStages::FRAGMENT,
+                        ..
+                    })
+                )
+            }),
+            "expected sampled HDR read"
+        );
+        assert_eq!(setup.color_attachments.len(), 1);
+    }
+
+    #[test]
+    fn compose_input_respects_view_post_processing_policy() {
+        let resources = SceneColorComposeGraphResources {
+            scene_color_hdr: TextureHandle(1),
+            post_processed_scene_color_hdr: TextureHandle(2),
+            frame_color: ImportedTextureHandle(0),
+        };
+
+        assert_eq!(
+            scene_color_compose_input(resources, ViewPostProcessing::disabled()),
+            resources.scene_color_hdr
+        );
+        assert_eq!(
+            scene_color_compose_input(resources, ViewPostProcessing::primary_view()),
+            resources.post_processed_scene_color_hdr
+        );
+    }
+}

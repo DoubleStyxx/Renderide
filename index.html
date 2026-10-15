@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta name="google-site-verification" content="7wdnqumhD20N7QZGlNoxcSeURffvufio0bfAUlQ0GJI" />
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="index, follow">
+    <meta
+      name="description"
+      content="Renderide is an experimental Rust and wgpu renderer for Resonite, with cross-platform rendering, OpenXR support, and shared-memory IPC."
+    >
+    <link rel="canonical" href="https://doublestyx.github.io/Renderide/">
+    <title>Renderide - Rust wgpu renderer for Resonite</title>
+
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="Renderide">
+    <meta property="og:title" content="Renderide">
+    <meta
+      property="og:description"
+      content="An experimental Rust and wgpu renderer for Resonite."
+    >
+    <meta property="og:url" content="https://doublestyx.github.io/Renderide/">
+    <meta name="twitter:card" content="summary">
+
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareSourceCode",
+        "name": "Renderide",
+        "description": "Renderide is an experimental Rust and wgpu renderer for Resonite.",
+        "codeRepository": "https://github.com/DoubleStyx/Renderide",
+        "programmingLanguage": "Rust",
+        "license": "https://github.com/DoubleStyx/Renderide/blob/master/LICENSE",
+        "runtimePlatform": ["Linux", "macOS", "Windows"],
+        "applicationCategory": "GraphicsApplication"
+      }
+    </script>
+
+    <style>
+      :root {
+        color-scheme: light dark;
+        --background: #f7f8fa;
+        --surface: #ffffff;
+        --text: #1d1f24;
+        --muted: #5c6370;
+        --border: #d9dee7;
+        --accent: #c43d2b;
+        --accent-strong: #9f2f21;
+        --code: #eef1f5;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: var(--background);
+        color: var(--text);
+        font-family:
+          Inter,
+          ui-sans-serif,
+          system-ui,
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          sans-serif;
+        line-height: 1.6;
+      }
+
+      a {
+        color: var(--accent-strong);
+        text-decoration-thickness: 0.08em;
+        text-underline-offset: 0.18em;
+      }
+
+      a:hover {
+        color: var(--accent);
+      }
+
+      .page {
+        width: min(100% - 32px, 960px);
+        margin: 0 auto;
+        padding: 48px 0;
+      }
+
+      header {
+        display: grid;
+        gap: 24px;
+        padding: 56px 0 40px;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .eyebrow {
+        margin: 0;
+        color: var(--muted);
+        font-size: 0.95rem;
+        font-weight: 700;
+        letter-spacing: 0;
+        text-transform: uppercase;
+      }
+
+      h1,
+      h2 {
+        margin: 0;
+        line-height: 1.12;
+        letter-spacing: 0;
+      }
+
+      h1 {
+        max-width: 760px;
+        font-size: clamp(2.8rem, 8vw, 5.4rem);
+      }
+
+      h2 {
+        font-size: clamp(1.55rem, 3vw, 2rem);
+      }
+
+      p {
+        margin: 0;
+      }
+
+      .summary {
+        max-width: 720px;
+        color: var(--muted);
+        font-size: clamp(1.08rem, 2vw, 1.28rem);
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+      }
+
+      .button {
+        display: inline-flex;
+        min-height: 44px;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid var(--accent);
+        border-radius: 8px;
+        padding: 10px 16px;
+        background: var(--accent);
+        color: #ffffff;
+        font-weight: 700;
+        text-decoration: none;
+      }
+
+      .button:hover {
+        background: var(--accent-strong);
+        color: #ffffff;
+      }
+
+      .button.secondary {
+        border-color: var(--border);
+        background: var(--surface);
+        color: var(--text);
+      }
+
+      .button.secondary:hover {
+        border-color: var(--accent);
+        color: var(--accent-strong);
+      }
+
+      main {
+        display: grid;
+        gap: 28px;
+        padding: 34px 0 0;
+      }
+
+      section {
+        display: grid;
+        gap: 14px;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .card {
+        min-height: 150px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 18px;
+        background: var(--surface);
+      }
+
+      .card h3 {
+        margin: 0 0 8px;
+        font-size: 1rem;
+        line-height: 1.25;
+        letter-spacing: 0;
+      }
+
+      .card p {
+        color: var(--muted);
+        font-size: 0.97rem;
+      }
+
+      code {
+        border-radius: 6px;
+        padding: 0.12em 0.32em;
+        background: var(--code);
+        font-family:
+          "SFMono-Regular",
+          Consolas,
+          "Liberation Mono",
+          monospace;
+        font-size: 0.92em;
+      }
+
+      footer {
+        margin-top: 42px;
+        padding-top: 22px;
+        border-top: 1px solid var(--border);
+        color: var(--muted);
+        font-size: 0.95rem;
+      }
+
+      @media (max-width: 760px) {
+        .page {
+          width: min(100% - 24px, 960px);
+          padding: 28px 0;
+        }
+
+        header {
+          padding: 36px 0 30px;
+        }
+
+        .grid {
+          grid-template-columns: 1fr;
+        }
+
+        .button {
+          width: 100%;
+        }
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --background: #111317;
+          --surface: #191c22;
+          --text: #f3f4f6;
+          --muted: #b2bac8;
+          --border: #343a46;
+          --accent: #e05a45;
+          --accent-strong: #ff7660;
+          --code: #252a33;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <header>
+        <h1>Renderide</h1>
+        <p class="summary">
+          Renderide is an experimental Rust and wgpu renderer for Resonite. It
+          runs alongside the existing FrooxEngine process and focuses on cross-platform
+          rendering, OpenXR, shared-memory IPC, and renderer architecture that
+          can evolve independently.
+        </p>
+        <nav class="actions" aria-label="Project links">
+          <a class="button" href="https://github.com/DoubleStyx/Renderide">
+            View the GitHub repository
+          </a>
+          <a class="button secondary" href="https://aur.archlinux.org/packages/renderide-git">
+            AUR package
+          </a>
+        </nav>
+      </header>
+
+      <main>
+        <section aria-labelledby="about-title">
+          <h2 id="about-title">About</h2>
+          <p>
+            The project is a drop-in renderer replacement written in Rust on top
+            of <a href="https://wgpu.rs/">wgpu</a>. Renderide targets Linux,
+            macOS, and Windows, with renderer systems for assets, materials,
+            cameras, render graph execution, profiling, and VR presentation.
+          </p>
+        </section>
+
+        <section aria-labelledby="highlights-title">
+          <h2 id="highlights-title">Highlights</h2>
+          <div class="grid">
+            <article class="card">
+              <h3>Rust and wgpu</h3>
+              <p>
+                Built around portable graphics backends including Vulkan, Metal,
+                and DirectX 12 through wgpu.
+              </p>
+            </article>
+            <article class="card">
+              <h3>OpenXR-first VR</h3>
+              <p>
+                VR presentation is part of the renderer path instead of being a
+                separate afterthought.
+              </p>
+            </article>
+            <article class="card">
+              <h3>Renderer architecture</h3>
+              <p>
+                Frontend, scene, backend, and runtime layers separate host IPC
+                from GPU work and frame orchestration.
+              </p>
+            </article>
+          </div>
+        </section>
+
+        <section aria-labelledby="repository-title">
+          <h2 id="repository-title">Repository</h2>
+          <p>
+            Source code, build instructions, issue tracking, releases, and
+            contribution details live at
+            <a href="https://github.com/DoubleStyx/Renderide">github.com/DoubleStyx/Renderide</a>.
+            Clone it with <code>git clone https://github.com/DoubleStyx/Renderide.git</code>.
+          </p>
+        </section>
+      </main>
+
+      <footer>
+        <p>
+          Renderide is an unofficial renderer project for Resonite. Resonite is
+          a separate project owned by Yellow Dog Man Studios.
+        </p>
+      </footer>
+    </div>
+  </body>
+</html>

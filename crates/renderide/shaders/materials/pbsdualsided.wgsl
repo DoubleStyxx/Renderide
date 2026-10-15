@@ -1,0 +1,205 @@
+//! Unity surface shader `Shader "PBSDualSided"`: metallic Standard lighting with two-sided normals.
+//!
+//! Unity's `#pragma surface surf Standard fullforwardshadows addshadow` uses a material-driven
+//! `Cull [_Cull]` state whose default disables culling. This renderer keeps a single clustered
+//! forward color pass with the same cull fallback.
+//!
+//! Froox variant bits populate `_RenderideVariantBits`; this shader decodes PBSDualSided's
+//! shader-specific keyword bits locally.
+
+
+//#texture_default _MainTex white
+//#texture_default _NormalMap bump
+//#texture_default _EmissionMap black
+//#texture_default _OcclusionMap white
+//#texture_default _MetallicMap black
+//#mat_default _Color vec4 1.0 1.0 1.0 1.0
+//#mat_default _NormalScale float 1.0
+//#mat_default _AlphaClip float 0.5
+//#mat_default _Glossiness float 0.5
+
+#import renderide::material::variant_bits as vb
+#import renderide::mesh::vertex as mv
+#import renderide::pbs::lighting as plight
+#import renderide::pbs::sampling as psamp
+#import renderide::pbs::surface as psurf
+#import renderide::core::uv as uvu
+#import renderide::core::texture_sampling as ts
+
+struct PbsDualSidedMaterial {
+    _Color: vec4<f32>,
+    _EmissionColor: vec4<f32>,
+    _MainTex_ST: vec4<f32>,
+    _NormalScale: f32,
+    _Glossiness: f32,
+    _Metallic: f32,
+    _AlphaClip: f32,
+    _RenderideVariantBits: u32,
+    _NormalMap_LodBias: f32,
+    _EmissionMap_LodBias: f32,
+    _MainTex_LodBias: f32,
+    _MetallicMap_LodBias: f32,
+    _OcclusionMap_LodBias: f32,
+}
+
+const PBSDUALSIDED_KW_ALBEDOTEX: u32 = 1u << 0u;
+const PBSDUALSIDED_KW_ALPHACLIP: u32 = 1u << 1u;
+const PBSDUALSIDED_KW_EMISSIONTEX: u32 = 1u << 2u;
+const PBSDUALSIDED_KW_METALLICMAP: u32 = 1u << 3u;
+const PBSDUALSIDED_KW_NORMALMAP: u32 = 1u << 4u;
+const PBSDUALSIDED_KW_OCCLUSION: u32 = 1u << 5u;
+const PBSDUALSIDED_KW_VCOLOR_ALBEDO: u32 = 1u << 6u;
+const PBSDUALSIDED_KW_VCOLOR_EMIT: u32 = 1u << 7u;
+const PBSDUALSIDED_KW_VCOLOR_METALLIC: u32 = 1u << 8u;
+
+@group(1) @binding(0)  var<uniform> mat: PbsDualSidedMaterial;
+@group(1) @binding(1)  var _MainTex: texture_2d<f32>;
+@group(1) @binding(2)  var _MainTex_sampler: sampler;
+@group(1) @binding(3)  var _NormalMap: texture_2d<f32>;
+@group(1) @binding(4)  var _NormalMap_sampler: sampler;
+@group(1) @binding(5)  var _EmissionMap: texture_2d<f32>;
+@group(1) @binding(6)  var _EmissionMap_sampler: sampler;
+@group(1) @binding(7)  var _OcclusionMap: texture_2d<f32>;
+@group(1) @binding(8)  var _OcclusionMap_sampler: sampler;
+@group(1) @binding(9)  var _MetallicMap: texture_2d<f32>;
+@group(1) @binding(10) var _MetallicMap_sampler: sampler;
+
+struct SurfaceData {
+    base_color: vec3<f32>,
+    alpha: f32,
+    metallic: f32,
+    roughness: f32,
+    occlusion: f32,
+    normal: vec3<f32>,
+    emission: vec3<f32>,
+}
+
+fn pbs_kw(mask: u32) -> bool {
+    return vb::enabled(mat._RenderideVariantBits, mask);
+}
+
+fn sample_normal_world(uv_main: vec2<f32>, world_n: vec3<f32>, world_t: vec4<f32>, front_facing: bool) -> vec3<f32> {
+    return psamp::sample_optional_two_sided_world_normal(
+        pbs_kw(PBSDUALSIDED_KW_NORMALMAP),
+        _NormalMap,
+        _NormalMap_sampler,
+        uv_main,
+        mat._NormalMap_LodBias,
+        mat._NormalScale,
+        world_n,
+        world_t,
+        front_facing,
+    );
+}
+
+fn sample_surface(
+    uv0: vec2<f32>,
+    world_n: vec3<f32>,
+    world_t: vec4<f32>,
+    front_facing: bool,
+    vertex_color: vec4<f32>,
+) -> SurfaceData {
+    let uv_main = uvu::apply_st(uv0, mat._MainTex_ST);
+
+    var albedo = mat._Color;
+    if (pbs_kw(PBSDUALSIDED_KW_ALBEDOTEX)) {
+        albedo = albedo * ts::sample_tex_2d(_MainTex, _MainTex_sampler, uv_main, mat._MainTex_LodBias);
+    }
+    if (pbs_kw(PBSDUALSIDED_KW_VCOLOR_ALBEDO)) {
+        albedo = albedo * vertex_color;
+    }
+    if (pbs_kw(PBSDUALSIDED_KW_ALPHACLIP) && albedo.a < mat._AlphaClip) {
+        discard;
+    }
+
+    var metallic = mat._Metallic;
+    var smoothness = mat._Glossiness;
+    if (pbs_kw(PBSDUALSIDED_KW_METALLICMAP)) {
+        let m = ts::sample_tex_2d(_MetallicMap, _MetallicMap_sampler, uv_main, mat._MetallicMap_LodBias);
+        metallic = m.r;
+        smoothness = m.a;
+    }
+    if (pbs_kw(PBSDUALSIDED_KW_VCOLOR_METALLIC)) {
+        metallic = metallic * dot(vertex_color.rgb, vec3<f32>(0.33333334));
+        smoothness = smoothness * vertex_color.a;
+    }
+    metallic = clamp(metallic, 0.0, 1.0);
+    let roughness = psamp::roughness_from_smoothness(smoothness);
+
+    var occlusion = 1.0;
+    if (pbs_kw(PBSDUALSIDED_KW_OCCLUSION)) {
+        occlusion = ts::sample_tex_2d(_OcclusionMap, _OcclusionMap_sampler, uv_main, mat._OcclusionMap_LodBias).r;
+    }
+
+    var emission = mat._EmissionColor.rgb;
+    if (pbs_kw(PBSDUALSIDED_KW_EMISSIONTEX)) {
+        emission = emission * ts::sample_tex_2d(_EmissionMap, _EmissionMap_sampler, uv_main, mat._EmissionMap_LodBias).rgb;
+    }
+    if (pbs_kw(PBSDUALSIDED_KW_VCOLOR_EMIT)) {
+        emission = emission * vertex_color.rgb;
+    }
+
+    return SurfaceData(
+        albedo.rgb,
+        albedo.a,
+        metallic,
+        roughness,
+        occlusion,
+        sample_normal_world(uv_main, world_n, world_t, front_facing),
+        emission,
+    );
+}
+
+@vertex
+fn vs_main(
+    @builtin(instance_index) instance_index: u32,
+#ifdef MULTIVIEW
+    @builtin(view_index) view_idx: u32,
+#endif
+    @location(0) pos: vec4<f32>,
+    @location(1) n: vec4<f32>,
+    @location(2) uv0: vec2<f32>,
+    @location(3) color: vec4<f32>,
+    @location(4) t: vec4<f32>,
+) -> mv::WorldColorVertexOutput {
+#ifdef MULTIVIEW
+    return mv::world_color_vertex_main(instance_index, view_idx, pos, n, t, uv0, color);
+#else
+    return mv::world_color_vertex_main(instance_index, 0u, pos, n, t, uv0, color);
+#endif
+}
+
+//#pass type=forward name=forward_two_sided cull=material(off) offset=material(0,0) a2c=cutout
+@fragment
+fn fs_forward_base(
+    @builtin(position) frag_pos: vec4<f32>,
+    @builtin(front_facing) front_facing: bool,
+    @location(0) world_pos: vec3<f32>,
+    @location(1) world_n: vec3<f32>,
+    @location(2) world_t: vec4<f32>,
+    @location(3) uv0: vec2<f32>,
+    @location(4) color: vec4<f32>,
+    @location(5) @interpolate(flat) view_layer: u32,
+) -> @location(0) vec4<f32> {
+    let s = sample_surface(uv0, world_n, world_t, front_facing, color);
+    let surface = psurf::metallic_with_geometric_normal(
+        s.base_color,
+        s.alpha,
+        s.metallic,
+        s.roughness,
+        s.occlusion,
+        s.normal,
+        psamp::two_sided_geometric_normal(world_n, front_facing),
+        s.emission,
+    );
+    return vec4<f32>(
+        plight::shade_metallic_clustered(
+            frag_pos.xy,
+            world_pos,
+            view_layer,
+            surface,
+            plight::default_lighting_options(),
+        ),
+        s.alpha,
+    );
+}

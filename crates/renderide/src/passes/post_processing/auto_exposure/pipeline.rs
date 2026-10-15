@@ -1,0 +1,652 @@
+//! Cached pipelines, bind layouts, and per-view GPU state for auto-exposure.
+
+use std::num::NonZeroU64;
+use std::sync::Arc;
+
+use bytemuck::{Pod, Zeroable};
+
+use crate::config::AutoExposureSettings;
+use crate::embedded_shaders::embedded_wgsl;
+use crate::gpu::bind_layout::{
+    fragment_filterable_d2_array_entry, fragment_filtering_sampler_entry, texture_layout_entry,
+    uniform_buffer_layout_entry,
+};
+use crate::gpu_resource::{BindGroupMap, OnceGpu, RenderPipelineMap};
+use crate::render_graph::gpu_cache::{
+    FullscreenPipelineVariantDesc, FullscreenShaderVariants, create_d2_array_view,
+    create_linear_clamp_sampler, create_wgsl_shader_module, fullscreen_pipeline_variant,
+};
+
+/// Number of histogram bins used by the auto-exposure compute pass.
+pub(super) const HISTOGRAM_BIN_COUNT: u64 = 64;
+/// Workgroup width used by `compute_histogram`.
+pub(super) const HISTOGRAM_WORKGROUP_WIDTH: u32 = 16;
+/// Workgroup height used by `compute_histogram`.
+pub(super) const HISTOGRAM_WORKGROUP_HEIGHT: u32 = 16;
+
+const HISTOGRAM_BUFFER_SIZE: u64 = HISTOGRAM_BIN_COUNT * size_of::<u32>() as u64;
+const EXPOSURE_BUFFER_SIZE: u64 = size_of::<f32>() as u64;
+
+/// CPU mirror of the WGSL `AutoExposureParams` uniform.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub(super) struct AutoExposureParamsGpu {
+    min_log_lum: f32,
+    inv_log_lum_range: f32,
+    log_lum_range: f32,
+    low_percent: f32,
+    high_percent: f32,
+    speed_brighten: f32,
+    speed_darken: f32,
+    exponential_transition_distance: f32,
+    target_ev: f32,
+    delta_time_seconds: f32,
+    layer_count: u32,
+    instant_adaptation: u32,
+}
+
+impl AutoExposureParamsGpu {
+    pub(super) fn from_settings(
+        settings: AutoExposureSettings,
+        delta_seconds: f32,
+        layer_count: u32,
+        instant_adaptation: bool,
+    ) -> Self {
+        let (min_log_lum, max_log_lum) = settings.resolved_ev_range();
+        let log_lum_range = max_log_lum - min_log_lum;
+        let (low_percent, high_percent) = settings.resolved_filter();
+        Self {
+            min_log_lum,
+            inv_log_lum_range: 1.0 / log_lum_range,
+            log_lum_range,
+            low_percent,
+            high_percent,
+            speed_brighten: settings.resolved_speed_brighten(),
+            speed_darken: settings.resolved_speed_darken(),
+            exponential_transition_distance: settings.resolved_exponential_transition_distance(),
+            target_ev: settings.resolved_target_ev(),
+            delta_time_seconds: delta_seconds.max(0.0),
+            layer_count: layer_count.max(1),
+            instant_adaptation: u32::from(instant_adaptation),
+        }
+    }
+}
+
+/// Per-view GPU buffers retained by the auto-exposure effect.
+pub(super) struct ViewAutoExposureGpuState {
+    /// Per-view settings uniform buffer.
+    pub(super) settings: wgpu::Buffer,
+    /// Per-view histogram storage buffer.
+    pub(super) histogram: wgpu::Buffer,
+    /// Per-view persistent exposure EV storage buffer.
+    pub(super) exposure: wgpu::Buffer,
+}
+
+impl ViewAutoExposureGpuState {
+    pub(super) fn new(device: &wgpu::Device) -> Self {
+        let settings = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("auto_exposure_settings"),
+            size: size_of::<AutoExposureParamsGpu>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        crate::profiling::note_resource_churn!(Buffer, "passes::auto_exposure_settings");
+        let histogram = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("auto_exposure_histogram"),
+            size: HISTOGRAM_BUFFER_SIZE,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        crate::profiling::note_resource_churn!(Buffer, "passes::auto_exposure_histogram");
+        let exposure = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("auto_exposure_ev"),
+            size: EXPOSURE_BUFFER_SIZE,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        crate::profiling::note_resource_churn!(Buffer, "passes::auto_exposure_ev");
+        Self {
+            settings,
+            histogram,
+            exposure,
+        }
+    }
+}
+
+/// Upper bound on cached auto-exposure bind groups. The working set is bounded by the number of
+/// live view states (main + photo + utility offscreens + HMD eyes); the cap protects against
+/// unbounded growth when per-view GPU buffers are reallocated rapidly.
+const MAX_CACHED_BIND_GROUPS: usize = 16;
+
+/// Cache key for `compute_histogram` / `compute_average` bind groups.
+///
+/// `scene_color_texture` is the HDR scene-color source from the transient pool. The per-view
+/// state buffers (`settings`, `histogram`, `exposure`) are Arc-backed in wgpu, so reallocation
+/// produces a new key and stale entries simply age out under the LRU cap.
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct AutoExposureComputeBindGroupKey {
+    scene_color_texture: wgpu::Texture,
+    settings: wgpu::Buffer,
+    histogram: wgpu::Buffer,
+    exposure: wgpu::Buffer,
+    multiview_stereo: bool,
+}
+
+/// Cache key for `apply` bind groups. Same identity rules as the compute key.
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct AutoExposureApplyBindGroupKey {
+    scene_color_texture: wgpu::Texture,
+    exposure: wgpu::Buffer,
+    multiview_stereo: bool,
+}
+
+/// Process-wide pipeline cache for the auto-exposure compute and apply passes.
+pub(super) struct AutoExposurePipelineCache {
+    compute_bind_group_layout: OnceGpu<wgpu::BindGroupLayout>,
+    apply_bind_group_layout: OnceGpu<wgpu::BindGroupLayout>,
+    sampler: OnceGpu<wgpu::Sampler>,
+    histogram_pipeline: OnceGpu<wgpu::ComputePipeline>,
+    average_pipeline: OnceGpu<wgpu::ComputePipeline>,
+    mono_apply: RenderPipelineMap<wgpu::TextureFormat>,
+    multiview_apply: RenderPipelineMap<wgpu::TextureFormat>,
+    /// Compute bind groups keyed by source texture, per-view state buffers, and view shape. The
+    /// cached value owns the D2Array texture view alongside the bind group.
+    compute_bind_groups: BindGroupMap<AutoExposureComputeBindGroupKey>,
+    /// Apply bind groups keyed by source texture, exposure buffer, and view shape.
+    apply_bind_groups: BindGroupMap<AutoExposureApplyBindGroupKey>,
+}
+
+impl Default for AutoExposurePipelineCache {
+    fn default() -> Self {
+        Self {
+            compute_bind_group_layout: OnceGpu::default(),
+            apply_bind_group_layout: OnceGpu::default(),
+            sampler: OnceGpu::default(),
+            histogram_pipeline: OnceGpu::default(),
+            average_pipeline: OnceGpu::default(),
+            mono_apply: RenderPipelineMap::default(),
+            multiview_apply: RenderPipelineMap::default(),
+            compute_bind_groups: BindGroupMap::with_max_entries(MAX_CACHED_BIND_GROUPS),
+            apply_bind_groups: BindGroupMap::with_max_entries(MAX_CACHED_BIND_GROUPS),
+        }
+    }
+}
+
+impl AutoExposurePipelineCache {
+    fn compute_bind_group_layout(&self, device: &wgpu::Device) -> &wgpu::BindGroupLayout {
+        self.compute_bind_group_layout.get_or_create(|| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("auto_exposure_compute"),
+                entries: &[
+                    uniform_buffer_layout_entry(
+                        0,
+                        wgpu::ShaderStages::COMPUTE,
+                        NonZeroU64::new(size_of::<AutoExposureParamsGpu>() as u64),
+                    ),
+                    texture_layout_entry(
+                        1,
+                        wgpu::ShaderStages::COMPUTE,
+                        wgpu::TextureSampleType::Float { filterable: false },
+                        wgpu::TextureViewDimension::D2Array,
+                        false,
+                    ),
+                    storage_buffer_layout_entry(
+                        2,
+                        wgpu::ShaderStages::COMPUTE,
+                        false,
+                        HISTOGRAM_BUFFER_SIZE,
+                    ),
+                    storage_buffer_layout_entry(
+                        3,
+                        wgpu::ShaderStages::COMPUTE,
+                        false,
+                        EXPOSURE_BUFFER_SIZE,
+                    ),
+                ],
+            })
+        })
+    }
+
+    fn apply_bind_group_layout(&self, device: &wgpu::Device) -> &wgpu::BindGroupLayout {
+        self.apply_bind_group_layout.get_or_create(|| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("auto_exposure_apply"),
+                entries: &[
+                    fragment_filterable_d2_array_entry(0),
+                    fragment_filtering_sampler_entry(1),
+                    storage_buffer_layout_entry(
+                        2,
+                        wgpu::ShaderStages::FRAGMENT,
+                        true,
+                        EXPOSURE_BUFFER_SIZE,
+                    ),
+                ],
+            })
+        })
+    }
+
+    pub(super) fn histogram_pipeline(&self, device: &wgpu::Device) -> &wgpu::ComputePipeline {
+        self.histogram_pipeline.get_or_create(|| {
+            create_auto_exposure_compute_pipeline(
+                device,
+                self.compute_bind_group_layout(device),
+                "compute_histogram",
+            )
+        })
+    }
+
+    pub(super) fn average_pipeline(&self, device: &wgpu::Device) -> &wgpu::ComputePipeline {
+        self.average_pipeline.get_or_create(|| {
+            create_auto_exposure_compute_pipeline(
+                device,
+                self.compute_bind_group_layout(device),
+                "compute_average",
+            )
+        })
+    }
+
+    pub(super) fn apply_pipeline(
+        &self,
+        device: &wgpu::Device,
+        output_format: wgpu::TextureFormat,
+        multiview_stereo: bool,
+    ) -> Arc<wgpu::RenderPipeline> {
+        let bind_group_layout = self.apply_bind_group_layout(device);
+        fullscreen_pipeline_variant(
+            device,
+            FullscreenPipelineVariantDesc {
+                output_format,
+                multiview_stereo,
+                mono: &self.mono_apply,
+                multiview: &self.multiview_apply,
+                shader: FullscreenShaderVariants {
+                    mono_label: "auto_exposure_apply_default",
+                    mono_source: embedded_wgsl!("auto_exposure_apply_default"),
+                    multiview_label: "auto_exposure_apply_multiview",
+                    multiview_source: embedded_wgsl!("auto_exposure_apply_multiview"),
+                },
+                bind_group_layouts: &[Some(bind_group_layout)],
+                log_name: "auto_exposure_apply",
+            },
+        )
+    }
+
+    pub(super) fn compute_bind_group(
+        &self,
+        device: &wgpu::Device,
+        scene_color_texture: &wgpu::Texture,
+        multiview_stereo: bool,
+        state: &ViewAutoExposureGpuState,
+    ) -> wgpu::BindGroup {
+        let key = AutoExposureComputeBindGroupKey {
+            scene_color_texture: scene_color_texture.clone(),
+            settings: state.settings.clone(),
+            histogram: state.histogram.clone(),
+            exposure: state.exposure.clone(),
+            multiview_stereo,
+        };
+        self.compute_bind_groups.get_or_create(key, |k| {
+            let view = create_d2_array_view(
+                &k.scene_color_texture,
+                "auto_exposure_histogram_src",
+                k.multiview_stereo,
+            );
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("auto_exposure_compute"),
+                layout: self.compute_bind_group_layout(device),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: k.settings.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: k.histogram.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: k.exposure.as_entire_binding(),
+                    },
+                ],
+            });
+            crate::profiling::note_resource_churn!(BindGroup, "passes::auto_exposure_compute_bg");
+            bind_group
+        })
+    }
+
+    pub(super) fn apply_bind_group(
+        &self,
+        device: &wgpu::Device,
+        scene_color_texture: &wgpu::Texture,
+        multiview_stereo: bool,
+        state: &ViewAutoExposureGpuState,
+    ) -> wgpu::BindGroup {
+        let key = AutoExposureApplyBindGroupKey {
+            scene_color_texture: scene_color_texture.clone(),
+            exposure: state.exposure.clone(),
+            multiview_stereo,
+        };
+        self.apply_bind_groups.get_or_create(key, |k| {
+            let view = create_d2_array_view(
+                &k.scene_color_texture,
+                "auto_exposure_apply_src",
+                k.multiview_stereo,
+            );
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("auto_exposure_apply"),
+                layout: self.apply_bind_group_layout(device),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(self.sampler(device)),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: k.exposure.as_entire_binding(),
+                    },
+                ],
+            });
+            crate::profiling::note_resource_churn!(BindGroup, "passes::auto_exposure_apply_bg");
+            bind_group
+        })
+    }
+
+    fn sampler(&self, device: &wgpu::Device) -> &wgpu::Sampler {
+        self.sampler
+            .get_or_create(|| create_linear_clamp_sampler(device, "auto_exposure_apply"))
+    }
+}
+
+fn storage_buffer_layout_entry(
+    binding: u32,
+    visibility: wgpu::ShaderStages,
+    read_only: bool,
+    min_binding_size: u64,
+) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only },
+            has_dynamic_offset: false,
+            min_binding_size: NonZeroU64::new(min_binding_size),
+        },
+        count: None,
+    }
+}
+
+fn create_auto_exposure_compute_pipeline(
+    device: &wgpu::Device,
+    bind_group_layout: &wgpu::BindGroupLayout,
+    entry_point: &'static str,
+) -> wgpu::ComputePipeline {
+    logger::debug!("auto_exposure: building compute pipeline {entry_point}");
+    let shader = create_wgsl_shader_module(
+        device,
+        "auto_exposure_histogram",
+        embedded_wgsl!("auto_exposure_histogram"),
+    );
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("auto_exposure_histogram"),
+        bind_group_layouts: &[Some(bind_group_layout)],
+        immediate_size: 0,
+    });
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some(entry_point),
+        layout: Some(&layout),
+        module: &shader,
+        entry_point: Some(entry_point),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+    crate::profiling::note_resource_churn!(ComputePipeline, "passes::auto_exposure_pipeline");
+    pipeline
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AutoExposureParamsGpu, HISTOGRAM_BIN_COUNT};
+    use crate::config::AutoExposureSettings;
+
+    const HISTOGRAM_TEST_BIN_COUNT: usize = HISTOGRAM_BIN_COUNT as usize;
+    const HISTOGRAM_METERED_BIN_COUNT: f32 = 62.0;
+    const HISTOGRAM_EV_TOLERANCE: f32 = 0.08;
+    const MIXED_HISTOGRAM_EV_TOLERANCE: f32 = 0.12;
+    const MIN_AVERAGE_LUMINANCE: f32 = 0.000_001;
+
+    fn assert_close_ev(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() <= HISTOGRAM_EV_TOLERANCE,
+            "expected {actual} EV to be within {HISTOGRAM_EV_TOLERANCE} EV of {expected}"
+        );
+    }
+
+    fn meter_test_settings() -> AutoExposureSettings {
+        AutoExposureSettings {
+            low_percent: 0.0,
+            high_percent: 1.0,
+            ..Default::default()
+        }
+    }
+
+    fn exposure_for_repeated_luminance(luminance: f32) -> f32 {
+        let samples = [luminance; 64];
+        exposure_for_luminance_samples(&samples, meter_test_settings())
+    }
+
+    fn exposure_for_luminance_samples(samples: &[f32], settings: AutoExposureSettings) -> f32 {
+        settings.resolved_target_ev() - metered_log_luminance(samples, settings)
+    }
+
+    fn metered_log_luminance(samples: &[f32], settings: AutoExposureSettings) -> f32 {
+        let histogram = histogram_for_luminance_samples(samples, settings);
+        linear_histogram_metered_log_luminance(&histogram, settings)
+    }
+
+    fn old_log_bin_metered_log_luminance(samples: &[f32], settings: AutoExposureSettings) -> f32 {
+        let histogram = histogram_for_luminance_samples(samples, settings);
+        let (min_ev, max_ev) = settings.resolved_ev_range();
+        let log_lum_range = max_ev - min_ev;
+        let (first_index, last_index) = percentile_indices(&histogram, settings);
+
+        let mut previous_cumulative = 0u32;
+        let mut count = 0u32;
+        let mut sum = 0.0;
+        for (i, bin_population) in histogram.iter().copied().enumerate() {
+            let current_cumulative = previous_cumulative + bin_population;
+            if i > 0 {
+                let bin_count = current_cumulative.clamp(first_index, last_index)
+                    - previous_cumulative.clamp(first_index, last_index);
+                sum += bin_count as f32 * i as f32;
+                count += bin_count;
+            }
+            previous_cumulative = current_cumulative;
+        }
+
+        if count > 0 {
+            sum / (count as f32 * (HISTOGRAM_TEST_BIN_COUNT as f32 - 1.0)) * log_lum_range + min_ev
+        } else {
+            min_ev
+        }
+    }
+
+    fn linear_histogram_metered_log_luminance(
+        histogram: &[u32; HISTOGRAM_TEST_BIN_COUNT],
+        settings: AutoExposureSettings,
+    ) -> f32 {
+        let (min_ev, max_ev) = settings.resolved_ev_range();
+        let (first_index, last_index) = percentile_indices(histogram, settings);
+
+        let mut previous_cumulative = 0u32;
+        let mut count = 0u32;
+        let mut linear_luminance_sum = 0.0;
+        for (i, bin_population) in histogram.iter().copied().enumerate() {
+            let current_cumulative = previous_cumulative + bin_population;
+            if i > 0 {
+                let bin_count = current_cumulative.clamp(first_index, last_index)
+                    - previous_cumulative.clamp(first_index, last_index);
+                linear_luminance_sum +=
+                    bin_count as f32 * linear_luminance_for_bin(i, min_ev, max_ev);
+                count += bin_count;
+            }
+            previous_cumulative = current_cumulative;
+        }
+
+        if count > 0 {
+            (linear_luminance_sum / count as f32)
+                .max(MIN_AVERAGE_LUMINANCE)
+                .log2()
+        } else {
+            min_ev
+        }
+    }
+
+    fn percentile_indices(
+        histogram: &[u32; HISTOGRAM_TEST_BIN_COUNT],
+        settings: AutoExposureSettings,
+    ) -> (u32, u32) {
+        let histogram_sum = histogram.iter().sum::<u32>();
+        let (low_percent, high_percent) = settings.resolved_filter();
+        (
+            (histogram_sum as f32 * low_percent) as u32,
+            (histogram_sum as f32 * high_percent) as u32,
+        )
+    }
+
+    fn histogram_for_luminance_samples(
+        samples: &[f32],
+        settings: AutoExposureSettings,
+    ) -> [u32; HISTOGRAM_TEST_BIN_COUNT] {
+        let mut histogram = [0; HISTOGRAM_TEST_BIN_COUNT];
+        let (min_ev, max_ev) = settings.resolved_ev_range();
+        for luminance in samples.iter().copied() {
+            histogram[bin_for_luminance(luminance, min_ev, max_ev)] += 1;
+        }
+        histogram
+    }
+
+    fn bin_for_luminance(luminance: f32, min_ev: f32, max_ev: f32) -> usize {
+        let luminance = luminance.max(0.0);
+        let min_luminance = min_ev.exp2();
+        if !matches!(
+            luminance.partial_cmp(&min_luminance),
+            Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+        ) {
+            return 0;
+        }
+        let normalized = ((luminance.log2() - min_ev) / (max_ev - min_ev)).clamp(0.0, 1.0);
+        (normalized * HISTOGRAM_METERED_BIN_COUNT + 1.0) as usize
+    }
+
+    fn linear_luminance_for_bin(bin: usize, min_ev: f32, max_ev: f32) -> f32 {
+        let normalized = ((bin as f32 - 0.5) / HISTOGRAM_METERED_BIN_COUNT).min(1.0);
+        (normalized * (max_ev - min_ev) + min_ev).exp2()
+    }
+
+    #[test]
+    fn auto_exposure_params_are_uniform_aligned() {
+        assert_eq!(size_of::<AutoExposureParamsGpu>(), 48);
+        assert_eq!(size_of::<AutoExposureParamsGpu>() % 16, 0);
+    }
+
+    #[test]
+    fn default_auto_exposure_params_target_middle_gray() {
+        let params =
+            AutoExposureParamsGpu::from_settings(AutoExposureSettings::default(), 0.016, 1, false);
+
+        assert!((params.target_ev - AutoExposureSettings::MIDDLE_GRAY_EV).abs() < 1e-6);
+    }
+
+    #[test]
+    fn stereo_auto_exposure_params_meter_two_layers_into_shared_state() {
+        let params =
+            AutoExposureParamsGpu::from_settings(AutoExposureSettings::default(), 0.016, 2, false);
+
+        assert_eq!(params.layer_count, 2);
+    }
+
+    #[test]
+    fn auto_exposure_params_apply_compensation_relative_to_middle_gray() {
+        let settings = AutoExposureSettings {
+            compensation_ev: 1.0,
+            ..Default::default()
+        };
+        let params = AutoExposureParamsGpu::from_settings(settings, 0.016, 1, false);
+
+        assert!((params.target_ev - (AutoExposureSettings::MIDDLE_GRAY_EV + 1.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn auto_exposure_params_encode_instant_adaptation_policy() {
+        let temporal =
+            AutoExposureParamsGpu::from_settings(AutoExposureSettings::default(), 0.016, 1, false);
+        let instant =
+            AutoExposureParamsGpu::from_settings(AutoExposureSettings::default(), 0.016, 1, true);
+
+        assert_eq!(temporal.instant_adaptation, 0);
+        assert_eq!(instant.instant_adaptation, 1);
+    }
+
+    #[test]
+    fn histogram_has_expected_bin_count() {
+        assert_eq!(HISTOGRAM_BIN_COUNT, 64);
+    }
+
+    #[test]
+    fn flat_middle_gray_meters_to_neutral_exposure() {
+        assert_close_ev(exposure_for_repeated_luminance(0.18), 0.0);
+    }
+
+    #[test]
+    fn flat_one_stop_above_middle_gray_darkens_one_stop() {
+        assert_close_ev(exposure_for_repeated_luminance(0.36), -1.0);
+    }
+
+    #[test]
+    fn flat_one_stop_below_middle_gray_brightens_one_stop() {
+        assert_close_ev(exposure_for_repeated_luminance(0.09), 1.0);
+    }
+
+    #[test]
+    fn mixed_luminance_meters_linear_average_instead_of_log_average() {
+        let settings = meter_test_settings();
+        let mut samples = vec![0.02; 64];
+        samples.extend([2.0; 64]);
+
+        let metered_log_luminance = metered_log_luminance(&samples, settings);
+        let old_log_bin_luminance = old_log_bin_metered_log_luminance(&samples, settings);
+        let arithmetic_luminance = samples.iter().sum::<f32>() / samples.len() as f32;
+
+        assert!(
+            (metered_log_luminance.exp2() / arithmetic_luminance)
+                .log2()
+                .abs()
+                <= MIXED_HISTOGRAM_EV_TOLERANCE,
+            "metered luminance should track arithmetic luminance"
+        );
+        assert!(
+            metered_log_luminance > old_log_bin_luminance + 1.5,
+            "linear metering should not collapse mixed luminance toward the old log-bin average"
+        );
+    }
+
+    #[test]
+    fn percentile_filtering_discards_dark_and_bright_tails_before_metering() {
+        let mut samples = vec![0.01; 25];
+        samples.extend([0.18; 50]);
+        samples.extend([10.0; 25]);
+
+        assert_close_ev(
+            exposure_for_luminance_samples(&samples, AutoExposureSettings::default()),
+            0.0,
+        );
+    }
+}

@@ -1,0 +1,680 @@
+//! OpenXR action set, interaction profile bindings, and per-frame VR controller sampling.
+
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+
+use parking_lot::Mutex;
+
+use super::bindings::ProfileExtensionGates;
+use super::frame::{ControllerFrame, resolve_controller_frame};
+use super::latch::HostProfileLatch;
+use super::manifest::Manifest;
+use super::openxr_actions::{
+    OpenxrInputActions, OpenxrInputParts, ResolvedProfilePaths, create_openxr_input_parts,
+};
+use super::pose::pose_from_location;
+use super::profile::{
+    ActiveControllerProfile, decode_profile_code, is_concrete_profile, log_profile_transition,
+    profile_code,
+};
+use super::state::{
+    OpenxrControllerRawInputs, OpenxrControllerThresholdState,
+    build_controller_state_with_thresholds,
+};
+use super::tracker::{TrackerCache, TrackerPoseSpace};
+use crate::shared::{Chirality, HandState, TrackerState, VRControllerState};
+use crate::xr::input::hand_tracking::{hand_from_openxr, inactive_openxr_hand};
+use crate::xr::synthesize_hand_states;
+use glam::{Quat, Vec2, Vec3};
+use openxr as xr;
+
+/// OpenXR [`xr::Action::state`] snapshot for one hand (all channels consumed by IPC mapping).
+struct PolledHandStates {
+    trigger: xr::ActionState<f32>,
+    trigger_touch: xr::ActionState<bool>,
+    trigger_click: xr::ActionState<bool>,
+    squeeze: xr::ActionState<f32>,
+    squeeze_click: xr::ActionState<bool>,
+    thumbstick: xr::ActionState<xr::Vector2f>,
+    thumbstick_touch: xr::ActionState<bool>,
+    thumbstick_click: xr::ActionState<bool>,
+    trackpad: xr::ActionState<xr::Vector2f>,
+    trackpad_touch: xr::ActionState<bool>,
+    trackpad_click: xr::ActionState<bool>,
+    trackpad_force: xr::ActionState<f32>,
+    primary: xr::ActionState<bool>,
+    secondary: xr::ActionState<bool>,
+    primary_touch: xr::ActionState<bool>,
+    secondary_touch: xr::ActionState<bool>,
+    menu: xr::ActionState<bool>,
+    thumbrest_touch: xr::ActionState<bool>,
+    select: xr::ActionState<bool>,
+}
+
+impl PolledHandStates {
+    fn thumbstick_vec(&self) -> Vec2 {
+        Vec2::new(
+            self.thumbstick.current_state.x,
+            self.thumbstick.current_state.y,
+        )
+    }
+
+    fn trackpad_vec(&self) -> Vec2 {
+        Vec2::new(self.trackpad.current_state.x, self.trackpad.current_state.y)
+    }
+}
+
+/// Result of sampling an optional OpenXR hand tracker for one side.
+enum OpenxrHandSample {
+    /// No tracker exists for this side, so controller-synthesized hand input is the only source.
+    NoTracker,
+    /// A tracker exists, but it produced no usable joint pose for the current frame.
+    Inactive,
+    /// A tracker produced a host-facing hand for the current frame.
+    Active(HandState),
+}
+
+/// Locates and converts one OpenXR hand tracker without failing the whole input tick.
+fn sample_openxr_hand(
+    tracker: Option<&xr::HandTracker>,
+    stage: &xr::Space,
+    predicted_time: xr::Time,
+    chirality: Chirality,
+) -> OpenxrHandSample {
+    let Some(tracker) = tracker else {
+        return OpenxrHandSample::NoTracker;
+    };
+    let joints = match stage.locate_hand_joints(tracker, predicted_time) {
+        Ok(Some(joints)) => joints,
+        Ok(None) => return OpenxrHandSample::Inactive,
+        Err(error) => {
+            logger::trace!("OpenXR {chirality:?} hand tracking locate failed: {error:?}");
+            return OpenxrHandSample::Inactive;
+        }
+    };
+    hand_from_openxr(&joints, chirality)
+        .map_or(OpenxrHandSample::Inactive, OpenxrHandSample::Active)
+}
+
+/// Appends the host-facing hand state for one side using OpenXR state when available.
+fn append_hand_for_side(
+    hands: &mut Vec<HandState>,
+    synthetic_hands: &[HandState],
+    chirality: Chirality,
+    openxr_sample: OpenxrHandSample,
+) {
+    match openxr_sample {
+        OpenxrHandSample::Active(hand) => hands.push(hand),
+        OpenxrHandSample::Inactive => {
+            hands.push(inactive_openxr_hand(chirality));
+            append_synthetic_hand_for_side(hands, synthetic_hands, chirality);
+        }
+        OpenxrHandSample::NoTracker => {
+            append_synthetic_hand_for_side(hands, synthetic_hands, chirality);
+        }
+    }
+}
+
+/// Appends synthesized controller-driven hand state for one side.
+fn append_synthetic_hand_for_side(
+    hands: &mut Vec<HandState>,
+    synthetic_hands: &[HandState],
+    chirality: Chirality,
+) {
+    hands.extend(
+        synthetic_hands
+            .iter()
+            .filter(|hand| hand.chirality == chirality)
+            .cloned(),
+    );
+}
+
+/// Builds the ordered hand list sent over IPC for a pair of OpenXR tracker samples.
+fn hand_states_from_samples(
+    controllers: &[VRControllerState],
+    left_openxr: OpenxrHandSample,
+    right_openxr: OpenxrHandSample,
+) -> Vec<HandState> {
+    let synthetic_hands = synthesize_hand_states(controllers);
+    let mut hands = Vec::with_capacity(synthetic_hands.len() + 2);
+    append_hand_for_side(&mut hands, &synthetic_hands, Chirality::Left, left_openxr);
+    append_hand_for_side(&mut hands, &synthetic_hands, Chirality::Right, right_openxr);
+    hands
+}
+
+/// Fallback [`ControllerFrame`] when [`resolve_controller_frame`] returns [`None`].
+fn placeholder_controller_frame() -> ControllerFrame {
+    ControllerFrame {
+        position: Vec3::ZERO,
+        rotation: Quat::IDENTITY,
+        has_bound_hand: false,
+        hand_position: Vec3::ZERO,
+        hand_rotation: Quat::IDENTITY,
+    }
+}
+
+/// Maps a resolved pose frame (if any) plus analog/digital samples into a host-facing [`VRControllerState`].
+fn ipc_vr_controller_from_polled(
+    profile: ActiveControllerProfile,
+    side: Chirality,
+    resolved_frame: Option<ControllerFrame>,
+    polled: &PolledHandStates,
+    threshold_state: &mut OpenxrControllerThresholdState,
+) -> VRControllerState {
+    let tracking_valid = resolved_frame.is_some();
+    let frame = resolved_frame.unwrap_or_else(placeholder_controller_frame);
+    build_controller_state_with_thresholds(
+        OpenxrControllerRawInputs {
+            profile,
+            side,
+            is_tracking: tracking_valid,
+            frame,
+            trigger: polled.trigger.current_state,
+            trigger_active: polled.trigger.is_active,
+            trigger_touch: polled.trigger_touch.current_state,
+            trigger_click: polled.trigger_click.current_state,
+            squeeze: polled.squeeze.current_state,
+            squeeze_active: polled.squeeze.is_active,
+            squeeze_click: polled.squeeze_click.current_state,
+            thumbstick: polled.thumbstick_vec(),
+            thumbstick_touch: polled.thumbstick_touch.current_state,
+            thumbstick_click: polled.thumbstick_click.current_state,
+            trackpad: polled.trackpad_vec(),
+            trackpad_touch: polled.trackpad_touch.current_state,
+            trackpad_click: polled.trackpad_click.current_state,
+            trackpad_force: polled.trackpad_force.current_state,
+            primary: polled.primary.current_state,
+            secondary: polled.secondary.current_state,
+            primary_touch: polled.primary_touch.current_state,
+            secondary_touch: polled.secondary_touch.current_state,
+            menu: polled.menu.current_state,
+            thumbrest_touch: polled.thumbrest_touch.current_state,
+            select: polled.select.current_state,
+        },
+        threshold_state,
+    )
+}
+
+/// Host-facing OpenXR input sample for one predicted display tick.
+pub struct OpenxrInputSample {
+    /// Active controller states to forward over IPC.
+    pub controllers: Vec<VRControllerState>,
+    /// Active and previously seen body tracker states to forward over IPC.
+    pub trackers: Vec<TrackerState>,
+    /// Hand skeleton states from OpenXR hand tracking or controller synthesis.
+    pub hands: Vec<HandState>,
+}
+
+/// OpenXR actions and derived spaces for headset/controller input used by the renderer IPC path.
+pub struct OpenxrInput {
+    instance: xr::Instance,
+    action_set: xr::ActionSet,
+    left_user_path: xr::Path,
+    right_user_path: xr::Path,
+    profile_paths: ResolvedProfilePaths,
+    left_profile_cache: AtomicU8,
+    right_profile_cache: AtomicU8,
+    left_host_profile_latch: HostProfileLatch,
+    right_host_profile_latch: HostProfileLatch,
+    actions: OpenxrInputActions,
+    left_space: xr::Space,
+    right_space: xr::Space,
+    left_palm_ext_space: xr::Space,
+    right_palm_ext_space: xr::Space,
+    tracker_spaces: Vec<TrackerPoseSpace>,
+    left_hand_tracker: Option<xr::HandTracker>,
+    right_hand_tracker: Option<xr::HandTracker>,
+    tracker_cache: Mutex<TrackerCache>,
+    left_threshold_state: Mutex<OpenxrControllerThresholdState>,
+    right_threshold_state: Mutex<OpenxrControllerThresholdState>,
+}
+
+impl OpenxrInput {
+    /// Loads the XR action manifest, creates the action set, suggests bindings, and builds spaces.
+    ///
+    /// `gates` must reflect which OpenXR extensions were enabled on the instance; binding
+    /// suggestions for profiles whose extension is disabled are skipped so runtimes that do not
+    /// recognise those paths do not emit errors.
+    pub fn new(
+        instance: &xr::Instance,
+        session: &xr::Session<xr::Vulkan>,
+        gates: &ProfileExtensionGates,
+        manifest: &Manifest,
+    ) -> Result<Self, xr::sys::Result> {
+        let parts = create_openxr_input_parts(instance, session, gates, manifest)?;
+        Ok(Self::from_parts(instance.clone(), parts))
+    }
+
+    fn from_parts(instance: xr::Instance, parts: OpenxrInputParts) -> Self {
+        Self {
+            instance,
+            action_set: parts.action_set,
+            left_user_path: parts.left_user_path,
+            right_user_path: parts.right_user_path,
+            profile_paths: parts.profile_paths,
+            left_profile_cache: parts.left_profile_cache,
+            right_profile_cache: parts.right_profile_cache,
+            left_host_profile_latch: HostProfileLatch::default(),
+            right_host_profile_latch: HostProfileLatch::default(),
+            actions: parts.actions,
+            left_space: parts.left_space,
+            right_space: parts.right_space,
+            left_palm_ext_space: parts.left_palm_ext_space,
+            right_palm_ext_space: parts.right_palm_ext_space,
+            tracker_spaces: parts.tracker_spaces,
+            left_hand_tracker: parts.left_hand_tracker,
+            right_hand_tracker: parts.right_hand_tracker,
+            tracker_cache: Mutex::new(TrackerCache::default()),
+            left_threshold_state: Mutex::new(OpenxrControllerThresholdState::default()),
+            right_threshold_state: Mutex::new(OpenxrControllerThresholdState::default()),
+        }
+    }
+
+    fn detect_profile(
+        &self,
+        session: &xr::Session<xr::Vulkan>,
+        hand_user_path: xr::Path,
+    ) -> ActiveControllerProfile {
+        let Ok(profile) = session.current_interaction_profile(hand_user_path) else {
+            return ActiveControllerProfile::Generic;
+        };
+        let paths = &self.profile_paths;
+        if profile == paths.oculus_touch
+            || profile == paths.meta_touch_pro
+            || profile == paths.meta_touch_plus
+        {
+            ActiveControllerProfile::Touch
+        } else if profile == paths.pico4_controller {
+            ActiveControllerProfile::Pico4
+        } else if profile == paths.pico_neo3_controller {
+            ActiveControllerProfile::PicoNeo3
+        } else if profile == paths.valve_index {
+            ActiveControllerProfile::Index
+        } else if profile == paths.htc_vive {
+            ActiveControllerProfile::Vive
+        } else if profile == paths.htc_vive_cosmos {
+            ActiveControllerProfile::ViveCosmos
+        } else if profile == paths.htc_vive_focus3 {
+            ActiveControllerProfile::ViveFocus3
+        } else if profile == paths.hp_reverb_g2 {
+            ActiveControllerProfile::HpReverbG2
+        } else if profile == paths.microsoft_motion || profile == paths.samsung_odyssey {
+            ActiveControllerProfile::WindowsMr
+        } else if profile == paths.generic_controller {
+            ActiveControllerProfile::Generic
+        } else if profile == paths.simple_controller || profile == xr::Path::NULL {
+            ActiveControllerProfile::Simple
+        } else {
+            ActiveControllerProfile::Generic
+        }
+    }
+
+    fn active_profile(
+        &self,
+        session: &xr::Session<xr::Vulkan>,
+        hand_user_path: xr::Path,
+        side: Chirality,
+    ) -> ActiveControllerProfile {
+        let live = self.detect_profile(session, hand_user_path);
+        let cache = match side {
+            Chirality::Left => &self.left_profile_cache,
+            Chirality::Right => &self.right_profile_cache,
+        };
+        if is_concrete_profile(live) {
+            cache.store(profile_code(live), Ordering::Relaxed);
+            return live;
+        }
+        decode_profile_code(cache.load(Ordering::Relaxed))
+            .filter(|cached| is_concrete_profile(*cached))
+            .unwrap_or(live)
+    }
+
+    fn host_profile_for_sample(
+        &self,
+        side: Chirality,
+        profile: ActiveControllerProfile,
+    ) -> Option<ActiveControllerProfile> {
+        let latch = match side {
+            Chirality::Left => &self.left_host_profile_latch,
+            Chirality::Right => &self.right_host_profile_latch,
+        };
+        latch.profile_for_sample(side, profile)
+    }
+
+    /// Samples every bound action for the given hand after [`xr::Session::sync_actions`].
+    fn poll_hand_action_states(
+        &self,
+        session: &xr::Session<xr::Vulkan>,
+        side: Chirality,
+    ) -> Result<PolledHandStates, xr::sys::Result> {
+        let a = &self.actions;
+        match side {
+            Chirality::Left => Ok(PolledHandStates {
+                trigger: a.left_trigger.state(session, xr::Path::NULL)?,
+                trigger_touch: a.left_trigger_touch.state(session, xr::Path::NULL)?,
+                trigger_click: a.left_trigger_click.state(session, xr::Path::NULL)?,
+                squeeze: a.left_squeeze.state(session, xr::Path::NULL)?,
+                squeeze_click: a.left_squeeze_click.state(session, xr::Path::NULL)?,
+                thumbstick: a.left_thumbstick.state(session, xr::Path::NULL)?,
+                thumbstick_touch: a.left_thumbstick_touch.state(session, xr::Path::NULL)?,
+                thumbstick_click: a.left_thumbstick_click.state(session, xr::Path::NULL)?,
+                trackpad: a.left_trackpad.state(session, xr::Path::NULL)?,
+                trackpad_touch: a.left_trackpad_touch.state(session, xr::Path::NULL)?,
+                trackpad_click: a.left_trackpad_click.state(session, xr::Path::NULL)?,
+                trackpad_force: a.left_trackpad_force.state(session, xr::Path::NULL)?,
+                primary: a.left_primary.state(session, xr::Path::NULL)?,
+                secondary: a.left_secondary.state(session, xr::Path::NULL)?,
+                primary_touch: a.left_primary_touch.state(session, xr::Path::NULL)?,
+                secondary_touch: a.left_secondary_touch.state(session, xr::Path::NULL)?,
+                menu: a.left_menu.state(session, xr::Path::NULL)?,
+                thumbrest_touch: a.left_thumbrest_touch.state(session, xr::Path::NULL)?,
+                select: a.left_select.state(session, xr::Path::NULL)?,
+            }),
+            Chirality::Right => Ok(PolledHandStates {
+                trigger: a.right_trigger.state(session, xr::Path::NULL)?,
+                trigger_touch: a.right_trigger_touch.state(session, xr::Path::NULL)?,
+                trigger_click: a.right_trigger_click.state(session, xr::Path::NULL)?,
+                squeeze: a.right_squeeze.state(session, xr::Path::NULL)?,
+                squeeze_click: a.right_squeeze_click.state(session, xr::Path::NULL)?,
+                thumbstick: a.right_thumbstick.state(session, xr::Path::NULL)?,
+                thumbstick_touch: a.right_thumbstick_touch.state(session, xr::Path::NULL)?,
+                thumbstick_click: a.right_thumbstick_click.state(session, xr::Path::NULL)?,
+                trackpad: a.right_trackpad.state(session, xr::Path::NULL)?,
+                trackpad_touch: a.right_trackpad_touch.state(session, xr::Path::NULL)?,
+                trackpad_click: a.right_trackpad_click.state(session, xr::Path::NULL)?,
+                trackpad_force: a.right_trackpad_force.state(session, xr::Path::NULL)?,
+                primary: a.right_primary.state(session, xr::Path::NULL)?,
+                secondary: a.right_secondary.state(session, xr::Path::NULL)?,
+                primary_touch: a.right_primary_touch.state(session, xr::Path::NULL)?,
+                secondary_touch: a.right_secondary_touch.state(session, xr::Path::NULL)?,
+                menu: a.right_menu.state(session, xr::Path::NULL)?,
+                thumbrest_touch: a.right_thumbrest_touch.state(session, xr::Path::NULL)?,
+                select: a.right_select.state(session, xr::Path::NULL)?,
+            }),
+        }
+    }
+
+    /// Applies a haptic vibration event to the hand-specific OpenXR haptic action.
+    pub(in crate::xr::input) fn apply_haptic_feedback(
+        &self,
+        session: &xr::Session<xr::Vulkan>,
+        side: Chirality,
+        duration: xr::Duration,
+        frequency_hz: f32,
+        amplitude: f32,
+    ) -> Result<(), xr::sys::Result> {
+        let action = match side {
+            Chirality::Left => &self.actions.left_haptic,
+            Chirality::Right => &self.actions.right_haptic,
+        };
+        let event = xr::HapticVibration::new()
+            .duration(duration)
+            .frequency(frequency_hz)
+            .amplitude(amplitude);
+        action.apply_feedback(session, xr::Path::NULL, &event)
+    }
+
+    /// Syncs actions, samples poses and digital/analog state, and returns host-facing input.
+    pub fn sync_and_sample(
+        &self,
+        session: &xr::Session<xr::Vulkan>,
+        stage: &xr::Space,
+        predicted_time: xr::Time,
+    ) -> Result<OpenxrInputSample, xr::sys::Result> {
+        profiling::scope!("xr::input_sync_and_sample");
+        session.sync_actions(&[xr::ActiveActionSet::new(&self.action_set)])?;
+        let left_loc = self.left_space.locate(stage, predicted_time)?;
+        let right_loc = self.right_space.locate(stage, predicted_time)?;
+        let left_palm_ext_loc = self.left_palm_ext_space.locate(stage, predicted_time)?;
+        let right_palm_ext_loc = self.right_palm_ext_space.locate(stage, predicted_time)?;
+        let left_grip_pose = pose_from_location(&left_loc);
+        let right_grip_pose = pose_from_location(&right_loc);
+        let left_palm_ext_pose = pose_from_location(&left_palm_ext_loc);
+        let right_palm_ext_pose = pose_from_location(&right_palm_ext_loc);
+
+        let left_openxr_hand = sample_openxr_hand(
+            self.left_hand_tracker.as_ref(),
+            stage,
+            predicted_time,
+            Chirality::Left,
+        );
+        let right_openxr_hand = sample_openxr_hand(
+            self.right_hand_tracker.as_ref(),
+            stage,
+            predicted_time,
+            Chirality::Right,
+        );
+
+        let left_polled = self.poll_hand_action_states(session, Chirality::Left)?;
+        let right_polled = self.poll_hand_action_states(session, Chirality::Right)?;
+
+        let left_profile = self.active_profile(session, self.left_user_path, Chirality::Left);
+        let right_profile = self.active_profile(session, self.right_user_path, Chirality::Right);
+        log_profile_transition(Chirality::Left, left_profile);
+        log_profile_transition(Chirality::Right, right_profile);
+        Self::log_palm_ext_pose_missing_with_fallback_throttled(
+            Chirality::Left,
+            left_palm_ext_pose,
+            left_grip_pose,
+        );
+        Self::log_palm_ext_pose_missing_with_fallback_throttled(
+            Chirality::Right,
+            right_palm_ext_pose,
+            right_grip_pose,
+        );
+        let left_frame = resolve_controller_frame(
+            left_profile,
+            Chirality::Left,
+            left_grip_pose,
+            left_palm_ext_pose,
+        );
+        let right_frame = resolve_controller_frame(
+            right_profile,
+            Chirality::Right,
+            right_grip_pose,
+            right_palm_ext_pose,
+        );
+        let mut controllers = Vec::with_capacity(2);
+        if let Some(left_host_profile) = self.host_profile_for_sample(Chirality::Left, left_profile)
+        {
+            let mut threshold_state = self.left_threshold_state.lock();
+            controllers.push(ipc_vr_controller_from_polled(
+                left_host_profile,
+                Chirality::Left,
+                left_frame,
+                &left_polled,
+                &mut threshold_state,
+            ));
+        }
+        if let Some(right_host_profile) =
+            self.host_profile_for_sample(Chirality::Right, right_profile)
+        {
+            let mut threshold_state = self.right_threshold_state.lock();
+            controllers.push(ipc_vr_controller_from_polled(
+                right_host_profile,
+                Chirality::Right,
+                right_frame,
+                &right_polled,
+                &mut threshold_state,
+            ));
+        }
+        let hand_states =
+            hand_states_from_samples(&controllers, left_openxr_hand, right_openxr_hand);
+        let trackers = self.tracker_cache.lock().sample(
+            &self.instance,
+            stage,
+            predicted_time,
+            &self.tracker_spaces,
+        );
+
+        Ok(OpenxrInputSample {
+            controllers,
+            trackers,
+            hands: hand_states,
+        })
+    }
+
+    /// Logs at most once every 300 frames per hand when `palm_ext` is unavailable but grip is valid.
+    fn log_palm_ext_pose_missing_with_fallback_throttled(
+        side: Chirality,
+        palm_ext_pose: Option<(Vec3, Quat)>,
+        grip_pose: Option<(Vec3, Quat)>,
+    ) {
+        if palm_ext_pose.is_some() || grip_pose.is_none() {
+            return;
+        }
+        static LEFT: AtomicU32 = AtomicU32::new(0);
+        static RIGHT: AtomicU32 = AtomicU32::new(0);
+        let slot = match side {
+            Chirality::Left => &LEFT,
+            Chirality::Right => &RIGHT,
+        };
+        let n = slot.fetch_add(1, Ordering::Relaxed);
+        if n % 300 == 0 {
+            logger::debug!(
+                "OpenXR {side:?}: palm_ext pose invalid or untracked; resolving controller frame from grip fallback for IPC"
+            );
+        }
+    }
+
+    /// Logs once (at trace level) if stereo view array order may not match left-then-right pose ordering.
+    pub fn log_stereo_view_order_once(views: &[xr::View]) {
+        static ONCE: AtomicBool = AtomicBool::new(false);
+        if views.len() < 2 || ONCE.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let x0 = views[0].pose.position.x;
+        let x1 = views[1].pose.position.x;
+        if x0 > x1 + 0.02 {
+            logger::trace!(
+                "OpenXR stereo: views[0].pose.x ({x0}) > views[1].pose.x ({x1}); runtime may use right-then-left ordering - verify eye mapping."
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shared::{BodyNode, TouchControllerModel, TouchControllerState};
+
+    /// Builds a tracked Touch controller state that can synthesize one fallback hand.
+    fn touch_controller(side: Chirality) -> VRControllerState {
+        VRControllerState::TouchControllerState(TouchControllerState {
+            model: TouchControllerModel::QuestAndRiftS,
+            start: false,
+            button_yb: false,
+            button_xa: false,
+            button_yb_touch: false,
+            button_xa_touch: false,
+            thumbrest_touch: false,
+            grip: 0.5,
+            grip_click: false,
+            joystick_raw: Vec2::ZERO,
+            joystick_touch: false,
+            joystick_click: false,
+            trigger: 0.25,
+            trigger_touch: false,
+            trigger_click: false,
+            device_id: None,
+            device_model: None,
+            side,
+            body_node: match side {
+                Chirality::Left => BodyNode::LeftController,
+                Chirality::Right => BodyNode::RightController,
+            },
+            is_device_active: true,
+            is_tracking: true,
+            position: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+            has_bound_hand: false,
+            hand_position: Vec3::ZERO,
+            hand_rotation: Quat::IDENTITY,
+            battery_level: 1.0,
+            battery_charging: false,
+        })
+    }
+
+    /// Builds a minimal active OpenXR hand state for selection tests.
+    fn tracked_openxr_hand(chirality: Chirality) -> HandState {
+        HandState {
+            unique_id: Some(format!("test_openxr_{chirality:?}")),
+            priority: 1,
+            chirality,
+            is_device_active: true,
+            is_tracking: true,
+            tracks_metacarpals: true,
+            confidence: 1.0,
+            wrist_position: Vec3::ZERO,
+            wrist_rotation: Quat::IDENTITY,
+            segment_positions: vec![Vec3::ZERO; 24],
+            segment_rotations: vec![Quat::IDENTITY; 24],
+        }
+    }
+
+    /// Filters a hand list down to one chirality.
+    fn hands_for_side(hands: &[HandState], chirality: Chirality) -> Vec<&HandState> {
+        hands
+            .iter()
+            .filter(|hand| hand.chirality == chirality)
+            .collect()
+    }
+
+    #[test]
+    fn active_openxr_hand_suppresses_same_side_synthetic_fallback() {
+        let controllers = vec![
+            touch_controller(Chirality::Left),
+            touch_controller(Chirality::Right),
+        ];
+        let hands = hand_states_from_samples(
+            &controllers,
+            OpenxrHandSample::Active(tracked_openxr_hand(Chirality::Left)),
+            OpenxrHandSample::NoTracker,
+        );
+
+        let left_hands = hands_for_side(&hands, Chirality::Left);
+        let right_hands = hands_for_side(&hands, Chirality::Right);
+        assert_eq!(left_hands.len(), 1);
+        assert_eq!(left_hands[0].priority, 1);
+        assert!(left_hands[0].is_tracking);
+        assert_eq!(right_hands.len(), 1);
+        assert_eq!(right_hands[0].priority, 0);
+    }
+
+    #[test]
+    fn inactive_openxr_tracker_clears_device_then_keeps_synthetic_fallback() {
+        let controllers = vec![
+            touch_controller(Chirality::Left),
+            touch_controller(Chirality::Right),
+        ];
+        let hands = hand_states_from_samples(
+            &controllers,
+            OpenxrHandSample::Inactive,
+            OpenxrHandSample::NoTracker,
+        );
+
+        let left_hands = hands_for_side(&hands, Chirality::Left);
+        assert_eq!(left_hands.len(), 2);
+        assert_eq!(left_hands[0].priority, 1);
+        assert!(!left_hands[0].is_tracking);
+        assert_eq!(left_hands[1].priority, 0);
+        assert!(left_hands[1].is_tracking);
+    }
+
+    #[test]
+    fn missing_openxr_trackers_preserve_synthetic_only_behavior() {
+        let controllers = vec![
+            touch_controller(Chirality::Left),
+            touch_controller(Chirality::Right),
+        ];
+        let hands = hand_states_from_samples(
+            &controllers,
+            OpenxrHandSample::NoTracker,
+            OpenxrHandSample::NoTracker,
+        );
+
+        assert_eq!(hands.len(), 2);
+        assert!(hands.iter().all(|hand| hand.priority == 0));
+        assert_eq!(hands_for_side(&hands, Chirality::Left).len(), 1);
+        assert_eq!(hands_for_side(&hands, Chirality::Right).len(), 1);
+    }
+}

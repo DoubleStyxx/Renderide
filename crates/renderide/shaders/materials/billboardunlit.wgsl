@@ -1,0 +1,359 @@
+//! Billboard/Unlit (`Shader "Billboard/Unlit"`).
+//!
+//! The material expects one point expanded into four quad vertices. WGSL has no geometry stage, so
+//! this shader billboards already-quad geometry in the vertex stage. Meshes with duplicated center
+//! positions and quad UVs match the expected point expansion closely.
+//!
+//! Variant bits cover the material keyword set.
+//! `_POINT_UV` is a pipeline-affecting decision (the host pre-bakes per-point
+//! `texcoord + texscale * (corner - 0.5)` into the expanded quad's UVs), so the WGSL only needs
+//! the bit reserved at its sorted index even though no fragment branch reads it.
+
+//#render_queue AlphaTest+200
+//#texture_default _Tex white
+//#texture_default _OffsetTex black
+//#texture_default _MaskTex white
+//#mat_default _Color vec4 1.0 1.0 1.0 1.0
+//#mat_default _OffsetMagnitude vec4 0.1 0.1 0.0 0.0
+//#mat_default _PointSize vec4 0.1 0.1 0.0 0.0
+//#mat_default _PolarPow float 1.0
+//#mat_default _Cutoff float 0.5
+//#mat_default _Tex_LodBias float 0.0
+//#mat_default _OffsetTex_LodBias float 0.0
+//#mat_default _MaskTex_LodBias float 0.0
+
+#import renderide::core::texture_sampling as ts
+#import renderide::core::uv as uvu
+#import renderide::frame::globals as rg
+#import renderide::frame::fog as rfog
+#import renderide::draw::per_draw as pd
+#import renderide::lighting::diffuse as dl
+#import renderide::material::alpha as ma
+#import renderide::material::variant_bits as vb
+#import renderide::material::vertex_color as vc
+#import renderide::mesh::billboard as mb
+#import renderide::mesh::particle as mp
+#import renderide::mesh::transform as mt
+
+struct BillboardUnlitMaterial {
+    _Color: vec4<f32>,
+    _Tex_ST: vec4<f32>,
+    _RightEye_ST: vec4<f32>,
+    _MaskTex_ST: vec4<f32>,
+    _OffsetTex_ST: vec4<f32>,
+    _OffsetMagnitude: vec4<f32>,
+    _PointSize: vec4<f32>,
+    _Cutoff: f32,
+    _PolarPow: f32,
+    _RenderideVariantBits: u32,
+    _Tex_LodBias: f32,
+    _OffsetTex_LodBias: f32,
+    _MaskTex_LodBias: f32,
+    _pad0: f32,
+}
+
+const BILLBOARDUNLIT_KW_ALPHATEST: u32 = 1u << 0u;
+const BILLBOARDUNLIT_KW_COLOR: u32 = 1u << 1u;
+const BILLBOARDUNLIT_KW_MUL_ALPHA_INTENSITY: u32 = 1u << 2u;
+const BILLBOARDUNLIT_KW_MUL_RGB_BY_ALPHA: u32 = 1u << 3u;
+const BILLBOARDUNLIT_KW_OFFSET_TEXTURE: u32 = 1u << 4u;
+const BILLBOARDUNLIT_KW_POINT_ROTATION: u32 = 1u << 5u;
+const BILLBOARDUNLIT_KW_POINT_SIZE: u32 = 1u << 6u;
+const BILLBOARDUNLIT_KW_POINT_UV: u32 = 1u << 7u;
+const BILLBOARDUNLIT_KW_POLARUV: u32 = 1u << 8u;
+const BILLBOARDUNLIT_KW_RIGHT_EYE_ST: u32 = 1u << 9u;
+const BILLBOARDUNLIT_KW_TEXTURE: u32 = 1u << 10u;
+const BILLBOARDUNLIT_KW_VERTEX_HDRSRGB_COLOR: u32 = 1u << 11u;
+const BILLBOARDUNLIT_KW_VERTEX_HDRSRGBALPHA_COLOR: u32 = 1u << 12u;
+const BILLBOARDUNLIT_KW_VERTEX_LINEAR_COLOR: u32 = 1u << 13u;
+const BILLBOARDUNLIT_KW_VERTEX_SRGB_COLOR: u32 = 1u << 14u;
+const BILLBOARDUNLIT_KW_VERTEXCOLORS: u32 = 1u << 15u;
+const BILLBOARDUNLIT_KW_RENDER_BUFFER: u32 = 1u << 16u;
+const BILLBOARDUNLIT_KW_SIMPLE_LIT: u32 = 1u << 17u;
+const BILLBOARDUNLIT_KW_UNLIT_MASK_TEXTURE_CLIP: u32 = 1u << 18u;
+const BILLBOARDUNLIT_KW_UNLIT_MASK_TEXTURE_MUL: u32 = 1u << 19u;
+
+@group(1) @binding(0) var<uniform> mat: BillboardUnlitMaterial;
+@group(1) @binding(1) var _Tex: texture_2d<f32>;
+@group(1) @binding(2) var _Tex_sampler: sampler;
+@group(1) @binding(3) var _OffsetTex: texture_2d<f32>;
+@group(1) @binding(4) var _OffsetTex_sampler: sampler;
+@group(1) @binding(5) var _MaskTex: texture_2d<f32>;
+@group(1) @binding(6) var _MaskTex_sampler: sampler;
+
+fn bb_kw(mask: u32) -> bool {
+    return vb::enabled(mat._RenderideVariantBits, mask);
+}
+
+fn kw_ALPHATEST() -> bool {
+    return bb_kw(BILLBOARDUNLIT_KW_ALPHATEST);
+}
+
+fn kw_COLOR() -> bool {
+    return bb_kw(BILLBOARDUNLIT_KW_COLOR);
+}
+
+fn kw_UNLIT_MASK_TEXTURE_CLIP() -> bool {
+    return bb_kw(BILLBOARDUNLIT_KW_UNLIT_MASK_TEXTURE_CLIP);
+}
+
+fn kw_UNLIT_MASK_TEXTURE_MUL() -> bool {
+    return bb_kw(BILLBOARDUNLIT_KW_UNLIT_MASK_TEXTURE_MUL);
+}
+
+fn kw_MUL_ALPHA_INTENSITY() -> bool {
+    return bb_kw(BILLBOARDUNLIT_KW_MUL_ALPHA_INTENSITY);
+}
+
+fn kw_MUL_RGB_BY_ALPHA() -> bool {
+    return bb_kw(BILLBOARDUNLIT_KW_MUL_RGB_BY_ALPHA);
+}
+
+fn kw_OFFSET_TEXTURE() -> bool {
+    return bb_kw(BILLBOARDUNLIT_KW_OFFSET_TEXTURE);
+}
+
+fn kw_POINT_ROTATION() -> bool {
+    return bb_kw(BILLBOARDUNLIT_KW_POINT_ROTATION);
+}
+
+fn kw_POINT_SIZE() -> bool {
+    return bb_kw(BILLBOARDUNLIT_KW_POINT_SIZE);
+}
+
+fn kw_RENDER_BUFFER() -> bool {
+    return bb_kw(BILLBOARDUNLIT_KW_RENDER_BUFFER);
+}
+
+fn kw_POLARUV() -> bool {
+    return bb_kw(BILLBOARDUNLIT_KW_POLARUV);
+}
+
+fn kw_RIGHT_EYE_ST() -> bool {
+    return bb_kw(BILLBOARDUNLIT_KW_RIGHT_EYE_ST);
+}
+
+fn kw_TEXTURE() -> bool {
+    return bb_kw(BILLBOARDUNLIT_KW_TEXTURE);
+}
+
+fn kw_VERTEX_SRGB_COLOR() -> bool {
+    return bb_kw(BILLBOARDUNLIT_KW_VERTEX_SRGB_COLOR);
+}
+
+fn kw_VERTEX_HDRSRGB_COLOR() -> bool {
+    return bb_kw(BILLBOARDUNLIT_KW_VERTEX_HDRSRGB_COLOR);
+}
+
+fn kw_VERTEX_HDRSRGBALPHA_COLOR() -> bool {
+    return bb_kw(BILLBOARDUNLIT_KW_VERTEX_HDRSRGBALPHA_COLOR);
+}
+
+fn kw_VERTEXCOLORS() -> bool {
+    return bb_kw(BILLBOARDUNLIT_KW_VERTEXCOLORS);
+}
+
+fn kw_SIMPLE_LIT() -> bool {
+    return bb_kw(BILLBOARDUNLIT_KW_SIMPLE_LIT);
+}
+
+struct VertexOutput {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) color: vec4<f32>,
+    @location(2) @interpolate(flat) view_layer: u32,
+    @location(3) fog_coord: f32,
+    @location(4) world_p: vec3<f32>,
+    @location(5) n: vec3<f32>,
+}
+
+fn billboard_size(pointdata: vec3<f32>, model: mat4x4<f32>) -> vec2<f32> {
+    if (kw_RENDER_BUFFER()) {
+        return max(abs(pointdata.xy), vec2<f32>(1e-6, 1e-6)) * mb::model_uniform_scale(model);
+    }
+    return mb::billboard_size(pointdata, mat._PointSize.xy, model, kw_POINT_SIZE());
+}
+
+fn billboard_corner_for_vertex(pos: vec3<f32>, uv: vec2<f32>, vertex_index: u32) -> vec2<f32> {
+    if (kw_RENDER_BUFFER()) {
+        return mp::render_buffer_billboard_corner(vertex_index);
+    }
+    return mb::billboard_corner(pos, uv);
+}
+
+@vertex
+fn vs_main(
+    @builtin(instance_index) instance_index: u32,
+    @builtin(vertex_index) vertex_index: u32,
+#ifdef MULTIVIEW
+    @builtin(view_index) view_idx: u32,
+#endif
+    @location(0) pos: vec4<f32>,
+    @location(1) pointdata_in: vec4<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) color: vec4<f32>,
+    @location(4) point_forward_upz: vec4<f32>,
+    @location(5) point_up_xy: vec2<f32>,
+) -> VertexOutput {
+    let d = pd::get_draw(instance_index);
+    let pointdata = pointdata_in.xyz;
+#ifdef MULTIVIEW
+    let layer = view_idx;
+#else
+    let layer = 0u;
+#endif
+
+#ifdef MULTIVIEW
+    let vp = mt::select_view_proj(d, view_idx);
+#else
+    let vp = mt::select_view_proj(d, 0u);
+#endif
+    let center_world = mt::world_position(d, pos).xyz;
+    let use_rotation = kw_POINT_ROTATION() && abs(pointdata.z) > 1e-4;
+    let fallback_axes = mb::billboard_axes(center_world, pointdata, layer, use_rotation);
+    var axes = fallback_axes;
+    if (kw_RENDER_BUFFER()) {
+        axes = mp::render_buffer_billboard_basis_from_forward_up(d, center_world, pointdata, point_forward_upz, point_up_xy, layer);
+    }
+    let corner = billboard_corner_for_vertex(pos.xyz, uv, vertex_index);
+    let unclamped_size = billboard_size(pointdata, d.model);
+    var size = unclamped_size;
+    if (kw_RENDER_BUFFER()) {
+        size = mp::screen_clamped_billboard_size(d, center_world, axes, unclamped_size, vp);
+    }
+    let world_p = center_world + axes.right * (corner.x * size.x) + axes.up * (corner.y * size.y);
+
+    var out: VertexOutput;
+    out.clip_pos = vp * vec4<f32>(world_p, 1.0);
+    out.uv = uv;
+    out.color = color;
+    out.view_layer = layer;
+    out.fog_coord = rfog::coord_from_world_pos(world_p, layer);
+    out.world_p = world_p;
+    out.n = mp::render_buffer_billboard_normal(axes);
+    return out;
+}
+
+fn main_st(view_layer: u32) -> vec4<f32> {
+    if (kw_RIGHT_EYE_ST() && rg::view_layer_is_right_eye(view_layer)) {
+        return mat._RightEye_ST;
+    }
+    return mat._Tex_ST;
+}
+
+fn texture_uv(base_uv: vec2<f32>, view_layer: u32) -> vec2<f32> {
+    let st = main_st(view_layer);
+    var uv: vec2<f32>;
+    if (kw_POLARUV()) {
+        uv = uvu::apply_st(uvu::polar_uv(base_uv, mat._PolarPow), st);
+    } else {
+        uv = uvu::apply_st(base_uv, st);
+    }
+    if (kw_OFFSET_TEXTURE()) {
+        let uv_off = uvu::apply_st(base_uv, mat._OffsetTex_ST);
+        let offset_s = ts::sample_tex_2d(_OffsetTex, _OffsetTex_sampler, uv_off, mat._OffsetTex_LodBias);
+        uv = uv + offset_s.xy * mat._OffsetMagnitude.xy;
+    }
+    return uv;
+}
+
+fn offset_texture_uv(uv: vec2<f32>, base_uv: vec2<f32>) -> vec2<f32> {
+    if (kw_OFFSET_TEXTURE()) {
+        let uv_off = uvu::apply_st(base_uv, mat._OffsetTex_ST);
+        let offset_s = ts::sample_tex_2d(_OffsetTex, _OffsetTex_sampler, uv_off, mat._OffsetTex_LodBias);
+        return uv + offset_s.xy * mat._OffsetMagnitude.xy;
+    }
+    return uv;
+}
+
+fn sample_main_texture(base_uv: vec2<f32>, view_layer: u32) -> vec4<f32> {
+    if (kw_POLARUV()) {
+        let mapped = uvu::polar_mapping(base_uv, main_st(view_layer), mat._PolarPow);
+        let uv_main = offset_texture_uv(mapped.uv, base_uv);
+        return textureSampleGrad(_Tex, _Tex_sampler, uv_main, mapped.ddx_uv, mapped.ddy_uv);
+    }
+    return ts::sample_tex_2d(_Tex, _Tex_sampler, texture_uv(base_uv, view_layer), mat._Tex_LodBias);
+}
+
+fn vertex_color(color: vec4<f32>) -> vec4<f32> {
+    if (kw_VERTEX_HDRSRGBALPHA_COLOR()) {
+        let rgb_linear = vc::srgb_to_linear_hdr(color);
+        return vec4<f32>(rgb_linear.rgb, pow(color.a, 1.0 / 2.2));
+    }
+    if (kw_VERTEX_HDRSRGB_COLOR()) {
+        return vc::srgb_to_linear_hdr(color);
+    }
+    if (kw_VERTEX_SRGB_COLOR()) {
+        return vc::srgb_to_linear_ldr(color);
+    }
+    return color;
+}
+
+fn two_sided_geometric_normal(world_n: vec3<f32>, front_facing: bool) -> vec3<f32> {
+    let n = normalize(world_n);
+    return select(-n, n, front_facing);
+}
+
+//#pass type=forward name=forward_billboard blend=material_filter offset=0,0
+@fragment
+fn fs_main(
+    in: VertexOutput,
+    @builtin(front_facing) front_facing: bool,
+) -> @location(0) vec4<f32> {
+    let use_texture = kw_TEXTURE();
+    let use_color = kw_COLOR();
+
+    var col: vec4<f32>;
+    if (use_texture) {
+        let tex = sample_main_texture(in.uv, in.view_layer);
+        if (use_color) {
+            col = tex * mat._Color;
+        } else {
+            col = tex;
+        }
+    } else if (use_color) {
+        col = mat._Color;
+    } else {
+        col = vec4<f32>(1.0);
+    }
+
+    let mask_clip = kw_UNLIT_MASK_TEXTURE_CLIP();
+    let mask_mul = kw_UNLIT_MASK_TEXTURE_MUL();
+    if (mask_mul || mask_clip) {
+        let uv_mask = uvu::apply_st(in.uv, mat._MaskTex_ST);
+        let mask_sample = ts::sample_tex_2d(_MaskTex, _MaskTex_sampler, uv_mask, mat._MaskTex_LodBias);
+        let mask_lum = ma::mask_luminance(mask_sample);
+
+        if (mask_mul) {
+            col.a = col.a * mask_lum;
+        }
+        if (mask_clip && mask_lum <= mat._Cutoff) {
+            discard;
+        }
+    }
+
+    if (kw_ALPHATEST() && !mask_clip && col.a < mat._Cutoff) {
+        discard;
+    }
+
+    if (kw_VERTEXCOLORS()) {
+        col = col * vertex_color(in.color);
+    }
+
+    if (kw_MUL_RGB_BY_ALPHA()) {
+        col = vec4<f32>(col.rgb * col.a, col.a);
+    }
+
+    if (kw_MUL_ALPHA_INTENSITY()) {
+        col = vec4<f32>(col.rgb, ma::alpha_intensity(col.a, col.rgb));
+    }
+
+    if (kw_SIMPLE_LIT()) {
+        let n = two_sided_geometric_normal(in.n, front_facing);
+        let base = clamp(col.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+        let lit = dl::shade_clustered_diffuse(in.clip_pos.xy, in.world_p, n, base, in.view_layer);
+        col = vec4<f32>(lit, col.a);
+    }
+
+    return rg::retain_globals_additive(rfog::apply_rgba(col, in.fog_coord));
+}

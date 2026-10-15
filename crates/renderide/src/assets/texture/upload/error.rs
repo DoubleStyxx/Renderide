@@ -1,0 +1,33 @@
+//! CPU-side texture upload staging / mip layout errors (host bytes -> GPU).
+
+use thiserror::Error;
+
+/// Host layout, dimensions, or format could not be staged for `write_texture` / mip upload.
+#[derive(Debug, Clone, Error)]
+pub enum TextureUploadError {
+    /// Printable failure reason (layout, bounds, format mismatch).
+    #[error("{0}")]
+    Message(String),
+    /// The GPU queue gate was busy during a non-blocking upload attempt.
+    #[error("GPU queue access gate busy")]
+    QueueAccessBusy,
+}
+
+impl TextureUploadError {
+    /// Whether this error represents retryable queue-gate contention.
+    pub fn is_queue_access_busy(&self) -> bool {
+        matches!(self, Self::QueueAccessBusy)
+    }
+}
+
+impl From<String> for TextureUploadError {
+    fn from(msg: String) -> Self {
+        Self::Message(msg)
+    }
+}
+
+impl From<&str> for TextureUploadError {
+    fn from(msg: &str) -> Self {
+        Self::Message(msg.to_string())
+    }
+}

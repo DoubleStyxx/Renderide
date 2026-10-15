@@ -1,0 +1,205 @@
+using System.Globalization;
+using NotEnoughLogs;
+using SharedTypeGenerator.Analysis;
+using SharedTypeGenerator.Emission;
+using SharedTypeGenerator.IR;
+using SharedTypeGenerator.Tests.Unit.Support;
+using Xunit;
+
+namespace SharedTypeGenerator.Tests.Unit;
+
+/// <summary>Unit tests for <see cref="PackEmitter"/> line helpers and emission paths.</summary>
+public sealed class PackEmitterTests
+{
+    /// <summary>Snapshot <see cref="PackEmitter"/> pack lines for each <see cref="FieldKind"/>.</summary>
+    [Fact]
+    public void PackLine_covers_each_field_kind()
+    {
+        Logger logger = TestLoggers.Create();
+        foreach (FieldKind kind in Enum.GetValues<FieldKind>())
+        {
+            if (kind == FieldKind.StringList)
+            {
+                Assert.Throws<InvalidOperationException>(() => InvokePackLine(logger, kind));
+                continue;
+            }
+
+            string line = InvokePackLine(logger, kind);
+            Assert.False(string.IsNullOrWhiteSpace(line), kind.ToString());
+        }
+    }
+
+    /// <summary>Unknown <see cref="FieldKind"/> values produce a FIXME line and a warning log.</summary>
+    [Fact]
+    public void PackLine_unknown_kind_emits_fixme_and_logs()
+    {
+        var sink = new CollectingSink();
+        using var logger = TestLoggers.Create(LogLevel.Warning, sink);
+        var bogus = (FieldKind)9999;
+        string line = InvokePackLine(logger, bogus);
+        Assert.Contains("FIXME", line, StringComparison.Ordinal);
+        Assert.Contains(bogus.ToString(), line, StringComparison.Ordinal);
+        Assert.True(sink.Lines.Exists(m => m.Contains("FIXME", StringComparison.Ordinal)), "expected warning log");
+    }
+
+    /// <summary>Empty step lists emit no-op bindings for pack and unpack.</summary>
+    [Fact]
+    public void EmitPack_and_EmitUnpack_empty_steps_are_no_ops()
+    {
+        using var sw = new StringWriter(CultureInfo.InvariantCulture);
+        using (var w = new RustWriter(sw))
+        {
+            PackEmitter.EmitPack(w, TestLoggers.Create(), "T", [], []);
+            PackEmitter.EmitUnpack(w, TestLoggers.Create(), "T", [], []);
+        }
+
+        string text = sw.ToString();
+        Assert.Contains("let _ = self;", text, StringComparison.Ordinal);
+        Assert.Contains("let _ = packer;", text, StringComparison.Ordinal);
+        Assert.Contains("Ok(())", text, StringComparison.Ordinal);
+    }
+
+    /// <summary><see cref="PackedBools"/> pads to eight slots on pack and unpack.</summary>
+    [Fact]
+    public void PackedBools_pads_to_eight()
+    {
+        using var sw = new StringWriter(CultureInfo.InvariantCulture);
+        var steps = new List<SerializationStep> { new PackedBools(["a", "b"]) };
+        using (var w = new RustWriter(sw))
+        {
+            PackEmitter.EmitPack(w, TestLoggers.Create(), "T", steps, []);
+            PackEmitter.EmitUnpack(w, TestLoggers.Create(), "T", steps, []);
+        }
+
+        string text = sw.ToString();
+        Assert.Contains("write_packed_bools_array([self.a, self.b", text, StringComparison.Ordinal);
+        Assert.Contains("read_packed_bools", text, StringComparison.Ordinal);
+        Assert.Contains("__p.bit0", text, StringComparison.Ordinal);
+    }
+
+    /// <summary><see cref="ConditionalBlock"/> emits matching <c>if</c> for pack and unpack.</summary>
+    [Fact]
+    public void ConditionalBlock_emits_if_for_pack_and_unpack()
+    {
+        using var sw = new StringWriter(CultureInfo.InvariantCulture);
+        var inner = new List<SerializationStep> { new WriteField("x", FieldKind.Pod) };
+        var steps = new List<SerializationStep> { new ConditionalBlock("flag", inner) };
+        using (var w = new RustWriter(sw))
+        {
+            PackEmitter.EmitPack(w, TestLoggers.Create(), "T", steps, []);
+            PackEmitter.EmitUnpack(w, TestLoggers.Create(), "T", steps, []);
+        }
+
+        string text = sw.ToString();
+        Assert.Contains("if self.flag {", text, StringComparison.Ordinal);
+        Assert.Contains("packer.write(&self.x);", text, StringComparison.Ordinal);
+        Assert.Contains("self.x = unpacker.read()?;", text, StringComparison.Ordinal);
+    }
+
+    /// <summary><see cref="PackEmitter.EmitExplicitPack"/> handles bool, enum, object-required, pod, and padding.</summary>
+    [Fact]
+    public void EmitExplicitPack_covers_field_kinds_and_padding()
+    {
+        using var sw = new StringWriter(CultureInfo.InvariantCulture);
+        var fields = new List<FieldDescriptor>
+        {
+            Ir.PodField("b", "u8", FieldKind.Bool),
+            Ir.PodField("e", "MyEnum", FieldKind.Enum),
+            Ir.PodField("r", "Thing", FieldKind.ObjectRequired),
+            Ir.PodField("p", "u32"),
+        };
+
+        using (var w = new RustWriter(sw))
+            PackEmitter.EmitExplicitPack(w, TestLoggers.Create(), "Explicit", fields, paddingBytes: 4);
+
+        string text = sw.ToString();
+        Assert.Contains("write_bool(self.b != 0);", text, StringComparison.Ordinal);
+        Assert.Contains("write_object_required(&mut self.e);", text, StringComparison.Ordinal);
+        Assert.Contains("write_object_required(&mut self.r);", text, StringComparison.Ordinal);
+        Assert.Contains("write(&self.p);", text, StringComparison.Ordinal);
+        Assert.Contains("write(&self._padding);", text, StringComparison.Ordinal);
+    }
+
+    /// <summary><see cref="PackEmitter.EmitExplicitUnpack"/> handles representative kinds and padding copy.</summary>
+    [Fact]
+    public void EmitExplicitUnpack_covers_field_kinds_and_padding()
+    {
+        using var sw = new StringWriter(CultureInfo.InvariantCulture);
+        var fields = new List<FieldDescriptor>
+        {
+            Ir.PodField("b", "u8", FieldKind.Bool),
+            Ir.PodField("e", "MyEnum", FieldKind.FlagsEnum),
+            Ir.PodField("p", "u32"),
+        };
+
+        using (var w = new RustWriter(sw))
+            PackEmitter.EmitExplicitUnpack(w, TestLoggers.Create(), "Explicit", fields, paddingBytes: 2);
+
+        string text = sw.ToString();
+        Assert.Contains("read_bool()? as u8;", text, StringComparison.Ordinal);
+        Assert.Contains("read_object_required", text, StringComparison.Ordinal);
+        Assert.Contains("unpacker.read()?;", text, StringComparison.Ordinal);
+        Assert.Contains("self._padding.copy_from_slice", text, StringComparison.Ordinal);
+    }
+
+    /// <summary><see cref="PackEmitter"/> object unpack strips a single <c>Option&lt;...&gt;</c> for generic inference.</summary>
+    [Fact]
+    public void UnpackObjectLine_strips_option_wrapper()
+    {
+        Logger logger = TestLoggers.Create();
+        var fields = new List<FieldDescriptor> { Ir.ObjectField("obj", "Option<FooBar>") };
+
+        string line = InvokeUnpackLine(logger, "T", "obj", FieldKind.Object, fields);
+        Assert.Contains("read_object::<FooBar>()", line, StringComparison.Ordinal);
+    }
+
+    /// <summary>Field descriptor lookup preserves the previous first-match behavior for duplicate Rust names.</summary>
+    [Fact]
+    public void FieldDescriptorLookup_preserves_first_matching_field()
+    {
+        Logger logger = TestLoggers.Create();
+        var fields = new List<FieldDescriptor>
+        {
+            Ir.ObjectField("obj", "Option<FirstType>"),
+            Ir.ObjectField("obj", "Option<SecondType>"),
+        };
+
+        string line = InvokeUnpackLine(logger, "T", "obj", FieldKind.Object, fields);
+        Assert.Contains("read_object::<FirstType>()", line, StringComparison.Ordinal);
+    }
+
+    /// <summary>String unpack converts owned decoded strings into <c>Cow&lt;'static, str&gt;</c> when the generated field uses Cow storage.</summary>
+    [Fact]
+    public void UnpackLine_converts_string_to_cow_for_static_string_fields()
+    {
+        Logger logger = TestLoggers.Create();
+        var fields = new List<FieldDescriptor>
+        {
+            Ir.PodField("renderer_identifier", "Option<Cow<'static, str>>", FieldKind.String),
+        };
+
+        string line = InvokeUnpackLine(logger, "RendererInitResult", "renderer_identifier", FieldKind.String, fields);
+        Assert.Equal("self.renderer_identifier = unpacker.read_str()?.map(<_>::into);", line);
+    }
+
+    /// <summary>Polymorphic list unpack strips <c>Vec&lt;...&gt;</c> to the element decode name.</summary>
+    [Fact]
+    public void UnpackPolymorphicListLine_strips_vec_wrapper()
+    {
+        Logger logger = TestLoggers.Create();
+        var fields = new List<FieldDescriptor>
+        {
+            Ir.PodField("items", "Vec<Thing>", FieldKind.PolymorphicList),
+        };
+
+        string line = InvokeUnpackLine(logger, "T", "items", FieldKind.PolymorphicList, fields);
+        Assert.Contains("decode_thing", line, StringComparison.Ordinal);
+    }
+
+    private static string InvokePackLine(Logger logger, FieldKind kind)
+        => PackEmitter.BuildPackLine(logger, "Type", "field", kind);
+
+    private static string InvokeUnpackLine(Logger logger, string typeName, string fieldName, FieldKind kind,
+        List<FieldDescriptor> fields)
+        => PackEmitter.BuildUnpackLine(logger, typeName, fieldName, kind, new FieldDescriptorLookup(fields));
+}

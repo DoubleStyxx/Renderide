@@ -1,0 +1,41 @@
+//! Concrete render passes registered on a [`crate::render_graph::CompiledRenderGraph`].
+//!
+//! Each pass implements one of the typed pass traits:
+//! - [`crate::render_graph::pass::RasterPass`] -- raster render passes
+//! - [`crate::render_graph::pass::ComputePass`] -- encoder-driven compute
+//! - [`crate::render_graph::pass::EncoderPass`] -- encoder-driven mixed copy/render work
+
+mod clustered_light;
+mod helpers;
+mod hi_z_build;
+mod mesh_deform;
+pub(crate) mod post_processing;
+mod scene_color_compose;
+mod world_mesh_forward;
+
+pub(crate) use clustered_light::{ClusteredLightGraphResources, ClusteredLightPass};
+pub(crate) use hi_z_build::{HiZBuildGraphResources, HiZBuildPass};
+pub(crate) use mesh_deform::MeshDeformPass;
+pub(crate) use post_processing::{
+    AcesTonemapEffect, AgxTonemapEffect, AutoExposureEffect, BloomEffect, GtaoEffect,
+    GtaoGraphResources, GtaoPassRange, MotionBlurEffect,
+};
+pub(crate) use scene_color_compose::{SceneColorComposeGraphResources, SceneColorComposePass};
+pub(crate) use world_mesh_forward::ForwardMsaaResources;
+pub(crate) use world_mesh_forward::{
+    GTAO_VIEW_NORMAL_FORMAT, MaterialBatchBoundary, PreparedWorldMeshForwardFrame,
+    ShadowDepthDrawBatch, WorldMeshDepthSnapshotPass, WorldMeshDesktopOverlayGraphResources,
+    WorldMeshDesktopOverlayPass, WorldMeshForwardDepthPrepass,
+    WorldMeshForwardDepthPrepassGraphResources, WorldMeshForwardDepthPrepassPipelineKey,
+    WorldMeshForwardDepthResolvePass, WorldMeshForwardEncodeRefs, WorldMeshForwardGraphResources,
+    WorldMeshForwardGtaoDepthResolvePass, WorldMeshForwardInstancePlanCache,
+    WorldMeshForwardInstancePlanCacheStats, WorldMeshForwardIntersectPass,
+    WorldMeshForwardNormalGraphResources, WorldMeshForwardNormalPass,
+    WorldMeshForwardNormalPipelineKey, WorldMeshForwardOcclusionDepthResolvePass,
+    WorldMeshForwardOpaquePass, WorldMeshForwardPipelineState, WorldMeshForwardPlanSlot,
+    WorldMeshForwardPrepareCaches, WorldMeshForwardPrepareGpu, WorldMeshForwardPrepareInputs,
+    WorldMeshForwardPrepareScratch, WorldMeshForwardPrepareView, WorldMeshForwardSkyboxRenderer,
+    WorldMeshForwardTransparentSequencePass, WorldMeshOverlayForwardPlanSlot,
+    depth_prepass_pipeline_key_for_draw, draw_shadow_depth_subset, normal_pipeline_key_for_draw,
+    pre_warm_depth_prepass_pipeline, pre_warm_normal_pipeline, prepare_world_mesh_forward_frame,
+};

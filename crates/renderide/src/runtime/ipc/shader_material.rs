@@ -1,0 +1,147 @@
+//! Shader routing and material batch IPC handlers.
+
+use crossbeam_channel::{Receiver, TryRecvError, bounded};
+
+use crate::assets::shader::shader_variant_bits_log;
+use crate::assets::{ResolvedShaderUpload, resolve_shader_upload};
+use crate::backend::RenderBackend;
+use crate::frontend::RendererFrontend;
+use crate::materials::{RasterPipelineKind, embedded_default_stem_for_shader_asset_name};
+use crate::shared::{
+    MaterialsUpdateBatch, RendererCommand, ShaderUnload, ShaderUpload, ShaderUploadResult,
+};
+
+/// In-flight `resolve_shader_upload` work dispatched to the rayon pool by
+/// [`on_shader_upload`].
+///
+/// The host sends the upload; resolving its AssetBundle shader asset name can read up to 32 MiB from disk,
+/// which must not block the IPC poll on the main thread. The resolver runs on a rayon worker,
+/// and [`drain_pending_shader_resolutions`] applies the result on a subsequent tick by
+/// calling [`RenderBackend::register_shader_route`] and sending `ShaderUploadResult`.
+pub(in crate::runtime) struct PendingShaderResolution {
+    /// Host `asset_id` echoed back in the eventual `ShaderUploadResult`.
+    asset_id: i32,
+    /// Receives the resolved pipeline from the rayon worker (bounded(1)).
+    rx: Receiver<ResolvedShaderUpload>,
+}
+
+/// Spawns disk-bound shader upload resolution on the rayon pool so the main thread stays free.
+///
+/// The IPC acknowledgement (`ShaderUploadResult`) and pipeline route registration run only after
+/// the resolver completes, via [`drain_pending_shader_resolutions`] on a later tick, preserving
+/// the lock-step invariant that the host sees routing ready before it sends dependent materials.
+pub(in crate::runtime) fn on_shader_upload(
+    pending: &mut Vec<PendingShaderResolution>,
+    upload: ShaderUpload,
+) {
+    let asset_id = upload.asset_id;
+    logger::trace!(
+        "shader_upload: queued async resolver asset_id={} file_present={}",
+        asset_id,
+        upload.file.is_some(),
+    );
+    let (tx, rx) = bounded::<ResolvedShaderUpload>(1);
+    rayon::spawn(move || {
+        let resolved = resolve_shader_upload(&upload, embedded_default_stem_for_shader_asset_name);
+        let _ = tx.send(resolved);
+    });
+    pending.push(PendingShaderResolution { asset_id, rx });
+}
+
+/// Applies completed rayon-side [`resolve_shader_upload`] results: registers the pipeline route
+/// and sends the `ShaderUploadResult` IPC acknowledgement.
+///
+/// Called at the top of [`crate::runtime::RendererRuntime::poll_ipc`] so resolutions landing
+/// between ticks are applied before this tick's IPC batch (which may reference the routes) is
+/// dispatched.
+pub(in crate::runtime) fn drain_pending_shader_resolutions(
+    pending: &mut Vec<PendingShaderResolution>,
+    backend: &mut RenderBackend,
+    frontend: &mut RendererFrontend,
+) {
+    profiling::scope!("ipc::drain_pending_shader_resolutions");
+    let mut completed: Vec<(i32, ResolvedShaderUpload)> = Vec::new();
+    pending.retain_mut(|p| match p.rx.try_recv() {
+        Ok(resolved) => {
+            completed.push((p.asset_id, resolved));
+            false
+        }
+        Err(TryRecvError::Empty) => true,
+        Err(TryRecvError::Disconnected) => {
+            logger::error!(
+                "shader_upload: resolver task disconnected for asset_id={}",
+                p.asset_id
+            );
+            false
+        }
+    });
+    for (asset_id, resolved) in completed {
+        if matches!(resolved.pipeline, RasterPipelineKind::Null) {
+            match resolved.shader_asset_name.as_deref() {
+                Some(name) => logger::warn!(
+                    "shader_upload: asset_id={asset_id} resolved shader_asset_name={name:?} has no embedded raster route; using Null pipeline"
+                ),
+                None => logger::warn!(
+                    "shader_upload: asset_id={asset_id} did not resolve a shader asset name; using Null pipeline"
+                ),
+            }
+        }
+        logger::info!(
+            "shader_upload: asset_id={} shader_asset_name={:?} shader_variant_bits={} raster_pipeline={:?}",
+            asset_id,
+            resolved.shader_asset_name.as_deref(),
+            shader_variant_bits_log(resolved.shader_variant_bits),
+            resolved.pipeline,
+        );
+        let shader_asset_name = resolved.shader_asset_name.clone();
+        let queued = backend.register_shader_route(
+            asset_id,
+            resolved.pipeline,
+            shader_asset_name,
+            resolved.shader_variant_bits,
+        );
+        if !queued
+            && let Some(ipc) = frontend.ipc_mut()
+            && !ipc.send_background_reliable(RendererCommand::ShaderUploadResult(
+                ShaderUploadResult {
+                    asset_id,
+                    instance_changed: true,
+                },
+            ))
+        {
+            logger::warn!(
+                "shader_upload: asset_id={asset_id} failed to enqueue reliable immediate ShaderUploadResult ack"
+            );
+        }
+    }
+}
+
+/// Applies a host shader-unload command to the backend shader route table.
+pub(in crate::runtime) fn on_shader_unload(backend: &mut RenderBackend, unload: ShaderUnload) {
+    let id = unload.asset_id;
+    logger::debug!("shader_unload: asset_id={id}");
+    backend.unregister_shader_route(id);
+}
+
+/// Applies or queues a host material batch depending on shared-memory availability.
+pub(in crate::runtime) fn on_materials_update_batch(
+    frontend: &mut RendererFrontend,
+    backend: &mut RenderBackend,
+    batch: MaterialsUpdateBatch,
+) {
+    if frontend.shared_memory().is_none() {
+        logger::trace!(
+            "materials update batch {} queued until shared memory is available (material_updates={} material_count={})",
+            batch.update_batch_id,
+            batch.material_updates.len(),
+            batch.material_update_count,
+        );
+        backend.enqueue_materials_batch_no_shm(batch);
+        return;
+    }
+    let (shm, ipc) = frontend.transport_pair_mut();
+    let (Some(shm), Some(ipc)) = (shm, ipc) else {
+        return;
+    };
+    backend.apply_materials_update_batch(batch, shm, ipc);
+}

@@ -1,0 +1,48 @@
+//! Lock-step between host [`crate::shared::FrameSubmitData`] and outgoing [`crate::shared::FrameStartData`].
+//!
+//! The canonical `last_frame_index` echoed to the host lives on [`crate::frontend::RendererFrontend`]
+//! and is updated from [`RendererRuntime::apply_frame_submit_data`](crate::runtime::RendererRuntime::apply_frame_submit_data) via
+//! [`RendererFrontend::note_frame_submit_processed`](crate::frontend::RendererFrontend::note_frame_submit_processed).
+//!
+//! Whether to send [`crate::shared::FrameStartData`] each tick is decided by the pure predicate in
+//! `crate::frontend::begin_frame` (see [`RendererFrontend::should_send_begin_frame`](crate::frontend::RendererFrontend::should_send_begin_frame)).
+
+/// Optional trace when the submitted frame index repeats (may be benign during stress tests).
+pub(crate) fn trace_duplicate_frame_index_if_interesting(
+    submitted: i32,
+    previous_host_camera_frame_index: i32,
+) {
+    if submitted == previous_host_camera_frame_index && submitted >= 0 {
+        logger::trace!(
+            "lockstep: frame_submit frame_index={submitted} matches previous host_camera.frame_index (duplicate submit?)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod trace_tests {
+    use super::trace_duplicate_frame_index_if_interesting;
+
+    /// Non-matching indices take the non-logging branch; the function must not panic or log
+    /// spuriously. This is the baseline smoke case.
+    #[test]
+    fn trace_duplicate_is_noop_when_indices_differ() {
+        trace_duplicate_frame_index_if_interesting(2, 1);
+    }
+
+    /// Matching but negative indices are skipped (negative values mean "no previous frame"), so
+    /// the trace is suppressed without error.
+    #[test]
+    fn trace_duplicate_is_noop_for_negative_indices() {
+        trace_duplicate_frame_index_if_interesting(-1, -1);
+        trace_duplicate_frame_index_if_interesting(i32::MIN, i32::MIN);
+    }
+
+    /// Matching non-negative indices hit the logging branch; the function must still return
+    /// normally without panicking even when `logger` is in its default, uninitialized state.
+    #[test]
+    fn trace_duplicate_logs_branch_is_safe_to_call() {
+        trace_duplicate_frame_index_if_interesting(0, 0);
+        trace_duplicate_frame_index_if_interesting(42, 42);
+    }
+}

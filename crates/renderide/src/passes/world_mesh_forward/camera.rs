@@ -1,0 +1,87 @@
+//! Camera and pipeline-state helpers for world-mesh forward views.
+
+use std::num::NonZeroU32;
+
+use glam::Mat4;
+
+use super::WorldMeshForwardPipelineState;
+use crate::camera::{HostCameraFrame, WorldProjectionSet};
+use crate::gpu::GpuLimits;
+use crate::materials::MaterialPipelineDesc;
+use crate::materials::{SHADER_PERM_MULTIVIEW_STEREO, ShaderPermutation};
+use crate::scene::SceneSpaceRead;
+use crate::shared::RenderingContext;
+use crate::world_mesh::draw_prep::WorldMeshDrawItem;
+
+/// Selects left/right camera world-space positions fed into frame globals for shader view-direction math.
+///
+/// Preference order:
+/// 1. `explicit_view.world_position` -- secondary RT cameras carry their own pose.
+/// 2. `stereo` eye positions -- HMD left/right eyes for multiview shader view-vector math.
+/// 3. `eye_world_position` -- main-space eye derived from the active render space's `view_transform`.
+/// 4. `head_output_transform.col(3)` -- last-ditch fallback (the render-space *root*, used by overlay
+///    positioning) for any path that has not yet propagated the eye position. Using this as the
+///    camera caused PBS specular highlights to converge at the space root (typically "the player's
+///    feet") because every fragment's `v = normalize(cam - world_pos)` then pointed at the root.
+///
+/// Explicit camera poses are mono offscreen views, so both eyes receive the same value. Desktop
+/// and fallback paths reuse the single resolved eye position for both slots.
+pub(super) fn resolve_camera_world_pair(hc: &HostCameraFrame) -> (glam::Vec3, glam::Vec3) {
+    hc.camera_world_pair()
+}
+
+/// Resolves multiview use, [`MaterialPipelineDesc`], and [`ShaderPermutation`].
+pub(super) fn resolve_pass_config(
+    hc: &HostCameraFrame,
+    multiview_stereo: bool,
+    scene_color_format: wgpu::TextureFormat,
+    depth_stencil_format: wgpu::TextureFormat,
+    gpu_limits: &GpuLimits,
+    sample_count: u32,
+    front_face_flip: bool,
+) -> WorldMeshForwardPipelineState {
+    let use_multiview =
+        multiview_stereo && hc.active_stereo().is_some() && gpu_limits.supports_multiview;
+
+    let sc = sample_count.max(1);
+
+    let pass_desc = MaterialPipelineDesc {
+        surface_format: scene_color_format,
+        depth_stencil_format: Some(depth_stencil_format),
+        sample_count: sc,
+        multiview_mask: if use_multiview {
+            NonZeroU32::new(3)
+        } else {
+            None
+        },
+    };
+
+    let shader_perm = if use_multiview {
+        SHADER_PERM_MULTIVIEW_STEREO
+    } else {
+        ShaderPermutation(0)
+    };
+
+    WorldMeshForwardPipelineState {
+        use_multiview,
+        pass_desc,
+        shader_perm,
+        front_face_flip,
+    }
+}
+
+/// Render context, perspective projection for world draws, and optional ortho for overlays.
+pub(super) fn compute_view_projections(
+    scene: &(impl SceneSpaceRead + ?Sized),
+    hc: &HostCameraFrame,
+    render_context: RenderingContext,
+    viewport_px: (u32, u32),
+    draws: &[WorldMeshDrawItem],
+) -> (RenderingContext, Mat4, Option<Mat4>) {
+    let projections = WorldProjectionSet::from_scene_host(scene, viewport_px, hc);
+
+    let has_overlay = !draws.is_empty() && draws.iter().any(|d| d.is_overlay);
+    let overlay_proj = has_overlay.then_some(projections.overlay_proj);
+
+    (render_context, projections.world_proj, overlay_proj)
+}

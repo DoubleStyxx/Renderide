@@ -1,0 +1,396 @@
+//! GTAO-only world-mesh normal prepass.
+//!
+//! The pass runs after opaque forward depth has been written and renders smooth vertex normals
+//! into an `Rgba16Float` view-space normal target. GTAO samples that target instead of deriving
+//! normals from depth planes, which avoids polygon-edge discontinuities on smooth-shaded meshes.
+
+use std::num::NonZeroU32;
+use std::sync::Arc;
+use std::sync::LazyLock;
+
+use crate::embedded_shaders::embedded_wgsl;
+use crate::gpu_resource::{OnceGpu, RenderPipelineMap};
+use crate::graph_inputs::PerViewFramePlanSlot;
+use crate::materials::{RasterFrontFace, RasterPrimitiveTopology};
+use crate::mesh_deform::PER_DRAW_UNIFORM_STRIDE;
+use crate::render_graph::context::RasterPassCtx;
+use crate::render_graph::error::{RenderPassError, SetupError};
+use crate::render_graph::gpu_cache::stereo_mask_or_template;
+use crate::render_graph::pass::{DepthAttachmentTemplate, RenderPassTemplate};
+use crate::render_graph::pass::{PassBuilder, RasterPass};
+use crate::render_graph::resources::{
+    BufferAccess, ImportedBufferHandle, ImportedTextureHandle, StorageAccess, TextureHandle,
+};
+
+use super::attachments::declare_normal_color_depth_attachments;
+use super::depth_like_pipeline::{DepthLikePipelineSpec, create_depth_like_pipeline};
+use super::raster_recording::{record_world_mesh_forward_normal_graph_raster, stencil_load_ops};
+use super::{WorldMeshForwardPipelineState, WorldMeshForwardPlanSlot};
+
+/// GTAO view-space normal target format.
+pub(crate) const GTAO_VIEW_NORMAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
+const POSITION_ATTRIBUTES: [wgpu::VertexAttribute; 1] = [wgpu::VertexAttribute {
+    offset: 0,
+    shader_location: 0,
+    format: wgpu::VertexFormat::Float32x4,
+}];
+const NORMAL_ATTRIBUTES: [wgpu::VertexAttribute; 1] = [wgpu::VertexAttribute {
+    offset: 0,
+    shader_location: 1,
+    format: wgpu::VertexFormat::Float32x4,
+}];
+
+/// Graph handles used by [`WorldMeshForwardNormalPass`].
+#[derive(Clone, Copy, Debug)]
+pub struct WorldMeshForwardNormalGraphResources {
+    /// Single-sample view-space normal target sampled by GTAO.
+    pub normals: TextureHandle,
+    /// Multisampled view-space normal target used when frame MSAA is active.
+    pub normals_msaa: Option<TextureHandle>,
+    /// Imported frame depth target.
+    pub depth: ImportedTextureHandle,
+    /// Graph-owned forward depth target used when MSAA is active.
+    pub msaa_depth: Option<TextureHandle>,
+    /// Imported per-draw storage slab.
+    pub per_draw_slab: ImportedBufferHandle,
+}
+
+/// Renders smooth view-space normals for GTAO.
+#[derive(Debug)]
+pub struct WorldMeshForwardNormalPass {
+    resources: WorldMeshForwardNormalGraphResources,
+    pipelines: &'static WorldMeshForwardNormalPipelineCache,
+}
+
+impl WorldMeshForwardNormalPass {
+    /// Creates the GTAO normal prepass.
+    pub fn new(resources: WorldMeshForwardNormalGraphResources) -> Self {
+        Self {
+            resources,
+            pipelines: normal_pipelines(),
+        }
+    }
+}
+
+/// Pipeline selectors for one GTAO normal prepass variant.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct WorldMeshForwardNormalPipelineKey {
+    /// Depth/stencil format of the active forward depth target.
+    pub depth_stencil_format: wgpu::TextureFormat,
+    /// Active color/depth sample count.
+    pub sample_count: u32,
+    /// Multiview mask when the pass renders stereo in one draw.
+    pub multiview_mask: Option<NonZeroU32>,
+    /// Front-face winding selected from the draw transform.
+    pub front_face: RasterFrontFace,
+    /// Primitive topology baked into the render pipeline.
+    pub primitive_topology: RasterPrimitiveTopology,
+}
+
+/// Cached render pipelines and bind layout for the GTAO normal prepass.
+#[derive(Debug, Default)]
+pub(super) struct WorldMeshForwardNormalPipelineCache {
+    per_draw_layout: OnceGpu<wgpu::BindGroupLayout>,
+    pipelines: RenderPipelineMap<WorldMeshForwardNormalPipelineKey>,
+}
+
+impl WorldMeshForwardNormalPipelineCache {
+    /// Returns the matching normal prepass pipeline.
+    pub(super) fn pipeline(
+        &self,
+        device: &wgpu::Device,
+        key: WorldMeshForwardNormalPipelineKey,
+    ) -> Arc<wgpu::RenderPipeline> {
+        self.pipelines
+            .get_or_create(key, |key| self.create_pipeline(device, *key))
+    }
+
+    fn create_pipeline(
+        &self,
+        device: &wgpu::Device,
+        key: WorldMeshForwardNormalPipelineKey,
+    ) -> wgpu::RenderPipeline {
+        profiling::scope!("world_mesh_forward::normal_pipeline");
+        let multiview = key.multiview_mask.is_some();
+        let (label, source) = if multiview {
+            (
+                "gtao_view_normals_multiview",
+                embedded_wgsl!("gtao_view_normals_multiview"),
+            )
+        } else {
+            (
+                "gtao_view_normals_default",
+                embedded_wgsl!("gtao_view_normals_default"),
+            )
+        };
+        logger::debug!(
+            "world mesh normal prepass: building pipeline sample_count={} multiview={} topology={:?}",
+            key.sample_count,
+            multiview,
+            key.primitive_topology
+        );
+        let per_draw_layout = self.per_draw_layout(device);
+        let bind_group_layouts = [per_draw_layout];
+        let vertex_buffers = normal_vertex_buffer_layouts();
+        let color_targets = [Some(wgpu::ColorTargetState {
+            format: GTAO_VIEW_NORMAL_FORMAT,
+            blend: None,
+            write_mask: wgpu::ColorWrites::ALL,
+        })];
+        let pipeline = create_depth_like_pipeline(
+            device,
+            DepthLikePipelineSpec {
+                label,
+                shader_source: source,
+                bind_group_layouts: &bind_group_layouts,
+                vertex_buffers: &vertex_buffers,
+                fragment_entry_point: Some("fs_main"),
+                color_targets: &color_targets,
+                primitive_topology: key.primitive_topology,
+                front_face: key.front_face,
+                cull_mode: None,
+                depth_stencil_format: key.depth_stencil_format,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Equal,
+                sample_count: key.sample_count,
+                multiview_mask: key.multiview_mask,
+            },
+        );
+        crate::profiling::note_resource_churn!(
+            RenderPipeline,
+            "passes::world_mesh_normal_pipeline"
+        );
+        pipeline
+    }
+
+    fn per_draw_layout(&self, device: &wgpu::Device) -> &wgpu::BindGroupLayout {
+        self.per_draw_layout.get_or_create(|| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("gtao_view_normals_per_draw"),
+                entries: &normal_per_draw_layout_entries(),
+            })
+        })
+    }
+}
+
+fn normal_per_draw_layout_entries() -> [wgpu::BindGroupLayoutEntry; 1] {
+    [wgpu::BindGroupLayoutEntry {
+        binding: 0,
+        // The normal prepass reuses the forward per-draw bind group, so this visibility must match
+        // the reflected `null_per_draw` layout even though this shader reads it only in vertex.
+        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: true },
+            has_dynamic_offset: true,
+            min_binding_size: wgpu::BufferSize::new(PER_DRAW_UNIFORM_STRIDE as u64),
+        },
+        count: None,
+    }]
+}
+
+impl WorldMeshForwardNormalPipelineKey {
+    /// Builds a normal-prepass pipeline key for one draw group.
+    pub(crate) fn for_draw(
+        pipeline: &WorldMeshForwardPipelineState,
+        front_face: RasterFrontFace,
+        primitive_topology: RasterPrimitiveTopology,
+    ) -> Option<Self> {
+        let depth_stencil_format = pipeline.pass_desc.depth_stencil_format?;
+        triangle_normal_topology(primitive_topology).map(|primitive_topology| Self {
+            depth_stencil_format,
+            sample_count: pipeline.pass_desc.sample_count,
+            multiview_mask: pipeline.pass_desc.multiview_mask,
+            front_face,
+            primitive_topology,
+        })
+    }
+}
+
+/// Returns the GTAO normal-prepass pipeline key needed by `item`, when supported.
+pub(crate) fn normal_pipeline_key_for_draw(
+    item: &crate::world_mesh::WorldMeshDrawItem,
+    pipeline: &WorldMeshForwardPipelineState,
+) -> Option<WorldMeshForwardNormalPipelineKey> {
+    let mut front_face = item.batch_key.front_face;
+    if pipeline.front_face_flip {
+        front_face = front_face.flipped();
+    }
+    WorldMeshForwardNormalPipelineKey::for_draw(
+        pipeline,
+        front_face,
+        item.batch_key.primitive_topology,
+    )
+}
+
+/// Pre-warms the GTAO normal-prepass pipeline matching `key`.
+pub(crate) fn pre_warm_normal_pipeline(
+    device: &wgpu::Device,
+    key: WorldMeshForwardNormalPipelineKey,
+) {
+    let _ = normal_pipelines().pipeline(device, key);
+}
+
+fn normal_pipelines() -> &'static WorldMeshForwardNormalPipelineCache {
+    static CACHE: LazyLock<WorldMeshForwardNormalPipelineCache> =
+        LazyLock::new(WorldMeshForwardNormalPipelineCache::default);
+    &CACHE
+}
+
+fn normal_vertex_buffer_layouts() -> [wgpu::VertexBufferLayout<'static>; 2] {
+    [
+        wgpu::VertexBufferLayout {
+            array_stride: 16,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &POSITION_ATTRIBUTES,
+        },
+        wgpu::VertexBufferLayout {
+            array_stride: 16,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &NORMAL_ATTRIBUTES,
+        },
+    ]
+}
+
+fn triangle_normal_topology(
+    primitive_topology: RasterPrimitiveTopology,
+) -> Option<RasterPrimitiveTopology> {
+    match primitive_topology {
+        RasterPrimitiveTopology::TriangleList => Some(primitive_topology),
+        RasterPrimitiveTopology::PointList => None,
+    }
+}
+
+impl RasterPass for WorldMeshForwardNormalPass {
+    fn name(&self) -> &str {
+        "WorldMeshForwardNormals"
+    }
+
+    fn setup(&mut self, b: &mut PassBuilder<'_>) -> Result<(), SetupError> {
+        b.read_blackboard::<PerViewFramePlanSlot>();
+        b.read_optional_blackboard::<WorldMeshForwardPlanSlot>();
+        b.write_blackboard::<WorldMeshForwardPlanSlot>();
+        {
+            let mut r = b.raster();
+            let color_ops = wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color {
+                    r: 0.0,
+                    g: 0.0,
+                    b: -1.0,
+                    a: 0.0,
+                }),
+                store: wgpu::StoreOp::Store,
+            };
+            let depth_ops = wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+            };
+            declare_normal_color_depth_attachments(&mut r, self.resources, color_ops, depth_ops);
+        }
+        b.import_buffer(
+            self.resources.per_draw_slab,
+            BufferAccess::Storage {
+                stages: wgpu::ShaderStages::VERTEX,
+                access: StorageAccess::ReadOnly,
+            },
+        );
+        Ok(())
+    }
+
+    fn multiview_mask_override(
+        &self,
+        ctx: &RasterPassCtx<'_, '_>,
+        template: &RenderPassTemplate,
+    ) -> Option<NonZeroU32> {
+        let use_multiview = ctx
+            .blackboard
+            .get::<WorldMeshForwardPlanSlot>()
+            .is_some_and(|prepared| prepared.pipeline.use_multiview);
+        stereo_mask_or_template(use_multiview, template.multiview_mask)
+    }
+
+    fn stencil_ops_override(
+        &self,
+        ctx: &RasterPassCtx<'_, '_>,
+        depth: &DepthAttachmentTemplate,
+    ) -> Option<wgpu::Operations<u32>> {
+        let Some(format) = ctx
+            .blackboard
+            .get::<WorldMeshForwardPlanSlot>()
+            .and_then(|prepared| prepared.pipeline.pass_desc.depth_stencil_format)
+        else {
+            return depth.stencil;
+        };
+        stencil_load_ops(Some(format))
+    }
+
+    fn should_record(&self, ctx: &RasterPassCtx<'_, '_>) -> Result<bool, RenderPassError> {
+        Ok(
+            crate::passes::post_processing::view_post_processing_enabled(ctx.frame.view)
+                && ctx
+                    .blackboard
+                    .get::<WorldMeshForwardPlanSlot>()
+                    .is_some_and(|prepared| prepared.opaque_recorded),
+        )
+    }
+
+    fn record(
+        &self,
+        ctx: &mut RasterPassCtx<'_, '_>,
+        rpass: &mut wgpu::RenderPass<'_>,
+    ) -> Result<(), RenderPassError> {
+        profiling::scope!("world_mesh_forward::normal_record");
+        let frame = &ctx.frame;
+
+        let Some(prepared) = ctx.blackboard.take::<WorldMeshForwardPlanSlot>() else {
+            return Ok(());
+        };
+        if prepared.opaque_recorded {
+            record_world_mesh_forward_normal_graph_raster(
+                rpass,
+                ctx.device,
+                frame,
+                &prepared,
+                self.pipelines,
+            );
+        }
+        ctx.blackboard.insert::<WorldMeshForwardPlanSlot>(prepared);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normal_per_draw_layout_entries, triangle_normal_topology};
+    use crate::materials::RasterPrimitiveTopology;
+    use crate::mesh_deform::PER_DRAW_UNIFORM_STRIDE;
+
+    #[test]
+    fn normal_prepass_only_supports_triangle_lists() {
+        assert_eq!(
+            triangle_normal_topology(RasterPrimitiveTopology::TriangleList),
+            Some(RasterPrimitiveTopology::TriangleList)
+        );
+        assert_eq!(
+            triangle_normal_topology(RasterPrimitiveTopology::PointList),
+            None
+        );
+    }
+
+    #[test]
+    fn normal_prepass_per_draw_layout_matches_forward_visibility() {
+        let [entry] = normal_per_draw_layout_entries();
+        assert_eq!(
+            entry.visibility,
+            wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT
+        );
+        assert_eq!(
+            entry.ty,
+            wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: true,
+                min_binding_size: wgpu::BufferSize::new(PER_DRAW_UNIFORM_STRIDE as u64),
+            }
+        );
+    }
+}

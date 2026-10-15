@@ -1,0 +1,196 @@
+//! Read-only snapshot of renderer state for the debug HUD "Renderer" tab (no ImGui types).
+
+use crate::diagnostics::{BackendDiagSnapshot, FrameUploadArenaSnapshot};
+use crate::frontend::InitState;
+use crate::gpu::{GpuContext, GpuLimits};
+use crate::materials::{
+    EmbeddedMaterialBindCacheDiagnosticSnapshot, MaterialPipelineCacheDiagnosticSnapshot,
+    MaterialShaderGraphDiagnosticSnapshot,
+};
+use crate::scene::SceneCoordinator;
+
+/// Per-frame diagnostic snapshot built on the CPU before the render graph executes.
+#[derive(Clone, Debug)]
+pub struct RendererInfoSnapshot {
+    /// Primary/Background queues open.
+    pub ipc_connected: bool,
+    /// Host init handshake phase.
+    pub init_state: InitState,
+    /// Lock-step index last sent toward the host.
+    pub last_frame_index: i32,
+    /// [`wgpu::AdapterInfo::name`].
+    pub adapter_name: String,
+    /// Selected API backend.
+    pub adapter_backend: wgpu::Backend,
+    /// Integrated vs discrete, etc.
+    pub adapter_device_type: wgpu::DeviceType,
+    /// Adapter driver name (when reported by wgpu).
+    pub adapter_driver: String,
+    /// Extra driver details string from the adapter.
+    pub adapter_driver_info: String,
+    /// Swapchain surface format in use.
+    pub surface_format: wgpu::TextureFormat,
+    /// Swapchain extent in physical pixels.
+    pub viewport_px: (u32, u32),
+    /// Swapchain present mode (fifo, mailbox, etc.).
+    pub present_mode: wgpu::PresentMode,
+    /// Active render spaces in the scene coordinator.
+    pub render_space_count: usize,
+    /// Mesh renderable records across spaces.
+    pub mesh_renderable_count: usize,
+    /// Resident [`crate::gpu_pools::MeshPool`] entries.
+    pub resident_mesh_count: usize,
+    /// Resident entries in [`crate::gpu_pools::TexturePool`].
+    pub resident_texture_count: usize,
+    /// Host [`crate::gpu_pools::GpuRenderTexture`] entries in [`crate::gpu_pools::RenderTexturePool`].
+    pub resident_render_texture_count: usize,
+    /// Allocated material property uniform slots.
+    pub material_property_slots: usize,
+    /// Allocated material property block slots.
+    pub property_block_slots: usize,
+    /// Distinct shader binding sets registered for materials.
+    pub material_shader_bindings: usize,
+    /// Shader/material graph diagnostics.
+    pub material_shader_graph: MaterialShaderGraphDiagnosticSnapshot,
+    /// Material pipeline cache diagnostics.
+    pub material_pipeline_cache: MaterialPipelineCacheDiagnosticSnapshot,
+    /// Embedded material bind-group cache diagnostics.
+    pub embedded_material_bind_cache: EmbeddedMaterialBindCacheDiagnosticSnapshot,
+    /// Pass count in the compiled main render graph.
+    pub frame_graph_pass_count: usize,
+    /// Pass count before compile-time render graph culling.
+    pub frame_graph_registered_pass_count: usize,
+    /// Kahn-style DAG wave count at compile time ([`crate::render_graph::CompileStats::topo_levels`]); same graph as [`Self::frame_graph_pass_count`].
+    pub frame_graph_topo_levels: usize,
+    /// Passes culled because no retained consumer or import needed them.
+    pub frame_graph_culled_pass_count: usize,
+    /// Passes intentionally omitted before graph construction.
+    pub frame_graph_compile_skipped_pass_count: usize,
+    /// Attachment resolve declarations retained by the graph.
+    pub frame_graph_attachment_resolve_count: usize,
+    /// Retained transient attachment stores.
+    pub frame_graph_transient_store_count: usize,
+    /// Retained transient attachment discards.
+    pub frame_graph_transient_discard_count: usize,
+    /// Coarse compile-time attachment bandwidth estimate in bytes.
+    pub frame_graph_estimated_bandwidth_bytes: u64,
+    /// Packed lights after [`crate::backend::RenderBackend::prepare_lights_from_scene`].
+    pub gpu_light_count: usize,
+    /// Whether signed scene-color HDR is active for the current packed light set.
+    pub signed_scene_color_active: bool,
+    /// Latest persistent upload arena pressure and fallback counters.
+    pub upload_arena: FrameUploadArenaSnapshot,
+    /// `max_texture_dimension_2d` from [`GpuLimits`].
+    pub gpu_max_texture_dim_2d: u32,
+    /// `max_buffer_size` from [`GpuLimits`].
+    pub gpu_max_buffer_size: u64,
+    /// `max_storage_buffer_binding_size` from [`GpuLimits`].
+    pub gpu_max_storage_binding: u64,
+    /// Whether the device exposes non-zero `first_instance` (merged mesh draws).
+    pub gpu_supports_base_instance: bool,
+    /// Whether stereo multiview shaders may be used.
+    pub gpu_supports_multiview: bool,
+    /// Whether filterable 32-bit float textures are available.
+    pub gpu_supports_float32_filterable: bool,
+    /// Enabled texture compression feature bits.
+    pub gpu_texture_compression_features: wgpu::Features,
+    /// MSAA sample count from [`crate::config::RenderingSettings::msaa`] (before GPU clamp).
+    pub msaa_requested_samples: u32,
+    /// Effective MSAA for the swapchain forward path after clamping to [`Self::msaa_max_samples`].
+    pub msaa_effective_samples: u32,
+    /// Maximum MSAA sample count supported for the swapchain color + depth formats on this adapter.
+    pub msaa_max_samples: u32,
+    /// Effective MSAA for the OpenXR stereo forward path (single-pass multiview), after clamping to
+    /// [`Self::msaa_max_samples_stereo`]. `1` = off or device lacks
+    /// [`wgpu::Features::MULTISAMPLE_ARRAY`] / [`wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES`].
+    pub msaa_effective_samples_stereo: u32,
+    /// Maximum MSAA sample count supported for 2D array color + depth (stereo multiview) on this
+    /// adapter; `1` when stereo MSAA is unavailable.
+    pub msaa_max_samples_stereo: u32,
+}
+
+/// Inputs for [`RendererInfoSnapshot::capture`] (IPC, adapter, swapchain, scene, and backend refs).
+pub struct RendererInfoSnapshotCapture<'a> {
+    /// Primary/Background IPC queues connected.
+    pub ipc_connected: bool,
+    /// Host/renderer init handshake state.
+    pub init_state: InitState,
+    /// Last lock-step frame index sent to the host.
+    pub last_frame_index: i32,
+    /// Selected adapter metadata.
+    pub adapter_info: &'a wgpu::AdapterInfo,
+    /// Device limits for HUD lines.
+    pub gpu_limits: &'a GpuLimits,
+    /// Swapchain surface format.
+    pub surface_format: wgpu::TextureFormat,
+    /// Swapchain extent in physical pixels.
+    pub viewport_px: (u32, u32),
+    /// Swapchain present mode.
+    pub present_mode: wgpu::PresentMode,
+    /// Scene coordinator for space/renderable counts.
+    pub scene: &'a SceneCoordinator,
+    /// Plain-data backend snapshot capturing pools, graph counts, and packed lights.
+    pub backend: &'a BackendDiagSnapshot,
+    /// GPU context (MSAA effective/max).
+    pub gpu: &'a GpuContext,
+    /// Requested MSAA sample count from settings (before clamp).
+    pub msaa_requested_samples: u32,
+}
+
+impl RendererInfoSnapshot {
+    /// Fills all fields from the scene, backend, and swapchain (call after light prep for `gpu_light_count`).
+    pub fn capture(args: RendererInfoSnapshotCapture<'_>) -> Self {
+        Self {
+            ipc_connected: args.ipc_connected,
+            init_state: args.init_state,
+            last_frame_index: args.last_frame_index,
+            adapter_name: args.adapter_info.name.clone(),
+            adapter_backend: args.adapter_info.backend,
+            adapter_device_type: args.adapter_info.device_type,
+            adapter_driver: args.adapter_info.driver.clone(),
+            adapter_driver_info: args.adapter_info.driver_info.clone(),
+            surface_format: args.surface_format,
+            viewport_px: args.viewport_px,
+            present_mode: args.present_mode,
+            render_space_count: args.scene.render_space_count(),
+            mesh_renderable_count: args.scene.total_mesh_renderable_count(),
+            resident_mesh_count: args.backend.mesh_pool_entry_count,
+            resident_texture_count: args.backend.texture_pool_resident_count,
+            resident_render_texture_count: args.backend.render_texture_pool_len,
+            material_property_slots: args.backend.material_property_slots,
+            property_block_slots: args.backend.property_block_slots,
+            material_shader_bindings: args.backend.material_shader_bindings,
+            material_shader_graph: args.backend.material_shader_graph.clone(),
+            material_pipeline_cache: args.backend.material_pipeline_cache,
+            embedded_material_bind_cache: args.backend.embedded_material_bind_cache,
+            frame_graph_pass_count: args.backend.frame_graph_pass_count,
+            frame_graph_registered_pass_count: args.backend.frame_graph_registered_pass_count,
+            frame_graph_topo_levels: args.backend.frame_graph_topo_levels,
+            frame_graph_culled_pass_count: args.backend.frame_graph_culled_pass_count,
+            frame_graph_compile_skipped_pass_count: args
+                .backend
+                .frame_graph_compile_skipped_pass_count,
+            frame_graph_attachment_resolve_count: args.backend.frame_graph_attachment_resolve_count,
+            frame_graph_transient_store_count: args.backend.frame_graph_transient_store_count,
+            frame_graph_transient_discard_count: args.backend.frame_graph_transient_discard_count,
+            frame_graph_estimated_bandwidth_bytes: args
+                .backend
+                .frame_graph_estimated_bandwidth_bytes,
+            gpu_light_count: args.backend.gpu_light_count,
+            signed_scene_color_active: args.backend.signed_scene_color_active,
+            upload_arena: args.backend.upload_arena,
+            gpu_max_texture_dim_2d: args.gpu_limits.max_texture_dimension_2d(),
+            gpu_max_buffer_size: args.gpu_limits.max_buffer_size(),
+            gpu_max_storage_binding: args.gpu_limits.max_storage_buffer_binding_size(),
+            gpu_supports_base_instance: args.gpu_limits.supports_base_instance,
+            gpu_supports_multiview: args.gpu_limits.supports_multiview,
+            gpu_supports_float32_filterable: args.gpu_limits.supports_float32_filterable,
+            gpu_texture_compression_features: args.gpu_limits.texture_compression_features,
+            msaa_requested_samples: args.msaa_requested_samples,
+            msaa_effective_samples: args.gpu.msaa().swapchain_msaa_effective(),
+            msaa_max_samples: args.gpu.msaa().msaa_max_sample_count(),
+            msaa_effective_samples_stereo: args.gpu.msaa().swapchain_msaa_effective_stereo(),
+            msaa_max_samples_stereo: args.gpu.msaa().msaa_max_sample_count_stereo(),
+        }
+    }
+}

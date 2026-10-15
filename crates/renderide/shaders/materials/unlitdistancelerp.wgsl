@@ -1,0 +1,140 @@
+//! UnlitDistanceLerp (`Shader "UnlitDistanceLerp"`): blends between near/far unlit textures by
+//! distance from `_Point`.
+//!
+//! Froox variant bits populate `_RenderideVariantBits`; this shader decodes UnlitDistanceLerp's
+//! shader-specific keyword bits locally.
+
+
+//#render_queue AlphaTest+200
+//#texture_default _NearTex white
+//#texture_default _FarTex white
+//#mat_default _Distance float 1.0
+//#mat_default _FarColor vec4 1.0 1.0 1.0 1.0
+//#mat_default _NearColor vec4 1.0 1.0 1.0 1.0
+//#mat_default _Transition float 0.1
+//#mat_default _Cutoff float 0.5
+
+#import renderide::frame::globals as rg
+#import renderide::draw::per_draw as pd
+#import renderide::material::variant_bits as vb
+#import renderide::mesh::vertex as mv
+#import renderide::core::uv as uvu
+#import renderide::core::texture_sampling as ts
+
+struct UnlitDistanceLerpMaterial {
+    _Point: vec4<f32>,
+    _NearColor: vec4<f32>,
+    _FarColor: vec4<f32>,
+    _NearTex_ST: vec4<f32>,
+    _FarTex_ST: vec4<f32>,
+    _Distance: f32,
+    _Transition: f32,
+    _Cutoff: f32,
+    _RenderideVariantBits: u32,
+    _NearTex_LodBias: f32,
+    _FarTex_LodBias: f32,
+}
+
+const UNLITDISTANCELERP_KW_ALPHATEST: u32 = 1u << 0u;
+const UNLITDISTANCELERP_KW_VERTEXCOLORS: u32 = 1u << 1u;
+const UNLITDISTANCELERP_KW_LOCAL_SPACE: u32 = 1u << 2u;
+const UNLITDISTANCELERP_KW_WORLD_SPACE: u32 = 1u << 3u;
+const UNLITDISTANCELERP_SPACE_GROUP: u32 =
+    UNLITDISTANCELERP_KW_LOCAL_SPACE | UNLITDISTANCELERP_KW_WORLD_SPACE;
+
+@group(1) @binding(0) var<uniform> mat: UnlitDistanceLerpMaterial;
+@group(1) @binding(1) var _NearTex: texture_2d<f32>;
+@group(1) @binding(2) var _NearTex_sampler: sampler;
+@group(1) @binding(3) var _FarTex: texture_2d<f32>;
+@group(1) @binding(4) var _FarTex_sampler: sampler;
+
+struct VertexOutput {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) world_pos: vec3<f32>,
+    @location(1) object_pos: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) color: vec4<f32>,
+}
+
+@vertex
+fn vs_main(
+    @builtin(instance_index) instance_index: u32,
+#ifdef MULTIVIEW
+    @builtin(view_index) view_idx: u32,
+#endif
+    @location(0) pos: vec4<f32>,
+    @location(1) _n: vec4<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) color: vec4<f32>,
+) -> VertexOutput {
+    let d = pd::get_draw(instance_index);
+    let world_p = mv::world_position(d, pos);
+#ifdef MULTIVIEW
+    let vp = mv::select_view_proj(d, view_idx);
+#else
+    let vp = mv::select_view_proj(d, 0u);
+#endif
+
+    var out: VertexOutput;
+    out.clip_pos = vp * world_p;
+    out.world_pos = world_p.xyz;
+    out.object_pos = pos.xyz;
+    out.uv = uv;
+    out.color = color;
+    return out;
+}
+
+fn unlitdistancelerp_kw(mask: u32) -> bool {
+    return vb::enabled(mat._RenderideVariantBits, mask);
+}
+
+fn kw_ALPHATEST() -> bool {
+    return unlitdistancelerp_kw(UNLITDISTANCELERP_KW_ALPHATEST);
+}
+
+fn kw_VERTEXCOLORS() -> bool {
+    return unlitdistancelerp_kw(UNLITDISTANCELERP_KW_VERTEXCOLORS);
+}
+
+fn kw_WORLD_SPACE() -> bool {
+    if ((vb::effective(mat._RenderideVariantBits) & UNLITDISTANCELERP_SPACE_GROUP) == 0u) {
+        return true;
+    }
+    return unlitdistancelerp_kw(UNLITDISTANCELERP_KW_WORLD_SPACE);
+}
+
+fn lerp_position(in: VertexOutput) -> vec3<f32> {
+    return select(in.object_pos, in.world_pos, kw_WORLD_SPACE());
+}
+
+fn distance_lerp(p: vec3<f32>) -> f32 {
+    let transition = select(
+        mat._Transition,
+        select(-1e-6, 1e-6, mat._Transition >= 0.0),
+        abs(mat._Transition) < 1e-6,
+    );
+    let dist = distance(mat._Point.xyz, p) - mat._Distance;
+    return clamp((dist / transition) + mat._Transition * 0.5, 0.0, 1.0);
+}
+
+//#pass type=forward blend=material_filter a2c=cutout
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let l = distance_lerp(lerp_position(in));
+
+    let near_uv = uvu::apply_st(in.uv, mat._NearTex_ST);
+    let far_uv = uvu::apply_st(in.uv, mat._FarTex_ST);
+
+    let near = ts::sample_tex_2d(_NearTex, _NearTex_sampler, near_uv, mat._NearTex_LodBias) * mat._NearColor;
+    let far = ts::sample_tex_2d(_FarTex, _FarTex_sampler, far_uv, mat._FarTex_LodBias) * mat._FarColor;
+
+    let c = mix(near, far, l);
+
+    if (kw_ALPHATEST()) {
+        if (c.a < mat._Cutoff) {
+            discard;
+        }
+    }
+
+    return rg::retain_globals_additive(c);
+}

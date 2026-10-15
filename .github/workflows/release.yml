@@ -1,0 +1,437 @@
+# Nightly release pipeline.
+#
+# Picks the newest master commit that has passed `ci.yml`, builds platform
+# binaries in release mode, and publishes a GitHub Release with per-platform
+# zips. The most recent release acts as the "last good version" pointer - this
+# workflow no-ops when no new green commit has appeared since.
+name: Release
+
+"on":
+  schedule:
+    # 07:17 UTC nightly; minutes-offset avoids the top-of-the-hour cron rush.
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Re-release the candidate SHA even if it matches the previous release."
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  select-commit:
+    name: Select candidate commit
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.pick.outputs.sha }}
+      short_sha: ${{ steps.pick.outputs.short_sha }}
+      previous_release_tag: ${{ steps.pick.outputs.previous_release_tag }}
+      previous_release_sha: ${{ steps.pick.outputs.previous_release_sha }}
+      tag: ${{ steps.pick.outputs.tag }}
+      should_release: ${{ steps.pick.outputs.should_release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Find newest green commit on master
+        id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+
+          green_shas=$(mktemp)
+          gh api -X GET \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
+            -f branch=master -f status=success -F per_page=100 \
+            | jq -r '.workflow_runs[].head_sha' \
+            | sort -u >"${green_shas}"
+
+          master_ref=$(git rev-parse --verify origin/master^{commit})
+          candidate=""
+          while IFS= read -r master_sha; do
+            if grep -qx "${master_sha}" "${green_shas}"; then
+              candidate="${master_sha}"
+              break
+            fi
+          done < <(git rev-list "${master_ref}")
+
+          if [ -z "$candidate" ]; then
+            echo "No master commit has CI green; skipping." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "should_release=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          short=${candidate:0:7}
+          date=$(date -u +%Y-%m-%d)
+          tag="nightly-${date}-${short}"
+
+          full_release_tags=$(mktemp)
+          gh api -X GET "repos/${GITHUB_REPOSITORY}/releases" -F per_page=100 \
+            | jq -r --arg prefix "nightly-" '
+                sort_by(.published_at // .created_at // "") | reverse | .[]
+                | select(.draft == false)
+                | select(.prerelease == false)
+                | select(.tag_name | startswith($prefix))
+                | .tag_name
+              ' >"${full_release_tags}"
+
+          resolve_release_sha() {
+            local release_tag="$1"
+            if [ -z "${release_tag}" ]; then
+              return 0
+            fi
+            if ! git cat-file -e "${release_tag}^{commit}" 2>/dev/null; then
+              git fetch --force --tags origin "refs/tags/${release_tag}:refs/tags/${release_tag}" >/dev/null 2>&1 || true
+            fi
+            git rev-parse "${release_tag}^{commit}" 2>/dev/null || true
+          }
+
+          latest_release_tag=$(head -n1 "${full_release_tags}" || true)
+          latest_release_sha=$(resolve_release_sha "${latest_release_tag}")
+
+          previous_release_tag=""
+          while IFS= read -r release_tag; do
+            if [ -z "${release_tag}" ] || [ "${release_tag}" = "${tag}" ]; then
+              continue
+            fi
+            previous_release_tag="${release_tag}"
+            break
+          done <"${full_release_tags}"
+          previous_release_sha=$(resolve_release_sha "${previous_release_tag}")
+
+          if [ -n "${latest_release_sha}" ] &&
+             [ "$candidate" = "${latest_release_sha}" ] &&
+             [ "${FORCE:-false}" != "true" ]; then
+            echo "Candidate $candidate already released as ${latest_release_tag}; nothing new tonight." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "should_release=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          {
+            echo "Releasing commit $candidate as tag $tag"
+            echo "Latest full release tag: ${latest_release_tag:-<none>}"
+            echo "Latest full release SHA: ${latest_release_sha:-<none>}"
+            echo "Previous changelog release tag: ${previous_release_tag:-<none>}"
+            echo "Previous changelog release SHA: ${previous_release_sha:-<none>}"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+          {
+            echo "sha=$candidate"
+            echo "short_sha=$short"
+            echo "previous_release_tag=$previous_release_tag"
+            echo "previous_release_sha=$previous_release_sha"
+            echo "tag=$tag"
+            echo "should_release=true"
+          } >>"$GITHUB_OUTPUT"
+
+  build:
+    name: ${{ matrix.platform }}
+    needs: select-commit
+    if: needs.select-commit.outputs.should_release == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+          - os: ubuntu-24.04-arm
+            platform: linux-aarch64
+          - os: windows-latest
+            platform: windows-x86_64
+          - os: windows-11-arm
+            platform: windows-aarch64
+          - os: macos-15-intel
+            platform: macos-x86_64
+          - os: macos-latest
+            platform: macos-aarch64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.select-commit.outputs.sha }}
+
+      # Mirror `ci.yml` so the release build matches what was tested.
+      # GStreamer headers gate the `video-textures` feature, which is not enabled
+      # by default, but keeping the install aligned avoids feature drift later.
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            mesa-vulkan-drivers vulkan-tools \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.platform }}-cargo-binless-v1
+          cache-bin: "false"
+
+      - name: Verify Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v cargo
+          command -v rustup
+          rustup show active-toolchain
+          cargo metadata --locked --no-deps --format-version 1 >/dev/null
+
+      - name: Verify release signing keys
+        shell: pwsh
+        env:
+          RENDERIDE_RELEASE_PUBLIC_KEY_HEX: ${{ vars.RENDERIDE_RELEASE_PUBLIC_KEY_HEX }}
+          RENDERIDE_RELEASE_PRIVATE_KEY_HEX: ${{ secrets.RENDERIDE_RELEASE_PRIVATE_KEY_HEX }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ([string]::IsNullOrWhiteSpace($env:RENDERIDE_RELEASE_PUBLIC_KEY_HEX)) {
+            throw "RENDERIDE_RELEASE_PUBLIC_KEY_HEX repository variable is required."
+          }
+          if ($env:RENDERIDE_RELEASE_PUBLIC_KEY_HEX.Length -ne 64) {
+            throw "RENDERIDE_RELEASE_PUBLIC_KEY_HEX must be 64 hex characters."
+          }
+          if ([string]::IsNullOrWhiteSpace($env:RENDERIDE_RELEASE_PRIVATE_KEY_HEX)) {
+            throw "RENDERIDE_RELEASE_PRIVATE_KEY_HEX repository secret is required."
+          }
+          if ($env:RENDERIDE_RELEASE_PRIVATE_KEY_HEX.Length -ne 64) {
+            throw "RENDERIDE_RELEASE_PRIVATE_KEY_HEX must be 64 hex characters."
+          }
+
+      - name: Build (release)
+        env:
+          RENDERIDE_RELEASE_CHANNEL: github-ci
+          RENDERIDE_RELEASE_TAG: ${{ needs.select-commit.outputs.tag }}
+          RENDERIDE_RELEASE_COMMIT: ${{ needs.select-commit.outputs.sha }}
+          RENDERIDE_RELEASE_PLATFORM: ${{ matrix.platform }}
+          RENDERIDE_RELEASE_PUBLIC_KEY_HEX: ${{ vars.RENDERIDE_RELEASE_PUBLIC_KEY_HEX }}
+        run: cargo build --release --locked -p renderide -p bootstrapper
+
+      - name: Stage zip (Unix)
+        if: runner.os != 'Windows'
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          TAG: ${{ needs.select-commit.outputs.tag }}
+          SHA: ${{ needs.select-commit.outputs.sha }}
+          RENDERIDE_RELEASE_PRIVATE_KEY_HEX: ${{ secrets.RENDERIDE_RELEASE_PRIVATE_KEY_HEX }}
+        run: |
+          set -euo pipefail
+          name="renderide-${PLATFORM}-${TAG}"
+          dist="dist/${name}"
+          src="target/release"
+          mkdir -p "${dist}"
+          cp "${src}/renderide"          "${dist}/"
+          cp "${src}/renderide-renderer" "${dist}/"
+          cp -R "${src}/xr"              "${dist}/xr"
+          cp -R "${src}/shaders"         "${dist}/shaders"
+          case "${PLATFORM}" in
+            macos-*)
+              latest_macos_loader_dir=""
+              for candidate in third_party/openxr_loader/openxr_loader_macos-*; do
+                if [ -d "${candidate}" ]; then
+                  latest_macos_loader_dir="${candidate}"
+                fi
+              done
+              macos_loader="${latest_macos_loader_dir}/libopenxr_loader.dylib"
+              if [ -z "${latest_macos_loader_dir}" ] || [ ! -f "${macos_loader}" ]; then
+                echo "libopenxr_loader.dylib missing under third_party/openxr_loader/openxr_loader_macos-*." >&2
+                exit 1
+              fi
+              cp "${macos_loader}" "${dist}/"
+              ;;
+          esac
+          DIST="${dist}" python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          files = ["renderide", "renderide-renderer", "xr", "shaders"]
+          if os.environ["PLATFORM"].startswith("macos-"):
+              files.append("libopenxr_loader.dylib")
+          manifest = {
+              "schema": 1,
+              "channel": "github-ci",
+              "tag": os.environ["TAG"],
+              "commit": os.environ["SHA"],
+              "platform": os.environ["PLATFORM"],
+              "required_files": files,
+              "sha256": {},
+          }
+          dist = Path(os.environ["DIST"])
+          def add_file_hash(path):
+              rel = path.relative_to(dist).as_posix()
+              manifest["sha256"][rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+
+          for entry in files:
+              path = dist / entry
+              if path.is_file():
+                  add_file_hash(path)
+              elif path.is_dir():
+                  for child in sorted(path.rglob("*")):
+                      if child.is_file():
+                          add_file_hash(child)
+          Path(os.environ["DIST"]).joinpath("renderide-release.json").write_text(
+              json.dumps(manifest, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          cargo run --release --locked -p bootstrapper --bin renderide-sign-release-manifest -- "${dist}/renderide-release.json" > "${dist}/renderide-release.json.sig"
+          ( cd dist && zip -r "${name}.zip" "${name}" )
+
+      - name: Stage zip (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          TAG: ${{ needs.select-commit.outputs.tag }}
+          SHA: ${{ needs.select-commit.outputs.sha }}
+          RENDERIDE_RELEASE_PRIVATE_KEY_HEX: ${{ secrets.RENDERIDE_RELEASE_PRIVATE_KEY_HEX }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $name = "renderide-$env:PLATFORM-$env:TAG"
+          $dist = "dist/$name"
+          $src  = "target/release"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item "$src/renderide.exe"          -Destination $dist
+          Copy-Item "$src/renderide-renderer.exe" -Destination $dist
+          Copy-Item "$src/xr"                     -Destination $dist -Recurse
+          Copy-Item "$src/shaders"                -Destination $dist -Recurse
+          if (-not (Test-Path "$src/openxr_loader.dll")) {
+            throw "openxr_loader.dll missing from $src - vendored loader did not copy during build."
+          }
+          Copy-Item "$src/openxr_loader.dll" -Destination $dist
+          $requiredFiles = @("renderide.exe", "renderide-renderer.exe", "xr", "shaders", "openxr_loader.dll")
+          $sha256 = [ordered]@{}
+          $distRoot = (Resolve-Path $dist).Path
+          function Add-FileHash([string]$path) {
+            $resolved = (Resolve-Path $path).Path
+            $relative = $resolved.Substring($distRoot.Length).TrimStart([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar).Replace('\', '/')
+            $sha256[$relative] = (Get-FileHash $resolved -Algorithm SHA256).Hash.ToLowerInvariant()
+          }
+          foreach ($entry in $requiredFiles) {
+            $path = Join-Path $dist $entry
+            if (Test-Path $path -PathType Leaf) {
+              Add-FileHash $path
+            } elseif (Test-Path $path -PathType Container) {
+              Get-ChildItem $path -File -Recurse | Sort-Object FullName | ForEach-Object {
+                Add-FileHash $_.FullName
+              }
+            }
+          }
+          $manifest = [ordered]@{
+            schema = 1
+            channel = "github-ci"
+            tag = $env:TAG
+            commit = $env:SHA
+            platform = $env:PLATFORM
+            required_files = $requiredFiles
+            sha256 = $sha256
+          }
+          $manifest | ConvertTo-Json -Depth 4 | Set-Content "$dist/renderide-release.json" -Encoding utf8
+          $signature = cargo run --release --locked -p bootstrapper --bin renderide-sign-release-manifest -- "$dist/renderide-release.json"
+          Set-Content "$dist/renderide-release.json.sig" -Encoding ascii -NoNewline -Value $signature
+          Compress-Archive -Path $dist -DestinationPath "dist/$name.zip" -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: renderide-${{ matrix.platform }}
+          path: dist/renderide-${{ matrix.platform }}-${{ needs.select-commit.outputs.tag }}.zip
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: [select-commit, build]
+    if: needs.select-commit.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.select-commit.outputs.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Compose release notes
+        id: notes
+        env:
+          SHA: ${{ needs.select-commit.outputs.sha }}
+          PREVIOUS_RELEASE_TAG: ${{ needs.select-commit.outputs.previous_release_tag }}
+          PREVIOUS_RELEASE_SHA: ${{ needs.select-commit.outputs.previous_release_sha }}
+          TAG: ${{ needs.select-commit.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          changelog_range_label=""
+          changelog_args=()
+          if [ -n "${PREVIOUS_RELEASE_TAG}" ] &&
+             [ -n "${PREVIOUS_RELEASE_SHA}" ] &&
+             git cat-file -e "${PREVIOUS_RELEASE_TAG}^{commit}" 2>/dev/null &&
+             git merge-base --is-ancestor "${PREVIOUS_RELEASE_SHA}" "${SHA}"
+          then
+            changelog_range_label="Changes since [${PREVIOUS_RELEASE_TAG}](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${PREVIOUS_RELEASE_TAG}) ([${PREVIOUS_RELEASE_SHA:0:8}](https://github.com/${GITHUB_REPOSITORY}/commit/${PREVIOUS_RELEASE_SHA}))."
+            changelog_args=("${PREVIOUS_RELEASE_TAG}..${SHA}")
+          else
+            changelog_range_label="No previous full release tag was available, so no commit changelog was generated for this release."
+          fi
+
+          changelog_count=0
+          {
+            echo "${changelog_range_label}"
+            if [ "${#changelog_args[@]}" -gt 0 ]; then
+              echo ""
+              while IFS=$'\x1f' read -r full_sha subject author; do
+                if [ -z "${full_sha}" ]; then
+                  continue
+                fi
+                short_sha="${full_sha:0:8}"
+                printf -- '- [%s](https://github.com/%s/commit/%s) %s by %s\n' \
+                  "${short_sha}" "${GITHUB_REPOSITORY}" "${full_sha}" "${subject}" "${author}"
+                changelog_count=$((changelog_count + 1))
+              done < <(git log --no-merges --reverse --format='%H%x1f%s%x1f%an' "${changelog_args[@]}")
+            fi
+          } > changelog.md
+
+          if [ "${#changelog_args[@]}" -gt 0 ] && [ "${changelog_count}" -eq 0 ]; then
+            {
+              echo "${changelog_range_label}"
+              echo ""
+              echo "_No non-merge commits found since the previous release._"
+            } > changelog.md
+          fi
+
+          {
+            echo "Commit: ${SHA}"
+            echo ""
+            echo "Nightly build of [${SHA}](https://github.com/${GITHUB_REPOSITORY}/commit/${SHA})."
+            echo ""
+            echo "Each zip contains the launcher (\`renderide\`), the renderer (\`renderide-renderer\`), the runtime shader package, and the XR action manifests. Windows and macOS zips also bundle the Khronos OpenXR loader; Linux uses the system OpenXR loader."
+            echo ""
+            echo "## Changelog"
+            echo ""
+            cat changelog.md
+          } > release-notes.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.select-commit.outputs.tag }}
+          name: ${{ needs.select-commit.outputs.tag }}
+          body_path: release-notes.md
+          target_commitish: ${{ needs.select-commit.outputs.sha }}
+          files: artifacts/**/*.zip
+          make_latest: "true"
+          prerelease: false
+          fail_on_unmatched_files: true

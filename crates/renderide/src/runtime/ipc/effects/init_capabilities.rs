@@ -1,0 +1,124 @@
+//! Renderer init data, init capabilities, decoupling config, desktop config, and host
+//! `FrameStartData` trace logging.
+
+use crate::frontend::dispatch::ipc_init::{self, RendererInitCapabilities};
+use crate::frontend::output_device::head_output_device_wants_openxr;
+use crate::ipc::SharedMemoryAccessor;
+use crate::shared::{
+    DesktopConfig, FrameStartData, QualityConfig, RenderDecouplingConfig, RendererCommand,
+    RendererInitData,
+};
+
+use super::super::super::RendererRuntime;
+
+impl RendererRuntime {
+    pub(in crate::runtime) fn apply_renderer_init_data(&mut self, d: RendererInitData) {
+        let shared_memory_prefix_len = d.shared_memory_prefix.as_ref().map(String::len);
+        logger::info!(
+            "IPC init data received: output_device={:?} shared_memory_prefix_present={} shared_memory_prefix_len={:?}",
+            d.output_device,
+            d.shared_memory_prefix.is_some(),
+            shared_memory_prefix_len,
+        );
+        self.host_camera.output_device = d.output_device;
+        if let Some(ref prefix) = d.shared_memory_prefix {
+            let accessor = match SharedMemoryAccessor::try_new(prefix.clone()) {
+                Ok(accessor) => accessor,
+                Err(err) => {
+                    logger::error!("IPC init data rejected: {}", err);
+                    self.frontend.set_fatal_error(true);
+                    return;
+                }
+            };
+            self.frontend.set_shared_memory(accessor);
+            logger::info!(
+                "Shared memory prefix accepted: len={} available=true",
+                prefix.len()
+            );
+            let (shm, ipc) = self.frontend.transport_pair_mut();
+            if let (Some(shm), Some(ipc)) = (shm, ipc) {
+                self.backend.flush_pending_material_batches(shm, ipc);
+            }
+        }
+        self.frontend.set_pending_init(d.clone());
+        let init_result = ipc_init::build_renderer_init_result(
+            d.output_device,
+            renderer_init_capabilities(d.output_device),
+        );
+        if let Some(ipc) = self.frontend.ipc_mut()
+            && !ipc.send_primary(RendererCommand::RendererInitResult(init_result))
+        {
+            logger::error!(
+                "IPC: RendererInitResult was not sent (primary queue full); stopping init handshake"
+            );
+            self.frontend.set_fatal_error(true);
+            return;
+        }
+        self.frontend.on_init_received();
+    }
+
+    pub(in crate::runtime) fn apply_render_decoupling_config(
+        &mut self,
+        cfg: RenderDecouplingConfig,
+    ) {
+        logger::info!(
+            "runtime: render_decoupling_config activate_interval_s={:.4} decoupled_max_asset_processing_s={:.4} recouple_frame_count={}",
+            cfg.decouple_activate_interval,
+            cfg.decoupled_max_asset_processing_time,
+            cfg.recouple_frame_count
+        );
+        self.frontend.set_decoupling_config(cfg);
+    }
+
+    pub(in crate::runtime) fn apply_desktop_config(&mut self, cfg: DesktopConfig) {
+        logger::info!(
+            "runtime: desktop_config foreground_fps={:?} background_fps={:?} v_sync={} (positive FPS caps override renderer config for this session; presentation_mode remains renderer-owned)",
+            cfg.maximum_foreground_framerate,
+            cfg.maximum_background_framerate,
+            cfg.v_sync
+        );
+        self.config.apply_host_desktop_config(&cfg);
+    }
+
+    pub(in crate::runtime) fn apply_quality_config(&mut self, cfg: QualityConfig) {
+        logger::info!(
+            "runtime: quality_config skin_weight_mode={:?} per_pixel_lights={} shadow_cascades={:?} shadow_resolution={:?} shadow_distance={}",
+            cfg.skin_weight_mode,
+            cfg.per_pixel_lights,
+            cfg.shadow_cascades,
+            cfg.shadow_resolution,
+            cfg.shadow_distance
+        );
+        self.config.apply_host_quality_config(&cfg);
+        self.backend.set_skin_weight_mode(cfg.skin_weight_mode);
+        self.backend
+            .set_shadow_quality(self.config.shadow_quality());
+    }
+}
+
+fn renderer_init_capabilities(
+    output_device: crate::shared::HeadOutputDevice,
+) -> RendererInitCapabilities {
+    let stereo_rendering_mode = if head_output_device_wants_openxr(output_device) {
+        "OpenXR(multiview)"
+    } else {
+        "None"
+    };
+    RendererInitCapabilities {
+        stereo_rendering_mode: stereo_rendering_mode.into(),
+        max_texture_size: crate::gpu::RENDERER_MAX_TEXTURE_DIMENSION_2D as i32,
+        supported_texture_formats: crate::assets::texture::supported_host_formats_for_init(),
+    }
+}
+
+/// Logs structured fields from a host [`FrameStartData`] payload (lock-step / diagnostics only).
+pub(in crate::runtime) fn log_frame_start_data_trace(fs: &FrameStartData) {
+    logger::trace!(
+        "host frame_start_data: last_frame_index={} has_performance={} has_inputs={} reflection_probes={} video_clock_errors={}",
+        fs.last_frame_index,
+        fs.performance.is_some(),
+        fs.inputs.is_some(),
+        fs.rendered_reflection_probes.len(),
+        fs.video_clock_errors.len(),
+    );
+}
