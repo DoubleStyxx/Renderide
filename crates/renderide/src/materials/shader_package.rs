@@ -426,12 +426,18 @@ fn dedup_dirs(dirs: Vec<PathBuf>) -> Vec<PathBuf> {
 
 /// Returns WGSL source for a target stem.
 pub(crate) fn target_wgsl(stem: &str) -> Option<&'static str> {
+    if let Some(wgsl) = super::custom_shader::target_wgsl(stem) {
+        return Some(wgsl);
+    }
     let package = global_package()?;
     package.targets.get(stem).map(|target| target.wgsl.as_ref())
 }
 
 /// Returns declared material passes for a target stem.
 pub(crate) fn material_passes(stem: &str) -> &'static [MaterialPassDesc] {
+    if let Some(passes) = super::custom_shader::material_passes(stem) {
+        return passes;
+    }
     let Some(package) = global_package() else {
         return &[];
     };
@@ -444,6 +450,9 @@ pub(crate) fn material_passes(stem: &str) -> &'static [MaterialPassDesc] {
 
 /// Returns the default render queue for a material target stem.
 pub(crate) fn material_default_render_queue(stem: &str) -> i32 {
+    if let Some(queue) = super::custom_shader::material_default_render_queue(stem) {
+        return queue;
+    }
     let Some(package) = global_package() else {
         return DEFAULT_RENDER_QUEUE;
     };
@@ -458,6 +467,9 @@ pub(crate) fn material_default_render_queue(stem: &str) -> i32 {
 
 /// Returns required device features for a target stem.
 pub(crate) fn target_required_features(stem: &str) -> wgpu::Features {
+    if super::custom_shader::target_wgsl(stem).is_some() {
+        return wgpu::Features::empty();
+    }
     let Some(package) = global_package() else {
         return wgpu::Features::empty();
     };
@@ -481,6 +493,9 @@ pub(crate) fn material_texture_defaults(stem: &str) -> &'static [EmbeddedTexture
 
 /// Returns material uniform defaults for a material target stem.
 pub(crate) fn material_uniform_defaults(stem: &str) -> &'static [EmbeddedMaterialDefault] {
+    if let Some(defaults) = super::custom_shader::material_uniform_defaults(stem) {
+        return defaults;
+    }
     let Some(package) = global_package() else {
         return &[];
     };
@@ -493,6 +508,9 @@ pub(crate) fn material_uniform_defaults(stem: &str) -> &'static [EmbeddedMateria
 
 /// Returns Naga-reflected material metadata for a target stem.
 pub(crate) fn material_reflection(stem: &str) -> EmbeddedShaderReflection {
+    if let Some(reflection) = super::custom_shader::material_reflection(stem) {
+        return reflection;
+    }
     let Some(package) = global_package() else {
         return EmbeddedShaderReflection::default();
     };
@@ -508,6 +526,20 @@ pub(crate) fn material_reflection(stem: &str) -> EmbeddedShaderReflection {
 pub(crate) fn default_material_stem_for_asset_key(asset: &str) -> Option<Arc<str>> {
     let package = global_package()?;
     package.routes.get(asset).cloned()
+}
+
+/// Reflects authored material WGSL into the metadata stored for packaged and custom stems.
+pub(crate) fn reflect_authored_material(
+    wgsl: &str,
+    passes: &[MaterialPassDesc],
+) -> Result<EmbeddedShaderReflection, String> {
+    let vertex_entries = passes
+        .iter()
+        .map(|pass| pass.vertex_entry)
+        .collect::<Vec<_>>();
+    let reflected = reflect_raster_material_wgsl_with_vertex_entries(wgsl, &vertex_entries)
+        .map_err(|error| error.to_string())?;
+    Ok(reflection_from_layout(wgsl, passes, &reflected))
 }
 
 /// Returns the first configured shader package directory for runtime development reload.

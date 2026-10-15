@@ -209,6 +209,10 @@ impl MaterialSystem {
         shader_asset_name: Option<String>,
         shader_variant_bits: Option<u32>,
     ) {
+        let pipeline = match shader_asset_name.as_deref() {
+            Some(name) => crate::materials::custom_shader::pipeline_for_shader_name(name, pipeline),
+            None => pipeline,
+        };
         if let Some(reg) = self.material_registry.as_mut() {
             reg.map_shader_route(asset_id, pipeline, shader_asset_name, shader_variant_bits);
         } else {
@@ -222,6 +226,35 @@ impl MaterialSystem {
         self.pending_shader_routes.remove(&asset_id);
         if let Some(reg) = self.material_registry.as_mut() {
             reg.unmap_shader(asset_id);
+        }
+    }
+
+    /// Rebinds routes whose shader asset name matches `shader_key` to the live custom program.
+    pub fn retarget_named_shader_routes(&mut self, shader_key: &str) {
+        let shader_key = crate::materials::custom_shader::normalize_shader_key(shader_key);
+        if let Some(reg) = self.material_registry.as_mut() {
+            reg.retarget_named_shader_routes(&shader_key);
+        }
+        let pending = self
+            .pending_shader_routes
+            .iter()
+            .filter_map(
+                |(&asset_id, (pipeline, shader_asset_name, shader_variant_bits))| {
+                    let name = shader_asset_name.as_deref()?;
+                    (crate::materials::custom_shader::normalize_shader_key(name) == shader_key)
+                        .then_some((
+                            asset_id,
+                            pipeline.clone(),
+                            name.to_string(),
+                            *shader_variant_bits,
+                        ))
+                },
+            )
+            .collect::<Vec<_>>();
+        for (asset_id, pipeline, name, shader_variant_bits) in pending {
+            let next = crate::materials::custom_shader::pipeline_for_shader_name(&name, pipeline);
+            self.pending_shader_routes
+                .insert(asset_id, (next, Some(name), shader_variant_bits));
         }
     }
 

@@ -94,6 +94,9 @@ pub(in crate::runtime) fn drain_pending_shader_resolutions(
             resolved.pipeline,
         );
         let shader_asset_name = resolved.shader_asset_name.clone();
+        if let Some(shader_key) = resolved.retarget_shader_key.as_deref() {
+            backend.retarget_named_shader_routes(shader_key);
+        }
         let queued = backend.register_shader_route(
             asset_id,
             resolved.pipeline,

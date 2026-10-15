@@ -13,10 +13,16 @@
 //! The integration harness can bypass AssetBundle parsing by setting [`ShaderUpload::file`] to
 //! `RENDERIDE_TEST_STEM:<stem>` (see [`renderide_shared::test_hooks::RENDERIDE_TEST_STEM_PREFIX`]). The prefix
 //! is never produced by the production host, so this path is inert outside the test harness.
+//!
+//! RenderideMod loads authored WGSL by setting [`ShaderUpload::file`] to a
+//! [`renderide_shared::custom_shader_ipc`] payload. That path compiles the program and routes the
+//! asset id onto a `renderide_custom_<key>` stem. [`ResolvedShaderUpload::retarget_shader_key`]
+//! tells the caller to rebind other host assets that use the same shader name.
 
 use std::path::Path;
 use std::sync::Arc;
 
+use renderide_shared::custom_shader_ipc::{CustomShaderPayload, parse_custom_shader_payload};
 use renderide_shared::test_hooks::RENDERIDE_TEST_STEM_PREFIX;
 
 use crate::render_contract::RasterPipelineKind;
@@ -37,6 +43,8 @@ pub struct ResolvedShaderUpload {
     pub shader_variant_bits: Option<u32>,
     /// Pipeline kind passed to [`crate::materials::MaterialRegistry::map_shader_route`].
     pub pipeline: RasterPipelineKind,
+    /// Shader asset name whose existing routes should adopt [`Self::pipeline`].
+    pub retarget_shader_key: Option<String>,
 }
 
 /// Pure shader route selected from an already-resolved shader asset name.
@@ -56,6 +64,7 @@ impl From<ShaderRoutePlan> for ResolvedShaderUpload {
             shader_asset_name: plan.shader_asset_name,
             shader_variant_bits: plan.shader_variant_bits,
             pipeline: plan.pipeline,
+            retarget_shader_key: None,
         }
     }
 }
@@ -88,6 +97,9 @@ pub fn resolve_shader_upload(
     data: &ShaderUpload,
     stem_lookup: ShaderRouteStemLookup,
 ) -> ResolvedShaderUpload {
+    if let Some(payload) = data.file.as_deref().and_then(parse_custom_shader_payload) {
+        return resolve_custom_shader_payload(payload, stem_lookup);
+    }
     if let Some(suffix) = data
         .file
         .as_deref()
@@ -121,6 +133,37 @@ fn normalize_test_stem_suffix(suffix: &str) -> (String, Option<u32>) {
     let (stem, shader_variant_bits) = split_variant_suffix(without_ext)
         .map_or((without_ext, None), |(stem, bits)| (stem, Some(bits)));
     (stem.to_ascii_lowercase(), shader_variant_bits)
+}
+
+fn resolve_custom_shader_payload(
+    payload: Result<CustomShaderPayload, String>,
+    stem_lookup: ShaderRouteStemLookup,
+) -> ResolvedShaderUpload {
+    let payload = match payload {
+        Ok(payload) => payload,
+        Err(error) => {
+            logger::warn!("custom shader payload rejected: {error}");
+            return plan_shader_route(None, None, stem_lookup).into();
+        }
+    };
+    if payload.remove {
+        crate::materials::custom_shader::remove(&payload.key);
+        let mut resolved = plan_shader_route(Some(payload.key.clone()), None, stem_lookup).into();
+        resolved.retarget_shader_key = Some(payload.key);
+        return resolved;
+    }
+    match crate::materials::custom_shader::install(&payload.key, &payload.wgsl) {
+        Ok(installed) => ResolvedShaderUpload {
+            shader_asset_name: Some(installed.key.clone()),
+            shader_variant_bits: None,
+            pipeline: RasterPipelineKind::EmbeddedStem(Arc::from(installed.default_stem)),
+            retarget_shader_key: Some(installed.key),
+        },
+        Err(error) => {
+            logger::warn!("custom shader install failed for {}: {error}", payload.key);
+            plan_shader_route(Some(payload.key), None, stem_lookup).into()
+        }
+    }
 }
 
 fn split_variant_suffix(name: &str) -> Option<(&str, u32)> {
@@ -301,6 +344,41 @@ mod tests {
         assert_eq!(r.shader_asset_name.as_deref(), Some("unlit"));
         assert_eq!(r.shader_variant_bits, Some(0x2202));
         assert!(matches!(r.pipeline, RasterPipelineKind::EmbeddedStem(_)));
+    }
+
+    #[test]
+    fn custom_wgsl_payload_installs_a_stem_and_removal_falls_back() {
+        let wgsl = include_str!("../../../../../RenderideMod/Shaders/example_solid.wgsl");
+        let key = "route-example-solid";
+        let upload = ShaderUpload {
+            asset_id: 40,
+            file: Some(renderide_shared::format_custom_shader_payload(key, wgsl)),
+        };
+        let installed = resolve_shader_upload(&upload, embedded_default_stem_for_shader_asset_name);
+        assert_eq!(installed.shader_asset_name.as_deref(), Some(key));
+        assert_eq!(installed.retarget_shader_key.as_deref(), Some(key));
+        match installed.pipeline {
+            RasterPipelineKind::EmbeddedStem(stem) => {
+                assert_eq!(
+                    stem.as_ref(),
+                    "renderide_custom_route-example-solid_default"
+                );
+            }
+            RasterPipelineKind::Null => panic!("custom shader did not resolve a stem"),
+        }
+        assert_eq!(
+            embedded_default_stem_for_shader_asset_name(key).as_deref(),
+            Some("renderide_custom_route-example-solid_default")
+        );
+
+        let removal = ShaderUpload {
+            asset_id: 41,
+            file: Some(renderide_shared::format_custom_shader_removal(key)),
+        };
+        let removed = resolve_shader_upload(&removal, embedded_default_stem_for_shader_asset_name);
+        assert_eq!(removed.pipeline, RasterPipelineKind::Null);
+        assert_eq!(removed.retarget_shader_key.as_deref(), Some(key));
+        assert_eq!(embedded_default_stem_for_shader_asset_name(key), None);
     }
 
     #[test]
