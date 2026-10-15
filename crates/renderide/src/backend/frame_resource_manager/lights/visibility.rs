@@ -4,7 +4,7 @@ use glam::{Vec3, Vec3A};
 
 use crate::scene::{RenderSpaceId, ResolvedLight, SceneLightRead, light_contributes};
 use crate::shared::LightType;
-use crate::world_mesh::culling::{WorldMeshCullInput, world_aabb_visible_for_cull};
+use crate::world_mesh::culling::{PreparedSpaceCull, WorldMeshCullInput};
 
 use super::super::view_desc::FrameLightCullDesc;
 
@@ -80,13 +80,14 @@ where
 
     stats.indexed_lights = indexed.len();
     if !indexed.is_empty() {
+        let prepared = PreparedSpaceCull::frustum(scene, space_id, false, &culling);
         if indexed.len() <= LIGHT_SPATIAL_LINEAR_LIMIT {
             stats.linear_queries = stats.linear_queries.saturating_add(1);
-            mark_visible_lights_linear(scene, space_id, &culling, &indexed, &mut keep, &mut stats);
+            mark_visible_lights_linear(&prepared, &indexed, &mut keep, &mut stats);
         } else {
             stats.bvh_queries = stats.bvh_queries.saturating_add(1);
             let bvh = LightBvh::build(&indexed);
-            bvh.mark_visible(scene, space_id, &culling, &mut keep, &mut stats);
+            bvh.mark_visible(&prepared, &mut keep, &mut stats);
         }
     }
 
@@ -95,20 +96,16 @@ where
     stats
 }
 
-fn mark_visible_lights_linear<S>(
-    scene: &S,
-    space_id: RenderSpaceId,
-    culling: &WorldMeshCullInput<'_>,
+fn mark_visible_lights_linear(
+    prepared: &PreparedSpaceCull<'_>,
     entries: &[IndexedLight],
     keep: &mut [bool],
     stats: &mut LightVisibilityStats,
-) where
-    S: SceneLightRead + ?Sized,
-{
+) {
     profiling::scope!("render::prepare_lights::filter_visibility_linear");
     for entry in entries {
         stats.light_aabb_tests = stats.light_aabb_tests.saturating_add(1);
-        if light_aabb_visible(scene, space_id, culling, entry.aabb_min, entry.aabb_max) {
+        if light_aabb_visible(prepared, entry.aabb_min, entry.aabb_max) {
             keep[entry.source_index] = true;
         } else {
             stats.rejected_lights = stats.rejected_lights.saturating_add(1);
@@ -357,36 +354,28 @@ impl LightBvh {
         node_index
     }
 
-    fn mark_visible<S>(
+    fn mark_visible(
         &self,
-        scene: &S,
-        space_id: RenderSpaceId,
-        culling: &WorldMeshCullInput<'_>,
+        prepared: &PreparedSpaceCull<'_>,
         keep: &mut [bool],
         stats: &mut LightVisibilityStats,
-    ) where
-        S: SceneLightRead + ?Sized,
-    {
+    ) {
         profiling::scope!("render::prepare_lights::filter_visibility_bvh");
         if let Some(root) = self.root {
-            self.mark_visible_node(root, scene, space_id, culling, keep, stats);
+            self.mark_visible_node(root, prepared, keep, stats);
         }
     }
 
-    fn mark_visible_node<S>(
+    fn mark_visible_node(
         &self,
         node_index: usize,
-        scene: &S,
-        space_id: RenderSpaceId,
-        culling: &WorldMeshCullInput<'_>,
+        prepared: &PreparedSpaceCull<'_>,
         keep: &mut [bool],
         stats: &mut LightVisibilityStats,
-    ) where
-        S: SceneLightRead + ?Sized,
-    {
+    ) {
         let node = self.nodes[node_index];
         stats.bvh_node_tests = stats.bvh_node_tests.saturating_add(1);
-        if !light_aabb_visible(scene, space_id, culling, node.aabb_min, node.aabb_max) {
+        if !light_aabb_visible(prepared, node.aabb_min, node.aabb_max) {
             stats.bvh_nodes_culled = stats.bvh_nodes_culled.saturating_add(1);
             stats.rejected_lights = stats.rejected_lights.saturating_add(node_light_count(node));
             return;
@@ -395,15 +384,15 @@ impl LightBvh {
             for &entry_index in &self.order[node.start..node.start + node.count] {
                 let entry = self.entries[entry_index];
                 stats.light_aabb_tests = stats.light_aabb_tests.saturating_add(1);
-                if light_aabb_visible(scene, space_id, culling, entry.aabb_min, entry.aabb_max) {
+                if light_aabb_visible(prepared, entry.aabb_min, entry.aabb_max) {
                     keep[entry.source_index] = true;
                 } else {
                     stats.rejected_lights = stats.rejected_lights.saturating_add(1);
                 }
             }
         } else {
-            self.mark_visible_node(node.left, scene, space_id, culling, keep, stats);
-            self.mark_visible_node(node.right, scene, space_id, culling, keep, stats);
+            self.mark_visible_node(node.left, prepared, keep, stats);
+            self.mark_visible_node(node.right, prepared, keep, stats);
         }
     }
 }
@@ -412,24 +401,8 @@ fn node_light_count(node: LightBvhNode) -> usize {
     node.light_count
 }
 
-fn light_aabb_visible<S>(
-    scene: &S,
-    space_id: RenderSpaceId,
-    culling: &WorldMeshCullInput<'_>,
-    aabb_min: Vec3A,
-    aabb_max: Vec3A,
-) -> bool
-where
-    S: SceneLightRead + ?Sized,
-{
-    world_aabb_visible_for_cull(
-        scene,
-        space_id,
-        false,
-        culling,
-        Vec3::from(aabb_min),
-        Vec3::from(aabb_max),
-    )
+fn light_aabb_visible(prepared: &PreparedSpaceCull<'_>, aabb_min: Vec3A, aabb_max: Vec3A) -> bool {
+    prepared.aabb_visible(Vec3::from(aabb_min), Vec3::from(aabb_max))
 }
 
 fn bounds_for_order(entries: &[IndexedLight], order: &[usize]) -> (Vec3A, Vec3A) {

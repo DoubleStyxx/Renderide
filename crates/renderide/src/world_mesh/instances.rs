@@ -29,7 +29,7 @@ use crate::render_phase::{RenderPhaseKey, RenderPhaseSet};
 
 use super::draw_prep::WorldMeshDrawItem;
 
-use batch_window::{BatchWindow, draw_requires_singleton, next_batch_window};
+use batch_window::{BatchWindow, draw_requires_singleton_for_classification, next_batch_window};
 use builder::InstancePlanBuilder;
 pub(crate) use prepass::{depth_prepass_group_eligible, depth_prepass_item_eligible};
 use scratch::{MeshSubmeshKey, mesh_submesh_key};
@@ -109,7 +109,53 @@ struct PendingSubmissionGroup {
     /// First sorted draw index in the group.
     representative_draw_idx: usize,
     /// Sorted draw indexes belonging to the group.
-    members: Vec<usize>,
+    members: SubmissionGroupMembers,
+}
+
+/// Member storage for one submission group.
+///
+/// Groups of one draw stay inline. Instanced groups allocate only when a second draw joins, so
+/// skinned draws, order-dependent transparency, and unique materials do not each heap-allocate a
+/// one-element `Vec`.
+enum SubmissionGroupMembers {
+    /// The group contains exactly one sorted draw index.
+    One(usize),
+    /// The group contains two or more sorted draw indexes, in first-seen order.
+    Many(Vec<usize>),
+}
+
+impl SubmissionGroupMembers {
+    /// Builds a one-draw group.
+    fn one(draw_idx: usize) -> Self {
+        Self::One(draw_idx)
+    }
+
+    /// Appends `draw_idx`, promoting a singleton to a heap buffer on the second member.
+    fn push(&mut self, draw_idx: usize) {
+        match self {
+            Self::One(existing) => {
+                let first = *existing;
+                *self = Self::Many(vec![first, draw_idx]);
+            }
+            Self::Many(members) => members.push(draw_idx),
+        }
+    }
+
+    /// Appends every member of `other` after the members already stored here.
+    fn append(&mut self, other: &mut Self) {
+        match other {
+            Self::One(draw_idx) => self.push(*draw_idx),
+            Self::Many(extra) => match self {
+                Self::One(existing) => {
+                    let mut members = Vec::with_capacity(extra.len().saturating_add(1));
+                    members.push(*existing);
+                    members.append(extra);
+                    *self = Self::Many(members);
+                }
+                Self::Many(members) => members.append(extra),
+            },
+        }
+    }
 }
 
 /// Precomputed per-draw submission routing after strict-order barriers have been assigned.
@@ -470,7 +516,11 @@ fn build_submission_plan_rows_into(
         let classification =
             crate::world_mesh::phase_classification::classify_world_mesh_batch(&item.batch_key);
         let phase = classification.phase;
-        let singleton = draw_requires_singleton(item, supports_base_instance);
+        let singleton = draw_requires_singleton_for_classification(
+            item,
+            supports_base_instance,
+            classification,
+        );
         rows.push(SubmissionPlanRow {
             phase,
             order_segment: order_segments[phase.index()],
@@ -579,7 +629,7 @@ fn collect_submission_groups_for_range(
                 key: None,
                 phase: row.phase,
                 representative_draw_idx: draw_idx,
-                members: vec![draw_idx],
+                members: SubmissionGroupMembers::one(draw_idx),
             });
             continue;
         }
@@ -600,7 +650,7 @@ fn collect_submission_groups_for_range(
                 key: Some(key),
                 phase: row.phase,
                 representative_draw_idx: draw_idx,
-                members: vec![draw_idx],
+                members: SubmissionGroupMembers::one(draw_idx),
             });
         }
     }
