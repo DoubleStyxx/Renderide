@@ -69,6 +69,9 @@ pub(in crate::assets::texture::upload) fn write_texture_region(
 ) -> Result<(), TextureUploadError> {
     profiling::scope!("asset::texture_write_region");
     let prepared = prepare_texture_region_write(write)?;
+    if record_prepared_texture_region(&prepared) {
+        return Ok(());
+    }
     let gpu_queue_access_gate = prepared.gpu_queue_access_gate;
     let queue_access_mode = prepared.queue_access_mode;
     let Some(_gate) = gpu_queue_access_gate.lock_for(queue_access_mode) else {
@@ -85,8 +88,20 @@ pub(in crate::assets::texture::upload) fn write_texture_region_with_gate(
 ) -> Result<(), TextureUploadError> {
     profiling::scope!("asset::texture_write_region_locked");
     let prepared = prepare_texture_region_write(write)?;
+    if record_prepared_texture_region(&prepared) {
+        return Ok(());
+    }
     submit_prepared_texture_region_write(prepared);
     Ok(())
+}
+
+fn record_prepared_texture_region(write: &PreparedTextureRegionWrite<'_>) -> bool {
+    crate::texture_upload_batch::try_record_texture_copy(
+        &write.destination,
+        write.bytes,
+        &write.layout,
+        write.size,
+    )
 }
 
 fn prepare_texture_region_write(

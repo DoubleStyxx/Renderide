@@ -148,6 +148,7 @@ pub(super) struct ForwardDrawState {
     last_per_draw_dyn_offset: Option<u32>,
     last_stencil_ref: Option<u32>,
     bound_batch_cursor: Option<usize>,
+    last_group1: Option<(*const wgpu::BindGroup, Option<u32>)>,
     last_pipeline: Option<*const wgpu::RenderPipeline>,
     pub(super) last_scissor: Option<(u32, u32, u32, u32)>,
 }
@@ -159,6 +160,7 @@ impl ForwardDrawState {
             last_per_draw_dyn_offset: None,
             last_stencil_ref: None,
             bound_batch_cursor: None,
+            last_group1: None,
             last_pipeline: None,
             last_scissor: None,
         }
@@ -331,6 +333,20 @@ fn issue_forward_group(
     );
 }
 
+fn group1_bind_identity(
+    resources: &ForwardDrawResources<'_, '_>,
+    packet: &MaterialBatchPacket,
+) -> (*const wgpu::BindGroup, Option<u32>) {
+    match &packet.group1_binding {
+        MaterialGroup1Binding::Empty => (resources.empty_bg, None),
+        MaterialGroup1Binding::Embedded {
+            bind_group,
+            uniform_dynamic_offset,
+            ..
+        } => (bind_group.as_ref(), *uniform_dynamic_offset),
+    }
+}
+
 fn bind_material_packet_if_changed(
     rpass: &mut wgpu::RenderPass<'_>,
     resources: &ForwardDrawResources<'_, '_>,
@@ -341,6 +357,12 @@ fn bind_material_packet_if_changed(
     if state.bound_batch_cursor == Some(batch_cursor) {
         return;
     }
+    let identity = group1_bind_identity(resources, packet);
+    state.bound_batch_cursor = Some(batch_cursor);
+    if state.last_group1 == Some(identity) {
+        return;
+    }
+    state.last_group1 = Some(identity);
     match &packet.group1_binding {
         MaterialGroup1Binding::Empty => {
             rpass.set_bind_group(1, resources.empty_bg, &[]);
@@ -357,7 +379,6 @@ fn bind_material_packet_if_changed(
             }
         }
     }
-    state.bound_batch_cursor = Some(batch_cursor);
 }
 
 fn bind_forward_per_draw_slab(

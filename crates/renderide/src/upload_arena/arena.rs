@@ -4,29 +4,62 @@
 use std::sync::mpsc;
 
 use super::slot::{
-    UPLOAD_ARENA_SLOTS, UploadArenaSlot, UploadArenaSlotState, create_persistent_slot_buffer,
-    create_temporary_staging_buffer, log_oversized_upload, next_slot_capacity,
-    select_writable_slot,
+    UPLOAD_ARENA_POOLED_TEMPS, UPLOAD_ARENA_SLOTS, UploadArenaSlot, UploadArenaSlotState,
+    create_persistent_slot_buffer, create_temporary_staging_buffer, log_oversized_upload,
+    next_slot_capacity, select_writable_slot,
 };
 use super::staging::{PreparedUploadStaging, UploadStagingSource};
 use crate::upload_stats::{UploadArenaAcquireStats, UploadArenaPressure};
+
+/// Which staging buffer a completion callback refers to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StagingOwner {
+    /// One of the persistent mapped slots.
+    Persistent(usize),
+    /// One of the overflow buffers kept after a persistent-ring miss.
+    Pooled(usize),
+}
 
 /// One completed upload slot event delivered from a wgpu callback to the main thread.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UploadArenaCompletion {
     /// Submitted GPU work that references this slot has completed.
-    Submitted { slot: usize, generation: u64 },
+    Submitted {
+        owner: StagingOwner,
+        generation: u64,
+    },
     /// A post-submit remap request has completed.
     Remapped {
-        slot: usize,
+        owner: StagingOwner,
         generation: u64,
         success: bool,
     },
 }
 
-/// Persistent triple-buffered upload staging arena for render-graph buffer writes.
+fn select_pooled_slot(slots: &[UploadArenaSlot], required: u64) -> Option<usize> {
+    slots
+        .iter()
+        .position(|slot| slot.state.can_write() && slot.capacity >= required)
+        .or_else(|| {
+            slots
+                .iter()
+                .position(|slot| matches!(slot.state, UploadArenaSlotState::Empty))
+        })
+        .or_else(|| {
+            slots
+                .iter()
+                .position(|slot| matches!(slot.state, UploadArenaSlotState::Free))
+        })
+}
+
+/// Persistent upload staging arena for render-graph and mesh buffer writes.
 pub(crate) struct PersistentUploadArena {
     slots: [UploadArenaSlot; UPLOAD_ARENA_SLOTS],
+    /// Overflow staging buffers recycled after GPU completion.
+    ///
+    /// These exist so a frame that finds every persistent slot busy can keep uploading without
+    /// `device.poll` and without allocating a new GPU buffer every time.
+    pooled: Vec<UploadArenaSlot>,
     completion_tx: mpsc::Sender<UploadArenaCompletion>,
     completion_rx: mpsc::Receiver<UploadArenaCompletion>,
     next_generation: u64,
@@ -38,17 +71,22 @@ impl PersistentUploadArena {
         let (completion_tx, completion_rx) = mpsc::channel();
         Self {
             slots: std::array::from_fn(|_| UploadArenaSlot::empty()),
+            pooled: Vec::new(),
             completion_tx,
             completion_rx,
             next_generation: 1,
         }
     }
 
-    /// Drains submitted-work and remap callbacks, polling only when all writable slots are busy.
+    /// Drains submitted-work and remap callbacks.
+    ///
+    /// `device.poll` runs only when every persistent slot is waiting on the GPU and the overflow
+    /// pool cannot serve another upload. Acquire itself never polls: a non-blocking poll still
+    /// round-trips through the wgpu device thread, which shows up in frame time.
     pub(crate) fn maintain(&mut self, device: &wgpu::Device) {
         profiling::scope!("frame_upload_arena::maintain");
         self.drain_completions();
-        if self.should_poll_for_maintenance() {
+        if self.should_block_for_recycle() {
             self.poll_for_staging_pressure(device);
         }
     }
@@ -68,6 +106,7 @@ impl PersistentUploadArena {
             slot.capacity = 0;
             slot.state = UploadArenaSlotState::Empty;
         }
+        self.pooled.clear();
 
         logger::debug!(
             "frame upload arena: reset persistent slots released_capacity_bytes={released_capacity}"
@@ -108,11 +147,8 @@ impl PersistentUploadArena {
             return self.prepare_persistent_slot(device, max_buffer_size, required, slot);
         }
 
-        if self.should_poll_for_maintenance() {
-            self.poll_for_staging_pressure(device);
-            if let Some(slot) = select_writable_slot(&self.slots, required) {
-                return self.prepare_persistent_slot(device, max_buffer_size, required, slot);
-            }
+        if let Some(prepared) = self.prepare_pooled_temporary(device, max_buffer_size, required) {
+            return prepared;
         }
 
         PreparedUploadStaging {
@@ -130,7 +166,7 @@ impl PersistentUploadArena {
     /// Current pressure/capacity sample for diagnostics.
     pub(crate) fn pressure(&self) -> UploadArenaPressure {
         let mut pressure = UploadArenaPressure::default();
-        for slot in &self.slots {
+        for slot in self.slots.iter().chain(self.pooled.iter()) {
             pressure.capacity_bytes = pressure.capacity_bytes.saturating_add(slot.capacity);
             match slot.state {
                 UploadArenaSlotState::Free => {
@@ -214,7 +250,23 @@ impl PersistentUploadArena {
         slot: usize,
         generation: u64,
     ) -> Option<Box<dyn FnOnce() + Send + 'static>> {
-        let arena_slot = self.slots.get_mut(slot)?;
+        self.finish_owned_write(StagingOwner::Persistent(slot), generation)
+    }
+
+    pub(super) fn finish_pooled_write(
+        &mut self,
+        slot: usize,
+        generation: u64,
+    ) -> Option<Box<dyn FnOnce() + Send + 'static>> {
+        self.finish_owned_write(StagingOwner::Pooled(slot), generation)
+    }
+
+    fn finish_owned_write(
+        &mut self,
+        owner: StagingOwner,
+        generation: u64,
+    ) -> Option<Box<dyn FnOnce() + Send + 'static>> {
+        let arena_slot = self.owner_slot_mut(owner)?;
         if arena_slot.state != (UploadArenaSlotState::Writing { generation }) {
             return None;
         }
@@ -223,21 +275,21 @@ impl PersistentUploadArena {
         arena_slot.state = UploadArenaSlotState::InFlight { generation };
         let tx = self.completion_tx.clone();
         Some(Box::new(move || {
-            let _ = tx.send(UploadArenaCompletion::Submitted { slot, generation });
+            let _ = tx.send(UploadArenaCompletion::Submitted { owner, generation });
         }))
     }
 
     fn drain_completions(&mut self) {
         while let Ok(completion) = self.completion_rx.try_recv() {
             match completion {
-                UploadArenaCompletion::Submitted { slot, generation } => {
-                    self.start_remap(slot, generation);
+                UploadArenaCompletion::Submitted { owner, generation } => {
+                    self.start_remap(owner, generation);
                 }
                 UploadArenaCompletion::Remapped {
-                    slot,
+                    owner,
                     generation,
                     success,
-                } => self.finish_remap(slot, generation, success),
+                } => self.finish_remap(owner, generation, success),
             }
         }
     }
@@ -259,6 +311,78 @@ impl PersistentUploadArena {
         has_pending_completion_work && !has_writable_slot
     }
 
+    /// Poll only when a recycle is required to avoid an unbounded one-shot allocation.
+    fn should_block_for_recycle(&self) -> bool {
+        self.should_poll_for_maintenance() && !self.pooled_temp_can_write()
+    }
+
+    fn pooled_temp_can_write(&self) -> bool {
+        self.pooled.len() < UPLOAD_ARENA_POOLED_TEMPS
+            || self.pooled.iter().any(|slot| slot.state.can_write())
+    }
+
+    fn prepare_pooled_temporary(
+        &mut self,
+        device: &wgpu::Device,
+        max_buffer_size: u64,
+        required: u64,
+    ) -> Option<PreparedUploadStaging> {
+        let slot = select_pooled_slot(&self.pooled, required);
+        let slot = match slot {
+            Some(slot) => slot,
+            None if self.pooled.len() < UPLOAD_ARENA_POOLED_TEMPS => {
+                self.pooled.push(UploadArenaSlot::empty());
+                self.pooled.len() - 1
+            }
+            None => return None,
+        };
+        let generation = self.next_generation;
+        self.next_generation = self.next_generation.saturating_add(1).max(1);
+        let arena_slot = self.pooled.get_mut(slot)?;
+        let mut acquire_stats = UploadArenaAcquireStats {
+            temporary_staging_bytes: required,
+            ..UploadArenaAcquireStats::default()
+        };
+        if arena_slot.buffer.is_none() || arena_slot.capacity < required {
+            let Some(capacity) = next_slot_capacity(required, arena_slot.capacity, max_buffer_size)
+            else {
+                return Some(PreparedUploadStaging {
+                    buffer: None,
+                    source: UploadStagingSource::QueueFallbackOversized,
+                    size: required,
+                    acquire_stats: UploadArenaAcquireStats {
+                        oversized_queue_fallback_writes: 1,
+                        ..UploadArenaAcquireStats::default()
+                    },
+                });
+            };
+            if let Some(buffer) = arena_slot.buffer.take()
+                && arena_slot.state.can_write()
+            {
+                buffer.unmap();
+            }
+            arena_slot.buffer = Some(create_persistent_slot_buffer(device, capacity));
+            arena_slot.capacity = capacity;
+            acquire_stats.temporary_staging_fallbacks = 1;
+        } else {
+            acquire_stats.temporary_slot_reuses = 1;
+        }
+        arena_slot.state = UploadArenaSlotState::Writing { generation };
+        Some(PreparedUploadStaging {
+            buffer: arena_slot.buffer.clone(),
+            source: UploadStagingSource::Pooled { slot, generation },
+            size: required,
+            acquire_stats,
+        })
+    }
+
+    fn owner_slot_mut(&mut self, owner: StagingOwner) -> Option<&mut UploadArenaSlot> {
+        match owner {
+            StagingOwner::Persistent(slot) => self.slots.get_mut(slot),
+            StagingOwner::Pooled(slot) => self.pooled.get_mut(slot),
+        }
+    }
+
     fn poll_for_staging_pressure(&mut self, device: &wgpu::Device) {
         profiling::scope!("frame_upload_arena::poll");
         self.drain_completions();
@@ -266,8 +390,8 @@ impl PersistentUploadArena {
         self.drain_completions();
     }
 
-    fn start_remap(&mut self, slot: usize, generation: u64) {
-        let Some(arena_slot) = self.slots.get_mut(slot) else {
+    fn start_remap(&mut self, owner: StagingOwner, generation: u64) {
+        let Some(arena_slot) = self.owner_slot_mut(owner) else {
             return;
         };
         if arena_slot.state != (UploadArenaSlotState::InFlight { generation }) {
@@ -284,15 +408,15 @@ impl PersistentUploadArena {
             .slice(..)
             .map_async(wgpu::MapMode::Write, move |result| {
                 let _ = tx.send(UploadArenaCompletion::Remapped {
-                    slot,
+                    owner,
                     generation,
                     success: result.is_ok(),
                 });
             });
     }
 
-    fn finish_remap(&mut self, slot: usize, generation: u64, success: bool) {
-        let Some(arena_slot) = self.slots.get_mut(slot) else {
+    fn finish_remap(&mut self, owner: StagingOwner, generation: u64, success: bool) {
+        let Some(arena_slot) = self.owner_slot_mut(owner) else {
             return;
         };
         if arena_slot.state != (UploadArenaSlotState::Remapping { generation }) {
@@ -302,7 +426,7 @@ impl PersistentUploadArena {
             arena_slot.state = UploadArenaSlotState::Free;
             return;
         }
-        logger::warn!("frame upload arena: persistent slot remap failed; dropping slot");
+        logger::warn!("frame upload arena: staging slot remap failed; dropping slot");
         arena_slot.buffer = None;
         arena_slot.capacity = 0;
         arena_slot.state = UploadArenaSlotState::Empty;
@@ -324,7 +448,7 @@ mod tests {
         let mut arena = PersistentUploadArena::new();
         arena.slots[0].state = UploadArenaSlotState::InFlight { generation: 2 };
 
-        arena.start_remap(0, 1);
+        arena.start_remap(StagingOwner::Persistent(0), 1);
 
         assert_eq!(
             arena.slots[0].state,
@@ -337,7 +461,7 @@ mod tests {
         let mut arena = PersistentUploadArena::new();
         arena.slots[0].state = UploadArenaSlotState::Remapping { generation: 4 };
 
-        arena.finish_remap(0, 4, true);
+        arena.finish_remap(StagingOwner::Persistent(0), 4, true);
 
         assert_eq!(arena.slots[0].state, UploadArenaSlotState::Free);
     }
@@ -348,7 +472,7 @@ mod tests {
         arena.slots[0].state = UploadArenaSlotState::Remapping { generation: 4 };
         arena.slots[0].capacity = 1024;
 
-        arena.finish_remap(0, 4, false);
+        arena.finish_remap(StagingOwner::Persistent(0), 4, false);
 
         assert_eq!(arena.slots[0].state, UploadArenaSlotState::Empty);
         assert_eq!(arena.slots[0].capacity, 0);
@@ -367,7 +491,7 @@ mod tests {
         arena.reset();
         let next_generation_after_reset = arena.next_generation;
         let _ = arena.completion_tx.send(UploadArenaCompletion::Remapped {
-            slot: 2,
+            owner: StagingOwner::Persistent(2),
             generation: 8,
             success: true,
         });
@@ -442,6 +566,58 @@ mod tests {
         }
 
         assert!(arena.should_poll_for_maintenance());
+    }
+
+    #[test]
+    fn maintenance_poll_is_skipped_when_pooled_temp_can_serve_upload() {
+        let mut arena = PersistentUploadArena::new();
+        for (index, slot) in arena.slots.iter_mut().enumerate() {
+            slot.state = UploadArenaSlotState::InFlight {
+                generation: index as u64 + 1,
+            };
+        }
+        arena.pooled.push(UploadArenaSlot {
+            buffer: None,
+            capacity: 1024,
+            state: UploadArenaSlotState::Free,
+        });
+
+        assert!(arena.should_poll_for_maintenance());
+        assert!(!arena.should_block_for_recycle());
+    }
+
+    #[test]
+    fn maintenance_poll_is_skipped_while_the_overflow_pool_can_grow() {
+        let mut arena = PersistentUploadArena::new();
+        for (index, slot) in arena.slots.iter_mut().enumerate() {
+            slot.state = UploadArenaSlotState::InFlight {
+                generation: index as u64 + 1,
+            };
+        }
+
+        assert!(arena.should_poll_for_maintenance());
+        assert!(!arena.should_block_for_recycle());
+    }
+
+    #[test]
+    fn maintenance_poll_is_requested_when_persistent_and_pooled_slots_wait() {
+        let mut arena = PersistentUploadArena::new();
+        for (index, slot) in arena.slots.iter_mut().enumerate() {
+            slot.state = UploadArenaSlotState::InFlight {
+                generation: index as u64 + 1,
+            };
+        }
+        for index in 0..UPLOAD_ARENA_POOLED_TEMPS {
+            arena.pooled.push(UploadArenaSlot {
+                buffer: None,
+                capacity: 256,
+                state: UploadArenaSlotState::InFlight {
+                    generation: 100 + index as u64,
+                },
+            });
+        }
+
+        assert!(arena.should_block_for_recycle());
     }
 
     #[test]

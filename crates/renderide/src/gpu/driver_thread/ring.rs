@@ -104,6 +104,21 @@ impl<T> BoundedRing<T> {
         Ok(())
     }
 
+    /// Pops the next item when one is already queued.
+    ///
+    /// Returns `None` immediately when the ring is empty. Used to fold already-queued
+    /// submits into the batch the driver is about to process without waiting for a later push.
+    pub(super) fn try_pop(&self) -> Option<T> {
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let item = guard.pop_front()?;
+        drop(guard);
+        self.space_available.notify_one();
+        Some(item)
+    }
+
     /// Pops the next item, blocking the caller while the ring is empty.
     pub(super) fn pop(&self) -> T {
         let mut guard = self
@@ -121,5 +136,25 @@ impl<T> BoundedRing<T> {
                 .wait(guard)
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BoundedRing;
+
+    #[test]
+    fn try_pop_returns_none_without_waiting_and_preserves_fifo_order() {
+        let ring = BoundedRing::new(4);
+        assert!(ring.try_pop().is_none());
+        assert_eq!(ring.depth(), 0);
+
+        ring.push(1).expect("space");
+        ring.push(2).expect("space");
+        assert_eq!(ring.try_pop(), Some(1));
+        assert_eq!(ring.depth(), 1);
+        assert_eq!(ring.try_pop(), Some(2));
+        assert!(ring.try_pop().is_none());
+        assert_eq!(ring.depth(), 0);
     }
 }

@@ -13,6 +13,8 @@ pub(crate) struct UploadArenaAcquireStats {
     pub(crate) temporary_staging_bytes: u64,
     /// Temporary fallback count caused by all persistent slots being unavailable.
     pub(crate) temporary_staging_fallbacks: usize,
+    /// Pooled temporary buffers reused instead of allocated.
+    pub(crate) temporary_slot_reuses: usize,
     /// Staged writes replayed through `Queue::write_buffer` because no staging buffer could fit.
     pub(crate) oversized_queue_fallback_writes: usize,
 }
