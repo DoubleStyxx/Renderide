@@ -130,17 +130,38 @@ struct PendingShadowCasterGroup {
     members: Vec<usize>,
 }
 
-impl FrameResourceManager {
-    /// Clears shadow assignments and stores an empty shadow frame plan.
-    pub(crate) fn clear_shadow_frame(&mut self) {
-        for lights in self.per_view_lights.values_mut() {
-            for light in &mut lights.lights {
-                clear_light_shadow_assignment(light);
-            }
-        }
-        self.shadow_frame = ShadowFramePlan::default();
+/// Reused grouping tables for [`build_shadow_caster_plan`].
+#[derive(Default)]
+pub(super) struct ShadowCasterPlanScratch {
+    group_index: HashMap<ShadowCasterGroupKey, usize>,
+    groups: Vec<PendingShadowCasterGroup>,
+    group_len: usize,
+}
+
+impl ShadowCasterPlanScratch {
+    fn begin_plan(&mut self) {
+        self.group_index.clear();
+        self.group_len = 0;
     }
 
+    fn push_group(&mut self, representative_draw_idx: usize, draw_idx: usize) -> usize {
+        if let Some(group) = self.groups.get_mut(self.group_len) {
+            group.representative_draw_idx = representative_draw_idx;
+            group.members.clear();
+            group.members.push(draw_idx);
+        } else {
+            self.groups.push(PendingShadowCasterGroup {
+                representative_draw_idx,
+                members: vec![draw_idx],
+            });
+        }
+        let idx = self.group_len;
+        self.group_len += 1;
+        idx
+    }
+}
+
+impl FrameResourceManager {
     /// Plans shadow maps from packed per-view lights and sorted view draw plans.
     pub(crate) fn prepare_shadow_frame_for_views<'a, I>(
         &mut self,
@@ -150,22 +171,31 @@ impl FrameResourceManager {
         I: IntoIterator<Item = (ViewId, &'a WorldMeshDrawPlan)>,
     {
         profiling::scope!("render::prepare_shadow_frame");
-        self.clear_shadow_frame();
+        for lights in self.per_view_lights.values_mut() {
+            for light in &mut lights.lights {
+                clear_light_shadow_assignment(light);
+            }
+        }
+        let mut plan = std::mem::replace(&mut self.shadow_frame, ShadowFramePlan::default());
+        plan.caster_sets.clear();
+        plan.render_views.clear();
+        plan.metadata.clear();
+        plan.requested_resolution = 1;
+        plan.requested_layers = 1;
+        plan.requested_draw_slots = 0;
         if !shadow_atlas_rendering_supported(self.limits.as_deref()) {
+            self.shadow_frame = plan;
             return;
         }
         let max_shadow_views = shadow_view_capacity(self.limits.as_deref());
-        let mut plan = ShadowFramePlan {
-            requested_resolution: 1,
-            requested_layers: 1,
-            ..ShadowFramePlan::default()
-        };
-        let planning_views = views
-            .into_iter()
-            .map(|(view_id, draw_plan)| ShadowPlanningView { view_id, draw_plan })
-            .collect::<Vec<_>>();
-        for view in planning_views {
-            append_shadow_views_for_view(self, quality, view, &mut plan, max_shadow_views);
+        for (view_id, draw_plan) in views {
+            append_shadow_views_for_view(
+                self,
+                quality,
+                ShadowPlanningView { view_id, draw_plan },
+                &mut plan,
+                max_shadow_views,
+            );
             if plan.metadata.len() >= max_shadow_views {
                 break;
             }
@@ -223,9 +253,11 @@ impl FrameResourceManager {
         self.shadow_frame.requested_draw_slots
     }
 
-    /// Deform keys required by this frame's shadow caster draws.
-    pub(crate) fn shadow_mesh_deform_keys(&self) -> hashbrown::HashSet<SkinCacheKey> {
-        let mut keys = hashbrown::HashSet::new();
+    /// Inserts deform keys required by this frame's shadow caster draws into `keys`.
+    pub(crate) fn extend_shadow_mesh_deform_keys(
+        &self,
+        keys: &mut hashbrown::HashSet<SkinCacheKey>,
+    ) {
         for caster_set in &self.shadow_frame.caster_sets {
             for item in caster_set.draws.iter() {
                 if item.world_space_deformed || item.blendshape_deformed {
@@ -238,7 +270,6 @@ impl FrameResourceManager {
                 }
             }
         }
-        keys
     }
 }
 
@@ -287,7 +318,11 @@ fn append_shadow_views_for_view(
         .limits
         .as_deref()
         .is_none_or(|limits| limits.supports_base_instance);
-    let instance_plan = build_shadow_caster_plan(&shadow_draws, supports_base_instance);
+    let instance_plan = build_shadow_caster_plan(
+        &shadow_draws,
+        supports_base_instance,
+        &mut manager.shadow_caster_plan_scratch,
+    );
     let slab_slot_offset = plan.requested_draw_slots;
     plan.requested_draw_slots = plan.requested_draw_slots.saturating_add(shadow_draws.len());
     plan.caster_sets.push(ShadowCasterSet {
@@ -362,6 +397,7 @@ fn append_shadow_views_for_view(
 fn build_shadow_caster_plan(
     draws: &[WorldMeshDrawItem],
     supports_base_instance: bool,
+    scratch: &mut ShadowCasterPlanScratch,
 ) -> InstancePlan {
     profiling::scope!("render::prepare_shadow_frame::build_caster_plan");
     let mut plan = InstancePlan::new();
@@ -369,31 +405,23 @@ fn build_shadow_caster_plan(
         return plan;
     }
 
-    let mut group_index: HashMap<ShadowCasterGroupKey, usize> = HashMap::new();
-    let mut pending_groups: Vec<PendingShadowCasterGroup> = Vec::new();
+    scratch.begin_plan();
     for (draw_idx, item) in draws.iter().enumerate() {
         if shadow_draw_requires_singleton(item, supports_base_instance) {
-            pending_groups.push(PendingShadowCasterGroup {
-                representative_draw_idx: draw_idx,
-                members: vec![draw_idx],
-            });
+            scratch.push_group(draw_idx, draw_idx);
             continue;
         }
 
         let key = shadow_caster_group_key(item);
-        if let Some(&group_idx) = group_index.get(&key) {
-            pending_groups[group_idx].members.push(draw_idx);
+        if let Some(&group_idx) = scratch.group_index.get(&key) {
+            scratch.groups[group_idx].members.push(draw_idx);
         } else {
-            let group_idx = pending_groups.len();
-            group_index.insert(key, group_idx);
-            pending_groups.push(PendingShadowCasterGroup {
-                representative_draw_idx: draw_idx,
-                members: vec![draw_idx],
-            });
+            let group_idx = scratch.push_group(draw_idx, draw_idx);
+            scratch.group_index.insert(key, group_idx);
         }
     }
 
-    for group in pending_groups {
+    for group in scratch.groups.iter().take(scratch.group_len) {
         let draw_group = append_shadow_draw_group(
             &mut plan.slab_layout,
             group.representative_draw_idx,

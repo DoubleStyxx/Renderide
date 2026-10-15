@@ -12,7 +12,7 @@ mod msaa_views;
 mod transient_extent;
 
 pub(super) use attachments::{
-    coalesce_render_pass_template, execute_graph_raster_pass_node,
+    ResolvedColorAttachments, coalesce_render_pass_template, execute_graph_raster_pass_node,
     frame_sample_count_from_raster_ctx, pass_info_raster_template, resolve_color_attachments,
     resolve_depth_attachment_with_stencil,
 };

@@ -78,15 +78,62 @@ pub(in crate::render_graph::compiled) fn resolve_attachment_resolve_target(
     }
 }
 
+/// Inline color-attachment slots. wgpu's practical color-attachment limit is 8; larger
+/// templates spill to [`ResolvedColorAttachments::overflow`].
+const INLINE_COLOR_ATTACHMENTS: usize = 8;
+
+/// Color attachments for one graph raster pass, stored inline when the template fits.
+pub(in crate::render_graph::compiled) struct ResolvedColorAttachments<'a> {
+    inline: [Option<wgpu::RenderPassColorAttachment<'a>>; INLINE_COLOR_ATTACHMENTS],
+    inline_len: usize,
+    overflow: Vec<Option<wgpu::RenderPassColorAttachment<'a>>>,
+}
+
+impl<'a> ResolvedColorAttachments<'a> {
+    fn new() -> Self {
+        Self {
+            inline: [None, None, None, None, None, None, None, None],
+            inline_len: 0,
+            overflow: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, attachment: wgpu::RenderPassColorAttachment<'a>) {
+        if self.overflow.is_empty() && self.inline_len < INLINE_COLOR_ATTACHMENTS {
+            self.inline[self.inline_len] = Some(attachment);
+            self.inline_len += 1;
+            return;
+        }
+        if self.overflow.is_empty() {
+            self.overflow.reserve(self.inline_len.saturating_add(1));
+            for slot in &mut self.inline[..self.inline_len] {
+                self.overflow.push(slot.take());
+            }
+        }
+        self.overflow.push(Some(attachment));
+    }
+
+    /// Attachment slice passed to [`wgpu::RenderPassDescriptor::color_attachments`].
+    pub(in crate::render_graph::compiled) fn as_slice(
+        &self,
+    ) -> &[Option<wgpu::RenderPassColorAttachment<'a>>] {
+        if self.overflow.is_empty() {
+            &self.inline[..self.inline_len]
+        } else {
+            self.overflow.as_slice()
+        }
+    }
+}
+
 /// Resolves the raster pass template's color attachments to live `wgpu::TextureView`s.
 pub(in crate::render_graph::compiled) fn resolve_color_attachments<'a>(
     pass_name: &str,
     template: &RenderPassTemplate,
     graph_resources: &'a GraphResolvedResources,
     sample_count: u32,
-) -> Result<Vec<Option<wgpu::RenderPassColorAttachment<'a>>>, GraphExecuteError> {
+) -> Result<ResolvedColorAttachments<'a>, GraphExecuteError> {
     profiling::scope!("graph::raster::resolve_color_attachments");
-    let mut color_attachments = Vec::with_capacity(template.color_attachments.len());
+    let mut color_attachments = ResolvedColorAttachments::new();
     for color in &template.color_attachments {
         let target = resolve_attachment_target(color.target, sample_count);
         let view = graph_resources.texture_view(target).ok_or_else(|| {
@@ -107,7 +154,7 @@ pub(in crate::render_graph::compiled) fn resolve_color_attachments<'a>(
             })?),
             None => None,
         };
-        color_attachments.push(Some(wgpu::RenderPassColorAttachment {
+        color_attachments.push(wgpu::RenderPassColorAttachment {
             view,
             resolve_target,
             ops: wgpu::Operations {
@@ -115,7 +162,7 @@ pub(in crate::render_graph::compiled) fn resolve_color_attachments<'a>(
                 store: color.store.resolve(sample_count),
             },
             depth_slice: None,
-        }));
+        });
     }
     Ok(color_attachments)
 }
@@ -169,7 +216,7 @@ fn resolve_depth_attachment<'a>(
 
 /// Builds the attachment template used when compatible raster passes are materialized together.
 pub(in crate::render_graph::compiled) fn coalesce_render_pass_template(
-    templates: &[RenderPassTemplate],
+    templates: &[&RenderPassTemplate],
 ) -> Option<RenderPassTemplate> {
     let (first, rest) = templates.split_first()?;
     if rest.is_empty() {
@@ -203,7 +250,7 @@ pub(in crate::render_graph::compiled) fn coalesce_render_pass_template(
     if !depth_ops_can_be_coalesced(templates) {
         return None;
     }
-    let mut merged = first.clone();
+    let mut merged = (*first).clone();
     for (merged_color, last_color) in merged
         .color_attachments
         .iter_mut()
@@ -222,7 +269,7 @@ pub(in crate::render_graph::compiled) fn coalesce_render_pass_template(
 }
 
 /// Returns whether depth/stencil load/store ops can be represented by one merged pass.
-fn depth_ops_can_be_coalesced(templates: &[RenderPassTemplate]) -> bool {
+fn depth_ops_can_be_coalesced(templates: &[&RenderPassTemplate]) -> bool {
     if templates.iter().any(|template| {
         template
             .depth_stencil_attachment
@@ -286,7 +333,7 @@ pub(in crate::render_graph::compiled) fn execute_graph_raster_pass_node(
         profiling::scope!("graph::raster::begin_render_pass");
         encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some(pass_profile_label.as_ref()),
-            color_attachments: &color_attachments,
+            color_attachments: color_attachments.as_slice(),
             depth_stencil_attachment,
             occlusion_query_set: None,
             timestamp_writes,

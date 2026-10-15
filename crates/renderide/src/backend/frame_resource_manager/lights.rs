@@ -2,7 +2,14 @@
 
 mod visibility;
 
+use std::cell::RefCell;
+
 use rayon::prelude::*;
+
+thread_local! {
+    static LIGHT_SPACE_ID_SCRATCH: RefCell<Vec<RenderSpaceId>> = const { RefCell::new(Vec::new()) };
+    static LIGHT_RESOLVE_SCRATCH: RefCell<Vec<ResolvedLight>> = const { RefCell::new(Vec::new()) };
+}
 
 use crate::camera::ViewId;
 use crate::cpu_parallelism::{
@@ -131,20 +138,22 @@ impl FrameResourceManager {
         I: IntoIterator<Item = FrameLightViewDesc>,
     {
         profiling::scope!("render::prepare_lights_for_views");
-        let views = views.into_iter().collect::<Vec<_>>();
+        let mut view_descs = std::mem::take(&mut self.light_view_scratch);
+        view_descs.clear();
+        view_descs.extend(views);
         self.light_scratch.clear();
         self.signed_scene_color_required = false;
         self.light_visibility_stats = LightVisibilityStats::default();
-        let packets = if should_parallelize_light_view_prep(scene, &views) {
+        let packets = if should_parallelize_light_view_prep(scene, &view_descs) {
             profiling::scope!("render::prepare_lights_for_views::parallel");
-            views
+            view_descs
                 .par_iter()
                 .with_min_len(LIGHT_VIEW_PREP_PARALLEL_CHUNK_VIEWS)
                 .map(|desc| prepare_lights_for_view_packet(scene, desc))
                 .collect::<Vec<_>>()
         } else {
             profiling::scope!("render::prepare_lights_for_views::serial");
-            views
+            view_descs
                 .iter()
                 .map(|desc| prepare_lights_for_view_packet(scene, desc))
                 .collect::<Vec<_>>()
@@ -158,6 +167,7 @@ impl FrameResourceManager {
             self.light_visibility_stats.add(packet.visibility_stats);
             self.commit_prepared_light_packet(packet, &mut wrote_fallback, asset_resources);
         }
+        self.light_view_scratch = view_descs;
         if self.signed_scene_color_required && !self.signed_scene_color_required_logged {
             logger::info!(
                 "negative direct lights active: signed scene-color HDR will be used while negative lights are packed"
@@ -183,9 +193,14 @@ impl FrameResourceManager {
         }
 
         self.signed_scene_color_required |= packet.signed_scene_color_required;
-        let mut packed_lights = Vec::with_capacity(packet.resolved.len());
+        let frame_gpu = self.frame_gpu.as_ref();
+        let entry = self
+            .per_view_lights
+            .get_or_insert_with(packet.view_id, PreparedViewLights::default);
+        entry.lights.clear();
+        entry.lights.reserve(packet.resolved.len());
         for light in &packet.resolved {
-            let cookie = self.frame_gpu().map_or(
+            let cookie = frame_gpu.map_or(
                 crate::backend::light_gpu::LightCookieBinding::NONE,
                 |fgpu| fgpu.assign_light_cookie(light, asset_resources),
             );
@@ -193,22 +208,16 @@ impl FrameResourceManager {
             if !packet.render_shadows {
                 disable_gpu_light_shadows(&mut gpu_light);
             }
-            packed_lights.push(gpu_light);
+            entry.lights.push(gpu_light);
         }
         if !*wrote_fallback {
             self.light_scratch
-                .extend_from_slice(packed_lights.as_slice());
+                .extend_from_slice(entry.lights.as_slice());
             *wrote_fallback = true;
         }
 
-        let light_count = packed_lights.len();
-        let signed_scene_color_required = packet.signed_scene_color_required;
-        let entry = self
-            .per_view_lights
-            .get_or_insert_with(packet.view_id, PreparedViewLights::default);
-        entry.lights.clear();
-        entry.lights.extend_from_slice(packed_lights.as_slice());
-        entry.signed_scene_color_required = signed_scene_color_required;
+        let light_count = entry.lights.len();
+        entry.signed_scene_color_required = packet.signed_scene_color_required;
         logger::trace!(
             "prepared lights for view {:?}: lights={} render_context={:?} render_space_scope={:?} render_shadows={}",
             packet.view_id,
@@ -248,7 +257,7 @@ where
     S: SceneLightRead + ?Sized,
 {
     profiling::scope!("render::prepare_lights_for_view");
-    let mut light_space_ids = Vec::new();
+    let mut light_space_ids = take_light_space_id_scratch();
     collect_light_space_ids(scene, desc, &mut light_space_ids);
     let mut resolved = Vec::new();
     let mut visibility_stats =
@@ -262,6 +271,7 @@ where
         .take(kept)
         .any(light_has_negative_contribution);
     resolved.truncate(kept);
+    recycle_light_space_id_scratch(light_space_ids);
     PreparedViewLightPacket {
         view_id: desc.view_id,
         render_context: desc.render_context,
@@ -392,7 +402,7 @@ where
         }
         stats
     } else {
-        let mut resolved = Vec::new();
+        let mut resolved = take_light_resolve_scratch();
         let mut stats = LightVisibilityStats::default();
         for &id in light_space_ids {
             resolved.clear();
@@ -410,6 +420,51 @@ where
             ));
             out.append(&mut resolved);
         }
+        recycle_light_resolve_scratch(resolved);
         stats
     }
+}
+
+fn take_light_space_id_scratch() -> Vec<RenderSpaceId> {
+    LIGHT_SPACE_ID_SCRATCH.with(|slot| {
+        let mut scratch = match slot.try_borrow_mut() {
+            Ok(mut guard) => std::mem::take(&mut *guard),
+            Err(_) => Vec::new(),
+        };
+        scratch.clear();
+        scratch
+    })
+}
+
+fn recycle_light_space_id_scratch(mut scratch: Vec<RenderSpaceId>) {
+    scratch.clear();
+    LIGHT_SPACE_ID_SCRATCH.with(|slot| {
+        if let Ok(mut guard) = slot.try_borrow_mut()
+            && scratch.capacity() > guard.capacity()
+        {
+            *guard = scratch;
+        }
+    });
+}
+
+fn take_light_resolve_scratch() -> Vec<ResolvedLight> {
+    LIGHT_RESOLVE_SCRATCH.with(|slot| {
+        let mut scratch = match slot.try_borrow_mut() {
+            Ok(mut guard) => std::mem::take(&mut *guard),
+            Err(_) => Vec::new(),
+        };
+        scratch.clear();
+        scratch
+    })
+}
+
+fn recycle_light_resolve_scratch(mut scratch: Vec<ResolvedLight>) {
+    scratch.clear();
+    LIGHT_RESOLVE_SCRATCH.with(|slot| {
+        if let Ok(mut guard) = slot.try_borrow_mut()
+            && scratch.capacity() > guard.capacity()
+        {
+            *guard = scratch;
+        }
+    });
 }

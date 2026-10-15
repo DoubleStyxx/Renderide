@@ -147,9 +147,7 @@ pub(in crate::passes::world_mesh_forward) fn record_world_mesh_forward_phase_gra
 ) -> bool {
     let groups = prepared.plan.phase(phase);
     #[cfg(feature = "tracy")]
-    let debug_label = format!("world_mesh_forward::{phase:?}");
-    #[cfg(feature = "tracy")]
-    rpass.push_debug_group(debug_label.as_str());
+    rpass.push_debug_group(phase.debug_group_label());
     let recorded = record_world_mesh_forward_groups_graph_raster_for_view(
         rpass,
         frame,

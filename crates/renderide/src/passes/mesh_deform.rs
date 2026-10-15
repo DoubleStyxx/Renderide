@@ -64,6 +64,8 @@ struct MeshDeformScratch {
     ready_work_indices: Vec<usize>,
     /// Render contexts that need visible deform work in this submission.
     render_contexts: Vec<RenderingContext>,
+    /// Reused chunk descriptors for aggressive per-space collection.
+    collect_specs: Vec<DeformCollectChunkSpec>,
     /// Reused compute dispatch batch for the encode phase.
     dispatch_batch: MeshDeformDispatchBatch,
 }
@@ -76,6 +78,7 @@ impl MeshDeformScratch {
             work: Vec::new(),
             ready_work_indices: Vec::new(),
             render_contexts: Vec::new(),
+            collect_specs: Vec::new(),
             dispatch_batch: MeshDeformDispatchBatch::new(),
         }
     }
@@ -423,6 +426,7 @@ fn collect_deform_work_for_space_aggressive(
     visible_filter: Option<&HashSet<SkinCacheKey>>,
     render_contexts: &[RenderingContext],
     space_id: RenderSpaceId,
+    mut specs: &mut Vec<DeformCollectChunkSpec>,
     chunks: &mut Vec<Vec<DeformWorkItem>>,
     work: &mut Vec<DeformWorkItem>,
 ) {
@@ -445,7 +449,7 @@ fn collect_deform_work_for_space_aggressive(
         return;
     }
 
-    let mut specs = Vec::new();
+    specs.clear();
     push_deform_collect_chunks(
         &mut specs,
         DeformCollectChunkKind::Static,
@@ -554,6 +558,7 @@ fn collect_deform_work_into_scratch(
                 visible_filter,
                 render_contexts,
                 space_id,
+                &mut scratch.collect_specs,
                 &mut scratch.chunks,
                 &mut scratch.work,
             );
