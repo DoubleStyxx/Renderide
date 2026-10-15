@@ -236,3 +236,15 @@ Renderide depends on upstream projects with their own contribution rules. For ex
 ## License
 
 MIT - see [`LICENSE`](LICENSE).
+
+
+## Benchmarks
+
+CPU microbenchmarks live in `crates/renderide-bench` (no Resonite host or GPU required):
+
+```bash
+cargo bench -p renderide-bench
+cargo bench -p renderide-bench --no-run   # compile only
+```
+
+See [PERFORMANCE_NOTES.md](PERFORMANCE_NOTES.md) for measured IPC packing gains and next profiling steps.

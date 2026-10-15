@@ -9,7 +9,7 @@ use crate::gpu::bind_layout::{
     fragment_filterable_d2_array_entry, fragment_filtering_sampler_entry, texture_layout_entry,
     uniform_buffer_layout_entry,
 };
-use crate::gpu_resource::{OnceGpu, RenderPipelineMap};
+use crate::gpu_resource::{BindGroupMap, OnceGpu, RenderPipelineMap};
 use crate::render_graph::gpu_cache::{
     FullscreenRenderPipelineDesc, create_fullscreen_render_pipeline, create_linear_clamp_sampler,
     create_uniform_buffer, create_wgsl_shader_module,
@@ -78,9 +78,36 @@ struct PipelineKey {
     multiview_stereo: bool,
 }
 
+/// Upper bound on cached motion blur bind groups (per kind). The working set is a handful of
+/// `(transient texture, per-view UBO)` pairs; the cap bounds growth when the pool recycles.
+const MAX_CACHED_BIND_GROUPS: usize = 16;
+
+/// Identity key for the velocity-pass bind group. Depth views come from the frame view and are
+/// stable across frames, so the view handle itself is a valid identity key.
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct MotionVectorsBindGroupKey {
+    depth_view: wgpu::TextureView,
+    params: wgpu::Buffer,
+    multiview_stereo: bool,
+}
+
+/// Identity key for the blur-resolve bind group, keyed by the underlying transient textures so
+/// the per-frame D2Array views (and bind group) are only rebuilt when the pool hands out a new
+/// allocation.
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct BlurBindGroupKey {
+    scene_color: wgpu::Texture,
+    velocity: wgpu::Texture,
+    params: wgpu::Buffer,
+    multiview_stereo: bool,
+}
+
 /// GPU state shared by every motion blur pass instance.
-#[derive(Default)]
 pub(super) struct MotionBlurPipelineCache {
+    /// Cached velocity-pass bind groups (avoids a `create_bind_group` per view per frame).
+    motion_vectors_bind_groups: BindGroupMap<MotionVectorsBindGroupKey>,
+    /// Cached blur-resolve bind groups (avoids two views + one bind group per view per frame).
+    blur_bind_groups: BindGroupMap<BlurBindGroupKey>,
     /// Linear clamp sampler used by the blur resolve.
     sampler: OnceGpu<wgpu::Sampler>,
     /// Bind-group layout for mono depth reprojection.
@@ -97,7 +124,71 @@ pub(super) struct MotionBlurPipelineCache {
     pipelines: RenderPipelineMap<PipelineKey>,
 }
 
+impl Default for MotionBlurPipelineCache {
+    fn default() -> Self {
+        Self {
+            motion_vectors_bind_groups: BindGroupMap::with_max_entries(MAX_CACHED_BIND_GROUPS),
+            blur_bind_groups: BindGroupMap::with_max_entries(MAX_CACHED_BIND_GROUPS),
+            sampler: OnceGpu::default(),
+            motion_vectors_bgl_mono: OnceGpu::default(),
+            motion_vectors_bgl_multiview: OnceGpu::default(),
+            blur_bgl: OnceGpu::default(),
+            shader_mono: OnceGpu::default(),
+            shader_multiview: OnceGpu::default(),
+            pipelines: RenderPipelineMap::default(),
+        }
+    }
+}
+
 impl MotionBlurPipelineCache {
+    /// Returns a cached velocity-pass bind group, building it on miss.
+    pub(super) fn cached_motion_vectors_bind_group(
+        &self,
+        device: &wgpu::Device,
+        depth_view: &wgpu::TextureView,
+        params_buffer: &wgpu::Buffer,
+        multiview_stereo: bool,
+    ) -> wgpu::BindGroup {
+        let key = MotionVectorsBindGroupKey {
+            depth_view: depth_view.clone(),
+            params: params_buffer.clone(),
+            multiview_stereo,
+        };
+        self.motion_vectors_bind_groups.get_or_create(key, |k| {
+            self.motion_vectors_bind_group(device, &k.depth_view, &k.params, k.multiview_stereo)
+        })
+    }
+
+    /// Returns a cached blur-resolve bind group, creating the D2Array views only on miss.
+    pub(super) fn cached_blur_bind_group(
+        &self,
+        device: &wgpu::Device,
+        scene_color: &wgpu::Texture,
+        velocity: &wgpu::Texture,
+        params_buffer: &wgpu::Buffer,
+        multiview_stereo: bool,
+    ) -> wgpu::BindGroup {
+        let key = BlurBindGroupKey {
+            scene_color: scene_color.clone(),
+            velocity: velocity.clone(),
+            params: params_buffer.clone(),
+            multiview_stereo,
+        };
+        self.blur_bind_groups.get_or_create(key, |k| {
+            let input_view = crate::render_graph::gpu_cache::create_d2_array_view(
+                &k.scene_color,
+                "motion_blur_scene_color",
+                k.multiview_stereo,
+            );
+            let velocity_view = crate::render_graph::gpu_cache::create_d2_array_view(
+                &k.velocity,
+                "motion_blur_velocity",
+                k.multiview_stereo,
+            );
+            self.blur_bind_group(device, &input_view, &velocity_view, &k.params)
+        })
+    }
+
     /// Linear clamp sampler shared by blur resolve texture inputs.
     pub(super) fn sampler(&self, device: &wgpu::Device) -> &wgpu::Sampler {
         self.sampler
