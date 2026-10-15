@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use super::error::DriverErrorState;
 use super::ring::BoundedRing;
-use super::submit_batch::{DriverMessage, SubmitBatch};
+use super::submit_batch::{DriverMessage, DriverSubmitKind, SubmitBatch};
 use super::submit_counters::SubmitCounters;
 use super::surface_counters::SurfaceCounters;
 use super::xr_finalize::run_xr_finalize;
@@ -21,6 +21,9 @@ use crate::gpu::flight_recorder::{
 use crate::gpu::frame_cpu_gpu_timing::{
     FrameTimingTrack, make_gpu_done_callback, record_frame_bracket_gpu_ms, record_real_submit,
 };
+
+/// Maximum number of driver-ring batches folded into one `Queue::submit`.
+pub(super) const MAX_COALESCED_SUBMITS: usize = 8;
 
 /// RAII guard that marks the ring's consumer side dead on drop.
 ///
@@ -93,6 +96,7 @@ pub(super) fn driver_loop(
         let DriverMessage::Submit(batch) = message else {
             break;
         };
+        let (batch, submit_count, shutdown_after) = coalesce_queued_submits(ring.as_ref(), *batch);
         let ring_depth = ring.depth();
         let ctx = DriverLoopContext {
             queue: queue.as_ref(),
@@ -101,7 +105,10 @@ pub(super) fn driver_loop(
             submit_counters: &submit_counters,
             flight_recorder: &flight_recorder,
         };
-        process_batch(ctx, ring_depth, *batch);
+        process_batch(ctx, ring_depth, batch, submit_count);
+        if shutdown_after {
+            break;
+        }
     }
     // A `DriverMessage::Shutdown` value breaks the loop above; nothing further to do.
     let (pushed, done) = submit_counters.snapshot();
@@ -113,9 +120,94 @@ pub(super) fn driver_loop(
     );
 }
 
+/// How many already-queued followers to fold into a plain background batch.
+///
+/// `followers_plain[i]` is true when that follower is plain background work. Plain followers
+/// are included. The first follower that is not plain is included as the terminating anchor
+/// and scanning stops, so a present, OpenXR, or waited batch is never delayed by work that
+/// was queued after it. The total, including the first batch, stays within
+/// [`MAX_COALESCED_SUBMITS`].
+pub(super) fn extra_batches_to_coalesce(first_is_plain: bool, followers_plain: &[bool]) -> usize {
+    if !first_is_plain {
+        return 0;
+    }
+    let mut extra = 0usize;
+    for &plain in followers_plain {
+        if extra + 1 >= MAX_COALESCED_SUBMITS {
+            break;
+        }
+        extra += 1;
+        if !plain {
+            break;
+        }
+    }
+    extra
+}
+
+fn is_plain_background(batch: &SubmitBatch) -> bool {
+    batch.submit_kind == DriverSubmitKind::BackgroundGpuWork
+        && batch.surface_texture.is_none()
+        && batch.xr_finalize.is_none()
+        && batch.wait.is_none()
+        && batch.frame_timing.is_none()
+        && batch.frame_bracket_readback.is_none()
+}
+
+/// Prepends already-queued plain background work onto `batch`, stopping at one anchor.
+///
+/// Returns the merged batch, how many ring batches it represents, and whether the next ring
+/// message was [`DriverMessage::Shutdown`]. Shutdown is consumed so the loop exits after this
+/// batch; messages after it stay queued and are dropped with the ring, matching a normal pop.
+fn coalesce_queued_submits(
+    ring: &BoundedRing<DriverMessage>,
+    batch: SubmitBatch,
+) -> (SubmitBatch, usize, bool) {
+    if !is_plain_background(&batch) {
+        return (batch, 1, false);
+    }
+    let mut batch = batch;
+    let mut merged = 1usize;
+    while merged < MAX_COALESCED_SUBMITS {
+        match ring.try_pop() {
+            None => break,
+            Some(DriverMessage::Shutdown) => return (batch, merged, true),
+            Some(DriverMessage::Submit(next)) => {
+                let anchor = !is_plain_background(&next);
+                batch = merge_submit_batches(batch, *next);
+                merged += 1;
+                if anchor {
+                    break;
+                }
+            }
+        }
+    }
+    (batch, merged, false)
+}
+
+fn merge_submit_batches(mut prefix: SubmitBatch, mut anchor: SubmitBatch) -> SubmitBatch {
+    prefix.command_buffers.append(&mut anchor.command_buffers);
+    anchor.command_buffers = prefix.command_buffers;
+    let mut retained = prefix.retained_resources;
+    retained.append(anchor.retained_resources);
+    anchor.retained_resources = retained;
+    prefix
+        .on_submitted_work_done
+        .append(&mut anchor.on_submitted_work_done);
+    anchor.on_submitted_work_done = prefix.on_submitted_work_done;
+    anchor
+}
+
 /// Handles one batch end-to-end: submit, install frame-timing callback, present, signal
 /// the oneshot. Each step is instrumented for Tracy.
-fn process_batch(ctx: DriverLoopContext<'_>, ring_depth: usize, batch: SubmitBatch) {
+///
+/// `submit_count` is the number of ring batches represented by `batch`. Each one advances
+/// the submit-done counter so a coalesced `Queue::submit` still releases every token.
+fn process_batch(
+    ctx: DriverLoopContext<'_>,
+    ring_depth: usize,
+    batch: SubmitBatch,
+    submit_count: usize,
+) {
     profiling::scope!("driver::frame");
     let SubmitBatch {
         submit_kind: _submit_kind,
@@ -137,7 +229,7 @@ fn process_batch(ctx: DriverLoopContext<'_>, ring_depth: usize, batch: SubmitBat
         has_xr_finalize: xr_finalize.is_some(),
     };
 
-    submit_commands(ctx, summary, command_buffers);
+    submit_commands(ctx, summary, command_buffers, submit_count);
 
     if let Some(track) = frame_timing {
         // Capture the post-submit instant on this thread for the `submit_latency_ms`
@@ -164,6 +256,7 @@ fn submit_commands(
     ctx: DriverLoopContext<'_>,
     summary: DriverBatchSummary,
     command_buffers: Vec<wgpu::CommandBuffer>,
+    submit_count: usize,
 ) {
     record_driver_event(
         ctx,
@@ -185,7 +278,10 @@ fn submit_commands(
     };
     // Bumped immediately after the submit returns and the gate is dropped so the backlog
     // plot reflects "in-flight on driver" without waiting on `present` or `xr_finalize`.
-    ctx.submit_counters.note_submit_done();
+    let submit_count = submit_count.max(1);
+    for _ in 0..submit_count {
+        ctx.submit_counters.note_submit_done();
+    }
     record_driver_event(
         ctx,
         summary,
@@ -321,4 +417,23 @@ fn register_gpu_completion(
     let gpu_done =
         make_gpu_done_callback(track.handle, track.generation, track.seq, real_submit_at);
     queue.on_submitted_work_done(Box::new(gpu_done));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_COALESCED_SUBMITS, extra_batches_to_coalesce};
+
+    #[test]
+    fn coalesce_span_stops_at_one_anchor_and_respects_the_cap() {
+        assert_eq!(extra_batches_to_coalesce(false, &[true, true]), 0);
+        assert_eq!(extra_batches_to_coalesce(true, &[]), 0);
+        assert_eq!(
+            extra_batches_to_coalesce(true, &[true, true, false, true]),
+            3
+        );
+        assert_eq!(
+            extra_batches_to_coalesce(true, &[true; MAX_COALESCED_SUBMITS + 4]),
+            MAX_COALESCED_SUBMITS - 1
+        );
+    }
 }

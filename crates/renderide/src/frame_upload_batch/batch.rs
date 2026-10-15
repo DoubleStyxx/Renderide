@@ -174,7 +174,8 @@ impl FrameUploadBatch {
     /// per-view uniform writes paid that overhead per write. The arena path copies the whole frame
     /// payload into one mapped buffer, unmaps once, and emits one encoder op per write. Persistent
     /// slots are recycled only after the submitted GPU work completes; if every persistent slot is
-    /// still busy, the frame falls back to a one-frame temporary staging buffer.
+    /// still busy, the frame reuses a pooled overflow buffer and only allocates a one-shot staging
+    /// buffer when that pool is saturated too. Acquire does not call `device.poll`.
     ///
     /// Writes whose `offset` or `len` are not 4-byte aligned (the
     /// [`wgpu::COPY_BUFFER_ALIGNMENT`] requirement for `copy_buffer_to_buffer`) fall back to

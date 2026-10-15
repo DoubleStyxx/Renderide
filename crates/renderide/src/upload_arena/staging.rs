@@ -7,7 +7,16 @@ use crate::upload_stats::UploadArenaAcquireStats;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum UploadStagingSource {
     None,
-    Persistent { slot: usize, generation: u64 },
+    Persistent {
+        slot: usize,
+        generation: u64,
+    },
+    /// Overflow buffer owned by the arena pool. `slot` indexes [`PersistentUploadArena`]'s pool.
+    Pooled {
+        slot: usize,
+        generation: u64,
+    },
+    /// One-shot buffer used only when the persistent ring and the pool are both saturated.
     Temporary,
     QueueFallbackOversized,
 }
@@ -52,6 +61,13 @@ impl PreparedUploadStaging {
                 FinishedUploadStaging {
                     buffer: self.buffer,
                     on_submitted_work_done: None,
+                }
+            }
+            UploadStagingSource::Pooled { slot, generation } => {
+                let on_submitted_work_done = arena.finish_pooled_write(slot, generation);
+                FinishedUploadStaging {
+                    buffer: self.buffer,
+                    on_submitted_work_done,
                 }
             }
             UploadStagingSource::Persistent { slot, generation } => {

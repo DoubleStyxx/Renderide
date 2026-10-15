@@ -182,13 +182,35 @@ impl OcclusionSystem {
     /// wgpu call is issued from inside the device-poll callback (which would risk deadlocks
     /// with wgpu's internal queue-write locks -- observed as a futex hang inside
     /// `queue.write_texture` during asset upload).
+    ///
+    /// Both polls are skipped when no view has a recorded copy or an in-flight map. The second
+    /// poll still runs when a map was just started or an older map is still pending, so occlusion
+    /// keeps the same snapshot it would have used with a fixed two-poll drain.
     pub fn hi_z_begin_frame_readback(&self, device: &wgpu::Device) {
         profiling::scope!("hi_z::readback_drain");
+        if !self.any_outstanding_readback() {
+            return;
+        }
         let _ = device.poll(wgpu::PollType::Poll);
         self.drain_completed_hi_z_maps();
         self.start_ready_hi_z_maps();
-        let _ = device.poll(wgpu::PollType::Poll);
-        self.drain_completed_hi_z_maps();
+        if self.any_outstanding_readback() {
+            let _ = device.poll(wgpu::PollType::Poll);
+            self.drain_completed_hi_z_maps();
+        }
+    }
+
+    fn any_outstanding_readback(&self) -> bool {
+        if self.main.lock().has_outstanding_readback() {
+            return true;
+        }
+        let offscreen = self.offscreen.lock();
+        for slot in offscreen.values() {
+            if slot.lock().has_outstanding_readback() {
+                return true;
+            }
+        }
+        false
     }
 
     /// Cancels all pending Hi-Z staging maps after GPU recovery.

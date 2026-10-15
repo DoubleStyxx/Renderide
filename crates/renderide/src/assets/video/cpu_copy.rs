@@ -468,6 +468,27 @@ fn write_rgba_frame_to_texture(
     bytes_per_row: u32,
 ) {
     profiling::scope!("video::write_rgba_frame_to_texture");
+    if crate::texture_upload_batch::try_record_texture_copy(
+        &wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        bytes,
+        &wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(bytes_per_row),
+            rows_per_image: Some(height),
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    ) {
+        return;
+    }
     queue.write_texture(
         wgpu::TexelCopyTextureInfo {
             texture,

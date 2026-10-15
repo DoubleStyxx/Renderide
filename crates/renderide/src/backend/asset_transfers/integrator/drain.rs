@@ -85,6 +85,11 @@ pub fn drain_asset_tasks(
     let summary = AssetIntegrationDrainSummary::start(asset);
     let high_priority_deadline = high_priority_emergency_deadline(drain_start, normal_deadline);
     let gpu_handles = collect_gpu_handles(asset);
+    let texture_upload_session = gpu_handles.as_ref().map(|_| {
+        crate::texture_upload_batch::TextureUploadSession::begin(
+            asset.gpu.texture_upload_scratch.clone(),
+        )
+    });
     let gpu_context = gpu_handles
         .as_ref()
         .map(|handles| handles.as_context(queue_access_mode));
@@ -103,10 +108,7 @@ pub fn drain_asset_tasks(
     let (particle_elapsed, particle_outcome) =
         run_particle_lane(asset, materials, gpu, shm, ipc, particle_deadline);
 
-    flush_mesh_upload_batch(asset, gpu_handles.as_ref(), queue_access_mode);
-    flush_batched_particle_acks(ipc);
-
-    finalize_drain(
+    let summary = finalize_drain(
         asset,
         ipc,
         summary,
@@ -118,7 +120,11 @@ pub fn drain_asset_tasks(
             gpu_ready: gpu.is_some(),
             queue_access_mode,
         },
-    )
+    );
+    flush_mesh_upload_batch(asset, gpu_handles.as_ref(), queue_access_mode);
+    drop(texture_upload_session);
+    flush_batched_particle_acks(ipc);
+    summary
 }
 
 fn flush_batched_particle_acks(ipc: &mut Option<&mut DualQueueIpc>) {
@@ -143,57 +149,75 @@ fn flush_mesh_upload_batch(
         .mesh_upload_arena
         .lock()
         .maintain(gpu.device.as_ref());
-    let Some(gate) = gpu.gate.lock_for(queue_access_mode) else {
+    let gate = gpu.gate.lock_for(queue_access_mode);
+    let queue_gate_held = gate.is_some();
+    let (mesh_flush, texture_flush) = {
         let mut mesh_upload_arena = asset.gpu.mesh_upload_arena.lock();
-        let _ = gpu.mesh_upload_batch.drain_and_flush(
+        let mesh_flush = gpu.mesh_upload_batch.drain_and_flush(
             gpu.device.as_ref(),
             gpu.queue.as_ref(),
             gpu.gpu_limits.max_buffer_size(),
             &mut mesh_upload_arena,
-            true,
+            !queue_gate_held,
         );
-        return;
-    };
-    let flush = {
-        let mut mesh_upload_arena = asset.gpu.mesh_upload_arena.lock();
-        gpu.mesh_upload_batch.drain_and_flush(
+        let texture_flush = crate::texture_upload_batch::flush_recorded(
             gpu.device.as_ref(),
             gpu.queue.as_ref(),
+            &gpu.gate,
+            queue_access_mode,
+            queue_gate_held,
             gpu.gpu_limits.max_buffer_size(),
             &mut mesh_upload_arena,
-            false,
-        )
+        );
+        (mesh_flush, texture_flush)
     };
     drop(gate);
-    let Some(flush) = flush else {
-        return;
-    };
-    submit_mesh_upload_flush(gpu, flush);
+    submit_upload_flushes(gpu, mesh_flush, texture_flush);
 }
 
-fn submit_mesh_upload_flush(
+fn submit_upload_flushes(
     gpu: &GpuHandles,
-    flush: super::super::mesh_upload_batch::MeshUploadFlush,
+    mesh_flush: Option<super::super::mesh_upload_batch::MeshUploadFlush>,
+    texture_flush: Option<crate::texture_upload_batch::TextureUploadFlush>,
 ) {
-    profiling::scope!("asset::mesh_upload_driver_submit");
-    let super::super::mesh_upload_batch::MeshUploadFlush {
-        command_buffer,
-        on_submitted_work_done: upload_done_callback,
-        stats: _stats,
-    } = flush;
-    let Some(command_buffer) = command_buffer else {
-        return;
-    };
+    profiling::scope!("asset::upload_driver_submit");
+    let mut command_buffers = Vec::new();
     let mut on_submitted_work_done = Vec::new();
-    if let Some(callback) = upload_done_callback {
-        on_submitted_work_done.push(callback);
+    let mut retained_resources = crate::gpu::GpuRetainedResources::new();
+    if let Some(flush) = mesh_flush {
+        let super::super::mesh_upload_batch::MeshUploadFlush {
+            command_buffer,
+            on_submitted_work_done: upload_done_callback,
+            staging_buffer,
+            stats: _stats,
+        } = flush;
+        command_buffers.extend(command_buffer);
+        on_submitted_work_done.extend(upload_done_callback);
+        if let Some(staging_buffer) = staging_buffer {
+            retained_resources.retain_buffer(staging_buffer);
+        }
+    }
+    if let Some(flush) = texture_flush {
+        let crate::texture_upload_batch::TextureUploadFlush {
+            command_buffer,
+            on_submitted_work_done: upload_done_callback,
+            staging_buffer,
+        } = flush;
+        command_buffers.extend(command_buffer);
+        on_submitted_work_done.extend(upload_done_callback);
+        if let Some(staging_buffer) = staging_buffer {
+            retained_resources.retain_buffer(staging_buffer);
+        }
+    }
+    if command_buffers.is_empty() {
+        return;
     }
     let _ = gpu
         .driver_submitter
         .submit(crate::gpu::driver_thread::SubmitBatch {
             submit_kind: crate::gpu::driver_thread::DriverSubmitKind::BackgroundGpuWork,
-            command_buffers: vec![command_buffer],
-            retained_resources: crate::gpu::GpuRetainedResources::new(),
+            command_buffers,
+            retained_resources,
             surface_texture: None,
             on_submitted_work_done,
             frame_timing: None,

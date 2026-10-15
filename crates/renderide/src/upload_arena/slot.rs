@@ -2,7 +2,14 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-pub(super) const UPLOAD_ARENA_SLOTS: usize = 3;
+/// Persistent mapped slots kept for steady-state frame and mesh uploads.
+///
+/// A slot stays unavailable for about two frames after submit: one while the GPU copy is in
+/// flight, and one while `map_async` completes. Six slots cover that recycle latency plus a
+/// couple of extra in-flight frames without allocating a fresh staging buffer.
+pub(super) const UPLOAD_ARENA_SLOTS: usize = 6;
+/// Overflow staging buffers recycled after GPU completion when every persistent slot is busy.
+pub(super) const UPLOAD_ARENA_POOLED_TEMPS: usize = 4;
 const DEFAULT_SLOT_BYTES: u64 = 1024 * 1024;
 static OVERSIZED_UPLOAD_LOG_COUNTER: AtomicU64 = AtomicU64::new(0);
 

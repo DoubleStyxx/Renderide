@@ -6,6 +6,8 @@
 
 use std::borrow::Cow;
 
+use parking_lot::Mutex;
+
 use super::pipeline::{GtaoParamsGpu, GtaoPipelines, VIEW_DEPTH_MIP_COUNT};
 use crate::graph_inputs::PerViewFramePlanSlot;
 use crate::passes::helpers::missing_pass_resource;
@@ -21,6 +23,37 @@ use crate::render_graph::resources::{
 
 const GTAO_PREFILTER_WORKGROUP_SIZE: u32 = 8;
 const GTAO_PREFILTER_MIP0_PIXELS_PER_INVOCATION: u32 = 2;
+const PREFILTER_BIND_GROUP_CACHE_CAP: usize = 8;
+
+/// Identity of one GTAO depth-prefilter bind group.
+///
+/// The group references buffers whose contents are updated with `write_buffer`, so a hit is
+/// valid for as long as the depth texture, frame-uniform buffer, params buffer, and output
+/// views keep the same wgpu ids.
+struct PrefilterBindKey {
+    depth: wgpu::Texture,
+    layer_count: u32,
+    multiview: bool,
+    frame_uniforms: wgpu::Buffer,
+    params: wgpu::Buffer,
+    outputs: [wgpu::TextureView; VIEW_DEPTH_MIP_COUNT as usize],
+}
+
+impl PartialEq for PrefilterBindKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.layer_count == other.layer_count
+            && self.multiview == other.multiview
+            && self.depth == other.depth
+            && self.frame_uniforms == other.frame_uniforms
+            && self.params == other.params
+            && self.outputs == other.outputs
+    }
+}
+
+#[derive(Default)]
+struct PrefilterBindCache {
+    entries: Vec<(PrefilterBindKey, wgpu::BindGroup)>,
+}
 
 /// Source and destination resources for the combined GTAO depth prefilter.
 #[derive(Clone, Copy, Debug)]
@@ -41,6 +74,7 @@ pub(super) struct GtaoDepthPrefilterPass {
     settings: crate::config::GtaoSettings,
     pipelines: &'static GtaoPipelines,
     view_depth_multiview_stereo: bool,
+    bind_group_cache: Mutex<PrefilterBindCache>,
 }
 
 impl GtaoDepthPrefilterPass {
@@ -56,6 +90,7 @@ impl GtaoDepthPrefilterPass {
             settings,
             pipelines,
             view_depth_multiview_stereo,
+            bind_group_cache: Mutex::new(PrefilterBindCache::default()),
         }
     }
 
@@ -115,6 +150,92 @@ impl GtaoDepthPrefilterPass {
             missing_pass_resource(self.name(), format_args!("missing output mip {m0:?}"))
         })?;
         Ok((t0.width, t0.height))
+    }
+
+    fn cached_bind_group(
+        &self,
+        ctx: &ComputePassCtx<'_, '_, '_>,
+        frame_uniform_buffer: &wgpu::Buffer,
+        params_buffer: &wgpu::Buffer,
+        multiview: bool,
+        layer_count: u32,
+        outputs: [&wgpu::TextureView; VIEW_DEPTH_MIP_COUNT as usize],
+    ) -> wgpu::BindGroup {
+        let key = PrefilterBindKey {
+            depth: ctx.frame.view.depth_texture.clone(),
+            layer_count,
+            multiview,
+            frame_uniforms: frame_uniform_buffer.clone(),
+            params: params_buffer.clone(),
+            outputs: outputs.map(wgpu::TextureView::clone),
+        };
+        let mut cache = self.bind_group_cache.lock();
+        if let Some((_, bind_group)) = cache.entries.iter().find(|(cached, _)| *cached == key) {
+            return bind_group.clone();
+        }
+        let source_view = ctx
+            .frame
+            .view
+            .depth_texture
+            .create_view(&wgpu::TextureViewDescriptor {
+                label: Some(raw_depth_view_label(multiview)),
+                aspect: wgpu::TextureAspect::DepthOnly,
+                dimension: Some(prefilter_view_dimension(multiview)),
+                base_array_layer: 0,
+                array_layer_count: Some(layer_count),
+                ..Default::default()
+            });
+        crate::profiling::note_resource_churn!(
+            TextureView,
+            "passes::gtao_prefilter_raw_depth_view"
+        );
+        let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("gtao_prefilter_combined"),
+            layout: self
+                .pipelines
+                .depth_prefilter
+                .bind_group_layout(ctx.device, multiview),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&source_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: frame_uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(outputs[0]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(outputs[1]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(outputs[2]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(outputs[3]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(outputs[4]),
+                },
+            ],
+        });
+        crate::profiling::note_resource_churn!(BindGroup, "passes::gtao_prefilter_combined_bg");
+        if cache.entries.len() == PREFILTER_BIND_GROUP_CACHE_CAP {
+            cache.entries.remove(0);
+        }
+        cache.entries.push((key, bind_group.clone()));
+        bind_group
     }
 }
 
@@ -195,22 +316,6 @@ impl ComputePass for GtaoDepthPrefilterPass {
         let bind_group_multiview_stereo = self.bind_group_multiview_stereo();
         let view_multiview_stereo = ctx.frame.view.multiview_stereo;
         let layer_count = self.dispatch_layer_count(view_multiview_stereo);
-        let source_view = ctx
-            .frame
-            .view
-            .depth_texture
-            .create_view(&wgpu::TextureViewDescriptor {
-                label: Some(raw_depth_view_label(bind_group_multiview_stereo)),
-                aspect: wgpu::TextureAspect::DepthOnly,
-                dimension: Some(prefilter_view_dimension(bind_group_multiview_stereo)),
-                base_array_layer: 0,
-                array_layer_count: Some(layer_count),
-                ..Default::default()
-            });
-        crate::profiling::note_resource_churn!(
-            TextureView,
-            "passes::gtao_prefilter_raw_depth_view"
-        );
 
         let [m0, m1, m2, m3, m4] = self.resources.output_mips;
         let Some(output_view0) = ctx.graph_resources.subresource_view(m0) else {
@@ -229,48 +334,20 @@ impl ComputePass for GtaoDepthPrefilterPass {
             return Ok(());
         };
 
-        let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("gtao_prefilter_combined"),
-            layout: self
-                .pipelines
-                .depth_prefilter
-                .bind_group_layout(ctx.device, bind_group_multiview_stereo),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&source_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: frame_uniform_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: params_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(output_view0),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::TextureView(output_view1),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: wgpu::BindingResource::TextureView(output_view2),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 6,
-                    resource: wgpu::BindingResource::TextureView(output_view3),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 7,
-                    resource: wgpu::BindingResource::TextureView(output_view4),
-                },
+        let bind_group = self.cached_bind_group(
+            ctx,
+            &frame_uniform_buffer,
+            params_buffer,
+            bind_group_multiview_stereo,
+            layer_count,
+            [
+                output_view0,
+                output_view1,
+                output_view2,
+                output_view3,
+                output_view4,
             ],
-        });
-        crate::profiling::note_resource_churn!(BindGroup, "passes::gtao_prefilter_combined_bg");
+        );
 
         let pipeline = self
             .pipelines
