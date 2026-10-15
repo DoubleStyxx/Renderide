@@ -87,33 +87,35 @@ fn compose_variant(
 ) -> Result<naga::Module, String> {
     let mut composer = Composer::default().with_capabilities(Capabilities::all());
     for (file_path, module_source) in modules {
-        composer
-            .add_composable_module(ComposableModuleDescriptor {
-                source: module_source.as_str(),
-                file_path: file_path.as_str(),
-                language: ShaderLanguage::Wgsl,
-                ..Default::default()
-            })
-            .map_err(|err| {
-                format!(
-                    "custom shader module {file_path}: {}",
-                    err.emit_to_string(&composer)
-                )
-            })?;
+        if let Err(err) = composer.add_composable_module(ComposableModuleDescriptor {
+            source: module_source.as_str(),
+            file_path: file_path.as_str(),
+            language: ShaderLanguage::Wgsl,
+            ..Default::default()
+        }) {
+            return Err(format!(
+                "custom shader module {file_path}: {}",
+                err.emit_to_string(&composer)
+            ));
+        }
     }
     let mut shader_defs = std::collections::HashMap::new();
     if multiview {
         shader_defs.insert("MULTIVIEW".to_string(), ShaderDefValue::Bool(true));
     }
-    composer
-        .make_naga_module(NagaModuleDescriptor {
-            source,
-            file_path: label,
-            shader_type: ShaderType::Wgsl,
-            shader_defs,
-            ..Default::default()
-        })
-        .map_err(|err| format!("compose {label}: {}", err.emit_to_string(&composer)))
+    match composer.make_naga_module(NagaModuleDescriptor {
+        source,
+        file_path: label,
+        shader_type: ShaderType::Wgsl,
+        shader_defs,
+        ..Default::default()
+    }) {
+        Ok(module) => Ok(module),
+        Err(err) => Err(format!(
+            "compose {label}: {}",
+            err.emit_to_string(&composer)
+        )),
+    }
 }
 
 fn module_to_wgsl(module: &naga::Module, label: &str) -> Result<String, String> {

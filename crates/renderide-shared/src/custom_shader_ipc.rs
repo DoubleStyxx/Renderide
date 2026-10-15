@@ -78,7 +78,11 @@ fn parse_custom_shader_body(rest: &str) -> Result<CustomShaderPayload, String> {
     if !remove && wgsl.trim().is_empty() {
         return Err(format!("custom shader payload for `{key}` has empty WGSL"));
     }
-    Ok(CustomShaderPayload { key, remove, wgsl })
+    Ok(CustomShaderPayload {
+        key,
+        remove,
+        wgsl: wgsl.to_string(),
+    })
 }
 
 fn split_header(rest: &str) -> Result<(&str, &str), String> {

@@ -160,7 +160,7 @@ fn unchanged_install(
     base_stem: &str,
     default_stem: &str,
     multiview_stem: &str,
-    composed: &self::compose::ComposedCustomShader,
+    composed: &compose::ComposedCustomShader,
 ) -> Option<InstalledCustomShader> {
     let registry = registry().read();
     let previous = registry.targets.get(default_stem)?;
@@ -311,7 +311,7 @@ fn leak_passes(passes: Vec<OwnedMaterialPass>) -> &'static [MaterialPassDesc] {
 }
 
 fn leak_material_defaults(
-    defaults: Vec<self::passes::OwnedMaterialDefault>,
+    defaults: Vec<passes::OwnedMaterialDefault>,
 ) -> &'static [EmbeddedMaterialDefault] {
     let leaked: Vec<EmbeddedMaterialDefault> = defaults
         .into_iter()
@@ -379,12 +379,12 @@ mod tests {
                 ..Default::default()
             }))
             .expect("device");
-        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let _module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("custom-shader-example"),
             source: wgpu::ShaderSource::Wgsl(wgsl.into()),
         });
-        let error = pollster::block_on(device.pop_error_scope());
+        let error = pollster::block_on(error_scope.pop());
         assert!(
             error.is_none(),
             "wgpu rejected the custom shader: {error:?}"

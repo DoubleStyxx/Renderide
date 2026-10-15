@@ -560,6 +560,32 @@ mod tests {
     }
 
     #[test]
+    fn custom_shader_retarget_rebinds_and_restores_a_named_route() {
+        let mut graph = MaterialAssetGraph::new(RasterPipelineKind::Null);
+        let key = "route-retarget-only";
+        graph.register_shader_route(
+            7,
+            RasterPipelineKind::Null,
+            Some(key.to_string()),
+            Some(0x20),
+        );
+
+        let wgsl = include_str!("../../../../RenderideMod/Shaders/example_solid.wgsl");
+        crate::materials::custom_shader::install(key, wgsl).expect("install custom shader");
+        graph.retarget_named_shader_routes(key);
+        assert_eq!(
+            graph.stem_for_shader_asset(7),
+            Some("renderide_custom_route-retarget-only_default")
+        );
+        assert_eq!(graph.variant_bits_for_shader_asset(7), Some(0x20));
+
+        crate::materials::custom_shader::remove(key).expect("remove custom shader");
+        graph.retarget_named_shader_routes(key);
+        assert_eq!(graph.stem_for_shader_asset(7), None);
+        assert_eq!(graph.variant_bits_for_shader_asset(7), Some(0x20));
+    }
+
+    #[test]
     fn global_uniform_registration_tracks_dependency_hook() {
         let mut graph = MaterialAssetGraph::new(RasterPipelineKind::Null);
 

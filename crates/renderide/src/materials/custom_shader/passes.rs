@@ -184,7 +184,7 @@ pub(super) fn parse_material_defaults(
     source: &str,
     file: &str,
 ) -> Result<Vec<OwnedMaterialDefault>, String> {
-    let mut defaults = Vec::new();
+    let mut defaults: Vec<OwnedMaterialDefault> = Vec::new();
     for (line_idx, line) in source.lines().enumerate() {
         let line_no = line_idx + 1;
         let Some(rest) = line.trim_start().strip_prefix("//#mat_default") else {

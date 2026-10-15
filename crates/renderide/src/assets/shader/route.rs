@@ -148,7 +148,8 @@ fn resolve_custom_shader_payload(
     };
     if payload.remove {
         crate::materials::custom_shader::remove(&payload.key);
-        let mut resolved = plan_shader_route(Some(payload.key.clone()), None, stem_lookup).into();
+        let mut resolved: ResolvedShaderUpload =
+            plan_shader_route(Some(payload.key.clone()), None, stem_lookup).into();
         resolved.retarget_shader_key = Some(payload.key);
         return resolved;
     }
