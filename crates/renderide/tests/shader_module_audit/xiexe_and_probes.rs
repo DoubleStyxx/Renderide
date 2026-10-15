@@ -477,7 +477,7 @@ fn xiexe_direct_diffuse_uses_burley_with_ramp_tint() -> io::Result<()> {
         "return brdf::direct_diffuse_fresnel_transmission(f, specular_reflectance);",
         "fn direct_diffuse_brdf(",
         "return brdf::fd_burley(",
-        "let diffuse_transmission = direct_diffuse_fresnel_transmission(",
+        "let diffuse_transmission = direct_diffuse_fresnel_transmission_prepared(",
         "let diffuse_brdf = direct_diffuse_brdf_prepared(diffuse_n, light.direction, view_dir, s.roughness);",
         "fn direct_diffuse_brdf(\n    normal: vec3<f32>,\n    light_direction: vec3<f32>,\n    view_dir: vec3<f32>,\n    perceptual_roughness: f32,",
         "s.albedo.rgb * diffuse_transmission * diffuse_brdf * light.color * light.attenuation * ramp",
