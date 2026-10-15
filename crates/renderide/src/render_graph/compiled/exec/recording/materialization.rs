@@ -140,17 +140,10 @@ impl CompiledRenderGraph {
         let Some(first_step) = steps.first().copied() else {
             return Ok(false);
         };
-        match self.cached_raster_merge(group).map(|cached| &cached.entry) {
-            Some(RasterMergeCacheEntry::NotRaster) => {
-                return Ok(false);
-            }
-            Some(RasterMergeCacheEntry::MissingTemplate { pass }) => {
-                return Err(GraphExecuteError::MissingRasterTemplate { pass: pass.clone() });
-            }
-            // Incompatible still runs dynamic-state and `should_record` checks so skipped-pass
-            // stats match the uncached path. The cached entry only skips the template clone.
-            Some(RasterMergeCacheEntry::Ready { .. } | RasterMergeCacheEntry::Incompatible)
-            | None => {}
+        if !cached_merge_should_continue(
+            self.cached_raster_merge(group).map(|cached| &cached.entry),
+        )? {
+            return Ok(false);
         }
 
         let PassRecordTargets {
@@ -193,19 +186,49 @@ impl CompiledRenderGraph {
             return Ok(false);
         }
 
-        let sample_count = helpers::frame_sample_count_from_raster_ctx(&ctx);
-        let Some((color_attachments, depth_stencil_attachment, multiview_mask)) =
-            resolve_merged_attachments(
-                &self.passes,
-                &self.pass_info,
-                &self.raster_merge_cache,
+        self.open_merged_raster_pass(
+            MergedRasterOpen {
+                group,
+                steps,
+                scope,
+                first_step,
+            },
+            &mut ctx,
+            encoder,
+            view.graph_resources,
+            upload_batch,
+        )
+    }
+
+    /// Opens one coalesced render pass and records each step that still wants to draw.
+    fn open_merged_raster_pass<'a, 'frame>(
+        &self,
+        open: MergedRasterOpen<'a>,
+        ctx: &mut RasterPassCtx<'_, 'frame>,
+        encoder: &mut wgpu::CommandEncoder,
+        graph_resources: &'a crate::render_graph::context::GraphResolvedResources,
+        upload_batch: &'frame FrameUploadBatch,
+    ) -> Result<bool, GraphExecuteError> {
+        let MergedRasterOpen {
+            group,
+            steps,
+            scope,
+            first_step,
+        } = open;
+        let sample_count = helpers::frame_sample_count_from_raster_ctx(ctx);
+        let Some(resolved) = resolve_merged_attachments(
+            &MergedAttachmentSources {
+                passes: &self.passes,
+                pass_info: &self.pass_info,
+                cache: &self.raster_merge_cache,
                 group,
                 steps,
                 first_step,
-                &ctx,
-                view.graph_resources,
                 sample_count,
-            )?
+            },
+            ctx,
+            graph_resources,
+        )?
         else {
             return Ok(false);
         };
@@ -225,11 +248,11 @@ impl CompiledRenderGraph {
         let timestamp_writes = crate::profiling::render_pass_timestamp_writes(pass_query.as_ref());
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some(merged_profile_label),
-            color_attachments: color_attachments.as_slice(),
-            depth_stencil_attachment,
+            color_attachments: resolved.color_attachments.as_slice(),
+            depth_stencil_attachment: resolved.depth_stencil_attachment,
             occlusion_query_set: None,
             timestamp_writes,
-            multiview_mask,
+            multiview_mask: resolved.multiview_mask,
         });
         for (idx, step) in steps.iter().copied().enumerate() {
             let pass = &self.passes[step.pass_idx];
@@ -239,13 +262,13 @@ impl CompiledRenderGraph {
             let should_record = if idx == 0 {
                 true
             } else {
-                self.materialized_pass_should_record(step, pass, &ctx)?
+                self.materialized_pass_should_record(step, pass, ctx)?
             };
             if !should_record {
                 update_command_stats(ctx.blackboard, GraphCommandStats::record_skipped_pass);
                 continue;
             }
-            self.record_materialized_raster_step(step, pass, &mut ctx, &mut rpass)?;
+            self.record_materialized_raster_step(step, pass, ctx, &mut rpass)?;
             update_command_stats(ctx.blackboard, GraphCommandStats::record_raster_pass);
         }
         update_command_stats(ctx.blackboard, GraphCommandStats::record_opened_render_pass);
@@ -385,27 +408,52 @@ fn materialized_group_dynamic_state_matches(
         })
 }
 
-fn resolve_merged_attachments<'a>(
-    passes: &[PassNode],
-    pass_info: &[crate::render_graph::compiled::CompiledPassInfo],
-    cache: &[CachedRasterMergeGroup],
+struct MergedRasterOpen<'a> {
     group: RenderPassMaterializationGroup,
-    steps: &[ScheduleStep],
+    steps: &'a [ScheduleStep],
+    scope: PhaseRecordingScope,
     first_step: ScheduleStep,
+}
+
+struct MergedAttachmentSources<'a> {
+    passes: &'a [PassNode],
+    pass_info: &'a [crate::render_graph::compiled::CompiledPassInfo],
+    cache: &'a [CachedRasterMergeGroup],
+    group: RenderPassMaterializationGroup,
+    steps: &'a [ScheduleStep],
+    first_step: ScheduleStep,
+    sample_count: u32,
+}
+
+struct ResolvedMergedPass<'a> {
+    color_attachments: helpers::ResolvedColorAttachments<'a>,
+    depth_stencil_attachment: Option<wgpu::RenderPassDepthStencilAttachment<'a>>,
+    multiview_mask: Option<std::num::NonZeroU32>,
+}
+
+/// Incompatible groups still continue so dynamic-state and `should_record` checks run.
+fn cached_merge_should_continue(
+    entry: Option<&RasterMergeCacheEntry>,
+) -> Result<bool, GraphExecuteError> {
+    match entry {
+        Some(RasterMergeCacheEntry::NotRaster) => Ok(false),
+        Some(RasterMergeCacheEntry::MissingTemplate { pass }) => {
+            Err(GraphExecuteError::MissingRasterTemplate { pass: pass.clone() })
+        }
+        Some(RasterMergeCacheEntry::Ready { .. } | RasterMergeCacheEntry::Incompatible) | None => {
+            Ok(true)
+        }
+    }
+}
+
+fn resolve_merged_attachments<'a>(
+    sources: &MergedAttachmentSources<'a>,
     ctx: &RasterPassCtx<'_, '_>,
     graph_resources: &'a crate::render_graph::context::GraphResolvedResources,
-    sample_count: u32,
-) -> Result<
-    Option<(
-        helpers::ResolvedColorAttachments<'a>,
-        Option<wgpu::RenderPassDepthStencilAttachment<'a>>,
-        Option<std::num::NonZeroU32>,
-    )>,
-    GraphExecuteError,
-> {
-    let cached = cache
-        .iter()
-        .find(|cached| cached.start_step == group.start_step && cached.end_step == group.end_step);
+) -> Result<Option<ResolvedMergedPass<'a>>, GraphExecuteError> {
+    let cached = sources.cache.iter().find(|cached| {
+        cached.start_step == sources.group.start_step && cached.end_step == sources.group.end_step
+    });
     let owned = match cached.map(|cached| &cached.entry) {
         Some(RasterMergeCacheEntry::Ready { .. }) => None,
         Some(RasterMergeCacheEntry::Incompatible | RasterMergeCacheEntry::NotRaster) => {
@@ -415,7 +463,8 @@ fn resolve_merged_attachments<'a>(
             return Err(GraphExecuteError::MissingRasterTemplate { pass: pass.clone() });
         }
         None => {
-            let Some(template_refs) = materialization_template_refs(passes, pass_info, steps)?
+            let Some(template_refs) =
+                materialization_template_refs(sources.passes, sources.pass_info, sources.steps)?
             else {
                 return Ok(None);
             };
@@ -435,12 +484,12 @@ fn resolve_merged_attachments<'a>(
     } else {
         return Ok(None);
     };
-    let first_pass = &passes[first_step.pass_idx];
+    let first_pass = &sources.passes[sources.first_step.pass_idx];
     let color_attachments = helpers::resolve_color_attachments(
         "render-graph-raster-merged",
         merged_template,
         graph_resources,
-        sample_count,
+        sources.sample_count,
     )?;
     let stencil_ops = merged_template
         .depth_stencil_attachment
@@ -450,15 +499,15 @@ fn resolve_merged_attachments<'a>(
         "render-graph-raster-merged",
         merged_template,
         graph_resources,
-        sample_count,
+        sources.sample_count,
         stencil_ops,
     )?;
     let multiview_mask = first_pass.multiview_mask_override(ctx, merged_template);
-    Ok(Some((
+    Ok(Some(ResolvedMergedPass {
         color_attachments,
         depth_stencil_attachment,
         multiview_mask,
-    )))
+    }))
 }
 
 fn merge_profile_label<'a>(

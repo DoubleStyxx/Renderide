@@ -176,17 +176,19 @@ impl FrameResourceManager {
                 clear_light_shadow_assignment(light);
             }
         }
-        let mut plan = std::mem::replace(&mut self.shadow_frame, ShadowFramePlan::default());
+        let mut plan = std::mem::take(&mut self.shadow_frame);
         plan.caster_sets.clear();
         plan.render_views.clear();
         plan.metadata.clear();
-        plan.requested_resolution = 1;
-        plan.requested_layers = 1;
+        plan.requested_resolution = 0;
+        plan.requested_layers = 0;
         plan.requested_draw_slots = 0;
         if !shadow_atlas_rendering_supported(self.limits.as_deref()) {
             self.shadow_frame = plan;
             return;
         }
+        plan.requested_resolution = 1;
+        plan.requested_layers = 1;
         let max_shadow_views = shadow_view_capacity(self.limits.as_deref());
         for (view_id, draw_plan) in views {
             append_shadow_views_for_view(

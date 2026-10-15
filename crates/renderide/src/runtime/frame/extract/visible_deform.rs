@@ -12,6 +12,7 @@ use super::ViewWorldMeshDrawPlans;
 const VISIBLE_DEFORM_KEYS_PARALLEL_CHUNK_VIEWS: usize = 1;
 
 /// Collects skin-cache keys for visible deformed world and overlay draw items.
+#[cfg(test)]
 pub(super) fn visible_mesh_deform_keys_from_draw_plans(
     draw_plans: &[ViewWorldMeshDrawPlans],
 ) -> hashbrown::HashSet<SkinCacheKey> {
