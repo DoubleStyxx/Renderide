@@ -289,8 +289,10 @@ fn compute_pixel_diff_stats(
     let actual_bytes = actual.as_raw();
     let golden_bytes = golden.as_raw();
     for (a_pix, g_pix) in actual_bytes
-        .chunks_exact(4)
-        .zip(golden_bytes.chunks_exact(4))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(golden_bytes.as_chunks::<4>().0)
     {
         let mut pixel_max: u8 = 0;
         for i in 0..3 {
@@ -330,7 +332,7 @@ fn compute_image_coverage_stats(image: &RgbaImage) -> ImageCoverageStats {
     let mut luma_max = u8::MIN;
     let mut colors = Vec::with_capacity(total);
     let mut transparent = 0usize;
-    for pixel in image.as_raw().chunks_exact(4) {
+    for pixel in image.as_raw().as_chunks::<4>().0 {
         let luma = luma_u8(pixel[0], pixel[1], pixel[2]);
         luma_min = luma_min.min(luma);
         luma_max = luma_max.max(luma);
