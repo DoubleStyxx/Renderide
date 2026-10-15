@@ -132,6 +132,26 @@ impl GpuReadbackRing {
         }
     }
 
+    /// Returns true when any slot still has a recorded copy, a finished submit, or a map in flight.
+    pub(crate) fn has_outstanding_readback(&self) -> bool {
+        for slot in 0..HIZ_STAGING_RING {
+            if self.pending_submit[slot]
+                || self.submit_done[slot]
+                || self.primary_pending[slot].is_some()
+            {
+                return true;
+            }
+            if self
+                .secondary_pending
+                .as_ref()
+                .is_some_and(|pending| pending[slot].is_some())
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Returns true when the next write slot has no outstanding submit or map work.
     pub(crate) fn can_claim_next_slot(&self, requires_secondary: bool) -> bool {
         let idx = self.write_idx;
@@ -274,6 +294,18 @@ fn start_map_read(buffer: &wgpu::Buffer) -> PendingMap {
 #[cfg(test)]
 mod tests {
     use super::GpuReadbackRing;
+
+    #[test]
+    fn outstanding_readback_tracks_submit_and_clears_on_reset() {
+        let mut ring = GpuReadbackRing::default();
+        assert!(!ring.has_outstanding_readback());
+
+        let _slot = ring.claim_next_slot();
+        assert!(ring.has_outstanding_readback());
+
+        ring.reset();
+        assert!(!ring.has_outstanding_readback());
+    }
 
     #[test]
     fn default_ring_can_claim_first_primary_slot() {

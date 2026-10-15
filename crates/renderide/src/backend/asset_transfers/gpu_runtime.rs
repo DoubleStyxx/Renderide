@@ -44,6 +44,9 @@ pub(crate) struct AssetGpuRuntime {
     pub(crate) mapped_buffer_health: Option<Arc<GpuMappedBufferHealth>>,
     /// Mesh buffer upload batch reused across cooperative drains.
     pub(crate) mesh_upload_batch: Arc<MeshUploadStagingBatch>,
+    /// CPU scratch for mip uploads that share the mesh staging submit.
+    pub(crate) texture_upload_scratch:
+        Arc<Mutex<crate::texture_upload_batch::TextureUploadScratch>>,
     /// Persistent staging arena for mesh upload batch copies.
     pub(crate) mesh_upload_arena: Mutex<PersistentUploadArena>,
     /// Whether mesh uploads should use per-mesh wgpu validation scopes.

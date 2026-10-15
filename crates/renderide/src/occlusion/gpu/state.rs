@@ -116,6 +116,11 @@ impl HiZGpuState {
         self.readback.set_secondary_enabled(enabled);
     }
 
+    /// Returns true when this view still has a Hi-Z copy or `map_async` that a poll could retire.
+    pub(crate) fn has_outstanding_readback(&self) -> bool {
+        self.readback.has_outstanding_readback()
+    }
+
     /// Returns true when the readback ring can safely accept another Hi-Z staging copy.
     pub(crate) fn can_encode_hi_z(&self, scratch: &HiZGpuScratch) -> bool {
         self.readback.can_claim_next_slot(scratch.is_stereo())

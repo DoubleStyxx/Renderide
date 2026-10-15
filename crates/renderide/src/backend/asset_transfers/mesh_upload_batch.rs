@@ -117,6 +117,10 @@ pub(crate) struct MeshUploadFlush {
     pub(crate) command_buffer: Option<wgpu::CommandBuffer>,
     /// Callback that recycles a persistent staging slot after GPU completion.
     pub(crate) on_submitted_work_done: Option<Box<dyn FnOnce() + Send + 'static>>,
+    /// Staging buffer that must stay alive until the driver calls `Queue::submit`.
+    ///
+    /// Persistent and pooled slots are also owned by the arena. One-shot temps exist only here.
+    pub(crate) staging_buffer: Option<wgpu::Buffer>,
     /// Batch traffic and staging stats.
     pub(crate) stats: MeshUploadBatchStats,
 }
@@ -164,6 +168,7 @@ impl MeshUploadStagingBatch {
             return Some(MeshUploadFlush {
                 command_buffer: None,
                 on_submitted_work_done: None,
+                staging_buffer: None,
                 stats,
             });
         }
@@ -201,6 +206,7 @@ impl MeshUploadStagingBatch {
         Some(MeshUploadFlush {
             command_buffer,
             on_submitted_work_done: staging.on_submitted_work_done,
+            staging_buffer: staging.buffer,
             stats,
         })
     }

@@ -67,6 +67,7 @@ mod render_phase;
 mod runtime;
 mod scene;
 mod shared;
+mod texture_upload_batch;
 mod upload_arena;
 mod upload_stats;
 mod world_mesh;
