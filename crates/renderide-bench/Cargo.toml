@@ -15,7 +15,9 @@ glam = { version = "0.33", features = ["bytemuck"] }
 renderide-shared = { path = "../renderide-shared" }
 
 [dev-dependencies]
-criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+criterion = { version = "0.5", default-features = false, features = [
+  "cargo_bench_support",
+] }
 
 [features]
 # Reserved for future wgpu-backed benches (headless adapter required); off by default.
