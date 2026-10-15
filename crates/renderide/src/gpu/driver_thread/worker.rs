@@ -127,6 +127,7 @@ pub(super) fn driver_loop(
 /// and scanning stops, so a present, OpenXR, or waited batch is never delayed by work that
 /// was queued after it. The total, including the first batch, stays within
 /// [`MAX_COALESCED_SUBMITS`].
+#[cfg(test)]
 pub(super) fn extra_batches_to_coalesce(first_is_plain: bool, followers_plain: &[bool]) -> usize {
     if !first_is_plain {
         return 0;

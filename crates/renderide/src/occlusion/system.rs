@@ -205,12 +205,11 @@ impl OcclusionSystem {
             return true;
         }
         let offscreen = self.offscreen.lock();
-        for slot in offscreen.values() {
-            if slot.lock().has_outstanding_readback() {
-                return true;
-            }
-        }
-        false
+        let outstanding = offscreen
+            .values()
+            .any(|slot| slot.lock().has_outstanding_readback());
+        drop(offscreen);
+        outstanding
     }
 
     /// Cancels all pending Hi-Z staging maps after GPU recovery.

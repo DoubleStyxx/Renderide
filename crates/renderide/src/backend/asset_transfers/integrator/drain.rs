@@ -169,6 +169,7 @@ fn flush_mesh_upload_batch(
             gpu.gpu_limits.max_buffer_size(),
             &mut mesh_upload_arena,
         );
+        drop(mesh_upload_arena);
         (mesh_flush, texture_flush)
     };
     drop(gate);
