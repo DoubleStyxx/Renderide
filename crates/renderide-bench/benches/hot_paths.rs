@@ -31,6 +31,8 @@ fn transforms_compose(c: &mut Criterion) {
 }
 
 fn frustum_cull(c: &mut Criterion) {
+    // Synthetic sphere-vs-plane cull, not the production AABB path
+    // (`world_aabb_visible_in_homogeneous_clip`).
     let mut g = c.benchmark_group("frustum_cull_spheres");
     let proj = Mat4::perspective_rh(1.2, 16.0 / 9.0, 0.1, 500.0);
     let view = Mat4::look_at_rh(Vec3::new(0.0, 0.0, 150.0), Vec3::ZERO, Vec3::Y);
@@ -74,6 +76,11 @@ fn ipc_transform_rows(c: &mut Criterion) {
                 black_box(p.remaining_len());
             });
         });
+        // Pack once into buf so unpack does not depend on pack run order.
+        {
+            let mut p = MemoryPacker::new(&mut buf);
+            p.write_value_list(Some(&xs));
+        }
         g.bench_with_input(BenchmarkId::new("unpack", n), &n, |b, _| {
             let mut pool = DefaultEntityPool;
             b.iter(|| {
