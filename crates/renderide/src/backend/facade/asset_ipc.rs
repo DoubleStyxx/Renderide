@@ -420,4 +420,9 @@ impl RenderBackend {
     pub fn unregister_shader_route(&mut self, asset_id: i32) {
         self.materials.unregister_shader_route(asset_id);
     }
+
+    /// Rebinds shader routes that share a custom-shader asset name.
+    pub fn retarget_named_shader_routes(&mut self, shader_key: &str) {
+        self.materials.retarget_named_shader_routes(shader_key);
+    }
 }

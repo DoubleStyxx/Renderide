@@ -14,8 +14,7 @@ internal static class CustomIpcDispatcher
     /// <summary>
     /// Invoked from the <see cref="Patches.RenderSystemSubmitFramePatch"/>
     /// postfix, after FrooxEngine has finished sending its own frame data.
-    /// Today this is a boilerplate no-op — future custom renderer commands
-    /// are sent here.
+    /// Flushes custom shader uploads queued by <see cref="RenderideMod.CustomShaders"/>.
     /// </summary>
     /// <param name="renderSystem">The engine's active render system.</param>
     internal static void DispatchAfterFrameSubmit(RenderSystem renderSystem)
@@ -27,12 +26,6 @@ internal static class CustomIpcDispatcher
             return;
         }
 
-        // Future custom RendererCommand sends go here, e.g.:
-        //   messagingHost.SendCommand(new MyCustomCommand(...), isBackground: false);
-        //
-        // Custom command types must derive from Renderite.Shared.RendererCommand
-        // and be registered with the renderer's type table before the renderer
-        // can decode them.
-        _ = messagingHost;
+        CustomShaderQueue.Flush(messagingHost);
     }
 }

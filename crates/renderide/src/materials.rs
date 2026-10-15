@@ -74,6 +74,7 @@
 
 mod asset_graph;
 mod cache;
+pub(crate) mod custom_shader;
 pub(crate) mod embedded;
 pub(crate) mod host_data;
 mod material_passes;
