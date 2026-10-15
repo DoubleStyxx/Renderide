@@ -238,6 +238,7 @@ mod tests {
                     persistent_slot_grows: 4,
                     temporary_staging_bytes: 256,
                     temporary_staging_fallbacks: 5,
+                    temporary_slot_reuses: 0,
                     oversized_queue_fallback_writes: 6,
                 },
                 pressure: UploadArenaPressure {

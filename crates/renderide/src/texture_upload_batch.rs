@@ -167,16 +167,13 @@ pub(crate) fn flush_recorded(
         placements.total_bytes,
         recorded.copies.len(),
     );
-    if staging.buffer().is_none() {
+    let Some(staging_buffer) = staging.buffer().cloned() else {
         let _ = staging.finish(upload_arena);
         replay_or_keep(queue, gate, queue_access_mode, queue_gate_held, recorded);
         return None;
-    }
-    fill_staging_buffer(
-        staging.buffer().expect("buffer checked above"),
-        &recorded,
-        &placements.placements,
-    );
+    };
+    fill_staging_buffer(&staging_buffer, &recorded, &placements.placements);
+    drop(staging_buffer);
     let staging = staging.finish(upload_arena);
     let command_buffer = record_texture_copies(
         device,
@@ -306,7 +303,9 @@ fn fill_staging_buffer(
                 if src_end > src.len() || dst_end > mapped.len() {
                     continue;
                 }
-                mapped[dst_offset..dst_end].copy_from_slice(&src[src_offset..src_end]);
+                mapped
+                    .slice(dst_offset..dst_end)
+                    .copy_from_slice(&src[src_offset..src_end]);
             }
         }
     }
