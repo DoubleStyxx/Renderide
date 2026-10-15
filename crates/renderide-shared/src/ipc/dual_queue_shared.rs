@@ -77,18 +77,33 @@ pub(super) fn drain_subscriber(
     invalid_log_prefix: &'static str,
 ) -> IpcDrainStats {
     let mut stats = IpcDrainStats::default();
-    while let Some(msg) = sub.try_dequeue() {
-        stats.bytes += msg.len();
-        let decoded = decode_renderer_command_payload(&msg, pool, invalid_log_prefix);
-        stats.decode_duration += decoded.duration;
-        match decoded.command {
-            Some(cmd) => {
-                stats.messages += 1;
-                out.push(cmd);
+    let mut recycled = Vec::new();
+    let mut batch = Vec::new();
+    loop {
+        let drained = sub.try_drain_reusing(&mut recycled, &mut batch, 32);
+        if drained == 0 {
+            break;
+        }
+        // `drain` leaves `batch`'s allocation in place for the next dequeue burst.
+        #[expect(
+            clippy::iter_with_drain,
+            reason = "the decode batch Vec capacity is reused across dequeue bursts"
+        )]
+        for mut msg in batch.drain(..) {
+            stats.bytes += msg.len();
+            let decoded = decode_renderer_command_payload(&msg, pool, invalid_log_prefix);
+            stats.decode_duration += decoded.duration;
+            match decoded.command {
+                Some(cmd) => {
+                    stats.messages += 1;
+                    out.push(cmd);
+                }
+                None => {
+                    stats.invalid_messages += 1;
+                }
             }
-            None => {
-                stats.invalid_messages += 1;
-            }
+            msg.clear();
+            recycled.push(msg);
         }
     }
     stats

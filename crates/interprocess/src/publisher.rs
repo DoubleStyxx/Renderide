@@ -70,17 +70,37 @@ impl Publisher {
 /// the subscriber to load `STATE_READY` while still observing a stale `body_length` or
 /// uninitialised body bytes.
 fn write_message_to_ring(ring: RingView, write_offset: i64, len: i64, message: &[u8]) {
-    let wire = message_header_wire_bytes(STATE_WRITING, len as i32);
-    ring.write(write_offset, &wire);
-    ring.write(write_offset + MESSAGE_BODY_OFFSET, message);
     // SAFETY: `write_offset` was claimed via CAS on `header.write_offset` above; the eight-byte
     // [`crate::layout::MessageHeader`] lies in the ring at this slot per the wire protocol and no
     // other writer can target the same slot (single-writer per slot). The wire protocol pads
-    // every message to eight bytes, so `message_header_at` always returns `Some`; the
-    // memcpy-based fallback exists only because the API is total.
-    let aligned_header = unsafe { ring.message_header_at(write_offset) };
-    if let Some(header) = aligned_header {
-        header.state.store(STATE_READY, Ordering::Release);
+    // every message to eight bytes and the ring capacity is a multiple of eight, so the header
+    // does not wrap and `message_header_ptr` returns `Some` for a well-formed peer. The
+    // memcpy-based fallback exists only because the API is total. The returned pointer is not
+    // turned into a reference that covers `body_length`.
+    let header_ptr = unsafe { ring.message_header_ptr(write_offset) };
+    if let Some(header_ptr) = header_ptr {
+        // Publish `STATE_WRITING` before the body so a subscriber never observes a stale
+        // `STATE_READY` from a previous occupant of this slot. `body_length` is a plain field;
+        // the subscriber reads it only after the Release store of `STATE_READY` below, which
+        // happens-before that read.
+        // SAFETY: this publisher exclusively owns the claimed slot until `STATE_READY`. The
+        // state store uses only the atomic field; `body_length` is written through its own
+        // address and is not read until that Release store.
+        unsafe {
+            (*header_ptr).state.store(STATE_WRITING, Ordering::Relaxed);
+            std::ptr::addr_of_mut!((*header_ptr).body_length).write(len as i32);
+        }
+    } else {
+        let wire = message_header_wire_bytes(STATE_WRITING, len as i32);
+        ring.write(write_offset, &wire);
+    }
+    ring.write(write_offset + MESSAGE_BODY_OFFSET, message);
+    if let Some(header_ptr) = header_ptr {
+        // SAFETY: same exclusive slot claim. The raw pointer does not alias the body bytes
+        // copied above; only the atomic state field is accessed.
+        unsafe {
+            (*header_ptr).state.store(STATE_READY, Ordering::Release);
+        }
     } else {
         let state_bytes = STATE_READY.to_le_bytes();
         ring.write(write_offset, &state_bytes);

@@ -83,14 +83,11 @@ fn prepared_from_space_draws(
     space_id: RenderSpaceId,
     draws: &[FramePreparedDraw],
 ) -> FramePreparedRenderables {
-    let adjusted = draws
-        .iter()
-        .cloned()
-        .map(|mut draw| {
-            draw.space_id = space_id;
-            draw
-        })
-        .collect::<Vec<_>>();
+    let mut adjusted = Vec::with_capacity(draws.len());
+    adjusted.extend_from_slice(draws);
+    for draw in &mut adjusted {
+        draw.space_id = space_id;
+    }
     let mut prepared = FramePreparedRenderables::empty(RenderingContext::UserView);
     prepared.rebuild_from_cached_spaces(
         RenderingContext::UserView,
@@ -131,7 +128,7 @@ fn cull_geometry_update_uses_renderer_run_lookup() {
     let mut first_slot = prepared_draw(0, 10, None);
     first_slot.instance_id = instance;
     first_slot.slot_index = 0;
-    let mut second_slot = first_slot.clone();
+    let mut second_slot = first_slot;
     second_slot.slot_index = 1;
     second_slot.material_asset_id = 11;
     let other = prepared_draw(1, 12, None);
@@ -349,7 +346,7 @@ fn spatial_query_counts_rejected_material_slots() {
     };
     let outside_slot0 =
         prepared_draw_with_bounds(0, Vec3::new(2.0, -0.5, -0.5), Vec3::new(3.0, 0.5, 0.5));
-    let mut outside_slot1 = outside_slot0.clone();
+    let mut outside_slot1 = outside_slot0;
     outside_slot1.slot_index = 1;
     outside_slot1.material_asset_id = 2;
     let inside = prepared_draw_with_bounds(

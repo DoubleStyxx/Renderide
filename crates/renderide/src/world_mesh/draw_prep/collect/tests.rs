@@ -228,10 +228,10 @@ fn prepared_draws_share_renderer_groups_material_slots_only() {
     second_slot.slot_index = 1;
     second_slot.first_index = 3;
     second_slot.material_asset_id = 10;
-    let mut next_renderer = second_slot.clone();
+    let mut next_renderer = second_slot;
     next_renderer.renderable_index = 1;
     next_renderer.instance_id = MeshRendererInstanceId(12);
-    let mut hidden_slot = second_slot.clone();
+    let mut hidden_slot = second_slot;
     hidden_slot.is_hidden = true;
 
     assert!(prepared_draws_share_renderer(&first_slot, &second_slot));

@@ -63,7 +63,7 @@ const PREPARED_EXPAND_PARALLEL_MIN_SPACES: usize = PREPARED_EXPAND_PARALLEL_CHUN
 ///
 /// [`Self::skinned`] implicitly selects which renderer list [`Self::renderable_index`] targets
 /// (static renderers when `false`, skinned renderers when `true`).
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub(super) struct FramePreparedDraw {
     /// Host render space that owns the source renderer.
     pub space_id: RenderSpaceId,
@@ -583,8 +583,14 @@ impl FramePreparedRenderables {
     }
 
     /// Appends retained draw-template rows to the snapshot under construction.
+    #[cfg(test)]
     pub(super) fn extend_cached_draws(&mut self, draws: &[FramePreparedDraw]) {
-        self.draws.extend(draws.iter().cloned());
+        self.draws.extend_from_slice(draws);
+    }
+
+    /// Moves retained draw rows into the snapshot, keeping `draws`'s capacity for recycling.
+    pub(super) fn append_cached_draw_buffer(&mut self, draws: &mut Vec<FramePreparedDraw>) {
+        self.draws.append(draws);
     }
 
     /// Appends retained draw rows for `id` from the previous rebuild, if available.
@@ -595,7 +601,7 @@ impl FramePreparedRenderables {
         let Some(draws) = self.previous_draws.get(range) else {
             return false;
         };
-        self.draws.extend(draws.iter().cloned());
+        self.draws.extend_from_slice(draws);
         true
     }
 
@@ -605,10 +611,13 @@ impl FramePreparedRenderables {
         draws: &[FramePreparedDraw],
         cull_geometry: Option<MeshCullGeometry>,
     ) {
-        self.draws.extend(draws.iter().cloned().map(|mut draw| {
-            draw.cull_geometry = cull_geometry;
-            draw
-        }));
+        let start = self.draws.len();
+        self.draws.extend_from_slice(draws);
+        if let Some(cull_geometry) = cull_geometry {
+            for draw in &mut self.draws[start..] {
+                draw.cull_geometry = Some(cull_geometry);
+            }
+        }
     }
 
     /// Mutable draw buffer used while a retained snapshot rebuild is in progress.

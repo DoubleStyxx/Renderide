@@ -45,8 +45,11 @@ impl Default for QueueHeader {
 
 impl QueueHeader {
     /// Returns `true` when no message is queued.
+    ///
+    /// Loads are [`Ordering::Acquire`] so a subscriber observes the publisher's slot reservation
+    /// and a publisher observes the subscriber's release of freed space.
     pub fn is_empty(&self) -> bool {
-        self.read_offset.load(Ordering::SeqCst) == self.write_offset.load(Ordering::SeqCst)
+        self.read_offset.load(Ordering::Acquire) == self.write_offset.load(Ordering::Acquire)
     }
 }
 

@@ -61,6 +61,26 @@ impl RingView {
     /// The base pointer must remain valid for the lifetime of the queue (see the type-level
     /// `# Safety` on [`RingView`]).
     pub(crate) unsafe fn message_header_at(&self, logical_offset: i64) -> Option<&MessageHeader> {
+        // SAFETY: caller upholds the same offset and mapping contract as `message_header_ptr`.
+        let header_ptr = unsafe { self.message_header_ptr(logical_offset) }?;
+        // SAFETY: alignment was verified; the eight-byte header lies contiguously in the live
+        // ring at this physical offset.
+        Some(unsafe { &*header_ptr })
+    }
+
+    /// Aligned pointer to the message header at `logical_offset`, or [`None`] when misaligned.
+    ///
+    /// Use this when a field other than [`MessageHeader::state`] must be written. Forming
+    /// [`&MessageHeader`] and assigning `body_length` is rejected because that field is not
+    /// atomic, and holding the shared reference across the write would alias the slot.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`Self::message_header_at`].
+    pub(crate) unsafe fn message_header_ptr(
+        &self,
+        logical_offset: i64,
+    ) -> Option<*mut MessageHeader> {
         let phys = (logical_offset.rem_euclid(self.capacity)) as usize;
         // Compute the candidate header pointer without dereferencing it so the alignment check
         // can run before any potentially-misaligned read.
@@ -74,21 +94,34 @@ impl RingView {
         if !header_ptr.is_aligned() {
             return None;
         }
-        // SAFETY: `phys < capacity`; the ring region is live and readable for `capacity` bytes
-        // per the type-level invariant; the caller guarantees the eight-byte header lies
-        // contiguously at this physical offset; alignment was just verified.
-        Some(unsafe { &*header_ptr })
+        Some(header_ptr)
     }
 
     /// Copies `len` bytes starting at logical `offset` into a new vector.
+    #[cfg(test)]
     pub(crate) fn read(self, offset: i64, len: usize) -> Vec<u8> {
-        if len == 0 {
-            return Vec::new();
-        }
-        let segments = WrappedSegments::new(offset, self.capacity, len);
-        let mut result = vec![0u8; len];
-        segments.copy_from_ring(self.ptr, &mut result);
+        let mut result = Vec::new();
+        self.read_into(offset, len, &mut result);
         result
+    }
+
+    /// Copies `len` bytes starting at logical `offset` into `out`, reusing its allocation.
+    ///
+    /// `out` is cleared first. When `len > 0` the bytes are written directly into the spare
+    /// capacity so the buffer is not zero-filled before the copy.
+    pub(crate) fn read_into(self, offset: i64, len: usize, out: &mut Vec<u8>) {
+        out.clear();
+        if len == 0 {
+            return;
+        }
+        out.reserve(len);
+        let segments = WrappedSegments::new(offset, self.capacity, len);
+        // SAFETY: `reserve` made `len` bytes of spare capacity available at `out.as_mut_ptr()`.
+        // `copy_from_ring_raw` initializes every one of those bytes before `set_len`.
+        unsafe {
+            segments.copy_from_ring_raw(self.ptr, out.as_mut_ptr());
+            out.set_len(len);
+        }
     }
 
     /// Writes `data` at logical `offset`, wrapping at `capacity`.
@@ -136,24 +169,27 @@ impl WrappedSegments {
         }
     }
 
-    /// Copies the described bytes from `ring_ptr` into `out`.
-    fn copy_from_ring(self, ring_ptr: *mut u8, out: &mut [u8]) {
+    /// Copies the described bytes from `ring_ptr` into `dst`.
+    ///
+    /// # Safety
+    ///
+    /// `dst` must be valid for writes of `first + second` bytes. Those bytes are fully
+    /// initialized by this call and may start uninitialized.
+    unsafe fn copy_from_ring_raw(self, ring_ptr: *mut u8, dst: *mut u8) {
         if self.first > 0 {
             // SAFETY: `new` guarantees `phys + first <= capacity`; the ring region is live and
-            // readable for `capacity` bytes per the `RingView` type invariant.
+            // readable for `capacity` bytes per the `RingView` type invariant. `dst` is valid
+            // for `first` bytes by the caller contract.
             unsafe {
-                out[..self.first].copy_from_slice(std::slice::from_raw_parts(
-                    ring_ptr.add(self.phys),
-                    self.first,
-                ));
+                std::ptr::copy_nonoverlapping(ring_ptr.add(self.phys), dst, self.first);
             }
         }
         if self.second > 0 {
             // SAFETY: `new` guarantees the wrapped segment begins at the ring base and fits the
-            // caller-constrained logical range.
+            // caller-constrained logical range. `dst.add(first)` is in bounds by the caller
+            // contract covering `first + second` bytes.
             unsafe {
-                out[self.first..]
-                    .copy_from_slice(std::slice::from_raw_parts(ring_ptr, self.second));
+                std::ptr::copy_nonoverlapping(ring_ptr, dst.add(self.first), self.second);
             }
         }
     }
@@ -203,8 +239,11 @@ pub fn available_space(header: &crate::layout::QueueHeader, capacity: i64) -> i6
     if capacity <= 0 {
         return 0;
     }
-    let read_off = header.read_offset.load(Ordering::SeqCst);
-    let write_off = header.write_offset.load(Ordering::SeqCst);
+    // Acquire pairs with the subscriber's Release store of `read_offset` and the publisher's
+    // SeqCst `write_offset` CAS, which is also a release store. Sequentially-consistent ordering
+    // is not required to publish freed space or a newly claimed slot.
+    let read_off = header.read_offset.load(Ordering::Acquire);
+    let write_off = header.write_offset.load(Ordering::Acquire);
     if read_off == write_off {
         return capacity;
     }
@@ -293,6 +332,22 @@ mod tests {
         assert_eq!(buf[4], 1);
         assert_eq!(buf[5], 2);
         assert_eq!(buf[0], 3);
+    }
+
+    #[test]
+    fn read_into_reuses_capacity_without_keeping_stale_bytes() {
+        let buf = [1u8, 2, 3, 4];
+        // SAFETY: read-only test; `buf` outlives `ring`, capacity matches length.
+        let ring = unsafe { RingView::from_raw(buf.as_ptr().cast_mut(), 4) };
+        let mut out = Vec::with_capacity(8);
+        out.extend_from_slice(b"stale!!");
+        let capacity = out.capacity();
+        ring.read_into(1, 3, &mut out);
+        assert_eq!(out, vec![2, 3, 4]);
+        assert!(out.capacity() >= capacity);
+        ring.read_into(0, 0, &mut out);
+        assert!(out.is_empty());
+        assert!(out.capacity() >= capacity);
     }
 
     #[test]

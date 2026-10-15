@@ -3,11 +3,12 @@
 //! Naming matches the host client when the renderer is **non-authority**: subscribe on `...A`,
 //! publish on `...S`.
 
+use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::{
-    Arc,
+    Arc, Condvar, Mutex, MutexGuard,
     atomic::{AtomicBool, Ordering},
-    mpsc::{self, Receiver, RecvTimeoutError, SyncSender},
+    mpsc::RecvTimeoutError,
 };
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -26,6 +27,10 @@ use crate::shared::RendererCommand;
 const SEND_BUFFER_CAP: usize = 65536;
 const INBOUND_PUMP_IDLE_WAIT: Duration = Duration::from_millis(10);
 const INBOUND_PUMP_BUFFERED_MESSAGES: usize = 1024;
+/// Ready shared-memory messages copied under one subscriber read lock before the pump publishes them.
+const INBOUND_BATCH_LIMIT: usize = 32;
+/// Reusable payload buffers retained per inbound queue after decode.
+const INBOUND_PAYLOAD_POOL_CAP: usize = 64;
 
 /// Log prefix used when [`encode_command`] overflows the send buffer on the renderer side.
 const ENCODE_OVERFLOW_LOG_PREFIX: &str = "IPC outgoing send: encode overflow";
@@ -66,8 +71,8 @@ struct RawTimedIpcMessage {
 }
 
 struct InboundPump {
-    primary_rx: Option<Receiver<RawTimedIpcMessage>>,
-    background_rx: Option<Receiver<RawTimedIpcMessage>>,
+    primary: Arc<InboundQueue>,
+    background: Arc<InboundQueue>,
     primary_cancel: Arc<AtomicBool>,
     background_cancel: Arc<AtomicBool>,
     primary_thread: Option<JoinHandle<()>>,
@@ -76,25 +81,25 @@ struct InboundPump {
 
 impl InboundPump {
     fn new(primary: Subscriber, background: Subscriber) -> Result<Self, InitError> {
-        let (primary_tx, primary_rx) = mpsc::sync_channel(INBOUND_PUMP_BUFFERED_MESSAGES);
-        let (background_tx, background_rx) = mpsc::sync_channel(INBOUND_PUMP_BUFFERED_MESSAGES);
+        let primary_queue = InboundQueue::new(INBOUND_PUMP_BUFFERED_MESSAGES);
+        let background_queue = InboundQueue::new(INBOUND_PUMP_BUFFERED_MESSAGES);
         let primary_cancel = Arc::new(AtomicBool::new(false));
         let background_cancel = Arc::new(AtomicBool::new(false));
         let primary_thread = spawn_inbound_pump(
             "renderide-ipc-primary-in",
             primary,
-            primary_tx,
+            Arc::clone(&primary_queue),
             Arc::clone(&primary_cancel),
         )?;
         let background_thread = spawn_inbound_pump(
             "renderide-ipc-background-in",
             background,
-            background_tx,
+            Arc::clone(&background_queue),
             Arc::clone(&background_cancel),
         )?;
         Ok(Self {
-            primary_rx: Some(primary_rx),
-            background_rx: Some(background_rx),
+            primary: primary_queue,
+            background: background_queue,
             primary_cancel,
             background_cancel,
             primary_thread: Some(primary_thread),
@@ -107,8 +112,8 @@ impl Drop for InboundPump {
     fn drop(&mut self) {
         self.primary_cancel.store(true, Ordering::Relaxed);
         self.background_cancel.store(true, Ordering::Relaxed);
-        self.primary_rx.take();
-        self.background_rx.take();
+        self.primary.close();
+        self.background.close();
         join_inbound_pump_thread("primary", self.primary_thread.take());
         join_inbound_pump_thread("background", self.background_thread.take());
     }
@@ -161,6 +166,8 @@ pub struct DualQueueIpc {
     background_publisher: Publisher,
     /// Reused across [`Self::poll_into`] calls so optional heap types during decode do not allocate a fresh pool each message.
     entity_pool: DefaultEntityPool,
+    /// Reused timed-command buffer for polls that only need [`RendererCommand`] values.
+    timed_scratch: Vec<TimedRendererCommand>,
     send_buffer: Vec<u8>,
     /// Count of dropped primary sends since last successful send (consecutive backpressure).
     primary_drops_since_log: u32,
@@ -219,6 +226,7 @@ impl DualQueueIpc {
             primary_publisher: primary_pub,
             background_publisher: background_pub,
             entity_pool: DefaultEntityPool,
+            timed_scratch: Vec::new(),
             send_buffer: vec![0u8; SEND_BUFFER_CAP],
             primary_drops_since_log: 0,
             background_drops_since_log: 0,
@@ -274,19 +282,12 @@ impl DualQueueIpc {
     ///
     /// Clears `out` then drains both subscribers so each tick starts from an empty batch.
     pub fn poll_into(&mut self, out: &mut Vec<RendererCommand>) {
-        let mut timed = Vec::new();
-        let _stats = self.poll_timed_into_profiled(&mut timed);
-        out.clear();
-        out.extend(timed.into_iter().map(|timed| timed.command));
+        let _stats = self.collect_commands_from_timed_scratch(out, Self::poll_timed_into_profiled);
     }
 
     /// Drains both subscribers into `out` and returns diagnostic counters for the drain.
     pub fn poll_into_profiled(&mut self, out: &mut Vec<RendererCommand>) -> DualQueueDrainStats {
-        let mut timed = Vec::new();
-        let stats = self.poll_timed_into_profiled(&mut timed);
-        out.clear();
-        out.extend(timed.into_iter().map(|timed| timed.command));
-        stats
+        self.collect_commands_from_timed_scratch(out, Self::poll_timed_into_profiled)
     }
 
     /// Drains both subscribers into `out` with per-message receive timestamps.
@@ -304,7 +305,7 @@ impl DualQueueIpc {
         let primary = {
             profiling::scope!("ipc::primary_drain");
             drain_timed_receiver(
-                self.inbound.primary_rx.as_ref(),
+                &self.inbound.primary,
                 &mut self.entity_pool,
                 out,
                 INVALID_MESSAGE_LOG_PREFIX,
@@ -313,7 +314,7 @@ impl DualQueueIpc {
         let background = {
             profiling::scope!("ipc::background_drain");
             drain_timed_receiver(
-                self.inbound.background_rx.as_ref(),
+                &self.inbound.background,
                 &mut self.entity_pool,
                 out,
                 INVALID_MESSAGE_LOG_PREFIX,
@@ -335,11 +336,10 @@ impl DualQueueIpc {
         out: &mut Vec<RendererCommand>,
         timeout: Duration,
     ) -> Duration {
-        let mut timed = Vec::new();
-        let stats = self.poll_timed_into_after_primary_wait_profiled(&mut timed, timeout);
-        out.clear();
-        out.extend(timed.into_iter().map(|timed| timed.command));
-        stats.waited
+        self.collect_commands_from_timed_scratch(out, |ipc, timed| {
+            ipc.poll_timed_into_after_primary_wait_profiled(timed, timeout)
+        })
+        .waited
     }
 
     /// Waits up to `timeout` for primary inbound work and returns diagnostic counters.
@@ -348,11 +348,9 @@ impl DualQueueIpc {
         out: &mut Vec<RendererCommand>,
         timeout: Duration,
     ) -> DualQueuePollStats {
-        let mut timed = Vec::new();
-        let stats = self.poll_timed_into_after_primary_wait_profiled(&mut timed, timeout);
-        out.clear();
-        out.extend(timed.into_iter().map(|timed| timed.command));
-        stats
+        self.collect_commands_from_timed_scratch(out, |ipc, timed| {
+            ipc.poll_timed_into_after_primary_wait_profiled(timed, timeout)
+        })
     }
 
     /// Waits up to `timeout` for primary inbound work and returns timed commands.
@@ -382,21 +380,14 @@ impl DualQueueIpc {
             };
         }
         let wait_started = Instant::now();
-        let Some(primary_rx) = self.inbound.primary_rx.as_ref() else {
-            logger::warn!("IPC primary inbound receiver disconnected before wait");
-            return DualQueuePollStats {
-                initial_drain,
-                ..DualQueuePollStats::default()
-            };
-        };
         let ready = {
             profiling::scope!("ipc::host_wait::primary_queue");
             profiling::scope!("ipc::primary_wait");
-            primary_rx.recv_timeout(timeout)
+            self.inbound.primary.recv_timeout(timeout)
         };
         let waited = wait_started.elapsed();
         let first_primary = match ready {
-            Ok(msg) => msg,
+            Ok(messages) => messages,
             Err(RecvTimeoutError::Timeout) => {
                 return DualQueuePollStats {
                     waited,
@@ -414,39 +405,70 @@ impl DualQueueIpc {
                 };
             }
         };
-        let post_wait_drain = {
-            profiling::scope!("ipc::post_wait_drain");
-            self.flush_reliable_outbound();
-            let mut primary = IpcDrainStats::default();
-            drain_timed_message(
-                first_primary,
-                &mut self.entity_pool,
-                out,
-                INVALID_MESSAGE_LOG_PREFIX,
-                &mut primary,
-            );
-            primary.add(drain_timed_receiver(
-                self.inbound.primary_rx.as_ref(),
-                &mut self.entity_pool,
-                out,
-                INVALID_MESSAGE_LOG_PREFIX,
-            ));
-            let background = drain_timed_receiver(
-                self.inbound.background_rx.as_ref(),
-                &mut self.entity_pool,
-                out,
-                INVALID_MESSAGE_LOG_PREFIX,
-            );
-            DualQueueDrainStats {
-                primary,
-                background,
-            }
-        };
+        let post_wait_drain = self.drain_after_primary_wait(out, first_primary);
         DualQueuePollStats {
             waited,
             initial_drain,
             post_wait_drain,
             timed_out: false,
+        }
+    }
+
+    /// Polls through the reused timed-command buffer, then moves decoded commands into `out`.
+    fn collect_commands_from_timed_scratch<R>(
+        &mut self,
+        out: &mut Vec<RendererCommand>,
+        poll: impl FnOnce(&mut Self, &mut Vec<TimedRendererCommand>) -> R,
+    ) -> R {
+        let mut timed = std::mem::take(&mut self.timed_scratch);
+        let result = poll(self, &mut timed);
+        out.clear();
+        // Capacity of the scratch buffer is reused on the next poll. `drain` keeps that
+        // allocation; `into_iter` would drop it.
+        #[expect(
+            clippy::iter_with_drain,
+            reason = "the timed-command scratch Vec capacity is reused across polls"
+        )]
+        out.extend(timed.drain(..).map(|timed| timed.command));
+        self.timed_scratch = timed;
+        result
+    }
+
+    /// Decodes the primary batch that ended the wait, then drains both inbound queues.
+    fn drain_after_primary_wait(
+        &mut self,
+        out: &mut Vec<TimedRendererCommand>,
+        first_primary: Vec<RawTimedIpcMessage>,
+    ) -> DualQueueDrainStats {
+        profiling::scope!("ipc::post_wait_drain");
+        self.flush_reliable_outbound();
+        let mut primary = IpcDrainStats::default();
+        let mut recycle = Vec::new();
+        for message in first_primary {
+            recycle.push(drain_timed_message(
+                message,
+                &mut self.entity_pool,
+                out,
+                INVALID_MESSAGE_LOG_PREFIX,
+                &mut primary,
+            ));
+        }
+        self.inbound.primary.recycle_payloads(&mut recycle);
+        primary.add(drain_timed_receiver(
+            &self.inbound.primary,
+            &mut self.entity_pool,
+            out,
+            INVALID_MESSAGE_LOG_PREFIX,
+        ));
+        let background = drain_timed_receiver(
+            &self.inbound.background,
+            &mut self.entity_pool,
+            out,
+            INVALID_MESSAGE_LOG_PREFIX,
+        );
+        DualQueueDrainStats {
+            primary,
+            background,
         }
     }
 
@@ -567,38 +589,60 @@ impl DualQueueIpc {
 fn spawn_inbound_pump(
     name: &'static str,
     mut subscriber: Subscriber,
-    tx: SyncSender<RawTimedIpcMessage>,
+    queue: Arc<InboundQueue>,
     cancel: Arc<AtomicBool>,
 ) -> Result<JoinHandle<()>, InitError> {
     thread::Builder::new()
         .name(String::from(name))
         .spawn(move || {
+            let _close_on_exit = InboundQueueCloseGuard(Arc::clone(&queue));
+            let mut pooled = Vec::new();
+            let mut filled = Vec::new();
+            let mut pending = Vec::new();
             while !cancel.load(Ordering::Relaxed) {
-                let ready = {
-                    profiling::scope!("ipc::inbound_pump_wait");
-                    subscriber.wait_for_message_timeout(INBOUND_PUMP_IDLE_WAIT)
-                };
-                if !ready {
-                    continue;
-                }
-                while let Some(payload) = {
-                    profiling::scope!("ipc::inbound_pump_dequeue");
-                    subscriber.try_dequeue()
-                } {
-                    let received_at = Instant::now();
-                    if tx
-                        .send(RawTimedIpcMessage {
-                            payload,
-                            received_at,
-                        })
-                        .is_err()
-                    {
-                        return;
-                    }
+                if !pump_ready_batch(
+                    &mut subscriber,
+                    &queue,
+                    &mut pooled,
+                    &mut filled,
+                    &mut pending,
+                ) {
+                    return;
                 }
             }
         })
         .map_err(|e| InitError::IpcConnect(format!("failed to spawn {name}: {e}")))
+}
+
+/// Copies one ready burst into `queue`, or waits briefly when the shared queue is idle.
+///
+/// Returns `false` when the inbound queue has been closed and the burst cannot be published.
+fn pump_ready_batch(
+    subscriber: &mut Subscriber,
+    queue: &InboundQueue,
+    pooled: &mut Vec<Vec<u8>>,
+    filled: &mut Vec<Vec<u8>>,
+    pending: &mut Vec<RawTimedIpcMessage>,
+) -> bool {
+    queue.take_pooled(pooled);
+    let drained = {
+        profiling::scope!("ipc::inbound_pump_dequeue");
+        subscriber.try_drain_reusing(pooled, filled, INBOUND_BATCH_LIMIT)
+    };
+    if drained == 0 {
+        queue.recycle_payloads(pooled);
+        profiling::scope!("ipc::inbound_pump_wait");
+        subscriber.wait_for_message_timeout(INBOUND_PUMP_IDLE_WAIT);
+        return true;
+    }
+    for payload in filled.drain(..) {
+        pending.push(RawTimedIpcMessage {
+            payload,
+            received_at: Instant::now(),
+        });
+    }
+    queue.recycle_payloads(pooled);
+    queue.push_all(pending)
 }
 
 fn join_inbound_pump_thread(name: &'static str, thread: Option<JoinHandle<()>>) {
@@ -611,17 +655,28 @@ fn join_inbound_pump_thread(name: &'static str, thread: Option<JoinHandle<()>>) 
 }
 
 fn drain_timed_receiver(
-    rx: Option<&Receiver<RawTimedIpcMessage>>,
+    queue: &InboundQueue,
     pool: &mut DefaultEntityPool,
     out: &mut Vec<TimedRendererCommand>,
     invalid_log_prefix: &'static str,
 ) -> IpcDrainStats {
     let mut stats = IpcDrainStats::default();
-    let Some(rx) = rx else {
-        return stats;
-    };
-    while let Ok(msg) = rx.try_recv() {
-        drain_timed_message(msg, pool, out, invalid_log_prefix, &mut stats);
+    let mut recycle = Vec::new();
+    loop {
+        let messages = queue.pop_all();
+        if messages.is_empty() {
+            break;
+        }
+        for message in messages {
+            recycle.push(drain_timed_message(
+                message,
+                pool,
+                out,
+                invalid_log_prefix,
+                &mut stats,
+            ));
+        }
+        queue.recycle_payloads(&mut recycle);
     }
     stats
 }
@@ -632,7 +687,7 @@ fn drain_timed_message(
     out: &mut Vec<TimedRendererCommand>,
     invalid_log_prefix: &'static str,
     stats: &mut IpcDrainStats,
-) {
+) -> Vec<u8> {
     stats.bytes += msg.payload.len();
     let decoded = decode_renderer_command_payload(&msg.payload, pool, invalid_log_prefix);
     stats.decode_duration += decoded.duration;
@@ -643,6 +698,171 @@ fn drain_timed_message(
         }
         None => {
             stats.invalid_messages += 1;
+        }
+    }
+    let mut payload = msg.payload;
+    payload.clear();
+    payload
+}
+
+/// Closes an [`InboundQueue`] when the pump thread exits, including on panic.
+struct InboundQueueCloseGuard(Arc<InboundQueue>);
+
+impl Drop for InboundQueueCloseGuard {
+    fn drop(&mut self) {
+        self.0.close();
+    }
+}
+
+/// Shared state for one renderer inbound pump.
+struct InboundState {
+    /// Messages copied out of shared memory and waiting for the render thread.
+    messages: VecDeque<RawTimedIpcMessage>,
+    /// Payload buffers returned after decode.
+    pool: Vec<Vec<u8>>,
+    /// Set when the pump exits or the owning [`InboundPump`] is dropped.
+    closed: bool,
+}
+
+/// Bounded batch queue between an inbound pump thread and the render thread.
+///
+/// One lock covers a whole burst. Payload `Vec`s cycle through [`Self::pool`] instead of being
+/// allocated for every command. The queue holds at most `capacity` messages so a stalled render
+/// thread still applies backpressure to the shared-memory ring.
+struct InboundQueue {
+    capacity: usize,
+    state: Mutex<InboundState>,
+    not_empty: Condvar,
+    not_full: Condvar,
+}
+
+impl InboundQueue {
+    /// Creates an empty queue that accepts at most `capacity` pending messages.
+    fn new(capacity: usize) -> Arc<Self> {
+        Arc::new(Self {
+            capacity,
+            state: Mutex::new(InboundState {
+                messages: VecDeque::new(),
+                pool: Vec::new(),
+                closed: false,
+            }),
+            not_empty: Condvar::new(),
+            not_full: Condvar::new(),
+        })
+    }
+
+    /// Locks the queue, recovering from a poisoned mutex so shutdown can still proceed.
+    fn lock(&self) -> MutexGuard<'_, InboundState> {
+        self.state.lock().unwrap_or_else(|err| err.into_inner())
+    }
+
+    /// Wakes waiters and rejects further publishes.
+    fn close(&self) {
+        let mut guard = self.lock();
+        guard.closed = true;
+        drop(guard);
+        self.not_empty.notify_all();
+        self.not_full.notify_all();
+    }
+
+    /// Moves every pooled payload buffer into `into`.
+    fn take_pooled(&self, into: &mut Vec<Vec<u8>>) {
+        let mut guard = self.lock();
+        into.append(&mut guard.pool);
+    }
+
+    /// Returns cleared payload buffers to the pool, dropping any above the cap.
+    fn recycle_payloads(&self, bufs: &mut Vec<Vec<u8>>) {
+        if bufs.is_empty() {
+            return;
+        }
+        let mut guard = self.lock();
+        for mut buf in bufs.drain(..) {
+            buf.clear();
+            if guard.pool.len() < INBOUND_PAYLOAD_POOL_CAP {
+                guard.pool.push(buf);
+            }
+        }
+    }
+
+    /// Appends `incoming` until it is empty or the queue is closed.
+    ///
+    /// Blocks while the queue is at capacity. Returns `false` when the queue is closed before
+    /// every message is accepted; any unsent tail remains in `incoming`.
+    fn push_all(&self, incoming: &mut Vec<RawTimedIpcMessage>) -> bool {
+        if incoming.is_empty() {
+            return true;
+        }
+        let mut guard = self.lock();
+        loop {
+            if guard.closed {
+                return false;
+            }
+            let room = self.capacity.saturating_sub(guard.messages.len());
+            if room == 0 {
+                guard = self
+                    .not_full
+                    .wait(guard)
+                    .unwrap_or_else(|err| err.into_inner());
+                continue;
+            }
+            let take = room.min(incoming.len());
+            for message in incoming.drain(..take) {
+                guard.messages.push_back(message);
+            }
+            let done = incoming.is_empty();
+            drop(guard);
+            self.not_empty.notify_one();
+            if done {
+                return true;
+            }
+            guard = self.lock();
+        }
+    }
+
+    /// Removes every currently queued message, retaining the deque allocation.
+    fn pop_all(&self) -> Vec<RawTimedIpcMessage> {
+        let mut guard = self.lock();
+        if guard.messages.is_empty() {
+            return Vec::new();
+        }
+        let messages: Vec<RawTimedIpcMessage> = guard.messages.drain(..).collect();
+        drop(guard);
+        self.not_full.notify_one();
+        messages
+    }
+
+    /// Waits until a message is available, `timeout` elapses, or the queue is closed.
+    fn recv_timeout(&self, timeout: Duration) -> Result<Vec<RawTimedIpcMessage>, RecvTimeoutError> {
+        let deadline = Instant::now() + timeout;
+        let mut guard = self.lock();
+        loop {
+            if !guard.messages.is_empty() {
+                let messages = guard.messages.drain(..).collect();
+                drop(guard);
+                self.not_full.notify_one();
+                return Ok(messages);
+            }
+            if guard.closed {
+                return Err(RecvTimeoutError::Disconnected);
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(RecvTimeoutError::Timeout);
+            }
+            let (next, wait) = self
+                .not_empty
+                .wait_timeout(guard, deadline.saturating_duration_since(now))
+                .unwrap_or_else(|err| err.into_inner());
+            guard = next;
+            if wait.timed_out() && guard.messages.is_empty() {
+                let closed = guard.closed;
+                drop(guard);
+                if closed {
+                    return Err(RecvTimeoutError::Disconnected);
+                }
+                return Err(RecvTimeoutError::Timeout);
+            }
         }
     }
 }
