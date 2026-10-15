@@ -180,8 +180,8 @@ impl<P: PoolKind> Pool<P> {
         id
     }
 
-    /// Acquires an id without touching the cached value (key-only acquisition for tests / dry runs).
-    #[cfg(test)]
+    /// Acquires an id without touching the cached value (key-only acquisition for tests and CPU benches).
+    #[cfg(any(test, feature = "bench-api"))]
     fn acquire_key_only(&mut self, key: P::Key, generation: u64) -> usize {
         self.acquire(key, generation, |_| {}, P::Value::default)
     }
@@ -307,7 +307,10 @@ impl TransientPool {
     }
 
     /// Acquires a buffer entry id for `key`, reusing a matching free entry when available.
-    #[cfg(test)]
+    ///
+    /// Does not allocate a GPU buffer. Unit tests and the `bench-api` feature use this to measure
+    /// free-list bookkeeping without a device.
+    #[cfg(any(test, feature = "bench-api"))]
     pub fn acquire_buffer(&mut self, key: BufferKey) -> usize {
         self.buffers.acquire_key_only(key, self.lru_gen)
     }

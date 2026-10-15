@@ -143,6 +143,7 @@ The workspace lives under `crates/`:
 | [`interprocess`](crates/interprocess) | Cloudtoid-compatible shared-memory ring queues used by every IPC channel. |
 | [`logger`](crates/logger) | File-first logging used by the bootstrapper, host capture, and renderer. |
 | [`renderide-test`](crates/renderide-test) | Integration test harness that drives the renderer end-to-end. |
+| [`renderide-bench`](crates/renderide-bench) | Criterion microbenchmarks for CPU transform, culling, and buffer-pool helpers. |
 
 A C# generator under [`generators/SharedTypeGenerator`](generators/SharedTypeGenerator) emits `crates/renderide-shared/src/shared.rs`. Its test project lives under [`generators/SharedTypeGenerator.Tests`](generators/SharedTypeGenerator.Tests) and uses the `roundtrip` binary to compare C# and Rust packing. [`RenderideMod`](RenderideMod) contains the host-side Resonite mod, [`crates/renderide/assets`](crates/renderide/assets) contains runtime XR bindings and the shipped skybox model, and [`third_party/openxr_loader`](third_party/openxr_loader) contains vendored OpenXR loader binaries used by release artifacts on Windows and macOS.
 
@@ -178,6 +179,24 @@ System dependencies:
 
 ```bash
 cargo build --release --features video-textures
+```
+
+### `bench-api`
+
+CPU-only helpers for [`renderide-bench`](crates/renderide-bench). The renderer process does not enable this feature. `cargo bench -p renderide-bench` turns it on for the bench crate. It does not create a GPU device.
+
+## Benchmarks
+
+CPU microbenchmarks live in [`renderide-bench`](crates/renderide-bench) and run without Resonite or a GPU adapter:
+
+```bash
+cargo bench -p renderide-bench
+```
+
+The suite measures transform matrix conversion, homogeneous-clip AABB culling, world-matrix hierarchy updates, and transient buffer free-list reuse. GPU-device benches are behind the bench crate's `gpu` feature and are not part of the default command:
+
+```bash
+cargo bench -p renderide-bench --features gpu
 ```
 
 ## Configuration
