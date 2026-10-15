@@ -27,6 +27,37 @@ use super::super::{
 };
 use super::{PassGpuInputs, PassRecordTargets, PassViewInputs, PhaseRecordingScope};
 
+const FRAME_GLOBAL_SPLIT_LABEL_PREFIX: &str = "render-graph-frame-global-split-";
+const FRAME_GLOBAL_SPLIT_LABEL_CAP: usize = 48;
+
+/// Writes `render-graph-frame-global-split-{chunk_idx}` into `buf` without allocating.
+fn frame_global_split_label(
+    chunk_idx: usize,
+    buf: &mut [u8; FRAME_GLOBAL_SPLIT_LABEL_CAP],
+) -> &str {
+    let prefix = FRAME_GLOBAL_SPLIT_LABEL_PREFIX.as_bytes();
+    buf[..prefix.len()].copy_from_slice(prefix);
+    let mut value = chunk_idx;
+    let mut digits = [0u8; 20];
+    let mut digit_count = 0usize;
+    loop {
+        digits[digit_count] = b'0' + (value % 10) as u8;
+        digit_count += 1;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    let len = prefix.len() + digit_count;
+    if len > buf.len() {
+        return FRAME_GLOBAL_SPLIT_LABEL_PREFIX;
+    }
+    for (offset, digit) in digits[..digit_count].iter().rev().enumerate() {
+        buf[prefix.len() + offset] = *digit;
+    }
+    std::str::from_utf8(&buf[..len]).unwrap_or(FRAME_GLOBAL_SPLIT_LABEL_PREFIX)
+}
+
 /// Mutable state needed to replay frame-global schedule steps.
 struct FrameGlobalPassLoop<'record, 'frame> {
     /// Compiled graph being recorded.
@@ -612,10 +643,10 @@ impl CompiledRenderGraph {
             .map(|(chunk_idx, unit_range)| {
                 profiling::scope!("graph::frame_global::split_worker");
                 let encode_start = Instant::now();
-                let label = format!("render-graph-frame-global-split-{chunk_idx}");
-                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some(label.as_str()),
-                });
+                let mut label_buf = [0u8; FRAME_GLOBAL_SPLIT_LABEL_CAP];
+                let label = frame_global_split_label(chunk_idx, &mut label_buf);
+                let mut encoder = device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
                 let encoded = frame_resources.encode_frame_global_split_pass(
                     resource_pass,
                     unit_range,

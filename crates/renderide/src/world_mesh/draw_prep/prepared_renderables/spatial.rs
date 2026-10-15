@@ -1,7 +1,15 @@
 //! Per-render-space CPU spatial index for prepared renderer runs.
 
+use std::cell::RefCell;
+
 use glam::{Vec3, Vec3A};
 use hashbrown::HashMap;
+
+thread_local! {
+    static SPATIAL_CANDIDATE_INDICES: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    static SPATIAL_CANDIDATE_RUNS: RefCell<Vec<FramePreparedRun>> = const { RefCell::new(Vec::new()) };
+    static SPATIAL_CANDIDATE_BITS: RefCell<DenseBitSet> = const { RefCell::new(DenseBitSet::new_empty()) };
+}
 
 #[cfg(test)]
 use crate::particles::ParticleDrawParams;
@@ -26,6 +34,12 @@ pub(in crate::world_mesh::draw_prep) struct PreparedSpatialRunCandidates {
     pub(in crate::world_mesh::draw_prep) cull_stats: (usize, usize, usize),
     /// Visibility broadphase counters for this query.
     pub(in crate::world_mesh::draw_prep) visibility: WorldMeshVisibilityStats,
+}
+
+impl Drop for PreparedSpatialRunCandidates {
+    fn drop(&mut self) {
+        recycle_spatial_runs(std::mem::take(&mut self.runs));
+    }
 }
 
 /// Per-render-space BVH and linear fallback buckets for prepared renderer runs.
@@ -76,7 +90,7 @@ impl PreparedSpatialIndex {
         culling: Option<&WorldMeshCullInput<'_>>,
     ) -> PreparedSpatialRunCandidates {
         profiling::scope!("mesh::prepared_renderables::spatial_query");
-        let mut candidate_indices = Vec::new();
+        let mut candidate_indices = take_spatial_indices();
         let mut raw_candidate_marks = 0usize;
         let mut cull_stats = (0usize, 0usize, 0usize);
         let mut visibility = WorldMeshVisibilityStats::default();
@@ -101,6 +115,7 @@ impl PreparedSpatialIndex {
         }
 
         let out = gather_spatial_candidate_runs(runs, &mut candidate_indices);
+        recycle_spatial_indices(candidate_indices);
         let candidate_runs = out.len();
         PreparedSpatialRunCandidates {
             runs: out,
@@ -434,7 +449,8 @@ fn gather_spatial_candidate_runs_sparse(
     profiling::scope!("mesh::prepared_renderables::spatial_query_gather_sparse");
     candidate_indices.sort_unstable();
     candidate_indices.dedup();
-    let mut out = Vec::with_capacity(candidate_indices.len());
+    let mut out = take_spatial_runs();
+    out.reserve(candidate_indices.len());
     for &run_index in candidate_indices.iter() {
         if let Some(run) = runs.get(run_index).copied() {
             out.push(run);
@@ -448,18 +464,75 @@ fn gather_spatial_candidate_runs_dense(
     candidate_indices: &[usize],
 ) -> Vec<FramePreparedRun> {
     profiling::scope!("mesh::prepared_renderables::spatial_query_gather_dense");
-    let mut candidate_bits = DenseBitSet::default();
+    let mut candidate_bits = take_spatial_bits();
     candidate_bits.clear_and_resize(runs.len());
     for &run_index in candidate_indices {
         candidate_bits.insert(run_index);
     }
-    let mut out = Vec::with_capacity(candidate_indices.len().min(runs.len()));
+    let mut out = take_spatial_runs();
+    out.reserve(candidate_indices.len().min(runs.len()));
     for (run_index, run) in runs.iter().copied().enumerate() {
         if candidate_bits.contains(run_index) {
             out.push(run);
         }
     }
+    recycle_spatial_bits(candidate_bits);
     out
+}
+
+fn take_spatial_indices() -> Vec<usize> {
+    take_tls_vec(&SPATIAL_CANDIDATE_INDICES)
+}
+
+fn recycle_spatial_indices(indices: Vec<usize>) {
+    recycle_tls_vec(&SPATIAL_CANDIDATE_INDICES, indices);
+}
+
+fn take_spatial_runs() -> Vec<FramePreparedRun> {
+    take_tls_vec(&SPATIAL_CANDIDATE_RUNS)
+}
+
+fn recycle_spatial_runs(runs: Vec<FramePreparedRun>) {
+    recycle_tls_vec(&SPATIAL_CANDIDATE_RUNS, runs);
+}
+
+fn take_spatial_bits() -> DenseBitSet {
+    SPATIAL_CANDIDATE_BITS.with(|slot| match slot.try_borrow_mut() {
+        Ok(mut guard) => std::mem::take(&mut *guard),
+        Err(_) => DenseBitSet::default(),
+    })
+}
+
+fn recycle_spatial_bits(bits: DenseBitSet) {
+    SPATIAL_CANDIDATE_BITS.with(|slot| {
+        if let Ok(mut guard) = slot.try_borrow_mut()
+            && bits.word_capacity() > guard.word_capacity()
+        {
+            *guard = bits;
+        }
+    });
+}
+
+fn take_tls_vec<T>(slot: &'static std::thread::LocalKey<RefCell<Vec<T>>>) -> Vec<T> {
+    slot.with(|cell| {
+        let mut vec = match cell.try_borrow_mut() {
+            Ok(mut guard) => std::mem::take(&mut *guard),
+            Err(_) => Vec::new(),
+        };
+        vec.clear();
+        vec
+    })
+}
+
+fn recycle_tls_vec<T>(slot: &'static std::thread::LocalKey<RefCell<Vec<T>>>, mut vec: Vec<T>) {
+    vec.clear();
+    slot.with(|cell| {
+        if let Ok(mut guard) = cell.try_borrow_mut()
+            && vec.capacity() > guard.capacity()
+        {
+            *guard = vec;
+        }
+    });
 }
 
 #[derive(Clone, Copy)]

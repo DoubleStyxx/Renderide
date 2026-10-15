@@ -33,7 +33,7 @@ use crate::world_mesh::{
 use cull::{ViewCullSnapshot, cull_projection_for_write_target, cull_snapshot_for_view};
 use queue::{QueuedViewDraws, queue_view_draws};
 use sort::{select_arrange_parallelism, sort_view_draws, trace_view_draw_plans};
-use visible_deform::visible_mesh_deform_keys_from_draw_plans;
+use visible_deform::collect_visible_mesh_deform_keys_from_draw_plans;
 
 use super::view_plan::{FrameViewPlan, ViewFamilyPlan};
 
@@ -263,8 +263,14 @@ impl SubmitFrame<'_> {
                 .zip(self.view_draws.iter())
                 .map(|(view, draws)| (view.view_id, &draws.shadow_casters)),
         );
-        let mut visible_deform_keys = visible_mesh_deform_keys_from_draw_plans(&self.view_draws);
-        visible_deform_keys.extend(backend.frame_resources().shadow_mesh_deform_keys());
+        let mut visible_deform_keys = backend.frame_resources_mut().take_deform_key_buffer();
+        collect_visible_mesh_deform_keys_from_draw_plans(
+            &self.view_draws,
+            &mut visible_deform_keys,
+        );
+        backend
+            .frame_resources()
+            .extend_shadow_mesh_deform_keys(&mut visible_deform_keys);
         backend
             .frame_resources_mut()
             .begin_mesh_deform_submission(visible_deform_keys);

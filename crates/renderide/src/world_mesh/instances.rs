@@ -184,6 +184,21 @@ impl WorldMeshPhase {
         Self::Transparent,
         Self::TransparentGrab,
     ];
+
+    /// Tracy debug-group label for this phase.
+    ///
+    /// Matches `format!("world_mesh_forward::{self:?}")` without allocating on the record path.
+    pub const fn debug_group_label(self) -> &'static str {
+        match self {
+            Self::DepthOnly => "world_mesh_forward::DepthOnly",
+            Self::ForwardOpaque => "world_mesh_forward::ForwardOpaque",
+            Self::ForwardAlphaTest => "world_mesh_forward::ForwardAlphaTest",
+            Self::ViewNormals => "world_mesh_forward::ViewNormals",
+            Self::Intersection => "world_mesh_forward::Intersection",
+            Self::Transparent => "world_mesh_forward::Transparent",
+            Self::TransparentGrab => "world_mesh_forward::TransparentGrab",
+        }
+    }
 }
 
 impl RenderPhaseKey for WorldMeshPhase {

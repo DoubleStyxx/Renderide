@@ -93,8 +93,24 @@ impl FrameResourceManager {
     pub fn reset_light_prep_for_tick(&mut self) {
         self.mesh_deform_dispatched_this_submission
             .store(false, Ordering::Release);
-        *self.visible_mesh_deform_keys.lock() = None;
+        if let Some(prev) = self.visible_mesh_deform_keys.get_mut().take() {
+            self.recycle_deform_key_buffer(prev);
+        }
         self.light_visibility_stats = Default::default();
+    }
+
+    /// Returns a cleared deform-key set, reusing capacity from the previous submission.
+    pub(crate) fn take_deform_key_buffer(&mut self) -> HashSet<SkinCacheKey> {
+        let mut keys = std::mem::take(&mut self.deform_key_scratch);
+        keys.clear();
+        keys
+    }
+
+    fn recycle_deform_key_buffer(&mut self, mut keys: HashSet<SkinCacheKey>) {
+        keys.clear();
+        if keys.capacity() > self.deform_key_scratch.capacity() {
+            self.deform_key_scratch = keys;
+        }
     }
 
     /// Starts a graph submission with the visible deformed renderers gathered during draw prep.
@@ -104,7 +120,9 @@ impl FrameResourceManager {
     /// mesh-deform coalescing flag must reset here instead of only at the wall-clock tick
     /// boundary.
     pub fn begin_mesh_deform_submission(&mut self, keys: HashSet<SkinCacheKey>) {
-        *self.visible_mesh_deform_keys.get_mut() = Some(keys);
+        if let Some(prev) = self.visible_mesh_deform_keys.get_mut().replace(keys) {
+            self.recycle_deform_key_buffer(prev);
+        }
         self.mesh_deform_dispatched_this_submission
             .store(false, Ordering::Release);
     }
