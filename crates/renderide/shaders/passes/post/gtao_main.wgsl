@@ -63,35 +63,42 @@ fn view_is_orthographic(view_layer: u32) -> bool {
     return (projection_flags_for_view(view_layer) & ft::FRAME_PROJECTION_FLAG_ORTHOGRAPHIC) != 0u;
 }
 
-fn mip_dimensions(mip: u32) -> vec2<u32> {
-#ifdef MULTIVIEW
-    var dim = textureDimensions(view_depth);
-    if (mip == 1u) {
-        dim = textureDimensions(view_depth_mip1);
-    } else if (mip == 2u) {
-        dim = textureDimensions(view_depth_mip2);
-    } else if (mip == 3u) {
-        dim = textureDimensions(view_depth_mip3);
-    } else if (mip >= 4u) {
-        dim = textureDimensions(view_depth_mip4);
-    }
-#else
-    var dim = textureDimensions(view_depth);
-    if (mip == 1u) {
-        dim = textureDimensions(view_depth_mip1);
-    } else if (mip == 2u) {
-        dim = textureDimensions(view_depth_mip2);
-    } else if (mip == 3u) {
-        dim = textureDimensions(view_depth_mip3);
-    } else if (mip >= 4u) {
-        dim = textureDimensions(view_depth_mip4);
-    }
-#endif
-    return vec2<u32>(dim.xy);
+struct GtaoMipDimensions {
+    mip0: vec2<u32>,
+    mip1: vec2<u32>,
+    mip2: vec2<u32>,
+    mip3: vec2<u32>,
+    mip4: vec2<u32>,
 }
 
-fn load_view_z(pix: vec2<i32>, view_layer: u32, mip: u32) -> f32 {
-    let dim = mip_dimensions(mip);
+fn load_mip_dimensions() -> GtaoMipDimensions {
+    return GtaoMipDimensions(
+        vec2<u32>(textureDimensions(view_depth).xy),
+        vec2<u32>(textureDimensions(view_depth_mip1).xy),
+        vec2<u32>(textureDimensions(view_depth_mip2).xy),
+        vec2<u32>(textureDimensions(view_depth_mip3).xy),
+        vec2<u32>(textureDimensions(view_depth_mip4).xy),
+    );
+}
+
+fn mip_dimensions_at(dims: GtaoMipDimensions, mip: u32) -> vec2<u32> {
+    if (mip == 1u) {
+        return dims.mip1;
+    }
+    if (mip == 2u) {
+        return dims.mip2;
+    }
+    if (mip == 3u) {
+        return dims.mip3;
+    }
+    if (mip >= 4u) {
+        return dims.mip4;
+    }
+    return dims.mip0;
+}
+
+fn load_view_z(pix: vec2<i32>, view_layer: u32, mip: u32, dims: GtaoMipDimensions) -> f32 {
+    let dim = mip_dimensions_at(dims, mip);
     let max_pix = vec2<i32>(i32(dim.x) - 1, i32(dim.y) - 1);
     let p = clamp(pix, vec2<i32>(0), max_pix);
 #ifdef MULTIVIEW
@@ -125,10 +132,10 @@ fn load_view_z(pix: vec2<i32>, view_layer: u32, mip: u32) -> f32 {
 #endif
 }
 
-fn load_view_z_uv(uv: vec2<f32>, view_layer: u32, mip: u32) -> f32 {
-    let dim = mip_dimensions(mip);
+fn load_view_z_uv(uv: vec2<f32>, view_layer: u32, mip: u32, dims: GtaoMipDimensions) -> f32 {
+    let dim = mip_dimensions_at(dims, mip);
     let pix = vec2<i32>(uv * vec2<f32>(dim));
-    return load_view_z(pix, view_layer, mip);
+    return load_view_z(pix, view_layer, mip, dims);
 }
 
 fn normal_dimensions() -> vec2<u32> {
@@ -161,8 +168,9 @@ fn reconstruct_view_normal(
     z_bottom: f32,
     edges_lrtb: vec4<f32>,
     view_layer: u32,
+    dims: GtaoMipDimensions,
 ) -> vec3<f32> {
-    let depth_dim = mip_dimensions(0u);
+    let depth_dim = dims.mip0;
     let inv_viewport = 1.0 / vec2<f32>(f32(depth_dim.x), f32(depth_dim.y));
     let orthographic = view_is_orthographic(view_layer);
     let center = gm::view_pos_from_uv(uv, z_center, proj_params, orthographic);
@@ -183,6 +191,7 @@ fn select_view_normal(
     z_top: f32,
     z_bottom: f32,
     edges_lrtb: vec4<f32>,
+    dims: GtaoMipDimensions,
 ) -> vec3<f32> {
     let prepass = load_prepass_view_normal(uv, view_layer);
     let prepass_len = length(prepass.xyz);
@@ -199,6 +208,7 @@ fn select_view_normal(
         z_bottom,
         edges_lrtb,
         view_layer,
+        dims,
     );
 }
 
@@ -212,40 +222,47 @@ fn add_horizon_sample(
     low_horizon_cos: f32,
     falloff_mul: f32,
     falloff_add: f32,
+    orthographic: bool,
+    dims: GtaoMipDimensions,
 ) -> f32 {
-    let sample_z = load_view_z_uv(sample_uv, view_layer, mip);
+    let sample_z = load_view_z_uv(sample_uv, view_layer, mip, dims);
     if (sample_z <= 0.0) {
         return low_horizon_cos;
     }
 
-    let sample_pos = gm::view_pos_from_uv(sample_uv, sample_z, proj_params, view_is_orthographic(view_layer));
+    let sample_pos = gm::view_pos_from_uv(sample_uv, sample_z, proj_params, orthographic);
     let delta = sample_pos - view_pos;
     let dist = length(delta);
     if (dist <= 1e-4) {
         return low_horizon_cos;
     }
 
-    let falloff_base = length(vec3<f32>(
-        delta.x,
-        delta.y,
-        delta.z * (1.0 + gtao.thin_occluder_compensation),
-    ));
+    // `thin_occluder_compensation == 0` makes the scaled delta identical to `delta`.
+    var falloff_base = dist;
+    if (gtao.thin_occluder_compensation != 0.0) {
+        falloff_base = length(vec3<f32>(
+            delta.x,
+            delta.y,
+            delta.z * (1.0 + gtao.thin_occluder_compensation),
+        ));
+    }
     let weight = clamp(falloff_base * falloff_mul + falloff_add, 0.0, 1.0);
     let candidate = dot(delta / dist, view_dir);
     return mix(low_horizon_cos, candidate, weight);
 }
 
 fn compute_gtao(pix: vec2<i32>, uv: vec2<f32>, view_layer: u32) -> GtaoSampleOutput {
-    let depth_dim = mip_dimensions(0u);
+    let dims = load_mip_dimensions();
+    let depth_dim = dims.mip0;
     let viewport = vec2<f32>(f32(depth_dim.x), f32(depth_dim.y));
     let inv_viewport = 1.0 / viewport;
     let proj_params = proj_params_for_view(view_layer);
 
-    let z_center = load_view_z(pix, view_layer, 0u);
-    let z_left = load_view_z(pix + vec2<i32>(-1, 0), view_layer, 0u);
-    let z_right = load_view_z(pix + vec2<i32>(1, 0), view_layer, 0u);
-    let z_top = load_view_z(pix + vec2<i32>(0, -1), view_layer, 0u);
-    let z_bottom = load_view_z(pix + vec2<i32>(0, 1), view_layer, 0u);
+    let z_center = load_view_z(pix, view_layer, 0u, dims);
+    let z_left = load_view_z(pix + vec2<i32>(-1, 0), view_layer, 0u, dims);
+    let z_right = load_view_z(pix + vec2<i32>(1, 0), view_layer, 0u, dims);
+    let z_top = load_view_z(pix + vec2<i32>(0, -1), view_layer, 0u, dims);
+    let z_bottom = load_view_z(pix + vec2<i32>(0, 1), view_layer, 0u, dims);
     let edges_lrtb = gf::gtao_calculate_edges(z_center, z_left, z_right, z_top, z_bottom);
 
     if (z_center <= 0.0 || gtao.radius_world <= 0.0 || gtao.intensity <= 0.0) {
@@ -262,6 +279,7 @@ fn compute_gtao(pix: vec2<i32>, uv: vec2<f32>, view_layer: u32) -> GtaoSampleOut
         z_top,
         z_bottom,
         edges_lrtb,
+        dims,
     );
 
     let biased_z = z_center * 0.99999;
@@ -269,13 +287,8 @@ fn compute_gtao(pix: vec2<i32>, uv: vec2<f32>, view_layer: u32) -> GtaoSampleOut
     let view_pos = gm::view_pos_from_uv(uv, biased_z, proj_params, orthographic);
     let view_dir = select(normalize(-view_pos), vec3<f32>(0.0, 0.0, -1.0), orthographic);
     let effect_radius = max(gtao.radius_world * gtao.radius_multiplier, 1e-4);
-    let perspective_pixel_view_size = biased_z * 2.0 / max(abs(proj_params.x) * viewport.x, 1e-4);
-    let orthographic_pixel_view_size = 2.0 / max(abs(proj_params.x) * viewport.x, 1e-4);
-    let pixel_view_size = max(select(
-        perspective_pixel_view_size,
-        orthographic_pixel_view_size,
-        orthographic,
-    ), 1e-6);
+    let pixel_size_denom = max(abs(proj_params.x) * viewport.x, 1e-4);
+    let pixel_view_size = max(select(biased_z, 1.0, orthographic) * 2.0 / pixel_size_denom, 1e-6);
     let resolution_divisor = max(f32(gtao.resolution_divisor), 1.0);
     let max_ao_pixel_radius = gtao.max_pixel_radius / resolution_divisor;
     let screenspace_radius = min(max_ao_pixel_radius, effect_radius / pixel_view_size);
@@ -349,6 +362,8 @@ fn compute_gtao(pix: vec2<i32>, uv: vec2<f32>, view_layer: u32) -> GtaoSampleOut
                 low_horizon_cos0,
                 falloff_mul,
                 falloff_add,
+                orthographic,
+                dims,
             );
             let shc1 = add_horizon_sample(
                 uv - sample_offset_uv,
@@ -360,6 +375,8 @@ fn compute_gtao(pix: vec2<i32>, uv: vec2<f32>, view_layer: u32) -> GtaoSampleOut
                 low_horizon_cos1,
                 falloff_mul,
                 falloff_add,
+                orthographic,
+                dims,
             );
             horizon_cos0 = max(horizon_cos0, shc0);
             horizon_cos1 = max(horizon_cos1, shc1);

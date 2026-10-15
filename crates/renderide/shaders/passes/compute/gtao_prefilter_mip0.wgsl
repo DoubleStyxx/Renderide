@@ -74,14 +74,8 @@ fn load_mip0_depth(mip0_pix: vec2<i32>, mip0_max: vec2<i32>, raw_dim: vec2<u32>,
     let raw_base = clamped_mip0_pix * i32(divisor);
     var sum = 0.0;
     var count = 0.0;
-    for (var y = 0u; y < 4u; y = y + 1u) {
-        if (y >= divisor) {
-            continue;
-        }
-        for (var x = 0u; x < 4u; x = x + 1u) {
-            if (x >= divisor) {
-                continue;
-            }
+    for (var y = 0u; y < divisor; y = y + 1u) {
+        for (var x = 0u; x < divisor; x = x + 1u) {
             let raw_pix = raw_base + vec2<i32>(i32(x), i32(y));
             if (raw_pix.x >= i32(raw_dim.x) || raw_pix.y >= i32(raw_dim.y)) {
                 continue;
@@ -93,23 +87,29 @@ fn load_mip0_depth(mip0_pix: vec2<i32>, mip0_max: vec2<i32>, raw_dim: vec2<u32>,
     return select(0.0, sum / max(count, 1.0), count > 0.0);
 }
 
-fn depth_mip_filter(d0: f32, d1: f32, d2: f32, d3: f32) -> f32 {
+struct DepthMipFalloff {
+    mul: f32,
+    add: f32,
+}
+
+fn depth_mip_falloff() -> DepthMipFalloff {
+    let effect_radius = max(gtao.radius_world * gtao.radius_multiplier, 1e-4) * 0.75;
+    let falloff_fraction = clamp(gtao.falloff_range, 0.01, 2.0);
+    let falloff_range = max(falloff_fraction * effect_radius, 1e-4);
+    let falloff_from = effect_radius * (1.0 - falloff_fraction);
+    return DepthMipFalloff(-1.0 / falloff_range, falloff_from / falloff_range + 1.0);
+}
+
+fn depth_mip_filter(d0: f32, d1: f32, d2: f32, d3: f32, falloff: DepthMipFalloff) -> f32 {
     let max_depth = max(max(d0, d1), max(d2, d3));
     if (max_depth <= 0.0) {
         return 0.0;
     }
 
-    let effect_radius = max(gtao.radius_world * gtao.radius_multiplier, 1e-4) * 0.75;
-    let falloff_fraction = clamp(gtao.falloff_range, 0.01, 2.0);
-    let falloff_range = max(falloff_fraction * effect_radius, 1e-4);
-    let falloff_from = effect_radius * (1.0 - falloff_fraction);
-    let falloff_mul = -1.0 / falloff_range;
-    let falloff_add = falloff_from / falloff_range + 1.0;
-
-    let w0 = clamp((max_depth - d0) * falloff_mul + falloff_add, 0.0, 1.0);
-    let w1 = clamp((max_depth - d1) * falloff_mul + falloff_add, 0.0, 1.0);
-    let w2 = clamp((max_depth - d2) * falloff_mul + falloff_add, 0.0, 1.0);
-    let w3 = clamp((max_depth - d3) * falloff_mul + falloff_add, 0.0, 1.0);
+    let w0 = clamp((max_depth - d0) * falloff.mul + falloff.add, 0.0, 1.0);
+    let w1 = clamp((max_depth - d1) * falloff.mul + falloff.add, 0.0, 1.0);
+    let w2 = clamp((max_depth - d2) * falloff.mul + falloff.add, 0.0, 1.0);
+    let w3 = clamp((max_depth - d3) * falloff.mul + falloff.add, 0.0, 1.0);
     let weight_sum = max(w0 + w1 + w2 + w3, 1e-5);
     return (w0 * d0 + w1 * d1 + w2 * d2 + w3 * d3) / weight_sum;
 }
@@ -183,6 +183,7 @@ fn cs_main(
     let mip0_max = vec2<i32>(i32(mip0_dim.x) - 1, i32(mip0_dim.y) - 1);
     let raw_dim = raw_dimensions();
     let layer = gid.z;
+    let falloff = depth_mip_falloff();
     let base_mip1 = vec2<i32>(i32(gid.x), i32(gid.y));
     let base_mip0 = base_mip1 * 2;
 
@@ -195,7 +196,7 @@ fn cs_main(
     store_mip0(base_mip0 + vec2<i32>(0, 1), layer, d2);
     store_mip0(base_mip0 + vec2<i32>(1, 1), layer, d3);
 
-    let depth_mip1 = depth_mip_filter(d0, d1, d2, d3);
+    let depth_mip1 = depth_mip_filter(d0, d1, d2, d3, falloff);
     store_mip1(base_mip1, layer, depth_mip1);
     previous_mip_depth[lid.x][lid.y] = depth_mip1;
 
@@ -206,7 +207,7 @@ fn cs_main(
         let depth1 = previous_mip_depth[lid.x + 1u][lid.y + 0u];
         let depth2 = previous_mip_depth[lid.x + 0u][lid.y + 1u];
         let depth3 = previous_mip_depth[lid.x + 1u][lid.y + 1u];
-        let depth_mip2 = depth_mip_filter(depth0, depth1, depth2, depth3);
+        let depth_mip2 = depth_mip_filter(depth0, depth1, depth2, depth3, falloff);
         store_mip2(base_mip1 / 2, layer, depth_mip2);
         previous_mip_depth[lid.x][lid.y] = depth_mip2;
     }
@@ -218,7 +219,7 @@ fn cs_main(
         let depth1 = previous_mip_depth[lid.x + 2u][lid.y + 0u];
         let depth2 = previous_mip_depth[lid.x + 0u][lid.y + 2u];
         let depth3 = previous_mip_depth[lid.x + 2u][lid.y + 2u];
-        let depth_mip3 = depth_mip_filter(depth0, depth1, depth2, depth3);
+        let depth_mip3 = depth_mip_filter(depth0, depth1, depth2, depth3, falloff);
         store_mip3(base_mip1 / 4, layer, depth_mip3);
         previous_mip_depth[lid.x][lid.y] = depth_mip3;
     }
@@ -230,7 +231,7 @@ fn cs_main(
         let depth1 = previous_mip_depth[lid.x + 4u][lid.y + 0u];
         let depth2 = previous_mip_depth[lid.x + 0u][lid.y + 4u];
         let depth3 = previous_mip_depth[lid.x + 4u][lid.y + 4u];
-        let depth_mip4 = depth_mip_filter(depth0, depth1, depth2, depth3);
+        let depth_mip4 = depth_mip_filter(depth0, depth1, depth2, depth3, falloff);
         store_mip4(base_mip1 / 8, layer, depth_mip4);
     }
 }
