@@ -3,6 +3,7 @@
 use hashbrown::{HashMap, HashSet};
 use rayon::prelude::*;
 use std::ops::Range;
+use std::sync::Mutex;
 
 use crate::cpu_parallelism::FrameParallelPolicy;
 use crate::gpu_pools::MeshPool;
@@ -14,6 +15,39 @@ use super::state::RenderWorldSpace;
 use super::{
     RenderWorld, SNAPSHOT_REBUILD_PARALLEL_TARGET_CHUNK_TEMPLATES, snapshot_rebuild_admission,
 };
+
+/// Maximum empty draw buffers retained for the next parallel snapshot rebuild.
+const PREPARED_DRAW_BUFFER_POOL_CAP: usize = 128;
+
+/// Recycled worker buffers for parallel prepared-snapshot copies.
+#[derive(Default)]
+pub(super) struct PreparedDrawBufferPool {
+    /// Empty buffers with retained capacity. Taken and returned under one lock per rebuild.
+    spare: Mutex<Vec<Vec<FramePreparedDraw>>>,
+}
+
+impl PreparedDrawBufferPool {
+    /// Returns `n` buffers, preferring previously recycled allocations.
+    fn take_n(&self, n: usize) -> Vec<Vec<FramePreparedDraw>> {
+        let mut spare = self.spare.lock().unwrap_or_else(|err| err.into_inner());
+        let mut buffers = Vec::with_capacity(n);
+        for _ in 0..n {
+            buffers.push(spare.pop().unwrap_or_default());
+        }
+        buffers
+    }
+
+    /// Clears and stores buffers for the next rebuild, discarding any above the cap.
+    fn recycle(&self, buffers: impl IntoIterator<Item = Vec<FramePreparedDraw>>) {
+        let mut spare = self.spare.lock().unwrap_or_else(|err| err.into_inner());
+        for mut buffer in buffers {
+            buffer.clear();
+            if spare.len() < PREPARED_DRAW_BUFFER_POOL_CAP {
+                spare.push(buffer);
+            }
+        }
+    }
+}
 
 /// Shared inputs used while rebuilding a prepared snapshot.
 struct SnapshotRebuildInputs<'a, S: WorldMeshSceneRead + ?Sized> {
@@ -177,18 +211,24 @@ where
         point_render_buffers,
         render_context,
     };
-    let active_space_ids = scene
-        .render_space_ids()
-        .filter(|id| {
-            render_world
-                .spaces
-                .get(id)
-                .is_some_and(|space| space.active)
-        })
-        .collect::<Vec<_>>();
+    let pool = std::mem::take(&mut render_world.draw_buffer_pool);
+    let mut active_space_ids = std::mem::take(&mut render_world.active_space_scratch);
+    active_space_ids.clear();
+    active_space_ids.extend(scene.render_space_ids().filter(|id| {
+        render_world
+            .spaces
+            .get(id)
+            .is_some_and(|space| space.active)
+    }));
     render_world.prepared.begin_cached_rebuild(render_context);
-    let reused_space_ids =
-        reusable_prepared_space_ids(&render_world.prepared, &active_space_ids, dirty_spaces);
+    let mut reused_space_ids = std::mem::take(&mut render_world.reused_space_scratch);
+    reused_space_ids.clear();
+    collect_reusable_prepared_space_ids(
+        &render_world.prepared,
+        &active_space_ids,
+        dirty_spaces,
+        &mut reused_space_ids,
+    );
     let active_spaces = active_space_ids
         .iter()
         .enumerate()
@@ -217,28 +257,68 @@ where
     let policy = FrameParallelPolicy::for_current_thread_pool();
     let parallel_outputs = snapshot_rebuild_admission(policy, tasks.len(), retained_draw_count)
         .chunk_size()
-        .map(|chunk_size| {
-            profiling::scope!("mesh::render_world::rebuild_prepared_snapshot::parallel");
-            tasks
-                .par_iter()
-                .with_min_len(chunk_size)
-                .map(|task| {
-                    profiling::scope!("mesh::render_world::rebuild_prepared_snapshot::worker");
-                    let mut draws = Vec::with_capacity(task.retained_template_count());
-                    task.append_draws_to(&mut draws, &inputs);
-                    (task.space_index, draws)
-                })
-                .collect::<Vec<_>>()
-        });
+        .map(|chunk_size| copy_snapshot_tasks_parallel(&tasks, &inputs, &pool, chunk_size));
     drop(tasks);
     drop(active_spaces);
-    if let Some(outputs) = parallel_outputs {
-        rebuild_snapshot_parallel(render_world, &active_space_ids, &reused_space_ids, outputs);
+    if let Some(mut outputs) = parallel_outputs {
+        rebuild_snapshot_parallel(
+            render_world,
+            &active_space_ids,
+            &reused_space_ids,
+            &mut outputs,
+        );
+        pool.recycle(outputs.into_iter().map(|(_, draws)| draws));
     } else {
-        rebuild_snapshot_serial(render_world, &inputs, active_space_ids, &reused_space_ids);
+        rebuild_snapshot_serial(render_world, &inputs, &active_space_ids, &reused_space_ids);
     }
     render_world.prepared.finish_cached_rebuild(scene);
+    active_space_ids.clear();
+    reused_space_ids.clear();
+    render_world.active_space_scratch = active_space_ids;
+    render_world.reused_space_scratch = reused_space_ids;
+    render_world.draw_buffer_pool = pool;
     stats
+}
+
+/// Copies snapshot tasks on the rayon pool using recycled draw buffers.
+fn copy_snapshot_tasks_parallel<S>(
+    tasks: &[SnapshotRebuildTask<'_>],
+    inputs: &SnapshotRebuildInputs<'_, S>,
+    pool: &PreparedDrawBufferPool,
+    chunk_size: usize,
+) -> Vec<(usize, Vec<FramePreparedDraw>)>
+where
+    S: WorldMeshSceneRead + Sync + ?Sized,
+{
+    profiling::scope!("mesh::render_world::rebuild_prepared_snapshot::parallel");
+    let mut buffers = pool.take_n(tasks.len());
+    tasks
+        .par_iter()
+        .with_min_len(chunk_size)
+        .zip(buffers.par_iter_mut())
+        .map(|(task, draws)| {
+            profiling::scope!("mesh::render_world::rebuild_prepared_snapshot::worker");
+            fill_snapshot_task_buffer(task, draws, inputs)
+        })
+        .collect()
+}
+
+/// Fills one recycled buffer from a snapshot task and moves the allocation to the caller.
+fn fill_snapshot_task_buffer<S>(
+    task: &SnapshotRebuildTask<'_>,
+    draws: &mut Vec<FramePreparedDraw>,
+    inputs: &SnapshotRebuildInputs<'_, S>,
+) -> (usize, Vec<FramePreparedDraw>)
+where
+    S: WorldMeshSceneRead + ?Sized,
+{
+    draws.clear();
+    let estimate = task.retained_template_count();
+    if draws.capacity() < estimate {
+        draws.reserve(estimate.saturating_sub(draws.capacity()));
+    }
+    task.append_draws_to(draws, inputs);
+    (task.space_index, std::mem::take(draws))
 }
 
 /// Builds deterministic snapshot-copy tasks from active render spaces.
@@ -425,7 +505,7 @@ fn rebuild_snapshot_parallel(
     render_world: &mut RenderWorld,
     active_space_ids: &[RenderSpaceId],
     reused_space_ids: &HashSet<RenderSpaceId>,
-    outputs: Vec<(usize, Vec<FramePreparedDraw>)>,
+    outputs: &mut [(usize, Vec<FramePreparedDraw>)],
 ) {
     let mut output_index = 0usize;
     for (space_index, &id) in active_space_ids.iter().enumerate() {
@@ -447,7 +527,7 @@ fn rebuild_snapshot_parallel(
             {
                 render_world
                     .prepared
-                    .extend_cached_draws(&outputs[output_index].1);
+                    .append_cached_draw_buffer(&mut outputs[output_index].1);
                 output_index += 1;
             }
         }
@@ -457,13 +537,13 @@ fn rebuild_snapshot_parallel(
 fn rebuild_snapshot_serial<S>(
     render_world: &mut RenderWorld,
     inputs: &SnapshotRebuildInputs<'_, S>,
-    active_space_ids: Vec<RenderSpaceId>,
+    active_space_ids: &[RenderSpaceId],
     reused_space_ids: &HashSet<RenderSpaceId>,
 ) where
     S: WorldMeshSceneRead + ?Sized,
 {
     profiling::scope!("mesh::render_world::rebuild_prepared_snapshot::serial");
-    for id in active_space_ids {
+    for &id in active_space_ids {
         render_world.prepared.push_cached_space(id);
         if reused_space_ids.contains(&id) {
             render_world
@@ -476,15 +556,15 @@ fn rebuild_snapshot_serial<S>(
     }
 }
 
-fn reusable_prepared_space_ids(
+fn collect_reusable_prepared_space_ids(
     prepared: &super::super::prepared_renderables::FramePreparedRenderables,
     active_space_ids: &[RenderSpaceId],
     dirty_spaces: Option<&HashSet<RenderSpaceId>>,
-) -> HashSet<RenderSpaceId> {
+    reused: &mut HashSet<RenderSpaceId>,
+) {
     let Some(dirty_spaces) = dirty_spaces else {
-        return HashSet::new();
+        return;
     };
-    let mut reused = HashSet::new();
     for &id in active_space_ids {
         if dirty_spaces.contains(&id) {
             continue;
@@ -493,7 +573,6 @@ fn reusable_prepared_space_ids(
             reused.insert(id);
         }
     }
-    reused
 }
 
 fn append_particle_draws<S>(

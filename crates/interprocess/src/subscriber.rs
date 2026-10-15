@@ -86,14 +86,6 @@ impl DequeueBackoff {
     }
 }
 
-/// Message bytes and padded slot length extracted from a ready slot.
-struct ExtractedMessage {
-    /// Payload bytes copied from the ring body.
-    body: Vec<u8>,
-    /// Header + body + padding length consumed from the ring.
-    padded_len: i64,
-}
-
 /// Receives messages from the queue using the same contention and backoff pattern as the managed client.
 pub struct Subscriber {
     /// Mapping, ring capacity, paired semaphore, and optional Unix file cleanup.
@@ -160,10 +152,64 @@ impl Subscriber {
 
     /// Returns the next message if one is ready; non-blocking aside from contender spin windows.
     pub fn try_dequeue(&mut self) -> Option<Vec<u8>> {
-        let spin_start_ticks = self.try_acquire_read_lock()?;
+        let mut buf = Vec::new();
+        self.try_dequeue_into(&mut buf).then_some(buf)
+    }
+
+    /// Copies the next message into `buf`, reusing its allocation.
+    ///
+    /// Returns `false` when no message is ready. On `false`, `buf` is left unchanged. On `true`,
+    /// `buf` contains exactly the payload bytes. Wire order, slot state, and read-offset
+    /// advancement match [`Self::try_dequeue`].
+    pub fn try_dequeue_into(&mut self, buf: &mut Vec<u8>) -> bool {
+        let Some(spin_start_ticks) = self.try_acquire_read_lock() else {
+            return false;
+        };
         let header = self.res.header();
         let _lock = ReadLockGuard { header };
-        self.try_extract_message(spin_start_ticks)
+        self.try_extract_message_into(spin_start_ticks, buf)
+    }
+
+    /// Drains up to `limit` ready messages, acquiring the subscriber read lock once.
+    ///
+    /// `recycled` supplies payload buffers. Each buffer is cleared and filled; unused buffers
+    /// stay in `recycled`. Filled buffers are appended to `out` in queue order. Passing `limit`
+    /// of zero, or calling this when the queue is empty, does not take the read lock and does
+    /// not modify `out`.
+    ///
+    /// A burst holds the crash-recovery timestamp for the whole drain instead of dropping and
+    /// re-acquiring it between messages. The timestamp is refreshed if a slot is still
+    /// `STATE_WRITING`, so a replacement subscriber still waits [`TICKS_FOR_TEN_SECONDS`] before
+    /// reclaiming a live drain. Message bytes, padding, and the final read offset match the
+    /// same number of [`Self::try_dequeue`] calls.
+    pub fn try_drain_reusing(
+        &mut self,
+        recycled: &mut Vec<Vec<u8>>,
+        out: &mut Vec<Vec<u8>>,
+        limit: usize,
+    ) -> usize {
+        if limit == 0 {
+            return 0;
+        }
+        let Some(spin_start_ticks) = self.try_acquire_read_lock() else {
+            return 0;
+        };
+        let header = self.res.header();
+        let _lock = ReadLockGuard { header };
+        let mut drained = 0usize;
+        while drained < limit {
+            let mut buf = recycled.pop().unwrap_or_default();
+            buf.clear();
+            if !self.try_extract_message_into(spin_start_ticks, &mut buf) {
+                if buf.capacity() > 0 {
+                    recycled.push(buf);
+                }
+                break;
+            }
+            out.push(buf);
+            drained += 1;
+        }
+        drained
     }
 
     /// Attempts to claim the subscriber read lock when the queue is non-empty and the lock is stale.
@@ -184,21 +230,36 @@ impl Subscriber {
         Some(ticks)
     }
 
-    /// Consumes one ready message after the read lock is held; caller supplies the tick value used for CAS spin limits.
-    fn try_extract_message(&self, spin_start_ticks: i64) -> Option<Vec<u8>> {
+    /// Consumes one ready message after the read lock is held.
+    ///
+    /// `buf` is updated only when a payload is returned. The caller supplies the tick value used
+    /// for the initial lock; a `STATE_WRITING` spin refreshes the shared recovery timestamp.
+    fn try_extract_message_into(&self, spin_start_ticks: i64, buf: &mut Vec<u8>) -> bool {
         let header = self.res.header();
         if header.is_empty() {
-            return None;
+            return false;
         }
-        let read_offset = header.read_offset.load(Ordering::SeqCst);
-        let write_offset = header.write_offset.load(Ordering::SeqCst);
+        let read_offset = header.read_offset.load(Ordering::Acquire);
+        let write_offset = header.write_offset.load(Ordering::Acquire);
         let ring = self.res.ring();
-        let msg = self.message_header_or_drain(&ring, header, read_offset, write_offset)?;
-        self.claim_ready_message(header, msg, write_offset, spin_start_ticks)?;
-        let extracted = self.read_valid_message(ring, header, msg, read_offset, write_offset)?;
-        ring.clear(read_offset, extracted.padded_len as usize);
-        self.advance_read_offset(header, read_offset, extracted.padded_len);
-        Some(extracted.body)
+        let Some(msg) = self.message_header_or_drain(&ring, header, read_offset, write_offset)
+        else {
+            return false;
+        };
+        if self
+            .claim_ready_message(header, msg, write_offset, spin_start_ticks)
+            .is_none()
+        {
+            return false;
+        }
+        let Some(padded_len) =
+            self.read_valid_message_into(ring, header, msg, read_offset, write_offset, buf)
+        else {
+            return false;
+        };
+        ring.clear(read_offset, padded_len as usize);
+        self.advance_read_offset(header, read_offset, padded_len);
+        true
     }
 
     /// Returns the slot header at `read_offset`, or drains corrupted queue state.
@@ -229,6 +290,7 @@ impl Subscriber {
         spin_start_ticks: i64,
     ) -> Option<()> {
         let mut backoff_iter: u32 = 0;
+        let mut refreshed_lock = false;
         loop {
             if msg
                 .state
@@ -242,6 +304,14 @@ impl Subscriber {
             {
                 break;
             }
+            if !refreshed_lock {
+                // One recovery-timestamp update for the spin, instead of a lock drop/reacquire
+                // between messages. Ready slots never touch this cache line.
+                header
+                    .read_lock_timestamp
+                    .store(utc_now_ticks(), Ordering::SeqCst);
+                refreshed_lock = true;
+            }
             if utc_now_ticks() - spin_start_ticks > TICKS_FOR_TEN_SECONDS {
                 self.drain_to_write_offset(header, write_offset);
                 return None;
@@ -252,23 +322,27 @@ impl Subscriber {
         Some(())
     }
 
-    /// Copies a validated message body from the ring.
-    fn read_valid_message(
+    /// Copies a validated message body from the ring into `buf`.
+    ///
+    /// Returns the padded slot length when the body was copied. `buf` is left unchanged when
+    /// the slot length is rejected.
+    fn read_valid_message_into(
         &self,
         ring: RingView,
         header: &QueueHeader,
         msg: &MessageHeader,
         read_offset: i64,
         write_offset: i64,
-    ) -> Option<ExtractedMessage> {
+        buf: &mut Vec<u8>,
+    ) -> Option<i64> {
         let body_len = i64::from(msg.body_length);
         let Some(padded_len) = self.valid_padded_len(body_len) else {
             self.drain_to_write_offset(header, write_offset);
             return None;
         };
         let body_offset = read_offset + MESSAGE_BODY_OFFSET;
-        let body = ring.read(body_offset, body_len as usize);
-        Some(ExtractedMessage { body, padded_len })
+        ring.read_into(body_offset, body_len as usize, buf);
+        Some(padded_len)
     }
 
     /// Returns a padded slot length when `body_len` is sane for this queue capacity.
@@ -285,13 +359,15 @@ impl Subscriber {
 
     /// Drains every queued slot after corruption or timeout.
     fn drain_to_write_offset(&self, header: &QueueHeader, write_offset: i64) {
-        header.read_offset.store(write_offset, Ordering::SeqCst);
+        // Release publishes the drain to the publisher's Acquire load in `available_space`.
+        header.read_offset.store(write_offset, Ordering::Release);
     }
 
     /// Advances the logical read offset after consuming one valid message.
     fn advance_read_offset(&self, header: &QueueHeader, read_offset: i64, padded_len: i64) {
         let new_read = (read_offset + padded_len) % (self.res.capacity * 2);
-        header.read_offset.store(new_read, Ordering::SeqCst);
+        // Release publishes freed ring space. The slot bytes were cleared above this store.
+        header.read_offset.store(new_read, Ordering::Release);
     }
 
     /// Performs one retry delay while waiting for a publisher to publish a claimed slot.
@@ -340,6 +416,50 @@ mod tests {
             .res
             .ring()
             .write(read_offset + field_offset, &body_len.to_le_bytes());
+    }
+
+    #[test]
+    fn try_dequeue_into_reuses_buffer_capacity() {
+        let (_dir, opts) = queue_options("sub_reuse", 4096).expect("queue options");
+        let mut publisher = Publisher::new(opts.clone()).expect("publisher");
+        let mut subscriber = Subscriber::new(opts).expect("subscriber");
+        let mut buf = Vec::with_capacity(128);
+        assert!(publisher.try_enqueue(b"reuse-me"));
+        assert!(subscriber.try_dequeue_into(&mut buf));
+        assert_eq!(buf, b"reuse-me");
+        let capacity = buf.capacity();
+        assert!(publisher.try_enqueue(b"again"));
+        assert!(subscriber.try_dequeue_into(&mut buf));
+        assert_eq!(buf, b"again");
+        assert!(buf.capacity() >= capacity);
+        assert!(!subscriber.try_dequeue_into(&mut buf));
+        assert_eq!(buf, b"again");
+    }
+
+    #[test]
+    fn try_drain_reusing_preserves_fifo_and_limit() {
+        let (_dir, opts) = queue_options("sub_drain", 4096).expect("queue options");
+        let mut publisher = Publisher::new(opts.clone()).expect("publisher");
+        let mut subscriber = Subscriber::new(opts).expect("subscriber");
+        for payload in [b"one".as_slice(), b"two", b"three", b"four"] {
+            assert!(publisher.try_enqueue(payload));
+        }
+
+        let mut recycled = vec![Vec::with_capacity(32), Vec::with_capacity(32)];
+        let mut out = Vec::new();
+        assert_eq!(subscriber.try_drain_reusing(&mut recycled, &mut out, 2), 2);
+        assert_eq!(out[0], b"one");
+        assert_eq!(out[1], b"two");
+        assert_eq!(subscriber.try_drain_reusing(&mut recycled, &mut out, 0), 0);
+        assert_eq!(out.len(), 2);
+
+        recycled.append(&mut out);
+        let recycled_before = recycled.len();
+        assert_eq!(subscriber.try_drain_reusing(&mut recycled, &mut out, 8), 2);
+        assert_eq!(out[0], b"three");
+        assert_eq!(out[1], b"four");
+        assert!(recycled.len() < recycled_before);
+        assert!(subscriber.try_dequeue().is_none());
     }
 
     #[test]

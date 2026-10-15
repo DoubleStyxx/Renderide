@@ -21,7 +21,7 @@ use crate::scene::{
 use crate::shared::RenderingContext;
 
 use super::prepared_renderables::FramePreparedRenderables;
-use snapshot::SnapshotRebuildStats;
+use snapshot::{PreparedDrawBufferPool, SnapshotRebuildStats};
 use state::RenderWorldSpace;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -305,6 +305,14 @@ pub struct RenderWorld {
     prepared: FramePreparedRenderables,
     /// Most recent maintenance counters.
     maintenance_stats: RenderWorldMaintenanceStats,
+    /// Reused set of spaces whose prepared rows must be rebuilt this frame.
+    snapshot_dirty_scratch: HashSet<RenderSpaceId>,
+    /// Reused active-space id list for prepared snapshot rebuilds.
+    active_space_scratch: Vec<RenderSpaceId>,
+    /// Reused set of spaces copied from the previous prepared snapshot.
+    reused_space_scratch: HashSet<RenderSpaceId>,
+    /// Recycled parallel snapshot-copy buffers.
+    draw_buffer_pool: PreparedDrawBufferPool,
 }
 
 /// Returns whether `node_id` is equal to or below `root_id` in the supplied parent table.
@@ -398,6 +406,10 @@ impl RenderWorld {
                 FramePreparedRenderables::empty(render_context)
             },
             maintenance_stats: RenderWorldMaintenanceStats::default(),
+            snapshot_dirty_scratch: HashSet::new(),
+            active_space_scratch: Vec::new(),
+            reused_space_scratch: HashSet::new(),
+            draw_buffer_pool: PreparedDrawBufferPool::default(),
         }
     }
 
@@ -476,7 +488,8 @@ impl RenderWorld {
         stats.mesh_asset_dirty_renderer_count = dirty_reason_counts.mesh_asset;
         stats.dirty_renderer_count = self.dirty_renderers.len();
         stats.bounds_dirty_renderer_count = self.dirty_bounds_renderers.len();
-        let mut snapshot_dirty_spaces = HashSet::new();
+        let mut snapshot_dirty_spaces = std::mem::take(&mut self.snapshot_dirty_scratch);
+        snapshot_dirty_spaces.clear();
         snapshot_dirty_spaces.extend(self.dirty_spaces.iter().copied());
         snapshot_dirty_spaces.extend(self.dirty_renderers.keys().map(|dirty| dirty.space_id));
         let force_full_snapshot = full_rebuild || context_changed || self.particle_snapshot_dirty;
@@ -527,6 +540,8 @@ impl RenderWorld {
         self.full_rebuild_requested = false;
         stats.retained_template_count = self.retained_template_count();
         self.maintenance_stats = stats;
+        snapshot_dirty_spaces.clear();
+        self.snapshot_dirty_scratch = snapshot_dirty_spaces;
         crate::profiling::plot_render_world_maintenance(stats.profile_sample());
         &self.prepared
     }

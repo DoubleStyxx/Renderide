@@ -11,6 +11,8 @@
 
 use hashbrown::HashMap;
 
+use std::borrow::Cow;
+
 use glam::{Mat4, Vec3};
 use rayon::prelude::*;
 
@@ -265,7 +267,10 @@ struct PreparedCollectionState<'a> {
     /// Material batch keys refreshed for this view's render context and shader permutation.
     cache: &'a FrameMaterialBatchCache,
     /// Active prepared render spaces relevant to this view.
-    space_ids: Vec<RenderSpaceId>,
+    ///
+    /// The common main-view path borrows the prepared snapshot's space list. Filtered views own
+    /// a smaller copied list.
+    space_ids: Cow<'a, [RenderSpaceId]>,
     /// Per-space camera transform-filter masks.
     filter_masks: HashMap<RenderSpaceId, Vec<bool>>,
     /// Per-view LOD visibility decisions.
@@ -614,29 +619,33 @@ fn build_prepared_collection_state<'a>(
 }
 
 /// Resolves the active prepared render spaces relevant to one view context.
-fn prepared_space_ids_for_context(
+fn prepared_space_ids_for_context<'a>(
     ctx: &DrawCollectionInputs<'_>,
-    prepared: &FramePreparedRenderables,
-) -> Vec<RenderSpaceId> {
+    prepared: &'a FramePreparedRenderables,
+) -> Cow<'a, [RenderSpaceId]> {
     match ctx.view.render_space_scope {
-        ViewRenderSpaceScope::Single(space_id) => prepared
-            .active_space_ids()
-            .iter()
-            .copied()
-            .filter(|id| *id == space_id)
-            .filter(|id| render_space_visible_in_view(ctx, *id))
-            .collect(),
+        ViewRenderSpaceScope::Single(space_id) => Cow::Owned(
+            prepared
+                .active_space_ids()
+                .iter()
+                .copied()
+                .filter(|id| *id == space_id)
+                .filter(|id| render_space_visible_in_view(ctx, *id))
+                .collect(),
+        ),
         ViewRenderSpaceScope::AllActive
             if matches!(ctx.view.layer_policy, ViewLayerPolicy::MainView) =>
         {
-            prepared.active_space_ids().to_vec()
+            Cow::Borrowed(prepared.active_space_ids())
         }
-        ViewRenderSpaceScope::AllActive => prepared
-            .active_space_ids()
-            .iter()
-            .copied()
-            .filter(|id| render_space_visible_in_view(ctx, *id))
-            .collect(),
+        ViewRenderSpaceScope::AllActive => Cow::Owned(
+            prepared
+                .active_space_ids()
+                .iter()
+                .copied()
+                .filter(|id| render_space_visible_in_view(ctx, *id))
+                .collect(),
+        ),
     }
 }
 
