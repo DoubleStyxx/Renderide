@@ -9,9 +9,22 @@
 
 const TILE_SIZE: u32 = cmath::TILE_SIZE;
 
+/// One cluster's compact index range. `.x` is the offset into `cluster_light_indices`, `.y` is the count.
+fn cluster_light_range_at(cluster_id: u32) -> vec2<u32> {
+    return rg::cluster_light_ranges[cluster_id];
+}
+
 /// Fetches the light count written by clustered-light compute for `cluster_id`.
 fn cluster_light_count_at(cluster_id: u32) -> u32 {
-    return rg::cluster_light_ranges[cluster_id].y;
+    return cluster_light_range_at(cluster_id).y;
+}
+
+/// Fetches a compact light index from a range already loaded by [`cluster_light_range_at`].
+///
+/// Light loops should load the range once. Calling [`cluster_light_index_at`] per light reloads
+/// the same `vec2` for every slot.
+fn cluster_light_index_from_range(range: vec2<u32>, slot: u32) -> u32 {
+    return rg::cluster_light_indices[range.x + slot];
 }
 
 /// Fetches the compact light index at `slot` within cluster `cluster_id`. Must stay in sync with
@@ -19,8 +32,7 @@ fn cluster_light_count_at(cluster_id: u32) -> u32 {
 /// layout documented on
 /// `ClusterBufferRefs::cluster_light_indices`.
 fn cluster_light_index_at(cluster_id: u32, slot: u32) -> u32 {
-    let range = rg::cluster_light_ranges[cluster_id];
-    return rg::cluster_light_indices[range.x + slot];
+    return cluster_light_index_from_range(cluster_light_range_at(cluster_id), slot);
 }
 
 /// Integer pixel -> tile index. Uses `floor(pxy / TILE_SIZE)` so tile `k` covers pixels
