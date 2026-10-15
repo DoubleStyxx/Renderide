@@ -98,5 +98,7 @@ pub(crate) use compiled::{
 pub(crate) use error::{GraphExecuteError, graph_error_kind};
 pub(crate) use execution_backend::GraphExecutionBackend;
 pub(crate) use history::{HistoryRegistry, HistoryRegistryError, HistoryTextureMipViews};
+#[cfg(feature = "bench-api")]
+pub(crate) use pool::BufferKey;
 pub(crate) use pool::TransientPool;
 pub(crate) use resources::HistorySlotId;

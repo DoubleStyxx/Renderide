@@ -53,6 +53,10 @@ tracy = [
 ## the latter provides `videoflip`, used to land frames in the Unity V=0-bottom
 ## convention shaders expect).
 video-textures = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video"]
+## Exposes CPU-only helpers to the `renderide-bench` crate. Not part of the renderer
+## process API. `cargo bench -p renderide-bench` enables this feature. It does not
+## create a wgpu device or require Resonite.
+bench-api = []
 
 [package.metadata.cargo-machete]
 ignored = ["tracing", "tracy-client"]
