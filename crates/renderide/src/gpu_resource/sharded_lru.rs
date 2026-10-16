@@ -144,7 +144,8 @@ mod tests {
 
     #[test]
     fn retain_drops_rejected_entries_only() {
-        let cache = ShardedLru::<u32, u32>::new(NonZeroUsize::new(4).unwrap(), 2);
+        // One shard so RandomState routing cannot co-locate keys and evict a kept entry.
+        let cache = ShardedLru::<u32, u32>::new(NonZeroUsize::new(4).unwrap(), 1);
 
         assert_eq!(cache.put(1, 10), None);
         assert_eq!(cache.put(2, 20), None);
