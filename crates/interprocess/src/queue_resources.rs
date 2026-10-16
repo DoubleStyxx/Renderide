@@ -61,15 +61,13 @@ impl QueueResources {
     /// View over the byte ring after [`crate::layout::QueueHeader`].
     pub(crate) fn ring(&self) -> RingView {
         // SAFETY: Ring begins at `BUFFER_BYTE_OFFSET` within the mapping; length is `capacity`.
-        unsafe {
-            RingView::from_raw(
-                self.mapping
-                    .as_ptr()
-                    .byte_add(crate::layout::BUFFER_BYTE_OFFSET)
-                    .cast_mut(),
-                self.capacity,
-            )
-        }
+        let ring_base = unsafe {
+            self.mapping
+                .as_ptr()
+                .byte_add(crate::layout::BUFFER_BYTE_OFFSET)
+        };
+        // SAFETY: `ring_base` is that ring start; `capacity` is the mapped ring length.
+        unsafe { RingView::from_raw(ring_base.cast_mut(), self.capacity) }
     }
 
     /// Signals waiters that new data may be available (after enqueue).

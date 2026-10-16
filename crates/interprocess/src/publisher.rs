@@ -84,11 +84,16 @@ fn write_message_to_ring(ring: RingView, write_offset: i64, len: i64, message: &
         // the subscriber reads it only after the Release store of `STATE_READY` below, which
         // happens-before that read.
         // SAFETY: this publisher exclusively owns the claimed slot until `STATE_READY`. The
-        // state store uses only the atomic field; `body_length` is written through its own
-        // address and is not read until that Release store.
+        // state store uses only the atomic field.
         unsafe {
             (*header_ptr).state.store(STATE_WRITING, Ordering::Relaxed);
-            std::ptr::addr_of_mut!((*header_ptr).body_length).write(len as i32);
+        }
+        // SAFETY: `body_length` is addressed through its own field; the place is not read until
+        // the Release store of `STATE_READY`.
+        let body_length = unsafe { std::ptr::addr_of_mut!((*header_ptr).body_length) };
+        // SAFETY: the write touches only `body_length` and is not read until that Release store.
+        unsafe {
+            body_length.write(len as i32);
         }
     } else {
         let wire = message_header_wire_bytes(STATE_WRITING, len as i32);

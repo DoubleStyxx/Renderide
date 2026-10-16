@@ -25,13 +25,15 @@ impl PlatformGroup {
 }
 
 fn apply_parent_death_signal(cmd: &mut Command) {
+    let hook = || {
+        // SAFETY: `prctl` runs in the forked child before `exec` and only affects that child.
+        if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    };
     // SAFETY: `pre_exec` runs in the child after `fork` and before `exec`; `prctl` only affects the child.
     unsafe {
-        cmd.pre_exec(|| {
-            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
-        });
+        cmd.pre_exec(hook);
     }
 }

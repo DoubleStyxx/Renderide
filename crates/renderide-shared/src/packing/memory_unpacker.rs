@@ -77,8 +77,7 @@ impl<'a, 'pool, P: MemoryPackerEntityPool> MemoryUnpacker<'a, 'pool, P> {
         //   storage holds `count * elem_size` bytes of properly-aligned writable memory and the
         //   destination range does not overlap `consumed` (different allocations).
         // - `T: Pod` permits any byte pattern, so the copied bytes form a valid `T` for every
-        //   index in `0..count`. After the copy every slot is initialized; `set_len(count)` is
-        //   sound.
+        //   index in `0..count`.
         // - `ptr::copy_nonoverlapping` accepts unaligned source / aligned destination via byte
         //   pointers.
         unsafe {
@@ -87,8 +86,11 @@ impl<'a, 'pool, P: MemoryPackerEntityPool> MemoryUnpacker<'a, 'pool, P> {
                 out.as_mut_ptr().cast::<u8>(),
                 byte_len,
             );
+        }
+        // SAFETY: the copy above initialized every slot; `set_len(count)` is sound.
+        unsafe {
             out.set_len(count);
-        };
+        }
         Ok(out)
     }
 

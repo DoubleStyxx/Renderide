@@ -45,9 +45,11 @@ fn wine_get_version_linux() -> Option<String> {
     }
     let mut len = None;
     for i in 0..WINE_VERSION_MAX_UTF16_UNITS {
+        // SAFETY: `i` stays below `WINE_VERSION_MAX_UTF16_UNITS`, the scan bound for this pointer.
+        let unit = unsafe { ptr.add(i) };
         // SAFETY: scanning at most `WINE_VERSION_MAX_UTF16_UNITS` code units before bailing;
         // Wine NUL-terminates the version string well within this bound for any honest shim.
-        if unsafe { *ptr.add(i) } == 0 {
+        if unsafe { *unit } == 0 {
             len = Some(i);
             break;
         }

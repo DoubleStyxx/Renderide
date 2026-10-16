@@ -95,8 +95,9 @@ impl PlatformWriter {
     ) -> Result<(), SharedMemoryWriterError> {
         // SAFETY: caller-facing bounds are checked by `write` in the outer struct; `self.view` is
         // the mapping base; `&mut self` ensures no other writer is active here.
+        let dst = unsafe { self.view.Value.add(offset).cast::<u8>() };
+        // SAFETY: `dst` is that bounds-checked destination; the source slice does not alias it.
         unsafe {
-            let dst = self.view.Value.add(offset).cast::<u8>();
             std::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len());
         }
         Ok(())
@@ -109,8 +110,9 @@ impl PlatformWriter {
         }
         // SAFETY: `offset + len <= self.len` is the caller's contract (the outer `flush_range`
         // bounds-checks); `self.view.Value` is the non-null live mapping base.
+        let base = unsafe { self.view.Value.add(offset).cast_const() };
+        // SAFETY: `base` and `len` describe a subrange of that live mapping.
         unsafe {
-            let base = self.view.Value.add(offset).cast_const();
             let _ = FlushViewOfFile(base, len);
         }
     }
