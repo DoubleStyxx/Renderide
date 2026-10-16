@@ -149,14 +149,14 @@ impl VariantInner {
         let installed = super::install(SHADER_KEY, KEYWORD_WGSL)?;
         let stem = installed.default_stem;
         clear_variants(&stem);
-        let (source, keywords) = {
-            let registry = super::registry().read();
-            let target = registry
-                .targets
-                .get(&stem)
-                .ok_or_else(|| format!("custom stem {stem} is not installed"))?;
-            (Arc::clone(&target.source), Arc::clone(&target.keywords))
+        let registry = super::registry().read();
+        let Some(target) = registry.targets.get(&stem) else {
+            drop(registry);
+            return Err(format!("custom stem {stem} is not installed"));
         };
+        let source = Arc::clone(&target.source);
+        let keywords = Arc::clone(&target.keywords);
+        drop(registry);
         if keywords.is_empty() {
             return Err(format!("custom stem {stem} has no keywords"));
         }
@@ -178,18 +178,31 @@ fn clear_variants(stem: &str) {
     if let Some(target) = registry.targets.get_mut(stem) {
         target.variants = super::keywords::KeywordVariantCache::default();
     }
+    drop(registry);
 }
 
 fn insert_miss(stem: &str, mask: u32, packed: &Arc<str>) -> u64 {
-    let mut registry = super::registry().write();
-    let Some(target) = registry.targets.get_mut(stem) else {
-        return 0;
+    let inserted = {
+        let mut registry = super::registry().write();
+        let inserted = if let Some(target) = registry.targets.get_mut(stem) {
+            let already_cached = target.variants.get(mask).is_some();
+            if already_cached {
+                false
+            } else {
+                target.variants.insert(mask, Arc::clone(packed));
+                true
+            }
+        } else {
+            false
+        };
+        drop(registry);
+        inserted
     };
-    if target.variants.get(mask).is_some() {
-        return 0;
+    if inserted {
+        fold_wgsl(packed.as_ref()).wrapping_add(u64::from(mask))
+    } else {
+        0
     }
-    target.variants.insert(mask, Arc::clone(packed));
-    fold_wgsl(packed.as_ref()).wrapping_add(u64::from(mask))
 }
 
 fn fold_wgsl(wgsl: &str) -> u64 {
