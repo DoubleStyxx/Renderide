@@ -11,7 +11,6 @@ use renderide_shared::{
     RENDERIDE_CUSTOM_WGSL_PREFIX, RENDERIDE_TEST_STEM_PREFIX, format_custom_shader_payload,
 };
 
-use crate::backend::asset_transfers::AssetTask;
 use crate::config::{PresentationModeSetting, RendererSettings, RendererSettingsHandle};
 use crate::connection::ConnectionParams;
 use crate::ipc::SharedMemoryAccessor;
@@ -755,22 +754,6 @@ fn take_shader_upload_results(host: &mut HostDualQueueIpc) -> Vec<ShaderUploadRe
         .collect()
 }
 
-fn has_queued_shader_route(rt: &RendererRuntime, asset_id: i32) -> bool {
-    let integrator = &rt.backend.asset_transfers.integrator;
-    [
-        &integrator.main,
-        &integrator.high_priority,
-        &integrator.normal_priority,
-        &integrator.render,
-        &integrator.particle,
-    ]
-    .into_iter()
-    .any(|lane| {
-        lane.iter()
-            .any(|task| matches!(task, AssetTask::ShaderRoute(route) if route.asset_id == asset_id))
-    })
-}
-
 fn assert_no_shader_route(rt: &RendererRuntime, asset_id: i32) {
     assert!(
         rt.backend
@@ -778,7 +761,7 @@ fn assert_no_shader_route(rt: &RendererRuntime, asset_id: i32) {
             .pending_shader_route_for_tests(asset_id)
             .is_none()
     );
-    assert!(!has_queued_shader_route(rt, asset_id));
+    assert_eq!(rt.backend.asset_transfers.integrator.total_queued(), 0);
 }
 
 #[test]
