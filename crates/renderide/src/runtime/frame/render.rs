@@ -154,6 +154,15 @@ impl RendererRuntime {
         request: FrameViewFamilyRequest<'_>,
     ) -> Result<(), GraphExecuteError> {
         profiling::scope!("render::render_frame");
+        #[cfg(feature = "control-api")]
+        let control_main = request.includes_main_view();
+        #[cfg(feature = "control-api")]
+        {
+            self.begin_control_frame();
+            if control_main {
+                self.latch_control_camera(gpu);
+            }
+        }
         let schedule = CpuRenderSchedule::new(request.schedule_kind());
         schedule.run_phase(CpuRenderPhase::Extract, || {
             self.sync_debug_hud_diagnostics_from_settings();
@@ -168,14 +177,19 @@ impl RendererRuntime {
         let inner_parallelism = select_inner_parallelism(prepared_views.plans());
         let scene = &self.scene;
         let backend = &mut self.backend;
-        execute_prepared_views(
+        let result = execute_prepared_views(
             schedule,
             gpu,
             backend,
             scene,
             prepared_views,
             inner_parallelism,
-        )
+        );
+        #[cfg(feature = "control-api")]
+        if control_main {
+            self.restore_control_camera();
+        }
+        result
     }
 
     /// Applies the MSAA tier for the active mode and evicts transient textures keyed by stale

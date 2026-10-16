@@ -50,6 +50,8 @@ impl AppDriver {
                 self.input.sync_window_resolution_logical(window.as_ref());
                 self.input.set_window_focused(window.has_focus());
                 self.input.set_fullscreen(target.is_fullscreen());
+                #[cfg(feature = "control-api")]
+                self.runtime.publish_control_meta(target.gpu());
                 self.target = Some(target);
                 self.apply_pending_window_icons();
             }

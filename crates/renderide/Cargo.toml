@@ -57,6 +57,10 @@ video-textures = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video"]
 ## process API. `cargo bench -p renderide-bench` enables this feature. It does not
 ## create a wgpu device or require Resonite.
 bench-api = []
+## Dev-only drone control API. Off by default so the Resonite IPC wire and the
+## default renderer build do not include the TCP server. Enable with
+## `--features control-api` and pass `--control-port <port>` to bind `127.0.0.1`.
+control-api = ["dep:renderide-control-client", "dep:serde_json"]
 
 [package.metadata.cargo-machete]
 ignored = ["tracing", "tracy-client"]
@@ -126,6 +130,9 @@ gstreamer-video = { version = "0.25", optional = true }
 directories = "6.0"
 mimalloc = "0.1"
 url = "2.5"
+## JSON-RPC codec for the dev-only control API. Compiled only with `control-api`.
+serde_json = { version = "1.0", optional = true }
+renderide-control-client = { path = "../renderide-control-client", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 wgpu = { version = "29.0", features = ["vulkan-portability"] }

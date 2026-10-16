@@ -86,6 +86,8 @@
 
 mod accessors;
 mod asset_integration;
+#[cfg(feature = "control-api")]
+mod control_api;
 mod debug_hud_frame;
 pub mod display;
 mod frame;
@@ -153,6 +155,12 @@ pub struct RendererRuntime {
     xr_stats: RuntimeXrStats,
     /// Lazy GPU resources for the host `BlitToDisplay` desktop pass; created on first use.
     display_blit: DisplayBlitResources,
+    /// Dev-only drone control server. Present only when `--control-port` is set.
+    #[cfg(feature = "control-api")]
+    control_server: Option<crate::control::ControlServer>,
+    /// Host camera fields saved while a drone pose replaces them for one main view.
+    #[cfg(feature = "control-api")]
+    control_camera_backup: Option<control_api::ControlCameraBackup>,
 }
 
 impl RendererRuntime {
@@ -173,6 +181,10 @@ impl RendererRuntime {
             tick_state: RuntimeTickState::new(),
             xr_stats: RuntimeXrStats::default(),
             display_blit: DisplayBlitResources::new(),
+            #[cfg(feature = "control-api")]
+            control_server: None,
+            #[cfg(feature = "control-api")]
+            control_camera_backup: None,
         }
     }
 

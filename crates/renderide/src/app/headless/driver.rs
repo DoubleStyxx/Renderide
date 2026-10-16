@@ -38,6 +38,9 @@ struct HeadlessDriver<'a> {
     gpu: GpuContext,
     schedule: HeadlessSchedule,
     frames_written: u64,
+    /// Start of the tick currently being measured for the control API.
+    #[cfg(feature = "control-api")]
+    control_tick_started: Instant,
 }
 
 impl<'a> HeadlessDriver<'a> {
@@ -67,6 +70,8 @@ impl<'a> HeadlessDriver<'a> {
         ))
         .map_err(RunError::gpu)?;
         runtime.attach_gpu(&gpu);
+        #[cfg(feature = "control-api")]
+        runtime.publish_control_meta(&gpu);
         let schedule = HeadlessSchedule::new(params.interval_ms, Instant::now());
 
         Ok(Self {
@@ -76,6 +81,8 @@ impl<'a> HeadlessDriver<'a> {
             gpu,
             schedule,
             frames_written: 0,
+            #[cfg(feature = "control-api")]
+            control_tick_started: Instant::now(),
         })
     }
 
@@ -91,6 +98,10 @@ impl<'a> HeadlessDriver<'a> {
             crash_context::set_tick_phase(TickPhase::Headless);
             self.runtime.tick_frame_wall_clock_begin(now);
             let tick_kind = self.schedule.tick_kind(now);
+            #[cfg(feature = "control-api")]
+            {
+                self.control_tick_started = Instant::now();
+            }
             let outcome = self.run_tick(tick_kind);
             let render_skipped = outcome.render_skipped;
             if let Some(exit) = self.handle_tick_outcome(outcome) {
@@ -109,20 +120,30 @@ impl<'a> HeadlessDriver<'a> {
     }
 
     fn run_tick(&mut self, kind: HeadlessTickKind) -> TickOutcome {
+        let inputs = self.tick_inputs();
         match kind {
             HeadlessTickKind::FullFrame => {
                 profiling::scope!("headless::full_frame");
-                let outcome = self
-                    .runtime
-                    .tick_one_frame(&mut self.gpu, InputState::default());
+                let outcome = self.runtime.tick_one_frame(&mut self.gpu, inputs);
                 self.schedule.complete_full_frame(Instant::now());
                 outcome
             }
             HeadlessTickKind::LockstepOnly => {
                 profiling::scope!("headless::lockstep_tick");
                 self.runtime
-                    .tick_one_frame_lockstep_only(Some(&mut self.gpu), InputState::default())
+                    .tick_one_frame_lockstep_only(Some(&mut self.gpu), inputs)
             }
+        }
+    }
+
+    fn tick_inputs(&self) -> InputState {
+        #[cfg(feature = "control-api")]
+        {
+            self.runtime.control_input_state()
+        }
+        #[cfg(not(feature = "control-api"))]
+        {
+            InputState::default()
         }
     }
 
@@ -169,6 +190,8 @@ impl<'a> HeadlessDriver<'a> {
     }
 
     fn after_tick(&mut self, kind: HeadlessTickKind, render_skipped: bool) {
+        #[cfg(feature = "control-api")]
+        self.note_control_presented(kind, render_skipped);
         if kind == HeadlessTickKind::FullFrame && !render_skipped {
             self.maybe_write_frame_png();
         }
@@ -177,6 +200,19 @@ impl<'a> HeadlessDriver<'a> {
         crate::profiling::flush_resource_churn_plots();
         crate::profiling::emit_frame_mark();
         std::thread::sleep(HEADLESS_TICK_SLEEP);
+    }
+
+    #[cfg(feature = "control-api")]
+    fn note_control_presented(&self, kind: HeadlessTickKind, render_skipped: bool) {
+        let full_frame = kind == HeadlessTickKind::FullFrame;
+        if !crate::control::headless_tick_presents(full_frame, render_skipped) {
+            return;
+        }
+        let Some(session) = self.runtime.control_session() else {
+            return;
+        };
+        let cpu_frame_ms = self.control_tick_started.elapsed().as_secs_f64() * 1000.0;
+        crate::control::finish_presented_frame(&session, &self.gpu, cpu_frame_ms);
     }
 
     fn maybe_write_frame_png(&mut self) {

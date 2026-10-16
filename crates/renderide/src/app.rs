@@ -39,3 +39,5 @@ mod window_icon;
 
 pub use bootstrap::run;
 pub use exit::RunExit;
+#[cfg(feature = "control-api")]
+pub(crate) use headless::readback_texture_png as headless_readback_png;

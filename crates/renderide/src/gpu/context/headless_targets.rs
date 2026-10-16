@@ -145,4 +145,10 @@ impl GpuContext {
             None
         }
     }
+
+    /// Primary offscreen color texture for a dev-only `capture.png`, headless or windowed.
+    #[cfg(feature = "control-api")]
+    pub(crate) fn control_color_texture(&self) -> Option<&wgpu::Texture> {
+        self.primary_offscreen.as_ref().map(|t| &t.color_texture)
+    }
 }

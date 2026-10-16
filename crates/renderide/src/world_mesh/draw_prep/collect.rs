@@ -390,6 +390,21 @@ impl QueuedWorldMeshDraws {
         self.len
     }
 
+    /// Draw count and triangle count for the dev-only control stats probe.
+    ///
+    /// Instances are the draw count. Triangles are `index_count / 3` summed across chunks.
+    #[cfg(feature = "control-api")]
+    pub(crate) fn control_index_triangles(&self) -> (u64, u64) {
+        let mut triangles = 0u64;
+        for chunk in &self.chunks {
+            for item in chunk {
+                triangles = triangles.saturating_add(u64::from(item.index_count) / 3);
+            }
+        }
+        let draws = u64::try_from(self.len).unwrap_or(u64::MAX);
+        (draws, triangles)
+    }
+
     /// Sorts and arranges queued draws, reusing a retained command-list cache when provided.
     pub(crate) fn sort_and_arrange_with_cache(
         self,

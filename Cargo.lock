@@ -3636,8 +3636,10 @@ dependencies = [
  "pollster",
  "profiling",
  "rayon",
+ "renderide-control-client",
  "renderide-shared",
  "serde",
+ "serde_json",
  "signal-hook",
  "sysinfo",
  "tempfile",
@@ -3663,6 +3665,14 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "renderide",
+]
+
+[[package]]
+name = "renderide-control-client"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
