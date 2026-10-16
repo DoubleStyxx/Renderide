@@ -40,6 +40,11 @@ fn world_matrices(c: &mut Criterion) {
     group.bench_function("forest_recompute", |b| {
         b.iter(|| black_box(workload.recompute()));
     });
+    let mut reverse = WorldMatrixWorkload::reverse_chain(WORLD_MATRIX_NODES);
+    let _ = reverse.recompute();
+    group.bench_function("reverse_chain_recompute", |b| {
+        b.iter(|| black_box(reverse.recompute()));
+    });
     group.finish();
 }
 

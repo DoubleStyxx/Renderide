@@ -126,13 +126,17 @@ pub(super) struct WorldHierarchyScratch {
 /// Reused level-synchronous world-matrix rebuild scratch.
 #[derive(Debug, Default)]
 pub(super) struct WorldBulkRebuildScratch {
-    /// Bulk-rebuild scratch: depth per node (`u32::MAX` for cycle nodes). Reused across frames.
+    /// Bulk-rebuild scratch: depth per node. Cycle members stay at [`DEPTH_ON_CHAIN`] until the
+    /// next solve. Reused across frames.
     pub(super) depth: Vec<u32>,
     /// Bulk-rebuild scratch: per-depth-level node-index buckets. Inner Vec capacities persist
     /// across frames so a stable scene re-uses the same storage every solve.
     pub(super) levels: Vec<Vec<usize>>,
     /// Bulk-rebuild scratch: indices of nodes whose ancestor chain forms a cycle.
     pub(super) cycle_nodes: Vec<usize>,
+    /// Parent-chain walk used by depth classification. Reused so a full rebuild does not
+    /// allocate a stack per solve.
+    pub(super) classify_stack: Vec<usize>,
     /// Bulk-rebuild scratch: per-level computed (world matrix, degenerate flag) pairs before
     /// they are written back to the cache.
     pub(super) writes: Vec<(Mat4, bool)>,
@@ -268,68 +272,114 @@ fn cache_is_fully_dirty(computed: &[bool]) -> bool {
     !computed.iter().any(|c| *c)
 }
 
+/// Unvisited node in [`classify_nodes_by_depth`].
+const DEPTH_UNSEEN: u32 = u32::MAX;
+/// Node currently on the parent-chain stack. Also the final mark for cycle members, which the
+/// bucketing pass turns into [`cycle_nodes`](WorldBulkRebuildScratch::cycle_nodes).
+const DEPTH_ON_CHAIN: u32 = u32::MAX - 1;
+
 /// Fills `depth` / `levels` / `cycle_nodes` from a parent-array tree, reusing the supplied
 /// buffers' allocations. After this call `levels[d]` lists every node at depth `d` whose
 /// ancestor chain reaches a root, and `cycle_nodes` lists every node whose ancestor chain
 /// forms a cycle. Cycle nodes get a local-only fallback matrix (matching
 /// [`WorldTransformCache::compute_world_matrices_incremental`]).
+///
+/// One walk per node resolves the parent chain. The previous sweep advanced one depth level
+/// per pass, so a child-before-parent chain of length `n` (bones and nested slots stored that
+/// way) re-scanned the whole array `n` times.
 fn classify_nodes_by_depth(
     node_parents: &[i32],
     n: usize,
     depth: &mut Vec<u32>,
     levels: &mut Vec<Vec<usize>>,
     cycle_nodes: &mut Vec<usize>,
+    stack: &mut Vec<usize>,
 ) {
     depth.clear();
-    depth.resize(n, u32::MAX);
+    depth.resize(n, DEPTH_UNSEEN);
     cycle_nodes.clear();
+    stack.clear();
     for inner in levels.iter_mut() {
         inner.clear();
     }
 
-    // Repeatedly resolve depths in a sweep order: a node knows its depth once its parent does.
-    // For a typical mostly-sorted host order this converges in 1-2 sweeps; cap at n iterations to
-    // exit deterministically when a cycle leaves a residue of unresolved nodes.
-    for (i, slot) in depth.iter_mut().enumerate().take(n) {
-        let p = node_parents.get(i).copied().unwrap_or(-1);
-        if p < 0 || (p as usize) >= n || p == i as i32 {
-            *slot = 0;
+    for start in 0..n {
+        if depth[start] != DEPTH_UNSEEN {
+            continue;
         }
-    }
-    let mut changed = true;
-    let mut sweep = 0usize;
-    while changed && sweep < n {
-        changed = false;
-        for i in 0..n {
-            if depth[i] != u32::MAX {
-                continue;
-            }
-            let p = node_parents[i];
-            if p >= 0 && (p as usize) < n {
-                let pd = depth[p as usize];
-                if pd != u32::MAX {
-                    depth[i] = pd + 1;
-                    changed = true;
-                }
+        let end = walk_parent_chain(node_parents, n, depth, stack, start);
+        match end {
+            ChainEnd::Cycle => stack.clear(),
+            ChainEnd::Root => assign_chain_depths(depth, stack, 0),
+            ChainEnd::ParentDepth(parent_depth) => {
+                assign_chain_depths(depth, stack, parent_depth.saturating_add(1));
             }
         }
-        sweep += 1;
     }
 
     let max_depth = depth
         .iter()
-        .filter(|&&d| d != u32::MAX)
         .copied()
+        .filter(|&d| d < DEPTH_ON_CHAIN)
         .max()
         .unwrap_or(0) as usize;
     if levels.len() < max_depth + 1 {
         levels.resize_with(max_depth + 1, Vec::new);
     }
     for (i, &d) in depth.iter().enumerate() {
-        if d == u32::MAX {
+        if d >= DEPTH_ON_CHAIN {
             cycle_nodes.push(i);
         } else {
             levels[d as usize].push(i);
+        }
+    }
+}
+
+/// How a parent walk in [`walk_parent_chain`] stopped.
+enum ChainEnd {
+    /// The chain reached a node with no parent, or a self-parent. Top of stack is depth 0.
+    Root,
+    /// The chain met a node whose depth is already known. That depth is the parent of the
+    /// top of the stack.
+    ParentDepth(u32),
+    /// The chain re-entered a node already on this stack, or a previously recorded cycle.
+    Cycle,
+}
+
+/// Walks from `start` toward the root, pushing unresolved nodes onto `stack`.
+fn walk_parent_chain(
+    node_parents: &[i32],
+    n: usize,
+    depth: &mut [u32],
+    stack: &mut Vec<usize>,
+    start: usize,
+) -> ChainEnd {
+    let mut cursor = start;
+    loop {
+        match depth[cursor] {
+            DEPTH_ON_CHAIN => return ChainEnd::Cycle,
+            DEPTH_UNSEEN => {
+                depth[cursor] = DEPTH_ON_CHAIN;
+                stack.push(cursor);
+                let parent = node_parents.get(cursor).copied().unwrap_or(-1);
+                if parent < 0 || (parent as usize) >= n || parent == cursor as i32 {
+                    return ChainEnd::Root;
+                }
+                cursor = parent as usize;
+            }
+            parent_depth => return ChainEnd::ParentDepth(parent_depth),
+        }
+    }
+}
+
+/// Writes increasing depths while popping `stack` (the root side was pushed last).
+fn assign_chain_depths(depth: &mut [u32], stack: &mut Vec<usize>, mut next: u32) {
+    while let Some(id) = stack.pop() {
+        if next >= DEPTH_ON_CHAIN {
+            depth[id] = DEPTH_ON_CHAIN;
+        } else {
+            depth[id] = next;
+            next += 1;
         }
     }
 }
@@ -458,6 +508,7 @@ impl WorldTransformCache {
                     depth,
                     levels,
                     cycle_nodes,
+                    classify_stack,
                     writes,
                     parallel_writes,
                     ..
@@ -465,7 +516,7 @@ impl WorldTransformCache {
             ..
         } = self;
 
-        classify_nodes_by_depth(node_parents, n, depth, levels, cycle_nodes);
+        classify_nodes_by_depth(node_parents, n, depth, levels, cycle_nodes, classify_stack);
 
         for cycle_id in cycle_nodes.iter() {
             logger::trace!(
@@ -520,6 +571,7 @@ impl WorldTransformCache {
                     depth,
                     levels,
                     cycle_nodes,
+                    classify_stack,
                     writes,
                     parallel_writes,
                     dirty_level_indices,
@@ -527,7 +579,7 @@ impl WorldTransformCache {
             ..
         } = self;
 
-        classify_nodes_by_depth(node_parents, n, depth, levels, cycle_nodes);
+        classify_nodes_by_depth(node_parents, n, depth, levels, cycle_nodes, classify_stack);
         if !cycle_nodes.is_empty()
             && cycle_nodes
                 .len()
