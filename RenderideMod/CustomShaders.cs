@@ -19,6 +19,26 @@ namespace RenderideMod;
 public static class CustomShaders
 {
     /// <summary>
+    /// Text of <c>Shaders/example_solid.wgsl</c>, embedded in the mod assembly.
+    /// </summary>
+    /// <remarks>
+    /// <c>CustomShaders.Install("Unlit", CustomShaders.ExampleSolidWgsl)</c> turns every Unlit
+    /// material into a flat <c>_Color</c> fill.
+    /// </remarks>
+    public static string ExampleSolidWgsl => ReadEmbeddedShader("example_solid.wgsl");
+
+    /// <summary>Reads an embedded WGSL file shipped under <c>Shaders/</c>.</summary>
+    /// <param name="fileName">File name, for example <c>example_solid.wgsl</c>.</param>
+    public static string ReadEmbeddedShader(string fileName)
+    {
+        var name = "RenderideMod.Shaders." + fileName;
+        using var stream = typeof(CustomShaders).Assembly.GetManifestResourceStream(name)
+            ?? throw new ArgumentException($"No embedded shader {name}.", nameof(fileName));
+        using var reader = new StreamReader(stream);
+        return reader.ReadToEnd();
+    }
+
+    /// <summary>
     /// Compiles <paramref name="wgsl"/> and binds it to every shader asset whose name matches
     /// <paramref name="shaderKey"/>.
     /// </summary>

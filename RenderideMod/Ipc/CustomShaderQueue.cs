@@ -50,6 +50,8 @@ internal static class CustomShaderQueue
         foreach (var upload in batch)
         {
             messagingHost.SendCommand(upload, isBackground: true);
+            ResoniteModLoader.ResoniteMod.Msg(
+                $"custom shader upload sent: assetId={upload.assetId} bytes={upload.file?.Length ?? 0}");
         }
     }
 
