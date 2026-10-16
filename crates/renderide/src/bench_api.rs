@@ -171,9 +171,40 @@ impl WorldMatrixWorkload {
         }
     }
 
+    /// Builds one parent chain stored child-before-parent.
+    ///
+    /// Node `i` parents `i + 1`, and the last node is the root. Bulk rebuild classifies this
+    /// shape on every full recompute; the chain is long enough that a per-depth sweep is quadratic.
+    #[must_use]
+    pub fn reverse_chain(count: usize) -> Self {
+        let mut nodes = Vec::with_capacity(count);
+        let mut parents = Vec::with_capacity(count);
+        for index in 0..count {
+            let is_root = index + 1 == count;
+            nodes.push(RenderTransform {
+                position: Vec3::new(if is_root { 0.0 } else { 1.0 }, 0.0, 0.0),
+                scale: Vec3::ONE,
+                rotation: Quat::IDENTITY,
+            });
+            let parent = if is_root {
+                -1
+            } else {
+                i32::try_from(index + 1).unwrap_or(-1)
+            };
+            parents.push(parent);
+        }
+        Self {
+            nodes,
+            parents,
+            cache: WorldTransformCache::default(),
+        }
+    }
+
     /// Invalidates the cache and solves world matrices.
     ///
     /// Returns the world-space X of node 1 (child of root 0), which is `1` for [`Self::forest`].
+    /// For [`Self::reverse_chain`] that node sits `count - 2` steps below the root, so the value
+    /// is `count - 2` when every step translates `+1` on X.
     #[must_use]
     pub fn recompute(&mut self) -> f32 {
         self.cache.computed.fill(false);

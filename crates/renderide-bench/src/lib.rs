@@ -16,7 +16,7 @@ pub use renderide::bench_api::{
 mod tests {
     use super::{
         BUFFER_POOL_SLOTS, BufferPoolWorkload, CULL_BATCH, CullWorkload, TransformWorkload,
-        WorldMatrixWorkload,
+        WORLD_MATRIX_NODES, WorldMatrixWorkload,
     };
 
     #[test]
@@ -39,6 +39,16 @@ mod tests {
         let first = workload.recompute();
         let second = workload.recompute();
         assert!((first - 1.0).abs() < 1.0e-4);
+        assert!((second - first).abs() < 1.0e-4);
+    }
+
+    #[test]
+    fn world_matrix_reverse_chain_recompute_matches_depth() {
+        let mut workload = WorldMatrixWorkload::reverse_chain(WORLD_MATRIX_NODES);
+        let expected = (WORLD_MATRIX_NODES - 2) as f32;
+        let first = workload.recompute();
+        let second = workload.recompute();
+        assert!((first - expected).abs() < 1.0e-3);
         assert!((second - first).abs() < 1.0e-4);
     }
 

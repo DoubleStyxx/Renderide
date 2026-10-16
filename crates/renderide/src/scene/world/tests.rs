@@ -278,6 +278,62 @@ fn parallel_bulk_rebuild_matches_serial_on_large_chain() {
         .compute_world_matrices_incremental(0, &nodes, &parents)
         .expect("serial");
 
+    assert_matrices_match(&parallel, &serial);
+}
+
+#[test]
+fn parallel_bulk_rebuild_matches_serial_on_reverse_chain() {
+    // Child stored before its parent. Depth classification must still multiply root-first.
+    let n = WORLD_BULK_REBUILD_PARALLEL_MIN + 11;
+    let mut nodes = Vec::with_capacity(n);
+    let mut parents = Vec::with_capacity(n);
+    for i in 0..n {
+        nodes.push(translation_xform(0.25, 0.0, 0.0));
+        let parent = if i + 1 == n { -1 } else { (i + 1) as i32 };
+        parents.push(parent);
+    }
+    assert_bulk_matches_serial(&nodes, &parents);
+}
+
+#[test]
+fn parallel_bulk_rebuild_matches_serial_when_a_node_points_into_a_cycle() {
+    let mut nodes = Vec::new();
+    let mut parents = Vec::new();
+    for _ in 0..WORLD_BULK_REBUILD_PARALLEL_MIN {
+        nodes.push(translation_xform(1.0, 0.0, 0.0));
+        parents.push(-1);
+    }
+    let cycle_a = nodes.len();
+    nodes.push(translation_xform(2.0, 0.0, 0.0));
+    parents.push((cycle_a + 1) as i32);
+    nodes.push(translation_xform(3.0, 0.0, 0.0));
+    parents.push(cycle_a as i32);
+    nodes.push(translation_xform(4.0, 0.0, 0.0));
+    parents.push(cycle_a as i32);
+    assert_bulk_matches_serial(&nodes, &parents);
+}
+
+fn assert_bulk_matches_serial(nodes: &[RenderTransform], parents: &[i32]) {
+    let n = nodes.len();
+    let mut parallel = WorldTransformCache::default();
+    compute_world_matrices_for_space(0, nodes, parents, &mut parallel).expect("parallel bulk");
+
+    let mut serial = WorldTransformCache::default();
+    ensure_cache_shapes(&mut serial, n, false);
+    if serial.hierarchy.children_dirty {
+        rebuild_children(parents, n, &mut serial.hierarchy.children);
+        serial.hierarchy.children_dirty = false;
+    }
+    serial
+        .compute_world_matrices_incremental(0, nodes, parents)
+        .expect("serial");
+
+    assert_matrices_match(&parallel, &serial);
+}
+
+fn assert_matrices_match(parallel: &WorldTransformCache, serial: &WorldTransformCache) {
+    let n = parallel.world_matrices.len();
+    assert_eq!(n, serial.world_matrices.len());
     for i in 0..n {
         assert!(
             parallel.world_matrices[i].abs_diff_eq(serial.world_matrices[i], 1e-5),
