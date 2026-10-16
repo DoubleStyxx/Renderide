@@ -8,6 +8,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 static DRAW_STATS: AtomicBool = AtomicBool::new(false);
 
 /// Arms draw-stat capture for the rest of the process.
+///
+/// Called from `app` when `--frame-bench-out` is present.
 pub(crate) fn set_frame_bench_draw_stats(enabled: bool) {
     DRAW_STATS.store(enabled, Ordering::Relaxed);
 }
