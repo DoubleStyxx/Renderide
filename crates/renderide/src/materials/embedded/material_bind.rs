@@ -7,11 +7,18 @@
 //! and decoded by WGSL via `renderide::material::variant_bits::enabled`.
 
 mod assemble;
+#[cfg(feature = "bench-api")]
+mod bench;
 mod cache;
 mod resolve;
 mod texture_signature;
 mod uniform;
 mod white_texture;
+
+#[cfg(feature = "bench-api")]
+pub(crate) use bench::{CpuMaterialBindGroupCache, material_bind_cache_key_for_bench};
+#[cfg(feature = "bench-api")]
+pub(crate) use uniform::CpuMaterialUniformArena;
 
 pub(crate) use cache::MaterialBindCacheKey;
 

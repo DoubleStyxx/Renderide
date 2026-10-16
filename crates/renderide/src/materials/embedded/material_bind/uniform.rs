@@ -414,6 +414,121 @@ impl EmbeddedMaterialBindResources {
     }
 }
 
+/// WebGPU minimum `minUniformBufferOffsetAlignment`.
+///
+/// Production reads the device limit. Benches have no device; desktop adapters commonly report
+/// this spec minimum, and the slot math matches [`MaterialUniformArenaAllocator`].
+#[cfg(feature = "bench-api")]
+const BENCH_UNIFORM_ALIGNMENT: u64 = 256;
+
+/// CPU uniform-arena slot table. No GPU buffer is allocated.
+#[cfg(feature = "bench-api")]
+pub(crate) struct CpuMaterialUniformArena {
+    allocator: MaterialUniformArenaAllocator,
+    block_size: u64,
+    pending: Option<PendingUniformWrite>,
+}
+
+#[cfg(feature = "bench-api")]
+struct PendingUniformWrite {
+    key: MaterialUniformCacheKey,
+    buffer_generation: u64,
+}
+
+#[cfg(feature = "bench-api")]
+impl CpuMaterialUniformArena {
+    /// Sizes the arena so `slot_count` blocks fit without a later growth generation bump.
+    pub(crate) fn for_slots(block_size: u64, slot_count: usize) -> Self {
+        let stride = align_up(block_size.max(1), BENCH_UNIFORM_ALIGNMENT);
+        let slots = u64::try_from(slot_count).unwrap_or(u64::MAX).max(1);
+        let bytes = stride.saturating_mul(slots).max(BENCH_UNIFORM_ALIGNMENT);
+        Self {
+            allocator: MaterialUniformArenaAllocator::new(bytes, bytes, BENCH_UNIFORM_ALIGNMENT),
+            block_size,
+            pending: None,
+        }
+    }
+
+    /// Inserts `material_asset_id` and marks it clean at `mutation_gen`.
+    pub(crate) fn prime(
+        &mut self,
+        stem_hash: u64,
+        material_asset_id: i32,
+        texture_2d_asset_id: i32,
+        mutation_gen: u64,
+        texture_state_sig: u64,
+    ) -> Result<(), EmbeddedMaterialBindError> {
+        if self
+            .begin_rewrite(
+                stem_hash,
+                material_asset_id,
+                texture_2d_asset_id,
+                mutation_gen,
+                texture_state_sig,
+            )?
+            .is_some()
+        {
+            self.finish_rewrite(mutation_gen, texture_state_sig);
+        }
+        Ok(())
+    }
+
+    /// Resolves an existing slot after a property change.
+    ///
+    /// Returns the dynamic offset when the slot must be rewritten.
+    pub(crate) fn begin_rewrite(
+        &mut self,
+        stem_hash: u64,
+        material_asset_id: i32,
+        texture_2d_asset_id: i32,
+        mutation_gen: u64,
+        texture_state_sig: u64,
+    ) -> Result<Option<u32>, EmbeddedMaterialBindError> {
+        let key = MaterialUniformCacheKey {
+            stem_hash,
+            material_asset_id,
+            property_block_slot0: None,
+            renderer_property_block_id: None,
+            texture_2d_asset_id,
+            shader_variant_bits: None,
+        };
+        let resolved = self.allocator.resolve_slot(
+            key,
+            non_zero_u64(self.block_size)?,
+            mutation_gen,
+            texture_state_sig,
+        )?;
+        let offset = u32::try_from(resolved.offset).map_err(|_err| {
+            EmbeddedMaterialBindError::from(format!(
+                "material uniform arena offset {} exceeds dynamic offset range",
+                resolved.offset
+            ))
+        })?;
+        if !resolved.needs_write {
+            self.pending = None;
+            return Ok(None);
+        }
+        self.pending = Some(PendingUniformWrite {
+            key,
+            buffer_generation: resolved.buffer_generation,
+        });
+        Ok(Some(offset))
+    }
+
+    /// Records that the bytes for the pending rewrite were staged.
+    pub(crate) fn finish_rewrite(&mut self, mutation_gen: u64, texture_state_sig: u64) {
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
+        self.allocator.mark_written(
+            &pending.key,
+            pending.buffer_generation,
+            mutation_gen,
+            texture_state_sig,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
