@@ -210,7 +210,7 @@ using RenderideMod;
 CustomShaders.Install("Rainbow", CustomShaders.ExampleRainbowWgsl);
 ```
 
-On one mesh, attach `CustomShaderMaterial` and set `ShaderKey` to `Rainbow`. Add a Colors row `_Color`, a Textures row `_MainTex`, and a Floats row `_Speed`. On another mesh, attach `UnlitMaterial` and leave it alone. The two materials coexist: Rainbow is one material's override, Unlit stays the packaged route.
+On one mesh, attach `CustomShaderMaterial` and set `ShaderKey` to `Rainbow`. Add a Colors row `_Color`, a Textures row `_MainTex`, a Floats row `_Speed`, and a Keywords row `RAINBOW` set true. On another mesh, attach `UnlitMaterial` and leave it alone. The two materials coexist: Rainbow is one material's override, Unlit stays the packaged route. `RAINBOW` off writes `_MainTex * _Color` from the custom program.
 
 ## Smoke test
 
@@ -252,15 +252,16 @@ Two materials in one world. One draws `ExampleRainbowWgsl` through `CustomShader
 2. After RenderideMod loads, call `CustomShaders.Install("Rainbow", CustomShaders.ExampleRainbowWgsl);`.
 3. Mod log: `custom shader upload sent: assetId=-1 bytes=<n>` (or the next carrier id if an earlier install ran). Renderer log: `custom shader installed key=rainbow stem=renderide_custom_rainbow_default`. No `custom shader payload rejected` and no `custom shader install failed for rainbow`.
 4. Spawn two boxes.
-5. Box A: attach `CustomShaderMaterial`. Set `ShaderKey` to `Rainbow`. Add a Colors row named `_Color`, a Textures row named `_MainTex` with a texture, and a Floats row named `_Speed` set to `0.2`.
+5. Box A: attach `CustomShaderMaterial`. Set `ShaderKey` to `Rainbow`. Add a Colors row named `_Color`, a Textures row named `_MainTex` with a texture, a Floats row named `_Speed` set to `0.2`, and a Keywords row named `RAINBOW` set true.
 6. Box B: attach `UnlitMaterial` with a texture and a non-white TintColor. Do not attach `CustomShaderMaterial`.
-7. Mod log, once the render material id exists: `custom shader material assign: material=<id> key=Rainbow`, then `custom shader upload sent` with the next negative carrier id. Renderer log: `custom shader material op=Assign material=Some(<id>) key=Rainbow`. A following `shader_upload` line for that carrier id does not register a shader route.
-8. With the renderer per-material override applied, box A cycles hue from world x and `_Speed`, multiplied by `_Color` and `_MainTex`. Box B stays textured unlit. Rainbow and Unlit coexist because the override is per material asset id.
-9. Clear `ShaderKey`, or disable or destroy the component on box A. Mod log: `custom shader material clear: material=<id>`. Renderer log: `custom shader material op=Clear material=Some(<id>) key=`. Box A draws packaged Unlit from `_Color` and `_MainTex`. Box B is unchanged.
-10. Optional keyword check: add a Keywords row whose name equals a `//#keyword` line. True sends `SetFloat` 1. False sends 0. That float is the keyword toggle. It does not add a command.
+7. Mod log, once the render material id exists: `custom shader material assign: material=<id> key=Rainbow`, then `custom shader upload sent` with the next negative carrier id. Renderer log: `shader_upload: asset_id=<carrier> shader_asset_name=None ... raster_pipeline=Null`. That carrier does not register a shader route. The override is the material id to key map. No `custom shader payload rejected` line.
+8. Box A cycles hue from world x and `_Speed`, multiplied by `_Color` and `_MainTex` (sampled with `_MainTex_ST`). Box B stays textured unlit. Rainbow and Unlit coexist because the override is per material asset id.
+9. Clear `ShaderKey`, or disable or destroy the component on box A. Mod log: `custom shader material clear: material=<id>`, then another carrier `custom shader upload sent` line. Renderer log is the same carrier `shader_upload` line with `raster_pipeline=Null`. Box A draws packaged Unlit from `_Color` and `_MainTex`. Box B is unchanged.
+10. Set the `RAINBOW` keyword false. `SetFloat` sends 0. Box A stays on the Rainbow program but the fragment is `_MainTex * _Color`, with no hue cycle. Box B is unchanged.
 
 Fail triage:
 
 - No `custom shader material assign` line: the render material id is not on `AssetId` or `RenderAssetId` yet, or the member was not found (`CustomShaderMaterial: no int AssetId/RenderAssetId`). Property rows can still upload. The assign waits until the id exists.
 - `custom shader material assign rejected`: `ShaderKey` was empty after trim or contained a newline.
-- Assign log is present and both boxes still share one program: the assign payload was queued, and the renderer did not apply a per-material override on top of the stock shader route.
+- Box A has no hue cycle and the assign log is present: `RAINBOW` is off, `_Speed` is 0, or the material id in the assign line is not the id of the drawn material.
+- Both boxes share the packaged Unlit program: the Rainbow install did not land, or assign/clear targeted a different material id. The stock Unlit route is unchanged by an install of key `Rainbow`.
