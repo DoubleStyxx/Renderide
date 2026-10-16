@@ -27,6 +27,11 @@ pub(super) const EMBEDDED_CACHE_SHARDS: usize = 16;
 pub(super) const MAX_CACHED_EMBEDDED_BIND_GROUPS: usize = 16_384;
 /// LRU cap for embedded samplers.
 pub(super) const MAX_CACHED_EMBEDDED_SAMPLERS: usize = 512;
+/// LRU cap for per-material uniform arena slots across all shards.
+///
+/// Custom shader properties share this table with packaged materials. The cap is split evenly
+/// across [`EMBEDDED_CACHE_SHARDS`] so a stem cannot grow the slot map without bound.
+pub(super) const MAX_CACHED_MATERIAL_UNIFORM_SLOTS: usize = 4_096;
 /// LRU cap for texture HUD asset-id scans.
 pub(super) const MAX_CACHED_TEXTURE_DEBUG_IDS: usize = 512;
 
@@ -40,9 +45,33 @@ pub(super) fn max_cached_embedded_samplers() -> NonZeroUsize {
     NonZeroUsize::new(MAX_CACHED_EMBEDDED_SAMPLERS).unwrap_or(NonZeroUsize::MIN)
 }
 
+/// Per-shard uniform-slot LRU capacity. The sharded total is at least
+/// [`MAX_CACHED_MATERIAL_UNIFORM_SLOTS`].
+pub(super) fn max_cached_material_uniform_slots_per_shard() -> NonZeroUsize {
+    let per_shard = MAX_CACHED_MATERIAL_UNIFORM_SLOTS
+        .div_ceil(EMBEDDED_CACHE_SHARDS)
+        .max(1);
+    NonZeroUsize::new(per_shard).unwrap_or(NonZeroUsize::MIN)
+}
+
 /// Non-zero texture debug-id cache capacity.
 pub(super) fn max_cached_texture_debug_ids() -> NonZeroUsize {
     NonZeroUsize::new(MAX_CACHED_TEXTURE_DEBUG_IDS).unwrap_or(NonZeroUsize::MIN)
+}
+
+/// Shader and texture lifetime folded into an embedded sampler cache key.
+///
+/// Samplers are descriptor objects, but a custom stem must not reuse a sampler cached for a
+/// previous shader generation or for a texture whose view/content generation has moved. `stem_hash`
+/// lets remove/reinstall drop just that stem's entries.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+pub(super) struct SamplerLifetime {
+    pub(super) stem_hash: u64,
+    pub(super) shader_source_generation: u64,
+    /// Texture view or cubemap allocation generation.
+    pub(super) texture_generation: u64,
+    /// Texel-upload generation. Zero when the pool has no content generation.
+    pub(super) content_generation: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -55,12 +84,22 @@ pub(super) struct EmbeddedSamplerCacheKey {
     pub(super) wrap_w: i32,
     pub(super) mipmap_bias_bits: u32,
     pub(super) mip_levels_resident: u32,
+    pub(super) lifetime: SamplerLifetime,
 }
 
 impl EmbeddedSamplerCacheKey {
     /// Builds a Texture2D sampler cache key. `wrap_w` is intentionally set to `wrap_u` to
     /// preserve the prior cache distribution; 2D bind paths never sample on the W axis.
+    #[cfg(test)]
     pub(super) fn texture2d(state: &SamplerState, mip_levels_resident: u32) -> Self {
+        Self::texture2d_with_lifetime(state, mip_levels_resident, SamplerLifetime::default())
+    }
+
+    pub(super) fn texture2d_with_lifetime(
+        state: &SamplerState,
+        mip_levels_resident: u32,
+        lifetime: SamplerLifetime,
+    ) -> Self {
         Self {
             dimension: 2,
             filter_mode: state.filter_mode as i32,
@@ -70,11 +109,21 @@ impl EmbeddedSamplerCacheKey {
             wrap_w: state.wrap_u as i32,
             mipmap_bias_bits: state.mipmap_bias.to_bits(),
             mip_levels_resident,
+            lifetime,
         }
     }
 
     /// Builds a Texture3D sampler cache key, including the W wrap mode.
+    #[cfg(test)]
     pub(super) fn texture3d(state: &SamplerState, mip_levels_resident: u32) -> Self {
+        Self::texture3d_with_lifetime(state, mip_levels_resident, SamplerLifetime::default())
+    }
+
+    pub(super) fn texture3d_with_lifetime(
+        state: &SamplerState,
+        mip_levels_resident: u32,
+        lifetime: SamplerLifetime,
+    ) -> Self {
         Self {
             dimension: 3,
             filter_mode: state.filter_mode as i32,
@@ -84,12 +133,22 @@ impl EmbeddedSamplerCacheKey {
             wrap_w: state.wrap_w as i32,
             mipmap_bias_bits: state.mipmap_bias.to_bits(),
             mip_levels_resident,
+            lifetime,
         }
     }
 
     /// Builds a cubemap sampler cache key. `wrap_w` follows `wrap_u` because the host cubemap
     /// properties carry no third axis.
+    #[cfg(test)]
     pub(super) fn cubemap(state: &SamplerState, mip_levels_resident: u32) -> Self {
+        Self::cubemap_with_lifetime(state, mip_levels_resident, SamplerLifetime::default())
+    }
+
+    pub(super) fn cubemap_with_lifetime(
+        state: &SamplerState,
+        mip_levels_resident: u32,
+        lifetime: SamplerLifetime,
+    ) -> Self {
         Self {
             dimension: 4,
             filter_mode: state.filter_mode as i32,
@@ -99,8 +158,23 @@ impl EmbeddedSamplerCacheKey {
             wrap_w: state.wrap_u as i32,
             mipmap_bias_bits: state.mipmap_bias.to_bits(),
             mip_levels_resident,
+            lifetime,
         }
     }
+}
+
+/// `true` when `key` was built for `stem_hash` at `shader_source_generation`.
+pub(super) fn bind_key_matches_stem_generation(
+    key: &MaterialBindCacheKey,
+    stem_hash: u64,
+    shader_source_generation: u64,
+) -> bool {
+    key.stem_hash == stem_hash && key.shader_source_generation == shader_source_generation
+}
+
+/// `true` when `key` was built for `stem_hash` at any shader generation.
+pub(super) fn bind_key_matches_stem(key: &MaterialBindCacheKey, stem_hash: u64) -> bool {
+    key.stem_hash == stem_hash
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -123,6 +197,7 @@ pub(crate) struct MaterialBindCacheKey {
     pub(super) property_block_slot0: Option<i32>,
     /// Optional renderer-level `MaterialPropertyBlock` id for uniform-backed layouts.
     pub(super) renderer_property_block_id: Option<i32>,
+    /// Fold of per-binding texture residency, view/allocation generation, and content generation.
     pub(super) texture_bind_signature: u64,
     /// Distinguishes direct, untracked offscreen, and host render-texture write targets.
     pub(super) offscreen_write_target: OffscreenWriteTarget,
@@ -152,13 +227,19 @@ impl EmbeddedMaterialBindResources {
             if cached.shader_source_generation == shader_source_generation {
                 return Ok(cached.layout.clone());
             }
+            let stale_generation = cached.shader_source_generation;
             cache.remove(stem);
+            // Drop bind groups, samplers, and uniform slots that still name the old generation
+            // before publishing the replacement layout. The stem-cache lock is held so a draw
+            // cannot observe the new layout until those entries are gone.
+            self.evict_shader_generation(stem, stale_generation);
         }
 
         let layout = build_stem_material_layout(
             self.device.as_ref(),
             stem,
             self.property_registry.as_ref(),
+            shader_source_generation,
         )?;
         cache.insert(
             stem.to_string(),
@@ -241,6 +322,9 @@ impl EmbeddedMaterialBindResources {
         // sampler objects are cheap-ish, but bind misses can make lots of them.
         let sampler = Arc::new(create());
         let evicted = self.sampler_cache.put(key, sampler.clone());
+        if evicted.is_some() {
+            self.sampler_cache_stats.note_eviction();
+        }
         drop(evicted);
         sampler
     }
@@ -248,7 +332,12 @@ impl EmbeddedMaterialBindResources {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroUsize;
+
     use super::*;
+    use crate::frame_contract::OffscreenWriteTarget;
+    use crate::gpu_resource::ShardedLru;
+    use crate::materials::host_data::MaterialPropertyLookupIds;
     use crate::shared::{TextureFilterMode, TextureWrapMode};
 
     fn texture2d_state() -> SamplerState {
@@ -306,6 +395,25 @@ mod tests {
         assert_ne!(base_key, EmbeddedSamplerCacheKey::texture2d(&changed, 4));
 
         assert_ne!(base_key, EmbeddedSamplerCacheKey::texture2d(&base, 3));
+
+        let lifetime = SamplerLifetime {
+            shader_source_generation: 2,
+            texture_generation: 8,
+            content_generation: 3,
+            stem_hash: 11,
+        };
+        assert_ne!(
+            base_key,
+            EmbeddedSamplerCacheKey::texture2d_with_lifetime(&base, 4, lifetime)
+        );
+        let content_generation_only = SamplerLifetime {
+            content_generation: 1,
+            ..SamplerLifetime::default()
+        };
+        assert_ne!(
+            base_key,
+            EmbeddedSamplerCacheKey::texture2d_with_lifetime(&base, 4, content_generation_only)
+        );
     }
 
     #[test]
@@ -321,5 +429,51 @@ mod tests {
             EmbeddedSamplerCacheKey::cubemap(&cubemap, 5),
             EmbeddedSamplerCacheKey::cubemap(&cubemap, 6)
         );
+    }
+
+    fn lookup_ids() -> MaterialPropertyLookupIds {
+        MaterialPropertyLookupIds {
+            material_asset_id: 1,
+            mesh_property_block_slot0: Some(10),
+            mesh_renderer_property_block_id: Some(20),
+        }
+    }
+
+    fn bind_key(stem_hash: u64, shader_source_generation: u64) -> MaterialBindCacheKey {
+        super::super::build_material_bind_cache_key_parts(
+            stem_hash,
+            lookup_ids(),
+            42,
+            OffscreenWriteTarget::None,
+            Some(7),
+            shader_source_generation,
+        )
+    }
+
+    #[test]
+    fn reinstall_drops_old_generation_bind_group_keys() {
+        let cache = ShardedLru::<MaterialBindCacheKey, u32>::new(NonZeroUsize::new(8).unwrap(), 1);
+        let old = bind_key(11, 1);
+        let current = bind_key(11, 2);
+        let other_stem = bind_key(12, 1);
+
+        assert_ne!(old, current);
+        assert!(bind_key_matches_stem_generation(&old, 11, 1));
+        assert!(!bind_key_matches_stem_generation(&current, 11, 1));
+
+        cache.put(old, 1);
+        cache.put(current, 2);
+        cache.put(other_stem, 3);
+        let dropped = cache.retain(|key| !bind_key_matches_stem_generation(key, 11, 1));
+
+        assert_eq!(dropped, 1);
+        assert_eq!(cache.get_cloned(&old), None);
+        assert_eq!(cache.get_cloned(&current), Some(2));
+        assert_eq!(cache.get_cloned(&other_stem), Some(3));
+
+        let dropped_stem = cache.retain(|key| !bind_key_matches_stem(key, 11));
+        assert_eq!(dropped_stem, 1);
+        assert_eq!(cache.get_cloned(&current), None);
+        assert_eq!(cache.get_cloned(&other_stem), Some(3));
     }
 }

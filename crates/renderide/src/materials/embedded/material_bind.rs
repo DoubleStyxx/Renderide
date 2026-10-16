@@ -82,16 +82,35 @@ pub(crate) struct EmbeddedMaterialBindCacheDiagnosticSnapshot {
     pub(crate) insertions: u64,
     /// Cache eviction counter.
     pub(crate) evictions: u64,
+    /// Uniform-arena slots retained across shards.
+    pub(crate) uniform_entries: usize,
+    /// Uniform-slot evictions (LRU cap and shader-generation invalidation).
+    pub(crate) uniform_evictions: u64,
+    /// Sampler cache entries retained across shards.
+    pub(crate) sampler_entries: usize,
+    /// Sampler cache evictions (LRU cap and shader-generation invalidation).
+    pub(crate) sampler_evictions: u64,
 }
 
 impl EmbeddedMaterialBindCacheDiagnosticSnapshot {
-    fn from_parts(entries: usize, stats: CacheStats) -> Self {
+    fn from_parts(
+        entries: usize,
+        stats: CacheStats,
+        uniform_entries: usize,
+        uniform_evictions: u64,
+        sampler_entries: usize,
+        sampler_stats: CacheStats,
+    ) -> Self {
         Self {
             entries,
             hits: stats.hits,
             misses: stats.misses,
             insertions: stats.insertions,
             evictions: stats.evictions,
+            uniform_entries,
+            uniform_evictions,
+            sampler_entries,
+            sampler_evictions: sampler_stats.evictions,
         }
     }
 }
@@ -227,6 +246,7 @@ pub struct EmbeddedMaterialBindResources {
     bind_cache: ShardedLru<MaterialBindCacheKey, Arc<wgpu::BindGroup>>,
     bind_cache_stats: AtomicCacheCounters,
     sampler_cache: ShardedLru<EmbeddedSamplerCacheKey, Arc<wgpu::Sampler>>,
+    sampler_cache_stats: AtomicCacheCounters,
     /// Texture-debug HUD cache stays a single mutex: per-stem call frequency is low and the
     /// HUD does not run inside the per-view rayon fan-out, so sharding has no benefit here.
     texture_debug_cache: Mutex<LruCache<TextureDebugCacheKey, Arc<[i32]>>>,
@@ -290,6 +310,7 @@ impl EmbeddedMaterialBindResources {
             bind_cache: ShardedLru::new(max_cached_embedded_bind_groups(), EMBEDDED_CACHE_SHARDS),
             bind_cache_stats: AtomicCacheCounters::default(),
             sampler_cache: ShardedLru::new(max_cached_embedded_samplers(), EMBEDDED_CACHE_SHARDS),
+            sampler_cache_stats: AtomicCacheCounters::default(),
             texture_debug_cache: Mutex::new(LruCache::new(max_cached_texture_debug_ids())),
         })
     }
@@ -356,11 +377,15 @@ impl EmbeddedMaterialBindResources {
     }
 
     /// Invalidates reflected layout and group-1 caches for one composed shader stem.
+    ///
+    /// Drops every bind group, sampler, and uniform slot for `stem`, including older custom
+    /// shader generations. Packaged hot reload uses the same path so a stem whose source
+    /// generation stays zero cannot keep a bind group built against the previous layout.
     pub(crate) fn invalidate_stem_layout(&self, stem: &str) {
         profiling::scope!("materials::embedded_invalidate_stem_layout");
         self.stem_cache.lock().remove(stem);
-        self.clear_bind_cache();
-        self.texture_debug_cache.lock().clear();
+        self.evict_stem_bind_state(stem);
+        super::stem_metadata::evict_stem_metadata(stem);
     }
 
     /// Returns or builds a `@group(1)` bind group for the composed embedded `stem`. Callers
@@ -556,9 +581,14 @@ impl EmbeddedMaterialBindResources {
 
     /// Captures embedded bind cache diagnostics.
     pub(crate) fn bind_cache_diagnostics(&self) -> EmbeddedMaterialBindCacheDiagnosticSnapshot {
+        let (uniform_entries, uniform_evictions) = self.uniform_slot_diagnostics();
         EmbeddedMaterialBindCacheDiagnosticSnapshot::from_parts(
             self.bind_cache.len(),
             self.bind_cache_stats.snapshot(),
+            uniform_entries,
+            uniform_evictions,
+            self.sampler_cache.len(),
+            self.sampler_cache_stats.snapshot(),
         )
     }
 
@@ -572,6 +602,75 @@ impl EmbeddedMaterialBindResources {
     fn clear_bind_cache(&self) {
         for _ in 0..self.bind_cache.clear() {
             self.bind_cache_stats.note_eviction();
+        }
+    }
+
+    fn uniform_slot_diagnostics(&self) -> (usize, u64) {
+        let mut entries = 0usize;
+        let mut evictions = 0u64;
+        for shard in &self.uniform_arena_shards {
+            let arena = shard.lock();
+            entries = entries.saturating_add(arena.slot_count());
+            evictions = evictions.saturating_add(arena.eviction_count());
+        }
+        (entries, evictions)
+    }
+
+    /// Drops group-1 cache entries for one shader generation of `stem`.
+    ///
+    /// Called while the stem-layout lock is held, before the replacement layout is published.
+    fn evict_shader_generation(&self, stem: &str, shader_source_generation: u64) {
+        let stem_hash = super::layout::stem_hash(stem);
+        self.evict_bind_groups(|key| {
+            cache::bind_key_matches_stem_generation(key, stem_hash, shader_source_generation)
+        });
+        self.evict_samplers(|key| {
+            key.lifetime.stem_hash == stem_hash
+                && key.lifetime.shader_source_generation == shader_source_generation
+        });
+        for shard in &self.uniform_arena_shards {
+            shard
+                .lock()
+                .evict_stem_generation(stem_hash, shader_source_generation);
+        }
+        self.evict_texture_debug_stem(stem_hash);
+        super::stem_metadata::evict_stem_generation(stem, shader_source_generation);
+    }
+
+    /// Drops every group-1 cache entry for `stem`, regardless of shader generation.
+    fn evict_stem_bind_state(&self, stem: &str) {
+        let stem_hash = super::layout::stem_hash(stem);
+        self.evict_bind_groups(|key| cache::bind_key_matches_stem(key, stem_hash));
+        self.evict_samplers(|key| key.lifetime.stem_hash == stem_hash);
+        for shard in &self.uniform_arena_shards {
+            shard.lock().evict_stem(stem_hash);
+        }
+        self.evict_texture_debug_stem(stem_hash);
+    }
+
+    fn evict_texture_debug_stem(&self, stem_hash: u64) {
+        let mut cache = self.texture_debug_cache.lock();
+        let stale: Vec<TextureDebugCacheKey> = cache
+            .iter()
+            .filter(|(key, _value)| key.stem_hash == stem_hash)
+            .map(|(key, _value)| *key)
+            .collect();
+        for key in stale {
+            cache.pop(&key);
+        }
+    }
+
+    fn evict_bind_groups(&self, mut drop_key: impl FnMut(&MaterialBindCacheKey) -> bool) {
+        let dropped = self.bind_cache.retain(|key| !drop_key(key));
+        for _ in 0..dropped {
+            self.bind_cache_stats.note_eviction();
+        }
+    }
+
+    fn evict_samplers(&self, mut drop_key: impl FnMut(&EmbeddedSamplerCacheKey) -> bool) {
+        let dropped = self.sampler_cache.retain(|key| !drop_key(key));
+        for _ in 0..dropped {
+            self.sampler_cache_stats.note_eviction();
         }
     }
 }

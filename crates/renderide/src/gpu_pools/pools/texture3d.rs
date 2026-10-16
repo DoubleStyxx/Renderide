@@ -50,6 +50,8 @@ pub struct GpuTexture3d {
     pub mip_levels_total: u32,
     /// Mips with authored texels uploaded so far.
     pub mip_levels_resident: u32,
+    /// Monotonic generation bumped whenever this texture's GPU texel contents are uploaded.
+    pub content_generation: u64,
     /// Estimated VRAM for allocated mips.
     pub resident_bytes: u64,
     /// Sampler fields for material bind groups.
@@ -119,6 +121,7 @@ impl GpuTexture3d {
             wgpu_format: desc.wgpu_format,
             mip_levels_total: desc.mip_levels_total,
             mip_levels_resident: 0,
+            content_generation: 0,
             resident_bytes,
             sampler,
             residency,
@@ -164,6 +167,11 @@ impl GpuTexture3d {
             && size.depth_or_array_layers == desc.depth_or_array_layers
             && self.mip_levels_total == desc.mip_levels_total
             && self.wgpu_format == desc.wgpu_format
+    }
+
+    /// Marks that a completed upload changed this texture's GPU contents.
+    pub fn mark_content_uploaded(&mut self) {
+        self.content_generation = self.content_generation.wrapping_add(1).max(1);
     }
 
     /// Updates sampler fields and residency hints from host properties.

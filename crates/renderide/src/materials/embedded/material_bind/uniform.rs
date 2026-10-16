@@ -1,9 +1,10 @@
 //! Embedded `@group(1)` material uniform arena and upload.
 
-use std::num::NonZeroU64;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 
-use hashbrown::{HashMap, HashSet};
+use hashbrown::HashSet;
+use lru::LruCache;
 
 use super::super::embedded_material_bind_error::EmbeddedMaterialBindError;
 use super::super::layout::StemMaterialLayout;
@@ -26,6 +27,13 @@ pub(super) struct MaterialUniformCacheKey {
     pub(super) renderer_property_block_id: Option<i32>,
     pub(super) texture_2d_asset_id: i32,
     pub(super) shader_variant_bits: Option<u32>,
+    /// Custom-shader source generation. Packaged stems stay at zero.
+    pub(super) shader_source_generation: u64,
+    /// Fold of bound-texture residency, view/allocation generation, and content generation.
+    ///
+    /// Same value as the bind-group `texture_bind_signature`. A reupload or mip residency change
+    /// must not reuse a slot packed against the previous stamp.
+    pub(super) texture_residency_generation: u64,
 }
 
 /// GPU arena slot selected for a material uniform block.
@@ -57,24 +65,48 @@ struct MaterialUniformSlotResolution {
 /// Pure allocator state for material uniform arena slots.
 #[derive(Debug)]
 struct MaterialUniformArenaAllocator {
-    slots: HashMap<MaterialUniformCacheKey, MaterialUniformSlot>,
+    slots: LruCache<MaterialUniformCacheKey, MaterialUniformSlot>,
     cursor: u64,
     capacity: u64,
     max_bytes: u64,
     alignment: u64,
     generation: u64,
+    slot_evictions: u64,
 }
 
 impl MaterialUniformArenaAllocator {
     fn new(capacity: u64, max_bytes: u64, alignment: u64) -> Self {
+        Self::with_slot_capacity(
+            capacity,
+            max_bytes,
+            alignment,
+            super::cache::max_cached_material_uniform_slots_per_shard(),
+        )
+    }
+
+    fn with_slot_capacity(
+        capacity: u64,
+        max_bytes: u64,
+        alignment: u64,
+        slot_capacity: NonZeroUsize,
+    ) -> Self {
         Self {
-            slots: HashMap::new(),
+            slots: LruCache::new(slot_capacity),
             cursor: 0,
             capacity,
             max_bytes,
             alignment: alignment.max(1),
             generation: 0,
+            slot_evictions: 0,
         }
+    }
+
+    fn slot_count(&self) -> usize {
+        self.slots.len()
+    }
+
+    fn eviction_count(&self) -> u64 {
+        self.slot_evictions
     }
 
     fn generation(&self) -> u64 {
@@ -117,7 +149,7 @@ impl MaterialUniformArenaAllocator {
         })?;
         self.ensure_capacity(end)?;
         self.cursor = end;
-        self.slots.insert(
+        let evicted = self.slots.push(
             key,
             MaterialUniformSlot {
                 offset,
@@ -127,6 +159,9 @@ impl MaterialUniformArenaAllocator {
                 buffer_generation: self.generation,
             },
         );
+        if evicted.is_some() {
+            self.note_slot_evictions(1);
+        }
         Ok(MaterialUniformSlotResolution {
             offset,
             size: non_zero_u64(size)?,
@@ -158,19 +193,57 @@ impl MaterialUniformArenaAllocator {
         material_ids: &HashSet<i32>,
         property_block_ids: &HashSet<i32>,
     ) -> usize {
-        let before = self.slots.len();
-        self.slots.retain(|key, _slot| {
+        self.retain_slots(|key| {
             !material_ids.contains(&key.material_asset_id)
                 && key
                     .property_block_slot0
                     .is_none_or(|id| !property_block_ids.contains(&id))
-        });
-        let removed = before.saturating_sub(self.slots.len());
-        if self.slots.is_empty() && removed > 0 {
+        })
+    }
+
+    fn evict_stem(&mut self, stem_hash: u64) -> usize {
+        self.retain_slots(|key| key.stem_hash != stem_hash)
+    }
+
+    fn evict_stem_generation(&mut self, stem_hash: u64, shader_source_generation: u64) -> usize {
+        self.retain_slots(|key| {
+            key.stem_hash != stem_hash || key.shader_source_generation != shader_source_generation
+        })
+    }
+
+    /// `lru` 0.18 has no `retain`. Keep entries for which `pred` is true.
+    fn retain_slots(&mut self, mut pred: impl FnMut(&MaterialUniformCacheKey) -> bool) -> usize {
+        let stale: Vec<MaterialUniformCacheKey> = self
+            .slots
+            .iter()
+            .filter(|(key, _slot)| !pred(key))
+            .map(|(key, _slot)| *key)
+            .collect();
+        let mut removed = 0usize;
+        for key in stale {
+            if self.slots.pop(&key).is_some() {
+                removed = removed.saturating_add(1);
+            }
+        }
+        self.finish_slot_removal(removed);
+        removed
+    }
+
+    fn finish_slot_removal(&mut self, removed: usize) {
+        if removed == 0 {
+            return;
+        }
+        self.note_slot_evictions(removed);
+        if self.slots.is_empty() {
             self.cursor = 0;
             self.generation = self.generation.wrapping_add(1);
         }
-        removed
+    }
+
+    fn note_slot_evictions(&mut self, removed: usize) {
+        self.slot_evictions = self
+            .slot_evictions
+            .saturating_add(u64::try_from(removed).unwrap_or(u64::MAX));
     }
 
     fn ensure_capacity(&mut self, needed: u64) -> Result<(), EmbeddedMaterialBindError> {
@@ -282,6 +355,27 @@ impl MaterialUniformArena {
     ) -> usize {
         self.allocator
             .purge_material_assets(material_ids, property_block_ids)
+    }
+
+    pub(super) fn evict_stem(&mut self, stem_hash: u64) -> usize {
+        self.allocator.evict_stem(stem_hash)
+    }
+
+    pub(super) fn evict_stem_generation(
+        &mut self,
+        stem_hash: u64,
+        shader_source_generation: u64,
+    ) -> usize {
+        self.allocator
+            .evict_stem_generation(stem_hash, shader_source_generation)
+    }
+
+    pub(super) fn slot_count(&self) -> usize {
+        self.allocator.slot_count()
+    }
+
+    pub(super) fn eviction_count(&self) -> u64 {
+        self.allocator.eviction_count()
     }
 }
 
@@ -566,6 +660,8 @@ mod tests {
             renderer_property_block_id: None,
             texture_2d_asset_id: -1,
             shader_variant_bits: None,
+            shader_source_generation: 0,
+            texture_residency_generation: 0,
         }
     }
 
@@ -577,6 +673,8 @@ mod tests {
             renderer_property_block_id: None,
             texture_2d_asset_id: -1,
             shader_variant_bits: None,
+            shader_source_generation: 0,
+            texture_residency_generation: 0,
         }
     }
 
@@ -654,8 +752,67 @@ mod tests {
         blocks.insert(20);
         assert_eq!(allocator.purge_material_assets(&materials, &blocks), 2);
 
-        assert!(!allocator.slots.contains_key(&key(1)));
-        assert!(!allocator.slots.contains_key(&key_with_block(2, 20)));
-        assert!(allocator.slots.contains_key(&key(3)));
+        assert!(!allocator.slots.contains(&key(1)));
+        assert!(!allocator.slots.contains(&key_with_block(2, 20)));
+        assert!(allocator.slots.contains(&key(3)));
+    }
+
+    #[test]
+    fn uniform_key_tracks_shader_generation_and_texture_residency() {
+        let base = key(1);
+        let mut generation = base;
+        generation.shader_source_generation = 4;
+        let mut residency = base;
+        residency.texture_residency_generation = 9;
+
+        assert_ne!(base, generation);
+        assert_ne!(base, residency);
+    }
+
+    #[test]
+    fn reinstall_drops_old_generation_uniform_slots() {
+        let mut allocator =
+            MaterialUniformArenaAllocator::with_slot_capacity(1024, 4096, 256, nonzero_slots(4));
+        let size = NonZeroU64::new(80).unwrap();
+        let mut old = key(1);
+        old.shader_source_generation = 1;
+        let mut current = key(1);
+        current.shader_source_generation = 2;
+        let other_stem = MaterialUniformCacheKey {
+            stem_hash: 8,
+            shader_source_generation: 1,
+            ..key(1)
+        };
+
+        allocator.resolve_slot(old, size, 0, 0).unwrap();
+        allocator.resolve_slot(current, size, 0, 0).unwrap();
+        allocator.resolve_slot(other_stem, size, 0, 0).unwrap();
+
+        assert_eq!(allocator.evict_stem_generation(old.stem_hash, 1), 1);
+        assert!(!allocator.slots.contains(&old));
+        assert!(allocator.slots.contains(&current));
+        assert!(allocator.slots.contains(&other_stem));
+        assert_eq!(allocator.eviction_count(), 1);
+    }
+
+    #[test]
+    fn uniform_slot_lru_cap_holds() {
+        let mut allocator =
+            MaterialUniformArenaAllocator::with_slot_capacity(4096, 8192, 64, nonzero_slots(2));
+        let size = NonZeroU64::new(64).unwrap();
+
+        allocator.resolve_slot(key(1), size, 0, 0).unwrap();
+        allocator.resolve_slot(key(2), size, 0, 0).unwrap();
+        allocator.resolve_slot(key(3), size, 0, 0).unwrap();
+
+        assert_eq!(allocator.slot_count(), 2);
+        assert!(!allocator.slots.contains(&key(1)));
+        assert!(allocator.slots.contains(&key(2)));
+        assert!(allocator.slots.contains(&key(3)));
+        assert_eq!(allocator.eviction_count(), 1);
+    }
+
+    fn nonzero_slots(cap: usize) -> NonZeroUsize {
+        NonZeroUsize::new(cap).unwrap_or(NonZeroUsize::MIN)
     }
 }

@@ -44,6 +44,10 @@ pub(crate) struct InstalledCustomShader {
     pub default_stem: String,
     /// `true` when the composed WGSL differed from the previously installed program.
     pub source_changed: bool,
+    /// Source generation published for this install.
+    pub generation: u64,
+    /// Generation replaced by this install, when a previous program was dropped.
+    pub replaced_generation: Option<u64>,
 }
 
 /// Result of removing one custom material program.
@@ -53,6 +57,8 @@ pub(crate) struct RemovedCustomShader {
     pub key: String,
     /// Base stem that was removed.
     pub base_stem: String,
+    /// Source generation that was dropped. Bind caches must evict this generation.
+    pub generation: u64,
 }
 
 struct InstalledTarget {
@@ -80,7 +86,7 @@ pub(super) struct CustomShaderRegistry {
     /// Material asset id -> normalized custom shader key.
     material_overrides: HashMap<i32, String>,
     next_generation: u64,
-    invalidated_stems: Vec<String>,
+    invalidated_stems: Vec<(String, u64)>,
 }
 
 pub(super) fn registry() -> &'static RwLock<CustomShaderRegistry> {
@@ -147,16 +153,13 @@ pub(crate) fn install(key: &str, wgsl: &str) -> Result<InstalledCustomShader, St
     let source = Arc::<str>::from(wgsl);
     let keywords = Arc::<[String]>::from(parsed_keywords);
 
-    {
+    let replaced_generation = {
         let mut registry = registry().write();
-        if registry.targets.remove(&default_stem).is_some() {
-            registry.invalidated_stems.push(default_stem.clone());
-        }
-        if registry.targets.remove(&multiview_stem).is_some() {
-            registry.invalidated_stems.push(multiview_stem.clone());
-        }
+        let replaced_generation = remove_target(&mut registry, &default_stem);
+        let _multiview_generation = remove_target(&mut registry, &multiview_stem);
         registry.keys.remove(&key);
-    }
+        replaced_generation
+    };
 
     let default_reflection = reflect_authored_material(&default_wgsl, &default_passes)?;
     let multiview_reflection = reflect_authored_material(&multiview_wgsl, &multiview_passes)?;
@@ -209,7 +212,17 @@ pub(crate) fn install(key: &str, wgsl: &str) -> Result<InstalledCustomShader, St
         base_stem,
         default_stem,
         source_changed: true,
+        generation,
+        replaced_generation,
     })
+}
+
+fn remove_target(registry: &mut CustomShaderRegistry, stem: &str) -> Option<u64> {
+    let previous = registry.targets.remove(stem)?;
+    registry
+        .invalidated_stems
+        .push((stem.to_string(), previous.generation));
+    Some(previous.generation)
 }
 
 fn unchanged_install(
@@ -221,9 +234,9 @@ fn unchanged_install(
     keywords: &[String],
     composed: &compose::ComposedCustomShader,
 ) -> Option<InstalledCustomShader> {
-    let unchanged = {
+    let copied = {
         let registry = registry().read();
-        let copied = match (
+        match (
             registry.targets.get(default_stem),
             registry.targets.get(multiview_stem),
         ) {
@@ -232,20 +245,17 @@ fn unchanged_install(
                 Arc::clone(&multiview.wgsl),
                 Arc::clone(&previous.source),
                 Arc::clone(&previous.keywords),
+                previous.generation,
             )),
             _ => None,
-        };
-        drop(registry);
-        copied.is_some_and(
-            |(default_wgsl, multiview_wgsl, previous_source, previous_keywords)| {
-                previous_source.as_ref() == source
-                    && previous_keywords.as_ref() == keywords
-                    && default_wgsl.as_ref() == composed.default_wgsl
-                    && multiview_wgsl.as_ref() == composed.multiview_wgsl
-            },
-        )
+        }
     };
-    if !unchanged {
+    let (default_wgsl, multiview_wgsl, previous_source, previous_keywords, generation) = copied?;
+    if previous_source.as_ref() != source
+        || previous_keywords.as_ref() != keywords
+        || default_wgsl.as_ref() != composed.default_wgsl
+        || multiview_wgsl.as_ref() != composed.multiview_wgsl
+    {
         return None;
     }
     Some(InstalledCustomShader {
@@ -253,6 +263,8 @@ fn unchanged_install(
         base_stem: base_stem.to_string(),
         default_stem: default_stem.to_string(),
         source_changed: false,
+        generation,
+        replaced_generation: None,
     })
 }
 
@@ -311,17 +323,17 @@ fn remove_result(key: &str) -> RemoveResult {
         };
     };
     let multiview_stem = format!("{}_multiview", installed.base_stem);
-    registry.targets.remove(&installed.default_stem);
-    registry.targets.remove(&multiview_stem);
-    registry
-        .invalidated_stems
-        .push(installed.default_stem.clone());
-    registry.invalidated_stems.push(multiview_stem);
+    let generation = remove_target(&mut registry, &installed.default_stem).unwrap_or(0);
+    let _multiview_generation = remove_target(&mut registry, &multiview_stem);
     let base_stem = installed.base_stem;
     drop(registry);
     logger::info!("custom shader removed key={key} stem={base_stem}");
     RemoveResult {
-        program: Some(RemovedCustomShader { key, base_stem }),
+        program: Some(RemovedCustomShader {
+            key,
+            base_stem,
+            generation,
+        }),
         cleared_overrides,
     }
 }
@@ -620,7 +632,7 @@ pub(crate) fn material_uniform_defaults(stem: &str) -> Option<Arc<[EmbeddedMater
 }
 
 /// Stems whose reflected `@group(1)` layout and bind groups must be dropped.
-pub(crate) fn take_invalidated_stems() -> Vec<String> {
+pub(crate) fn take_invalidated_stems() -> Vec<(String, u64)> {
     std::mem::take(&mut registry().write().invalidated_stems)
 }
 
@@ -799,5 +811,36 @@ mod tests {
         remove("arc-owned").expect("remove");
         assert!(target_wgsl(&installed.default_stem).is_none());
         assert_eq!(Arc::strong_count(&second), 1);
+    }
+
+    #[test]
+    fn reinstall_bumps_generation_and_remove_reports_the_dropped_generation() {
+        let installed = install("lifetime-solid", EXAMPLE_SOLID).expect("install");
+        assert!(installed.replaced_generation.is_none());
+        assert!(installed.generation >= 1);
+        assert_eq!(
+            source_generation(&installed.default_stem),
+            installed.generation
+        );
+
+        let replaced = EXAMPLE_SOLID.replace(
+            "return rg::retain_globals_additive(mat._Color);",
+            "return rg::retain_globals_additive(mat._Color) * 0.5;",
+        );
+        let again = install("lifetime-solid", &replaced).expect("reinstall");
+        assert!(again.source_changed);
+        assert_eq!(again.replaced_generation, Some(installed.generation));
+        assert_ne!(again.generation, installed.generation);
+        assert_eq!(source_generation(&installed.default_stem), again.generation);
+
+        let same = install("lifetime-solid", &replaced).expect("unchanged");
+        assert!(!same.source_changed);
+        assert_eq!(same.generation, again.generation);
+        assert!(same.replaced_generation.is_none());
+
+        let removed = remove("lifetime-solid").expect("remove");
+        assert_eq!(removed.generation, again.generation);
+        assert_eq!(source_generation(&installed.default_stem), 0);
+        assert!(target_wgsl(&installed.default_stem).is_none());
     }
 }

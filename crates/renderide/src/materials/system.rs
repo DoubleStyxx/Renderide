@@ -280,7 +280,7 @@ impl MaterialSystem {
         let Some(embedded) = self.embedded_material_bind.as_ref() else {
             return;
         };
-        for stem in stems {
+        for (stem, _generation) in stems {
             embedded.invalidate_stem_layout(&stem);
         }
     }

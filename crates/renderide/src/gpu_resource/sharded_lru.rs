@@ -75,6 +75,30 @@ impl<K: Eq + Hash, V> ShardedLru<K, V> {
     pub(crate) fn len(&self) -> usize {
         self.shards.iter().map(|shard| shard.lock().len()).sum()
     }
+
+    /// Drops entries for which `pred` returns false. Returns the number of dropped entries.
+    ///
+    /// `lru` 0.18 has no `retain`, so matching keys are collected and then popped.
+    pub(crate) fn retain(&self, mut pred: impl FnMut(&K) -> bool) -> usize
+    where
+        K: Clone,
+    {
+        let mut dropped = 0usize;
+        for shard in &self.shards {
+            let mut shard = shard.lock();
+            let stale: Vec<K> = shard
+                .iter()
+                .filter(|(key, _value)| !pred(key))
+                .map(|(key, _value)| (*key).clone())
+                .collect();
+            for key in stale {
+                if shard.pop(&key).is_some() {
+                    dropped = dropped.saturating_add(1);
+                }
+            }
+        }
+        dropped
+    }
 }
 
 #[cfg(test)]
@@ -116,6 +140,20 @@ mod tests {
         assert_eq!(cache.get_cloned(&1), None);
         assert_eq!(cache.get_cloned(&2), None);
         assert_eq!(cache.clear(), 0);
+    }
+
+    #[test]
+    fn retain_drops_rejected_entries_only() {
+        let cache = ShardedLru::<u32, u32>::new(NonZeroUsize::new(4).unwrap(), 2);
+
+        assert_eq!(cache.put(1, 10), None);
+        assert_eq!(cache.put(2, 20), None);
+        assert_eq!(cache.put(3, 30), None);
+        assert_eq!(cache.retain(|key| *key != 2), 1);
+        assert_eq!(cache.get_cloned(&1), Some(10));
+        assert_eq!(cache.get_cloned(&2), None);
+        assert_eq!(cache.get_cloned(&3), Some(30));
+        assert_eq!(cache.len(), 2);
     }
 
     #[test]
