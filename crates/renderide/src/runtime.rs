@@ -74,6 +74,8 @@
 //! - [`gpu_services`] -- GPU-facing helpers run once per tick (Hi-Z drain, async jobs,
 //!   transient eviction).
 //! - [`debug_hud_frame`] -- per-tick wiring for the diagnostics ImGui overlay.
+//! - [`frame_bench_capture`] -- process-wide draw-stat request for frame bench, read when
+//!   building [`crate::diagnostics::DebugHudMetricInterest`].
 //! - [`shutdown`] -- graceful shutdown signaling and the compact final-summary log.
 //! - [`lockstep`] -- diagnostic helper for duplicate frame indices.
 //! - [`xr_glue`] -- [`crate::xr::XrHostCameraSync`] and [`crate::xr::XrFrameRenderer`] impls
