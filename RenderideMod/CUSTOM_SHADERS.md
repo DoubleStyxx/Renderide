@@ -73,6 +73,7 @@ CustomShaders.ClearMaterial(materialAssetId);
 - Remove of an unknown key is a silent no-op on the renderer.
 - Empty/whitespace key or WGSL, or a key containing a newline, throws `ArgumentException` at the call site.
 - `AssignMaterial` and `ClearMaterial` also queue on a negative carrier id. The material asset id is the `material=` header, not `ShaderUpload.assetId`.
+- Scene use of assign/clear is the `CustomShaderMaterial` component below.
 
 ## Wire format
 
@@ -185,6 +186,32 @@ Limits:
 - Keyword toggles stay floats of the keyword name (`TILE`, `GYROID`, and the other example keywords). A nonzero value enables the `#ifdef`, same as any other float property of that name.
 - The wire payload is still the install, remove, assign, and clear bytes above.
 
+## CustomShaderMaterial
+
+`CustomShaderMaterial` is a FrooxEngine material under Assets/Materials. The packaged shader is Unlit, so the host uploads the material on `MaterialsUpdateBatch` the same way it uploads `UnlitMaterial`. `ShaderKey` is an installed program key for this material only. A second material with no component, or with an empty key, stays on its stock route.
+
+| Field | Contents |
+| --- | --- |
+| `ShaderKey` | string. Empty clears the override. |
+| `Floats` | list of `Name` (string) and `Value` (float), sent with `SetFloat`. |
+| `Colors` | list of `Name` (string) and `Value` (`colorX`). `SetFloat4` gets the rgba components. |
+| `Textures` | list of `Name` (string) and `Texture` (`ITexture2D` asset ref), sent with `SetTexture`. |
+| `Keywords` | list of `Name` (string) and `Value` (bool). `SetFloat` gets 1 or 0. The name matches a `//#keyword` line. |
+
+Names are the WGSL property names (`_Color`, `_MainTex`, `_Speed`). Blank names are skipped. Keywords are written after floats, so a keyword and a float of the same name leave the 0/1 value.
+
+Enable, and any change of `ShaderKey` to a non-empty value, calls `CustomShaders.AssignMaterial(materialAssetId, ShaderKey)`. Disable, destroy, and a cleared or whitespace key call `CustomShaders.ClearMaterial`. The material asset id is the render id `MaterialsUpdateBatch` puts on `SelectTarget` (`AssetId` or `RenderAssetId` on the material or its connector). It is not a `ShaderUpload` carrier id. The assign is queued until the id exists, which can be the frame after the material first integrates.
+
+Install the rainbow program under its own key. Do not install it as `Unlit` when a stock Unlit material should keep the packaged shader:
+
+```csharp
+using RenderideMod;
+
+CustomShaders.Install("Rainbow", CustomShaders.ExampleRainbowWgsl);
+```
+
+On one mesh, attach `CustomShaderMaterial` and set `ShaderKey` to `Rainbow`. Add a Colors row `_Color`, a Textures row `_MainTex`, and a Floats row `_Speed`. On another mesh, attach `UnlitMaterial` and leave it alone. The two materials coexist: Rainbow is one material's override, Unlit stays the packaged route.
+
 ## Smoke test
 
 Path: install `Unlit` with `ExampleSolidWgsl`, confirm a negative carrier asset id, remove, confirm the packaged Unlit is back.
@@ -216,3 +243,24 @@ Fail triage:
 - No mod `upload sent` line: renderer never reached a state where the messaging host exists; queue holds until it does.
 - `payload rejected`: header malformed; payload must start with `renderide-custom-wgsl:v1`.
 - `install failed`: WGSL compose/reflect error; asset stays on the packaged route.
+
+## Smoke test: rainbow beside unlit
+
+Two materials in one world. One draws `ExampleRainbowWgsl` through `CustomShaderMaterial`. The other is stock `UnlitMaterial`. Install rainbow under its own key so the Unlit shader asset stays on the packaged stem.
+
+1. `dotnet build RenderideMod -c Release` and run Resonite with Renderide, same as the smoke test above.
+2. After RenderideMod loads, call `CustomShaders.Install("Rainbow", CustomShaders.ExampleRainbowWgsl);`.
+3. Mod log: `custom shader upload sent: assetId=-1 bytes=<n>` (or the next carrier id if an earlier install ran). Renderer log: `custom shader installed key=rainbow stem=renderide_custom_rainbow_default`. No `custom shader payload rejected` and no `custom shader install failed for rainbow`.
+4. Spawn two boxes.
+5. Box A: attach `CustomShaderMaterial`. Set `ShaderKey` to `Rainbow`. Add a Colors row named `_Color`, a Textures row named `_MainTex` with a texture, and a Floats row named `_Speed` set to `0.2`.
+6. Box B: attach `UnlitMaterial` with a texture and a non-white TintColor. Do not attach `CustomShaderMaterial`.
+7. Mod log, once the render material id exists: `custom shader material assign: material=<id> key=Rainbow`, then `custom shader upload sent` with the next negative carrier id. Renderer log: `custom shader material op=Assign material=Some(<id>) key=Rainbow`. A following `shader_upload` line for that carrier id does not register a shader route.
+8. With the renderer per-material override applied, box A cycles hue from world x and `_Speed`, multiplied by `_Color` and `_MainTex`. Box B stays textured unlit. Rainbow and Unlit coexist because the override is per material asset id.
+9. Clear `ShaderKey`, or disable or destroy the component on box A. Mod log: `custom shader material clear: material=<id>`. Renderer log: `custom shader material op=Clear material=Some(<id>) key=`. Box A draws packaged Unlit from `_Color` and `_MainTex`. Box B is unchanged.
+10. Optional keyword check: add a Keywords row whose name equals a `//#keyword` line. True sends `SetFloat` 1. False sends 0. That float is the keyword toggle. It does not add a command.
+
+Fail triage:
+
+- No `custom shader material assign` line: the render material id is not on `AssetId` or `RenderAssetId` yet, or the member was not found (`CustomShaderMaterial: no int AssetId/RenderAssetId`). Property rows can still upload. The assign waits until the id exists.
+- `custom shader material assign rejected`: `ShaderKey` was empty after trim or contained a newline.
+- Assign log is present and both boxes still share one program: the assign payload was queued, and the renderer did not apply a per-material override on top of the stock shader route.
