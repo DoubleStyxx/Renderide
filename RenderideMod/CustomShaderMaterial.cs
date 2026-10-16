@@ -10,10 +10,10 @@ namespace RenderideMod;
 /// <remarks>
 /// <para>
 /// The host still uploads this material as Unlit. <see cref="ShaderKey"/> calls
-/// <see cref="CustomShaders.AssignMaterial"/> for this material's render asset id, so a second
-/// material can stay on the packaged Unlit program. Property lists are written with
-/// <c>Material.SetFloat</c>, <c>SetFloat4</c>, and <c>SetTexture</c> and ride
-/// <c>MaterialsUpdateBatch</c>. Keywords are 0/1 floats whose names match <c>//#keyword</c>.
+/// <see cref="CustomShaders.AssignMaterial"/> with <see cref="DynamicRendererAsset{A}.AssetId"/>.
+/// A second material can stay on the packaged Unlit program. Floats, colors, and textures
+/// are written with <see cref="MaterialUpdateWriter"/> using property ids from
+/// <see cref="Ipc.MaterialPropertyIds"/>. Keywords go through <see cref="UpdateKeywords"/>.
 /// </para>
 /// <para>
 /// Enable and a non-empty <see cref="ShaderKey"/> assign. Disable, destroy, and a cleared key
@@ -26,31 +26,42 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
     /// <summary>Installed custom program key. Empty clears the per-material override.</summary>
     public readonly Sync<string> ShaderKey;
 
-    /// <summary>Named floats. <see cref="FloatEntry.Name"/> is the WGSL uniform name.</summary>
+    /// <summary>Named floats. <see cref="FloatEntry.PropertyName"/> is the WGSL uniform name.</summary>
     public readonly SyncList<FloatEntry> Floats;
 
-    /// <summary>Named colors. Uploaded with <c>SetFloat4</c> as the <c>colorX</c> rgba components.</summary>
+    /// <summary>Named colors. Uploaded with <c>SetColor</c>.</summary>
     public readonly SyncList<ColorEntry> Colors;
 
-    /// <summary>Named textures. <see cref="TextureEntry.Texture"/> is the texture asset provider.</summary>
+    /// <summary>Named textures. <see cref="TextureEntry.Texture"/> is the texture provider.</summary>
     public readonly SyncList<TextureEntry> Textures;
 
-    /// <summary>
-    /// Named keywords. Uploaded with <c>SetFloat</c> as 1 or 0. The name matches a <c>//#keyword</c> line.
-    /// </summary>
+    /// <summary>Named shader keywords. Passed to <see cref="UpdateKeywords"/>.</summary>
     public readonly SyncList<KeywordEntry> Keywords;
 
+    private static bool _propertiesInitialized;
     private int? _boundMaterialId;
     private string? _boundKey;
     private string? _rejectedKey;
+    private int _propertyGeneration;
 
     /// <summary>Packaged Unlit shader. The custom program replaces it per material, not by name.</summary>
     protected override Uri ShaderURL => OfficialAssets.Shaders.Unlit;
+
+    /// <summary>
+    /// Static flag the engine sets after it resolves this type's static <c>MaterialProperty</c> fields.
+    /// This type has none; named list rows use <see cref="Ipc.MaterialPropertyIds"/> instead.
+    /// </summary>
+    public override bool PropertiesInitialized
+    {
+        get => _propertiesInitialized;
+        protected set => _propertiesInitialized = value;
+    }
 
     /// <inheritdoc />
     protected override void OnEnabled()
     {
         base.OnEnabled();
+        QueuePropertyIds();
         SyncAssignment();
     }
 
@@ -60,6 +71,7 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
         base.OnChanges();
         if (!Enabled.Value)
             return;
+        QueuePropertyIds();
         SyncAssignment();
     }
 
@@ -69,6 +81,15 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
         base.OnCommonUpdate();
         if (!Enabled.Value)
             return;
+
+        var generation = Ipc.MaterialPropertyIds.Generation;
+        if (generation != _propertyGeneration)
+        {
+            _propertyGeneration = generation;
+            MarkChangeDirty();
+        }
+
+        QueuePropertyIds();
         SyncAssignment();
     }
 
@@ -86,75 +107,89 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
         base.OnDestroy();
     }
 
-    /// <summary>Writes the named lists onto <paramref name="asset"/> and refreshes the shader key.</summary>
-    /// <param name="asset">Material asset the host uploads.</param>
-    protected override void UpdateMaterial(Material asset)
-    {
-        if (asset is null)
-            return;
-
-        PushFloats(asset);
-        PushColors(asset);
-        PushTextures(asset);
-        PushKeywords(asset);
-        // The provider may not have published Asset yet. Use the instance being uploaded.
-        SyncAssignment(asset);
-    }
-
-    private void PushFloats(Material asset)
-    {
-        foreach (var entry in Floats)
-        {
-            if (!TryPropertyName(entry.Name, out var property))
-                continue;
-            asset.SetFloat(property, entry.Value.Value);
-        }
-    }
-
-    private void PushColors(Material asset)
-    {
-        foreach (var entry in Colors)
-        {
-            if (!TryPropertyName(entry.Name, out var property))
-                continue;
-            var color = entry.Value.Value;
-            var rgba = new float4(color.r, color.g, color.b, color.a);
-            asset.SetFloat4(property, rgba);
-        }
-    }
-
-    private void PushTextures(Material asset)
-    {
-        foreach (var entry in Textures)
-        {
-            if (!TryPropertyName(entry.Name, out var property))
-                continue;
-            asset.SetTexture(property, entry.Texture.Target?.Asset);
-        }
-    }
-
-    private void PushKeywords(Material asset)
+    /// <summary>Sets keyword state from <see cref="Keywords"/>.</summary>
+    /// <param name="keywords">Host keyword set for this material.</param>
+    protected override void UpdateKeywords(ShaderKeywords keywords)
     {
         foreach (var entry in Keywords)
         {
-            if (!TryPropertyName(entry.Name, out var property))
+            if (!TryPropertyName(entry.PropertyName, out var keyword))
                 continue;
-            asset.SetFloat(property, entry.Value.Value ? 1f : 0f);
+            keywords.UpdateKeyword(keyword, entry.Value.Value);
+        }
+    }
+
+    /// <summary>Writes named floats, colors, and textures by resolved property id.</summary>
+    /// <param name="writer">Host material update writer.</param>
+    protected override void UpdateMaterial(ref MaterialUpdateWriter writer)
+    {
+        QueuePropertyIds();
+        PushFloats(ref writer);
+        PushColors(ref writer);
+        PushTextures(ref writer);
+        SyncAssignment();
+    }
+
+    private void QueuePropertyIds()
+    {
+        foreach (var entry in Floats)
+            RequestId(entry.PropertyName);
+        foreach (var entry in Colors)
+            RequestId(entry.PropertyName);
+        foreach (var entry in Textures)
+            RequestId(entry.PropertyName);
+    }
+
+    private static void RequestId(Sync<string> name)
+    {
+        if (TryPropertyName(name, out var property))
+            Ipc.MaterialPropertyIds.Request(property);
+    }
+
+    private void PushFloats(ref MaterialUpdateWriter writer)
+    {
+        foreach (var entry in Floats)
+        {
+            if (!TryPropertyName(entry.PropertyName, out var property))
+                continue;
+            if (!Ipc.MaterialPropertyIds.TryGet(property, out var propertyId))
+                continue;
+            writer.SetFloat(propertyId, entry.Value.Value);
+        }
+    }
+
+    private void PushColors(ref MaterialUpdateWriter writer)
+    {
+        foreach (var entry in Colors)
+        {
+            if (!TryPropertyName(entry.PropertyName, out var property))
+                continue;
+            if (!Ipc.MaterialPropertyIds.TryGet(property, out var propertyId))
+                continue;
+            colorX color = entry.Value.Value;
+            writer.SetColor(propertyId, in color);
+        }
+    }
+
+    private void PushTextures(ref MaterialUpdateWriter writer)
+    {
+        foreach (var entry in Textures)
+        {
+            if (!TryPropertyName(entry.PropertyName, out var property))
+                continue;
+            if (!Ipc.MaterialPropertyIds.TryGet(property, out var propertyId))
+                continue;
+            writer.SetTexture(propertyId, entry.Texture.Target);
         }
     }
 
     private void SyncAssignment()
     {
-        SyncAssignment(Asset);
-    }
-
-    private void SyncAssignment(Material? material)
-    {
         if (!Enabled.Value)
             return;
-        if (material is null)
-            return;
-        if (!MaterialAssetId.TryRead(material, out var materialId))
+
+        var materialId = AssetId;
+        if (materialId < 0)
             return;
 
         var key = ShaderKey.Value?.Trim();
@@ -212,7 +247,7 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
     public class FloatEntry : SyncObject
     {
         /// <summary>WGSL uniform name, for example <c>_Speed</c>.</summary>
-        public readonly Sync<string> Name;
+        public readonly Sync<string> PropertyName;
 
         /// <summary>Value passed to <c>SetFloat</c>.</summary>
         public readonly Sync<float> Value;
@@ -222,9 +257,9 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
     public class ColorEntry : SyncObject
     {
         /// <summary>WGSL uniform name, for example <c>_Color</c>.</summary>
-        public readonly Sync<string> Name;
+        public readonly Sync<string> PropertyName;
 
-        /// <summary>Color whose rgba components are packed into <c>SetFloat4</c>.</summary>
+        /// <summary>Color passed to <c>SetColor</c>.</summary>
         public readonly Sync<colorX> Value;
     }
 
@@ -232,9 +267,9 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
     public class TextureEntry : SyncObject
     {
         /// <summary>WGSL texture name, for example <c>_MainTex</c>.</summary>
-        public readonly Sync<string> Name;
+        public readonly Sync<string> PropertyName;
 
-        /// <summary>Texture asset provider passed to <c>SetTexture</c>.</summary>
+        /// <summary>Texture provider passed to <c>SetTexture</c>.</summary>
         public readonly AssetRef<ITexture2D> Texture;
     }
 
@@ -242,9 +277,9 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
     public class KeywordEntry : SyncObject
     {
         /// <summary><c>//#keyword</c> name.</summary>
-        public readonly Sync<string> Name;
+        public readonly Sync<string> PropertyName;
 
-        /// <summary>True uploads 1, false uploads 0.</summary>
+        /// <summary>True enables the keyword.</summary>
         public readonly Sync<bool> Value;
     }
 }
