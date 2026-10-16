@@ -21,12 +21,23 @@ namespace RenderideMod;
 /// Enable and a non-empty <see cref="ShaderKey"/> assign. Disable, destroy, and a cleared key
 /// call <see cref="CustomShaders.ClearMaterial"/>.
 /// </para>
+/// <para>
+/// <see cref="VariablePrefix"/> reads dynamic variables from spaces on this slot and its parents.
+/// Names that start with the prefix override <see cref="Floats"/>, <see cref="Colors"/>, and
+/// <see cref="Textures"/> for the same property. Values travel on the same writer path.
+/// </para>
 /// </remarks>
 [Category(new string[] { "Assets/Materials" })]
-public class CustomShaderMaterial : SingleShaderMaterialProvider
+public partial class CustomShaderMaterial : SingleShaderMaterialProvider
 {
     /// <summary>Installed custom program key. Empty clears the per-material override.</summary>
     public readonly Sync<string> ShaderKey;
+
+    /// <summary>
+    /// Name prefix for dynamic variables. Blank is <c>Shader/</c>.
+    /// The property name is the canonical variable name with this prefix removed.
+    /// </summary>
+    public readonly Sync<string> VariablePrefix;
 
     /// <summary>Named floats. <see cref="FloatEntry.PropertyName"/> is the WGSL uniform name.</summary>
     public readonly SyncList<FloatEntry> Floats;
@@ -72,10 +83,18 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
     }
 
     /// <inheritdoc />
+    protected override void OnAttach()
+    {
+        base.OnAttach();
+        VariablePrefix.Value = DefaultVariablePrefix;
+    }
+
+    /// <inheritdoc />
     protected override void OnAwake()
     {
         base.OnAwake();
         EnsurePropertiesInitialized();
+        HookOwnSlot();
     }
 
     /// <inheritdoc />
@@ -87,6 +106,7 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
             MarkChangeDirty();
         QueuePropertyIds();
         SyncAssignment();
+        BindDynVars();
     }
 
     /// <inheritdoc />
@@ -98,6 +118,8 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
             return;
         QueuePropertyIds();
         SyncAssignment();
+        if (ActivePrefix() != _dynPrefix)
+            BindDynVars();
     }
 
     /// <inheritdoc />
@@ -122,6 +144,7 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
     /// <inheritdoc />
     protected override void OnDisabled()
     {
+        UnbindDynVars();
         ClearBound();
         base.OnDisabled();
     }
@@ -129,6 +152,8 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
     /// <inheritdoc />
     protected override void OnDestroy()
     {
+        UnbindDynVars();
+        UnhookOwnSlot();
         ClearBound();
         base.OnDestroy();
     }
@@ -174,6 +199,7 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
         PushColors(ref writer);
         PushTextures(ref writer);
         PushKeywordFloats(ref writer);
+        PushDynVars(ref writer);
         SyncAssignment();
     }
 
@@ -187,6 +213,7 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
             RequestId(entry.PropertyName);
         foreach (var entry in Keywords)
             RequestId(entry.PropertyName);
+        QueueDynVarPropertyIds();
     }
 
     /// <summary>
@@ -270,6 +297,8 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
         {
             if (!TryPropertyName(entry.PropertyName, out var property))
                 continue;
+            if (DynVarOverrides(property))
+                continue;
             if (!Ipc.MaterialPropertyIds.TryGet(property, out var propertyId))
                 continue;
             writer.SetFloat(propertyId, entry.Value.Value);
@@ -281,6 +310,8 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
         foreach (var entry in Colors)
         {
             if (!TryPropertyName(entry.PropertyName, out var property))
+                continue;
+            if (DynVarOverrides(property))
                 continue;
             if (!Ipc.MaterialPropertyIds.TryGet(property, out var propertyId))
                 continue;
@@ -294,6 +325,8 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
         foreach (var entry in Textures)
         {
             if (!TryPropertyName(entry.PropertyName, out var property))
+                continue;
+            if (DynVarOverrides(property))
                 continue;
             if (!Ipc.MaterialPropertyIds.TryGet(property, out var propertyId))
                 continue;
