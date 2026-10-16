@@ -146,7 +146,7 @@ pub fn mip_dimensions_at_level(base_w: u32, base_h: u32, level: u32) -> (u32, u3
 /// Returns the legal WebGPU mip-level count for a 2D texture extent.
 pub fn legal_texture2d_mip_level_count(width: u32, height: u32) -> u32 {
     let max_axis = width.max(height).max(1);
-    u32::BITS - max_axis.leading_zeros()
+    max_axis.bit_width()
 }
 
 /// Width, height, and depth at `level` in a standard 3D mip chain.
@@ -170,7 +170,7 @@ pub fn mip_dimensions_at_level_3d(
 /// Returns the legal WebGPU mip-level count for a 3D texture extent.
 pub fn legal_texture3d_mip_level_count(width: u32, height: u32, depth: u32) -> u32 {
     let max_axis = width.max(height).max(depth).max(1);
-    u32::BITS - max_axis.leading_zeros()
+    max_axis.bit_width()
 }
 
 /// Converts a host mip-count field to at least one mip level.

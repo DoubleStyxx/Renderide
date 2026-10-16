@@ -63,7 +63,7 @@ impl<const MIN: u32, const MAX: u32> From<Clamped<MIN, MAX>> for u32 {
 /// downsample rung is stable.
 pub const fn power_of_two_floor(value: u32) -> u32 {
     let v = if value == 0 { 1 } else { value };
-    1_u32 << (u32::BITS - v.leading_zeros() - 1)
+    1_u32 << (v.bit_width() - 1)
 }
 
 #[cfg(test)]

@@ -69,7 +69,12 @@ pub(in crate::diagnostics::hud::windows::renderer_config) fn drag_f32_setting(
 
     if changed && edited.is_finite() {
         *value = edited.clamp(min, max);
-        return *value != original;
+        #[expect(
+            clippy::float_cmp,
+            reason = "exact compare detects any user edit, including sub-epsilon"
+        )]
+        let changed_value = *value != original;
+        return changed_value;
     }
     false
 }

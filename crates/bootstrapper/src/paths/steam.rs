@@ -124,7 +124,7 @@ mod tests {
         fs::create_dir_all(tmp.join("steamapps")).unwrap();
         let vdf = tmp.join("steamapps").join("libraryfolders.vdf");
         let mut f = fs::File::create(&vdf).unwrap();
-        writeln!(f, r#" "path" "/data/SteamLibrary" "#,).unwrap();
+        writeln!(f, r#" "path" "/data/SteamLibrary" "#).unwrap();
         let paths = library_paths_from_vdf(&tmp);
         assert!(
             paths.iter().any(|p| p == Path::new("/data/SteamLibrary")),

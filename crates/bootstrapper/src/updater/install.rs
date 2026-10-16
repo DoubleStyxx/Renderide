@@ -263,15 +263,14 @@ fn replace_entry_from_bundle(
             source,
         })?;
     }
-    match fs::rename(&source, &destination) {
-        Ok(()) => Ok(()),
-        Err(_) => {
-            copy_path(&source, &destination)?;
-            remove_source(&source).map_err(|source_error| UpdateError::Io {
-                context: format!("remove staged entry {}", source.display()),
-                source: source_error,
-            })
-        }
+    if fs::rename(&source, &destination).is_ok() {
+        Ok(())
+    } else {
+        copy_path(&source, &destination)?;
+        remove_source(&source).map_err(|source_error| UpdateError::Io {
+            context: format!("remove staged entry {}", source.display()),
+            source: source_error,
+        })
     }
 }
 

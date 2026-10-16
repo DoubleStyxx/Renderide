@@ -57,5 +57,5 @@ fn max_mip_levels_for_texture_key(key: TextureKey) -> u32 {
         wgpu::TextureDimension::D2 => width.max(height),
         wgpu::TextureDimension::D3 => width.max(height).max(depth),
     };
-    u32::BITS - max_axis.max(1).leading_zeros()
+    max_axis.max(1).bit_width()
 }

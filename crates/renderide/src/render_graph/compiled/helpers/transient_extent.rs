@@ -73,7 +73,7 @@ fn max_mip_levels_for_transient_extent(
         wgpu::TextureDimension::D2 => width.max(height),
         wgpu::TextureDimension::D3 => width.max(height).max(depth),
     };
-    u32::BITS - max_axis.max(1).leading_zeros()
+    max_axis.max(1).bit_width()
 }
 
 /// Resolves a backbuffer extent divided by an integer and optionally shifted by mip level.
@@ -134,7 +134,7 @@ fn resolve_backbuffer_scaled_mip_extent(
 /// Returns the largest power of two less than or equal to `value`.
 fn power_of_two_at_or_below(value: u32) -> u32 {
     let value = value.max(1);
-    1_u32 << (u32::BITS - value.leading_zeros() - 1)
+    1_u32 << (value.bit_width() - 1)
 }
 
 /// Halves a base extent by `mip`, clamping degenerate high mips to one pixel.

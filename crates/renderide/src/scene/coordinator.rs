@@ -420,13 +420,13 @@ impl SceneCoordinator {
             (id, result.map(|()| cache))
         };
         let results: Vec<(RenderSpaceId, Result<WorldTransformCache, SceneError>)> =
-            if !admission.is_parallel() {
-                work.into_iter().map(compute_one).collect()
-            } else {
+            if admission.is_parallel() {
                 work.into_par_iter()
                     .with_min_len(WORLD_CACHE_FLUSH_PARALLEL_CHUNK_SPACES)
                     .map(compute_one)
                     .collect()
+            } else {
+                work.into_iter().map(compute_one).collect()
             };
 
         let mut first_err: Option<SceneError> = None;

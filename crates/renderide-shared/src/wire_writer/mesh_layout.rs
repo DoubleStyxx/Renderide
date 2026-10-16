@@ -11,7 +11,9 @@
 
 use crate::shared::{IndexBufferFormat, VertexAttributeDescriptor, VertexAttributeFormat};
 
-/// One vertex attribute's source bytes in **per-vertex** layout. The encoder concatenates them
+/// One vertex attribute's source bytes in **per-vertex** layout.
+///
+/// The encoder concatenates them
 /// across all attributes, in the order given by [`MeshLayoutInput::vertex_attributes`], to form
 /// each interleaved vertex.
 #[derive(Clone, Debug)]

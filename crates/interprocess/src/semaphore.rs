@@ -18,7 +18,7 @@ use std::time::Duration;
 /// Clamping the requested timeout keeps `clock_gettime` arithmetic far below `i128::MAX`, so the
 /// nanosecond conversion to `i128` is exact without a defensive fallback.
 #[cfg(all(unix, not(target_vendor = "apple")))]
-const MAX_WAIT_DURATION: Duration = Duration::from_secs(60 * 60 * 24 * 365);
+const MAX_WAIT_DURATION: Duration = Duration::from_hours(24 * 365);
 
 /// Threshold above which the Windows wait helper switches to `WaitForSingleObject(INFINITE)`
 /// instead of converting the timeout to milliseconds.

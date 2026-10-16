@@ -232,14 +232,14 @@ pub fn compile(manifest_dir: &Path, out_dir: &Path) -> Result<(), BuildError> {
 
     let shader_modules = discover_shader_modules(manifest_dir)?;
     let gen_path = out_dir.join("embedded_shaders.rs");
-    let composed = match cached_composed_shaders(&shader_root, &target_dir, &gen_path)? {
-        Some(cached) => cached,
-        None => {
+    let composed =
+        if let Some(cached) = cached_composed_shaders(&shader_root, &target_dir, &gen_path)? {
+            cached
+        } else {
             let composed = compose_all_shaders(manifest_dir, &shader_root, &target_dir)?;
             write_shader_input_stamp(&shader_root, &target_dir)?;
             composed
-        }
-    };
+        };
     let embedded_rs = render_embedded_shaders_rs(&composed, &shader_modules);
     fs::write(&gen_path, embedded_rs)?;
     Ok(())

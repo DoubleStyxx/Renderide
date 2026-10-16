@@ -118,6 +118,10 @@ impl SceneCoordinator {
         ) {
             profiling::scope!("scene::apply::mutate::space_split");
             for slot in &mut work {
+                #[expect(
+                    clippy::branches_sharing_code,
+                    reason = "profiling scope guard must stay alive across the large-slot mutation"
+                )]
                 if slot.work_units >= MIN_APPLY_PARALLEL_WORK_UNITS {
                     profiling::scope!("scene::apply::mutate::space_split_slot");
                     apply_work_slot_mutation(slot);

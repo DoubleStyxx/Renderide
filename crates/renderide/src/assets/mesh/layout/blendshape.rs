@@ -646,7 +646,12 @@ fn pack_snorm16_delta_component(component: f32) -> (u16, bool) {
     );
     let scaled = (clamped / BLENDSHAPE_PACKED_VECTOR_DELTA_RANGE * 32767.0).round();
     let signed = scaled.clamp(-32767.0, 32767.0) as i16;
-    (signed as u16, !finite || clamped != input)
+    #[expect(
+        clippy::float_cmp,
+        reason = "exact compare detects whether clamp changed the value"
+    )]
+    let was_clamped = clamped != input;
+    (signed as u16, !finite || was_clamped)
 }
 
 /// Repacks host blendshape position, normal, and tangent deltas into frame-aware sparse GPU storage.
