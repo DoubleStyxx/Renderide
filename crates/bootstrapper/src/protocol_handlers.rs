@@ -78,7 +78,10 @@ mod tests {
     }
 
     fn make_publisher_subscriber(dir: &std::path::Path) -> (Publisher, Subscriber) {
-        let name = format!("ph_{}", std::process::id());
+        // Windows maps queues by name only (CT_IP_{name}); parallel tests must not share one.
+        static NEXT_QUEUE_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let id = NEXT_QUEUE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let name = format!("ph_{}_{id}", std::process::id());
         let opts = QueueOptions::with_path_and_destroy(&name, dir, 4096, true).expect("opts");
         let publisher = Publisher::new(opts.clone()).expect("publisher");
         let subscriber = Subscriber::new(opts).expect("subscriber");
