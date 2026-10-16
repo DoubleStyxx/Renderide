@@ -107,6 +107,8 @@ pub(crate) use cache::{
     MaterialPipelineCacheDiagnosticSnapshot, MaterialPipelineSet, MaterialPipelineVariantSpec,
 };
 
+#[cfg(feature = "bench-api")]
+pub use custom_shader::KeywordVariantCacheWorkload;
 /// Embedded raster materials: bind groups, texture pools, uniform packing, and stem-metadata queries.
 pub(crate) use embedded::EmbeddedMaterialBindShader;
 #[cfg(feature = "bench-api")]

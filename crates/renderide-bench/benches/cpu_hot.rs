@@ -1,5 +1,5 @@
 //! Criterion batches for transform math, frustum culling, world matrices, buffer-pool reuse,
-//! custom-material uniform packing, and bind-group cache churn.
+//! custom-material uniform packing, bind-group cache churn, and keyword variant cache lookup.
 //!
 //! `cargo bench -p renderide-bench` runs this file. Pass `--features gpu` to compile the GPU
 //! group as well. That group does not open a device; add adapter benches there when they exist.
@@ -9,8 +9,9 @@ use std::hint::black_box;
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use renderide_bench::{
     BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload, CULL_BATCH,
-    CullWorkload, MATERIAL_UNIFORM_BATCH, MaterialUniformUpdateWorkload, TRANSFORM_BATCH,
-    TransformWorkload, WORLD_MATRIX_NODES, WorldMatrixWorkload,
+    CullWorkload, KeywordVariantCacheWorkload, MATERIAL_UNIFORM_BATCH,
+    MaterialUniformUpdateWorkload, TRANSFORM_BATCH, TransformWorkload, WORLD_MATRIX_NODES,
+    WorldMatrixWorkload,
 };
 
 fn transforms(c: &mut Criterion) {
@@ -77,6 +78,22 @@ fn bind_groups(c: &mut Criterion) {
     group.finish();
 }
 
+fn keyword_variants(c: &mut Criterion) {
+    let mut workload = KeywordVariantCacheWorkload::standard();
+    let mut group = c.benchmark_group("keyword_variants");
+    group.throughput(Throughput::Elements(1));
+    group.bench_function("cache_hit", |b| {
+        b.iter(|| black_box(workload.cache_hit()));
+    });
+    group.bench_function("cache_miss", |b| {
+        b.iter(|| black_box(workload.cache_miss()));
+    });
+    group.bench_function("compose", |b| {
+        b.iter(|| black_box(workload.compose()));
+    });
+    group.finish();
+}
+
 fn buffer_pool(c: &mut Criterion) {
     let mut workload = BufferPoolWorkload::standard();
     let mut group = c.benchmark_group("buffer_pool");
@@ -100,7 +117,8 @@ criterion_group!(
     world_matrices,
     buffer_pool,
     material_uniforms,
-    bind_groups
+    bind_groups,
+    keyword_variants
 );
 
 #[cfg(feature = "gpu")]

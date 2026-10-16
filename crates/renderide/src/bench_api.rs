@@ -1,8 +1,8 @@
 //! CPU-only entry points for the `renderide-bench` crate.
 //!
 //! These helpers are not part of the renderer process API. They call the same transform, frustum,
-//! transient-pool, material-uniform, and bind-group cache bookkeeping the frame loop uses, and
-//! they never open a wgpu device.
+//! transient-pool, material-uniform, bind-group, and keyword-variant cache bookkeeping the frame
+//! loop uses, and they never open a wgpu device.
 
 use glam::{Mat4, Quat, Vec3};
 
@@ -27,6 +27,8 @@ pub const WORLD_MATRIX_NODES: usize = 4_096;
 /// Distinct buffer keys reused by one [`BufferPoolWorkload::reuse_cycle`] sample.
 pub const BUFFER_POOL_SLOTS: usize = 1_024;
 
+/// Custom-shader keyword variant cache workload.
+pub use crate::materials::KeywordVariantCacheWorkload;
 /// Custom-material uniform packing and bind-group cache workloads.
 pub use crate::materials::{
     BIND_GROUP_BATCH, BindGroupChurnWorkload, MATERIAL_UNIFORM_BATCH, MaterialUniformUpdateWorkload,
