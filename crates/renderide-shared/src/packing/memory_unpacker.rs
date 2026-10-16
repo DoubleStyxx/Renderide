@@ -1,5 +1,10 @@
 //! [`MemoryUnpacker`]: host-compatible reads from a byte slice with an entity pool.
 
+#![expect(
+    unsafe_code,
+    reason = "Pod bulk copy into a bounds-checked Vec via copy_nonoverlapping and set_len"
+)]
+
 use core::mem::size_of;
 
 use bytemuck::Pod;
@@ -80,15 +85,18 @@ impl<'a, 'pool, P: MemoryPackerEntityPool> MemoryUnpacker<'a, 'pool, P> {
         //   index in `0..count`. After the copy every slot is initialized; `set_len(count)` is
         //   sound.
         // - `ptr::copy_nonoverlapping` accepts unaligned source / aligned destination via byte
-        //   pointers.
+        //   pointers. Source and destination do not overlap.
         unsafe {
             core::ptr::copy_nonoverlapping(
                 consumed.as_ptr(),
                 out.as_mut_ptr().cast::<u8>(),
                 byte_len,
             );
+        }
+        // SAFETY: the copy initialized `count` elements of `T` in `out`.
+        unsafe {
             out.set_len(count);
-        };
+        }
         Ok(out)
     }
 

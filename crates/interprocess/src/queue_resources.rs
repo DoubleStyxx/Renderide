@@ -1,5 +1,10 @@
 //! Shared backing mapping, capacity, semaphore, and Unix `destroy_on_dispose` cleanup for both queue ends.
 
+#![expect(
+    unsafe_code,
+    reason = "reads the mapped queue header and builds RingView::from_raw"
+)]
+
 use std::fs;
 use std::io;
 
@@ -60,16 +65,17 @@ impl QueueResources {
 
     /// View over the byte ring after [`crate::layout::QueueHeader`].
     pub(crate) fn ring(&self) -> RingView {
-        // SAFETY: Ring begins at `BUFFER_BYTE_OFFSET` within the mapping; length is `capacity`.
-        unsafe {
-            RingView::from_raw(
-                self.mapping
-                    .as_ptr()
-                    .byte_add(crate::layout::BUFFER_BYTE_OFFSET)
-                    .cast_mut(),
-                self.capacity,
-            )
-        }
+        // SAFETY: the mapping is at least `BUFFER_BYTE_OFFSET + capacity` bytes, so this
+        // offset stays inside the live view.
+        let ring_ptr = unsafe {
+            self.mapping
+                .as_ptr()
+                .byte_add(crate::layout::BUFFER_BYTE_OFFSET)
+                .cast_mut()
+        };
+        // SAFETY: `ring_ptr` is the ring region after the queue header; `capacity` matches
+        // the options used to open the mapping.
+        unsafe { RingView::from_raw(ring_ptr, self.capacity) }
     }
 
     /// Signals waiters that new data may be available (after enqueue).

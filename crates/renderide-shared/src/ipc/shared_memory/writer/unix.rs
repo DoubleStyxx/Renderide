@@ -1,5 +1,10 @@
 //! Unix host-side shared-memory writer backend.
 
+#![expect(
+    unsafe_code,
+    reason = "memmap2 map_mut FFI for the host shared-memory writer"
+)]
+
 use std::env;
 use std::fs::{File, OpenOptions};
 use std::path::PathBuf;

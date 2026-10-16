@@ -1,5 +1,10 @@
 //! Unix implementation: read/write mmap of `{composed}.qu` under [`super::naming::unix_mmf_backing_dir`].
 
+#![expect(
+    unsafe_code,
+    reason = "memmap2 map_mut FFI for host-owned shared buffers"
+)]
+
 use std::fs::OpenOptions;
 use std::io;
 

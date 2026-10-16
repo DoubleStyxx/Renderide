@@ -4,6 +4,7 @@
 //! tests under `tests/`. Cargo integration tests link against this library, not the binary, so
 //! every type exercised from `tests/*.rs` is reached through this crate root.
 
+#![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 pub mod cli;

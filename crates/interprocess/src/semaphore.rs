@@ -1,5 +1,10 @@
 //! Named semaphore paired with the queue mapping for wakeup hints.
 
+#![expect(
+    unsafe_code,
+    reason = "POSIX and Win32 semaphore FFI; Send/Sync follow the kernel object"
+)]
+
 #[cfg(unix)]
 mod posix;
 #[cfg(windows)]

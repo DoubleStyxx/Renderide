@@ -7,6 +7,8 @@
 //!
 //! All harness logic lives in the library at [`renderide_test`]; this binary only dispatches.
 
+#![forbid(unsafe_code)]
+
 use mimalloc::MiMalloc;
 use std::process::ExitCode;
 

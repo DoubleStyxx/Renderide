@@ -15,6 +15,15 @@
 //!
 //! Binary layout details live in [`layout`]. Typical usage: build [`QueueOptions`], then
 //! [`Publisher::new`] / [`Subscriber::new`] or [`QueueFactory`].
+//!
+//! `unsafe` is denied for this crate. Production exceptions are
+//! `expect(unsafe_code)` on the mmap, ring, semaphore, publisher, subscriber,
+//! queue-resource, and Windows security modules. Those modules wrap FFI
+//! (`mmap` / `CreateFileMapping`, named semaphores) and raw ring views
+//! (`RingView::from_raw`). New `unsafe` anywhere else does not compile.
+
+#![deny(unsafe_code)]
+#![deny(clippy::multiple_unsafe_ops_per_block)]
 
 #[cfg(not(any(unix, windows)))]
 compile_error!("The `interprocess` crate only supports `cfg(unix)` and `cfg(windows)` targets.");

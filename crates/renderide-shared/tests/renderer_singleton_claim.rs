@@ -1,5 +1,8 @@
 //! Integration: [`renderide_shared::ipc::connection::try_claim_renderer_singleton`] process guard.
 
+#![forbid(unsafe_code)]
+#![deny(clippy::multiple_unsafe_ops_per_block)]
+
 use renderide_shared::ipc::connection::{InitError, try_claim_renderer_singleton};
 
 #[test]

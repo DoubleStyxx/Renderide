@@ -1,5 +1,10 @@
 //! Windows implementation: named file mapping `CT_IP_{prefix}_{bufferId:X}`.
 
+#![expect(
+    unsafe_code,
+    reason = "CreateFileMapping / MapViewOfFile FFI for host-owned shared buffers"
+)]
+
 use std::ffi::OsStr;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
@@ -67,14 +72,11 @@ impl SharedMemoryView {
         if self.view.Value.is_null() {
             return None;
         }
-        // SAFETY: `(start, end)` was validated against `self.len`, which is the mapping size, and
-        // `self.view.Value` is the non-null mapping base. Borrow lives no longer than `&self`.
-        Some(unsafe {
-            std::slice::from_raw_parts(
-                self.view.Value.add(start).cast::<u8>().cast_const(),
-                end - start,
-            )
-        })
+        // SAFETY: `start < self.len` and `self.view.Value` is the non-null mapping base.
+        let ptr = unsafe { self.view.Value.add(start).cast::<u8>().cast_const() };
+        // SAFETY: `ptr` is valid for `end - start` bytes inside the mapping. The borrow lives
+        // no longer than `&self`.
+        Some(unsafe { std::slice::from_raw_parts(ptr, end - start) })
     }
 
     /// Returns the mutable byte subregion or `None` if out of bounds.
@@ -83,11 +85,11 @@ impl SharedMemoryView {
         if self.view.Value.is_null() {
             return None;
         }
-        // SAFETY: same bounds-checked region as `slice`, but `&mut self` guarantees unique access
-        // on the Rust side; cross-process exclusivity is enforced by the IPC protocol.
-        Some(unsafe {
-            std::slice::from_raw_parts_mut(self.view.Value.add(start).cast::<u8>(), end - start)
-        })
+        // SAFETY: `start < self.len` and `self.view.Value` is the non-null mapping base.
+        let ptr = unsafe { self.view.Value.add(start).cast::<u8>() };
+        // SAFETY: same bounds-checked region as `slice`, but `&mut self` guarantees unique
+        // access on the Rust side; cross-process exclusivity is enforced by the IPC protocol.
+        Some(unsafe { std::slice::from_raw_parts_mut(ptr, end - start) })
     }
 
     /// Flushes the given view range (best-effort).

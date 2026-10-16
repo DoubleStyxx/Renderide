@@ -1,5 +1,10 @@
 //! Consumer side of the shared-memory queue.
 
+#![expect(
+    unsafe_code,
+    reason = "reads message headers through the shared ring pointer"
+)]
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 

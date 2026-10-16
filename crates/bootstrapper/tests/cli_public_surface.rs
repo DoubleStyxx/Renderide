@@ -1,5 +1,8 @@
 //! Integration: [`bootstrapper::cli`] parsing as a downstream crate would call it (separate test binary).
 
+#![forbid(unsafe_code)]
+#![deny(clippy::multiple_unsafe_ops_per_block)]
+
 use logger::LogLevel;
 
 /// Strips bootstrapper-only flags and preserves Host forwarding semantics.
