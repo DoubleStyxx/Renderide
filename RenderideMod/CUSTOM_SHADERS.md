@@ -193,10 +193,47 @@ Limits:
 | Field | Contents |
 | --- | --- |
 | `ShaderKey` | string. Empty clears the override. |
+| `VariablePrefix` | string. Default `Shader/`. Blank is the same default. |
 | `Floats` | list of `PropertyName` (string) and `Value` (float). `MaterialUpdateWriter.SetFloat(propertyId, value)`. |
 | `Colors` | list of `PropertyName` (string) and `Value` (`colorX`). `SetColor(propertyId, in colorX)`. |
 | `Textures` | list of `PropertyName` (string) and `Texture` (`ITexture2D` asset ref). `SetTexture(propertyId, provider)`. |
 | `Keywords` | list of `PropertyName` (string) and `Value` (bool). `UpdateKeyword` gets the `Sync<bool>`. Names missing from packaged Unlit metadata are `SetFloat` 0 or 1. |
+
+## Dynamic variables
+
+`VariablePrefix` reads dynamic variables from `DynamicVariableSpace` components on the material slot and its parents. That is the same parent walk a variable uses to bind: a name `Space/Local` binds to the space named `Space`, and a name with no slash binds to the first ancestor space whose `OnlyDirectBinding` is false.
+
+The canonical name is the component `VariableName` when it contains a slash, otherwise `SpaceName/VariableName`. Names that start with the prefix are sampled. The property name is that canonical name with the prefix removed (`Shader/_Speed` and a space named `Shader` with a variable `_Speed` both become `_Speed`).
+
+| Dynvar type | Writer call |
+| --- | --- |
+| `float` | `SetFloat` |
+| `float2`, `float3`, `float4` | `SetFloat4`, missing lanes zero |
+| `colorX` | `SetFloat4` of the linear profile (`ToProfile(ColorProfile.Linear)`) |
+| `IAssetProvider<ITexture2D>` | `SetTexture` |
+
+Other types are ignored. A dynvar property replaces a `Floats`, `Colors`, or `Textures` row of the same name. The value still uses `MaterialPropertyIdRequest` and `MaterialUpdateWriter`. `ShaderUpload` is unchanged: it only installs or removes WGSL, and only when `ShaderKey` or the source changes.
+
+The component subscribes to space, slot, and variable change events and calls `MarkChangeDirty` only when the mapped value or the mapped set changes. It does not poll variable values from `OnCommonUpdate`.
+
+Nearest ancestor space wins when two variables map to one property. Inside one space, the first live variable in slot hierarchy order wins. A disabled variable or an inactive slot does not override.
+
+## Smoke checklist: dynamic variables
+
+Build and run the rainbow-beside-unlit setup first (`CustomShaders.Install("Rainbow", CustomShaders.ExampleRainbowWgsl)`).
+
+1. On box A, `CustomShaderMaterial` has `ShaderKey` `Rainbow` and `VariablePrefix` `Shader/` (the attach default).
+2. On that slot, or a parent, add `DynamicVariableSpace`. Set `SpaceName` to `Shader`. Leave `OnlyDirectBinding` false.
+3. Under that space, add `DynamicValueVariable<float>` named `_Speed` (or `Shader/_Speed`) set to `0.5`.
+4. Add `DynamicValueVariable<colorX>` named `_Color`, `DynamicReferenceVariable<IAssetProvider<ITexture2D>>` named `_MainTex` with a texture, and optionally `DynamicValueVariable<float4>` named `_MainTex_ST`.
+5. Also add a `Floats` row `_Speed` = `0.2` and a `Colors` row `_Color`. These are the static values the dynvars must hide.
+6. Mod log includes `custom shader material dynvars: count=<n> prefix=Shader/` with `_Speed`, `_Color`, and `_MainTex` in the property-id lines. Box A uses the dynvar speed, color, and texture. The static `0.2` and static color are not the values on the material.
+7. Change `_Speed` once. The material updates on that change. Leaving the value alone does not keep dirtying the material.
+8. `float2` / `float3` dynvars, if added under names such as `_Pad`, upload as `SetFloat4` with the unused lanes at 0.
+9. Delete the `_Speed` variable, or disable it. The static `Floats` value `0.2` is written again. Box B is unchanged.
+10. Clear `ShaderKey` or disable the component. Mod log: `custom shader material clear: material=<id>`. Box A returns to packaged Unlit.
+11. Move the material slot out from under the `Shader` space. The dynvar overrides drop and the static rows apply. Move it back and the overrides return.
+12. Set `VariablePrefix` to `Other/`. The `Shader/` variables stop overriding. Set it back to `Shader/` and they return. Blank prefix is `Shader/`.
 
 `PropertyName` is the WGSL name (`_Color`, `_MainTex`, `_Speed`, `RAINBOW`). Blank names are skipped. The entry field is not named `Name` because that hides `SyncObject.Name`.
 
