@@ -25,9 +25,16 @@ pub(crate) fn run_headless(
     runtime: &mut RendererRuntime,
     params: HeadlessParams,
     external_shutdown: Option<ExternalShutdownCoordinator>,
+    main_heartbeat: Option<crate::diagnostics::Heartbeat>,
     gpu_config: GpuStartupConfig,
 ) -> Result<RunExit, RunError> {
-    let mut driver = HeadlessDriver::new(runtime, params, external_shutdown, gpu_config)?;
+    let mut driver = HeadlessDriver::new(
+        runtime,
+        params,
+        external_shutdown,
+        main_heartbeat,
+        gpu_config,
+    )?;
     driver.run()
 }
 
@@ -35,6 +42,7 @@ struct HeadlessDriver<'a> {
     runtime: &'a mut RendererRuntime,
     params: HeadlessParams,
     external_shutdown: Option<ExternalShutdownCoordinator>,
+    main_heartbeat: Option<crate::diagnostics::Heartbeat>,
     gpu: GpuContext,
     schedule: HeadlessSchedule,
     frames_written: u64,
@@ -48,6 +56,7 @@ impl<'a> HeadlessDriver<'a> {
         runtime: &'a mut RendererRuntime,
         params: HeadlessParams,
         external_shutdown: Option<ExternalShutdownCoordinator>,
+        main_heartbeat: Option<crate::diagnostics::Heartbeat>,
         gpu_config: GpuStartupConfig,
     ) -> Result<Self, RunError> {
         logger::info!(
@@ -72,12 +81,16 @@ impl<'a> HeadlessDriver<'a> {
         runtime.attach_gpu(&gpu);
         #[cfg(feature = "control-api")]
         runtime.publish_control_meta(&gpu);
+        if crate::app::frame_bench::active() {
+            crate::gpu::frame_bench_queries::install(gpu.device(), gpu.queue());
+        }
         let schedule = HeadlessSchedule::new(params.interval_ms, Instant::now());
 
         Ok(Self {
             runtime,
             params,
             external_shutdown,
+            main_heartbeat,
             gpu,
             schedule,
             frames_written: 0,
@@ -88,6 +101,9 @@ impl<'a> HeadlessDriver<'a> {
 
     fn run(&mut self) -> Result<RunExit, RunError> {
         loop {
+            if let Some(heartbeat) = self.main_heartbeat.as_ref() {
+                heartbeat.pet();
+            }
             if self.external_shutdown_requested() {
                 logger::info!("Headless: external shutdown requested, exiting");
                 self.drain_graceful_shutdown();
@@ -102,10 +118,15 @@ impl<'a> HeadlessDriver<'a> {
             {
                 self.control_tick_started = Instant::now();
             }
-            let outcome = self.run_tick(tick_kind);
+            let outcome = self.run_tick_for_bench(tick_kind);
             let render_skipped = outcome.render_skipped;
             if let Some(exit) = self.handle_tick_outcome(outcome) {
                 return Ok(exit);
+            }
+            if crate::app::frame_bench::active() && self.runtime.shutdown_requested() {
+                logger::info!("Headless: frame bench report written, exiting");
+                self.drain_graceful_shutdown();
+                return Ok(RunExit::Clean);
             }
             self.after_tick(tick_kind, render_skipped);
         }
@@ -117,6 +138,18 @@ impl<'a> HeadlessDriver<'a> {
         self.external_shutdown
             .as_ref()
             .is_some_and(|coord| coord.requested.load(Ordering::Relaxed))
+    }
+
+    fn run_tick_for_bench(&mut self, kind: HeadlessTickKind) -> TickOutcome {
+        let measure = crate::app::frame_bench::active() && kind == HeadlessTickKind::FullFrame;
+        if measure {
+            self.gpu.begin_frame_timing(Instant::now());
+        }
+        let outcome = self.run_tick(kind);
+        if measure {
+            crate::app::frame_bench::finish_headless_full_frame(&self.gpu, self.runtime, &outcome);
+        }
+        outcome
     }
 
     fn run_tick(&mut self, kind: HeadlessTickKind) -> TickOutcome {
@@ -221,6 +254,9 @@ impl<'a> HeadlessDriver<'a> {
     }
 
     fn maybe_write_frame_png(&mut self) {
+        if crate::app::frame_bench::active() {
+            return;
+        }
         if self.gpu.headless_color_texture().is_none() {
             return;
         }

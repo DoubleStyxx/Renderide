@@ -245,7 +245,10 @@ impl CompiledRenderGraph {
         let pass_query = ctx
             .profiler
             .map(|p| p.begin_pass_query(merged_profile_label, encoder));
-        let timestamp_writes = crate::profiling::render_pass_timestamp_writes(pass_query.as_ref());
+        let timestamp_writes = crate::profiling::render_pass_timestamp_writes(pass_query.as_ref())
+            .or_else(|| {
+                crate::gpu::frame_bench_queries::raster_timestamp_writes(merged_profile_label)
+            });
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some(merged_profile_label),
             color_attachments: resolved.color_attachments.as_slice(),

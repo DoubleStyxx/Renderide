@@ -32,6 +32,7 @@
 mod bootstrap;
 mod driver;
 mod exit;
+pub(crate) mod frame_bench;
 mod frame_clock;
 mod headless;
 mod redraw_plan;

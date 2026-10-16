@@ -31,6 +31,7 @@ pub fn run() -> Result<RunExit, RunError> {
     try_claim_renderer_singleton().map_err(RunError::connection)?;
 
     let logging = logging::init_logging()?;
+    super::frame_bench::install_from_args();
     let app_config = config::load_app_config(logging.log_level_cli);
     let mut runtime = runtime::build_runtime(&app_config.load)?;
     #[cfg(feature = "control-api")]
@@ -47,9 +48,9 @@ pub fn run() -> Result<RunExit, RunError> {
             &mut runtime,
             headless_params,
             external_shutdown,
+            main_heartbeat,
             app_config.gpu,
         );
-        drop(main_heartbeat);
         drop(watchdog);
         return result;
     }

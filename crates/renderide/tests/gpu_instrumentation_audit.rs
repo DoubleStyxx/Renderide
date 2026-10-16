@@ -12,6 +12,8 @@ const PARENT_SCOPED_COPY_FILES: &[&str] = &[
     "src/occlusion/gpu/encode/staging_copy.rs",
     "src/render_graph/frame_upload_batch/batch.rs",
     "src/runtime/offscreen_tasks/reflection_probe/readback.rs",
+    // Timestamp resolve copy. The bench query set is not a profiler scope; tracy may be off.
+    "src/gpu/frame_bench_queries.rs",
 ];
 
 /// GPU copy/clear commands that must be timestamped or explicitly parent-scoped.
@@ -42,6 +44,8 @@ const DIRECT_QUEUE_SUBMIT_FILES: &[&str] = &[
     "src/runtime/offscreen_tasks/camera/alpha_coverage.rs",
     "src/runtime/offscreen_tasks/camera/camera360.rs",
     "src/runtime/offscreen_tasks/reflection_probe/readback.rs",
+    // Readback submit runs after CPU frame time is sampled, outside primary frame timing.
+    "src/gpu/frame_bench_queries.rs",
 ];
 
 /// Returns the renderide crate directory.

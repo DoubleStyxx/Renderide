@@ -116,6 +116,17 @@ impl RendererRuntime {
         self.frontend.last_frame_index()
     }
 
+    /// World-mesh draw count and upload traffic for the frame benchmark.
+    pub(crate) fn frame_bench_counters(&self) -> (u64, u64, u64) {
+        let draws = self.backend.last_world_mesh_draw_stats();
+        let traffic = self.backend.latest_frame_upload_traffic();
+        (
+            u64::try_from(draws.draws_total).unwrap_or(u64::MAX),
+            u64::try_from(traffic.writes).unwrap_or(u64::MAX),
+            u64::try_from(traffic.bytes).unwrap_or(u64::MAX),
+        )
+    }
+
     /// Host requested an orderly renderer shutdown over IPC.
     pub fn shutdown_requested(&self) -> bool {
         self.frontend.shutdown_requested()

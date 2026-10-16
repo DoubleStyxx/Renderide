@@ -1,0 +1,137 @@
+//! Fixed scenes and the control-API script they record.
+//!
+//! Renderide Systems is designing a dev-only localhost TCP JSON-RPC API whose methods are
+//! `camera.set_pose`, `frames.wait`, and `stats.query`. This crate does not open that socket.
+//! The runner applies the same method names in process: the pose is written into the scene
+//! submission, frame counts come from the CLI, and `stats.query` is the report file.
+
+/// Scenario names the runner accepts when `--scenario` is omitted.
+pub const DEFAULT_SCENARIOS: [&str; 2] = ["unlit_sphere", "multi_primitive_unlit"];
+
+/// Transport name recorded in every report. The socket is not implemented.
+pub const CONTROL_TRANSPORT: &str = "localhost-tcp-jsonrpc";
+
+/// Method names of the planned control API, in script order.
+pub const CONTROL_METHODS: [&str; 3] = ["camera.set_pose", "frames.wait", "stats.query"];
+
+/// One fixed scene.
+#[derive(Clone, Copy, Debug)]
+pub struct Scenario {
+    /// Stable report name.
+    pub name: &'static str,
+    /// World-space camera position for `camera.set_pose`.
+    pub camera_position: [f32; 3],
+    /// Camera rotation quaternion, xyzw.
+    pub camera_rotation_xyzw: [f32; 4],
+}
+
+const UNLIT_SPHERE: Scenario = Scenario {
+    name: "unlit_sphere",
+    camera_position: [0.0, 0.0, -3.0],
+    camera_rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+};
+
+const MULTI_PRIMITIVE_UNLIT: Scenario = Scenario {
+    name: "multi_primitive_unlit",
+    camera_position: [0.0, 0.0, -4.2],
+    camera_rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+};
+
+/// Returns the named scenario.
+pub fn by_name(name: &str) -> Option<&'static Scenario> {
+    match name {
+        "unlit_sphere" => Some(&UNLIT_SPHERE),
+        "multi_primitive_unlit" => Some(&MULTI_PRIMITIVE_UNLIT),
+        _ => None,
+    }
+}
+
+/// One step of the planned control API, applied locally.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "method")]
+#[expect(
+    variant_size_differences,
+    reason = "camera.set_pose stores a pose; frames.wait and stats.query are markers"
+)]
+pub enum ScriptStep {
+    /// Set the world-space camera. Applied by overwriting the scene pose.
+    #[serde(rename = "camera.set_pose")]
+    CameraSetPose {
+        /// World position.
+        position: [f32; 3],
+        /// Rotation quaternion, xyzw.
+        rotation_xyzw: [f32; 4],
+    },
+    /// Warmup frames, then measured frames. Counts come from the CLI.
+    #[serde(rename = "frames.wait")]
+    FramesWait {
+        /// Frames discarded before measurement.
+        warmup_frames: u32,
+        /// Frames included in the percentiles.
+        measured_frames: u32,
+    },
+    /// Read the benchmark report. The result is the JSON file, not a socket reply.
+    #[serde(rename = "stats.query")]
+    StatsQuery,
+}
+
+/// Script recorded for one scenario run.
+pub fn script(scenario: &Scenario, warmup_frames: u32, measured_frames: u32) -> Vec<ScriptStep> {
+    vec![
+        ScriptStep::CameraSetPose {
+            position: scenario.camera_position,
+            rotation_xyzw: scenario.camera_rotation_xyzw,
+        },
+        ScriptStep::FramesWait {
+            warmup_frames,
+            measured_frames,
+        },
+        ScriptStep::StatsQuery,
+    ]
+}
+
+/// Pose carried by the first `camera.set_pose` step.
+pub fn pose_from_script(steps: &[ScriptStep]) -> Option<([f32; 3], [f32; 4])> {
+    steps.iter().find_map(|step| match step {
+        ScriptStep::CameraSetPose {
+            position,
+            rotation_xyzw,
+        } => Some((*position, *rotation_xyzw)),
+        ScriptStep::FramesWait { .. } | ScriptStep::StatsQuery => None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DEFAULT_SCENARIOS, ScriptStep, by_name, pose_from_script, script};
+
+    fn method_names(steps: &[ScriptStep]) -> Vec<&'static str> {
+        steps
+            .iter()
+            .map(|step| match step {
+                ScriptStep::CameraSetPose { .. } => "camera.set_pose",
+                ScriptStep::FramesWait { .. } => "frames.wait",
+                ScriptStep::StatsQuery => "stats.query",
+            })
+            .collect()
+    }
+
+    #[test]
+    fn default_scripts_use_the_control_api_method_names() {
+        for name in DEFAULT_SCENARIOS {
+            let scenario = by_name(name).expect(name);
+            let steps = script(scenario, 8, 32);
+            assert_eq!(
+                method_names(&steps),
+                ["camera.set_pose", "frames.wait", "stats.query"]
+            );
+            let (position, rotation) = pose_from_script(&steps).expect("pose");
+            assert_eq!(position, scenario.camera_position);
+            assert_eq!(rotation, scenario.camera_rotation_xyzw);
+            let json = serde_json::to_string(&steps).expect("json");
+            assert!(json.contains("\"method\":\"camera.set_pose\""), "{json}");
+            assert!(json.contains("\"method\":\"frames.wait\""), "{json}");
+            assert!(json.contains("\"method\":\"stats.query\""), "{json}");
+        }
+    }
+}

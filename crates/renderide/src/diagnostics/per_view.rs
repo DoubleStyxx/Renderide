@@ -7,7 +7,7 @@ impl DebugHudMetricInterest {
     /// Converts the HUD metric interests into per-view capture switches.
     pub(crate) fn per_view_hud_config(self) -> PerViewHudConfig {
         PerViewHudConfig {
-            capture_world_mesh_draw_stats: self.wants_stats(),
+            capture_world_mesh_draw_stats: self.wants_stats() || self.force_world_mesh_draw_stats,
             capture_world_mesh_view_stats: self.wants_visibility(),
             capture_world_mesh_draw_state_rows: self.wants_draw_state(),
             capture_current_view_texture_2d_asset_ids: self.textures,
@@ -96,5 +96,19 @@ mod tests {
             assert!(!config.capture_world_mesh_draw_state_rows);
             assert!(!config.capture_current_view_texture_2d_asset_ids);
         }
+    }
+
+    #[test]
+    fn forced_draw_stats_capture_ignores_the_closed_stats_tab() {
+        let config = DebugHudMetricInterest {
+            force_world_mesh_draw_stats: true,
+            ..Default::default()
+        }
+        .per_view_hud_config();
+
+        assert!(config.capture_world_mesh_draw_stats);
+        assert!(!config.capture_world_mesh_view_stats);
+        assert!(!config.capture_world_mesh_draw_state_rows);
+        assert!(!config.capture_current_view_texture_2d_asset_ids);
     }
 }

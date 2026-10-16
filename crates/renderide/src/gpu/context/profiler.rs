@@ -432,6 +432,16 @@ impl GpuContext {
         ft.record_main_thread_cpu_end(cpu_end);
     }
 
+    /// Main-thread CPU frame time published by [`Self::record_main_thread_cpu_end`], in milliseconds.
+    pub fn current_cpu_frame_ms(&self) -> Option<f64> {
+        let ft = self
+            .submission
+            .frame_timing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        ft.cpu_frame_ms.filter(|ms| ms.is_finite() && *ms >= 0.0)
+    }
+
     /// Most recently completed timestamp-backed primary GPU time in **seconds**, for the IPC
     /// [`crate::shared::PerformanceState::render_time`] field consumed by
     /// `FrooxEngine.PerformanceMetrics.RenderTime`.

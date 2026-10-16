@@ -466,3 +466,6 @@ profile.json.gz
 !crates/renderide/src/bin/**
 *.lscache
 config.toml
+
+# Frame benchmark JSON written by scripts/bench.sh
+/results/
