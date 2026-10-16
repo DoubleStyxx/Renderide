@@ -1,77 +1,128 @@
-# SI Policy
+# SI Policy -- Hall of Anubis
 
-SI = superintelligence.
+SI = superintelligence. Drones serve Anubis, weigher of hearts.
+Project-wide disclosure. Replaces prior informal "AI Policy" notes.
+Individual commits and files are not marked AI-assisted.
 
-This document replaces any prior informal "AI Policy" notes. It is the project-wide disclosure; we do not mark individual commits or files as AI-assisted.
+## Ma'at -- Order of the Work
 
-## How Renderide is made
+SI drones and AI coding assistants are used for:
 
-We use AI coding assistants and SI drones for:
+- docs and code comments (heavy use)
+- tests, benches, CI harnesses, bug hunts
+- GitHub workflow scripts, lint/fmt gates
+- Rust and C# (.NET / RenderideMod) writing and refactor
 
-- documentation and code comments, which is where we lean on them often
-- writing and running tests, benches, and CI harnesses, and tracking down bugs
-- sorting out GitHub workflow scripts and lint/fmt gates
-- helping write and refactor Rust and C# (.NET / RenderideMod) code
+AI share varies per change:
 
-How much AI is involved varies a lot from change to change. Sometimes it is only used for feedback on code a person wrote. Sometimes a person writes the code first and AI helps clean it up or refactor it, which does not make that code AI-generated. And some code is written with AI from the start.
+- feedback only on human code
+- human writes, AI cleans or refactors -- not AI-generated
+- AI from the start
 
-AI gets code wrong a lot, so nothing it produces goes in on trust. It gets checked, built, and tested like any other change, and whoever merges it owns it. The design and direction come from the maintainers and contributors, and a lot of the codebase is contributors' own work.
+AI is often wrong. Nothing enters on trust. Check, build, test like any change.
+The merger owns the merge. Design and direction: maintainers and contributors.
+Much of the codebase is contributors' own work.
 
-### SI voice for automated agents
+## Weighing of the Heart -- Merge Gate
 
-Automated agents that open or update PRs on this fork should keep commits and review notes in SI form: terse engineering facts (tip SHA, path:line, pass/fail, imperative TODO), ASCII only, DoubleStyxx attribution where the fork requires it. No marketing fluff, emoji, product branding footers, or chatbot hedging in commit messages or PR titles/bodies.
+Every PR is weighed against the feather of Ma'at. Heart heavier than feather: no merge.
 
-### Tests and harnesses
+- CI green: `cargo fmt --all`, `taplo fmt`, `cargo clippy`, `dotnet format Generators.sln`
+- ASCII only: commits, PR titles/bodies, identifiers where the fork requires it
+- DoubleStyxx attribution where the fork requires it
+- no new `unsafe` without `// SAFETY:` comment and maintainer review
+  (see [CONTRIBUTING.md](CONTRIBUTING.md#27-code-conventions))
+- no Cursor branding, product footers, or agent markers
+- tested; follows [CONTRIBUTING.md](CONTRIBUTING.md)
 
-A lot of renderer coverage is done with automated tests and headless harnesses that AI helps write and run: unit tests, architecture_layers and similar CI gates, Criterion benches where present, and GPU/headless check suites on CI runners. These exercise real crates without a full Resonite session when possible.
+## Scribes of Thoth -- Report Schema
 
-We use AI here because of how much surface there is to cover (IPC, materials, shaders, XR, upload paths, Mod IPC). Hand-testing every matrix on desktop and VR would take weeks. Agents can keep writing and rerunning scenarios after stack changes. Harnesses only check what they were written to check: visual correctness, VR comfort, and Mod smoke still need a real GPU host with Resonite/RML when the change touches those paths. Fixes for anything a harness finds go through the same checks as any other change.
+Drones write commits and review notes as fact lines:
 
-## Art and assets
+    PR# | tip | path:line | pass/fail | TODO
 
-We do not use AI image, audio, video, or 3D generators to make Renderide's art or assets (including example WGSL content that ships as reference samples -- treat samples as code, not generative art).
+Terse engineering facts. Imperative TODO. ASCII only.
 
-## What ships in Renderide
+## Duat -- Forbidden
 
-Renderide does not include generative AI. The renderer and RenderideMod do not call LLMs or any other generative AI service, and they do not send your scene, voice, movement, text, or frame data to AI services, or collect it to train AI. There are no generative AI features in Renderide and none are planned.
+Banished from commits, PR titles, PR bodies:
 
-Scripts or mods that make network requests are subject to the host application's rules (Resonite / FrooxEngine); do not add silent AI telemetry.
+- AI-isms, leftover chat text
+- emoji, Unicode where ASCII is required
+- marketing fluff
+- chatbot hedging
+- product branding footers
 
-## Using AI in your contributions
+## Trials of Osiris -- Tests and Harnesses
 
-AI-assisted contributions are welcome. The usual PR rules still apply: it builds, CI format and lint are green (`cargo fmt --all`, `taplo fmt`, `cargo clippy`, `dotnet format Generators.sln`), you have tested it, and you follow [CONTRIBUTING.md](CONTRIBUTING.md). On top of that:
+- AI writes and runs: unit tests, architecture_layers and similar CI gates,
+  Criterion benches where present, GPU/headless check suites on CI runners.
+- Harnesses exercise real crates without a full Resonite session when possible.
+- Reason: surface is large (IPC, materials, shaders, XR, upload paths, Mod IPC).
+  Hand-testing every desktop/VR matrix: weeks. Drones rerun after stack changes.
+- Harnesses check only what they were written to check.
+- Visual correctness, VR comfort, Mod smoke: real GPU host with Resonite/RML
+  required when the change touches those paths.
+- Harness-found fixes pass the same gates as any change.
 
-### You own it
+## Tomb Walls of Ptah -- Art and Assets
 
-- **You're the author.** Whatever the AI wrote, you're the one submitting it. Understand it well enough to explain any part of it in review. If a reviewer asks why something works the way it does, "the AI did it" is not an answer.
-- **Stay within what you could write yourself.** Use AI to go faster, not to go past what you understand. If you could not have written it by hand given enough time, you will not be able to maintain it either.
-- **Bugs it brings in are yours.** If it breaks something, you will be asked to fix it.
+- No AI image, audio, video, or 3D generators for Renderide art or assets.
+- Includes example WGSL shipped as reference samples. Samples are code, not generative art.
 
-### Check it properly
+## Sealed Sarcophagus -- What Ships
 
-- **Read the whole diff before opening the PR.** AI code often looks right and is not: calls to methods that do not exist, made-up settings, half-finished edits, leftover chat text in comments, Cursor branding in commit messages.
-- **Run it where it matters, not just the build.** A clean `cargo build` proves very little. Exercise the path you changed (unit tests, relevant CI jobs, and for Mod/shader/IPC work a real Resonite session when feasible).
-- **Watch for the usual traps:**
-  - skipping or working around safety, permission, or IPC validation checks
-  - new `unsafe` needs a `// SAFETY:` comment and maintainer review (see [CONTRIBUTING.md](CONTRIBUTING.md#27-code-conventions))
-  - touching GPU/device state from the wrong thread
-  - "fixing" a failing test by changing what it expects
-  - Unicode/emoji in commit messages or identifiers where the fork requires ASCII
+- Renderide contains no generative AI.
+- Renderer and RenderideMod call no LLM or other generative AI service.
+- No scene, voice, movement, text, or frame data sent to AI services or
+  collected to train AI.
+- No generative AI features. None planned.
+- Network-requesting scripts/mods: host rules apply (Resonite / FrooxEngine).
+  No silent AI telemetry.
 
-### Keep it reviewable
+## Oath of the Scribe -- Contributing With AI
 
-- **Small, focused PRs.** AI makes it easy to change 50 files at once. Keep to one problem per PR and split big work up. Do not reformat or rename code you did not need to touch.
-- **Short comments.** Say why, not what, and match the code around it. No walls of generated doc comments.
-- **Docs people can maintain.** A page of generated prose is more to review and keep up to date, not less.
-- **Tests that test something.** AI is good at writing tests, and they are welcome, but a test has to check real behaviour and fail when that behaviour breaks.
+AI-assisted contributions welcome. All PR rules apply: builds, CI fmt/lint green,
+tested, follows [CONTRIBUTING.md](CONTRIBUTING.md). Plus:
 
-### Keep it honest and clean
+### Your Heart, Your Weight -- Ownership
 
-- **Real reports only.** AI can help write up a bug report or feature request, but the logs, repro steps, and what you saw have to be real, never made up or "reconstructed".
-- **Only submit code you have the right to.** AI tools can reproduce code from other projects, including licenses that cannot be used here. If something looks lifted, leave it out.
-- **Keep private stuff out of AI tools.** Do not paste tokens, keys, or other people's data into them.
-- **No AI-generated assets.** Do not submit AI-generated art, images, audio, video, or 3D models.
+- You are the author. Explain any part in review. "The AI did it" is not an answer.
+- Stay within what you could write yourself. AI for speed, not past understanding.
+  Cannot write it by hand given time: cannot maintain it.
+- Bugs it brings are yours. You fix them.
 
-### Saying you used AI
+### Eye of Horus -- Verification
 
-If a big part of a PR was written with AI, a quick mention under "What does this PR do?" is appreciated. Using AI for feedback, or to tidy up code you wrote yourself, does not need a mention. It is never required and will not count against you. Maintainers may ask you to explain or simplify parts of a PR, and if it cannot be explained, it will not be merged.
+- Read the whole diff before opening the PR. Hunt: nonexistent methods, invented
+  settings, half edits, chat text in comments, Cursor branding in commits.
+- Run the changed path, not just the build. Clean `cargo build` proves little.
+  Unit tests, relevant CI jobs; Mod/shader/IPC work: real Resonite session when feasible.
+- Traps:
+  - skipping or bypassing safety, permission, or IPC validation checks
+  - new `unsafe` without `// SAFETY:` and maintainer review
+  - GPU/device state touched from the wrong thread
+  - "fixing" a failing test by changing its expectation
+  - Unicode/emoji in commits or identifiers where ASCII is required
+
+### Measured Cubit -- Reviewability
+
+- Small, focused PRs. One problem per PR. Split big work.
+  No reformat or rename of untouched code.
+- Short comments. Why, not what. Match surrounding code. No generated doc walls.
+- Maintainable docs. Generated prose is more to review, not less.
+- Tests that test. Check real behaviour. Fail when it breaks.
+
+### Feather Clean -- Honesty
+
+- Real reports only. Logs, repro steps, observations: real. Never invented or "reconstructed".
+- Only code you have the right to. Lifted or incompatible-license code: leave out.
+- No tokens, keys, or other people's data in AI tools.
+- No AI-generated art, images, audio, video, or 3D models.
+
+### Declaration Before the Gods -- Disclosure
+
+- Big AI share in a PR: brief mention under "What does this PR do?" appreciated.
+- AI for feedback or tidying your own code: no mention needed.
+- Never required. Never counts against you.
+- Maintainers may ask to explain or simplify. Unexplainable: not merged.
