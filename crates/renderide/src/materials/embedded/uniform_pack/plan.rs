@@ -33,11 +33,13 @@ const KIND_HOST_ARRAY: u8 = 7;
 const FLAG_SRGB: u8 = 1;
 const RENDERIDE_VARIANT_BITS_FIELD: &str = "_RenderideVariantBits";
 
+#[derive(Debug)]
 struct PlannedTexture {
     property_ids: Vec<i32>,
     fallback_primary: bool,
 }
 
+#[derive(Debug)]
 struct PlannedField {
     offset: u32,
     size: u32,
@@ -49,6 +51,7 @@ struct PlannedField {
 }
 
 /// Field recipes for one reflected material uniform block.
+#[derive(Debug)]
 pub(crate) struct MaterialUniformPackPlan {
     total_size: usize,
     fields: Vec<PlannedField>,
@@ -56,6 +59,33 @@ pub(crate) struct MaterialUniformPackPlan {
     vec4_defaults: Vec<[f32; 4]>,
     /// `false` when the reflected block is missing or a field has no property id.
     ready: bool,
+}
+
+/// Identity of the layout a [`MaterialUniformPackPlan`] was compiled from.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct UniformPlanCacheKey {
+    reflected: usize,
+    ids: usize,
+    defaults: usize,
+}
+
+/// Plan cached on the value-space object that was first packed with `key`.
+#[derive(Debug)]
+pub(super) struct CachedUniformPlan {
+    pub(super) key: UniformPlanCacheKey,
+    pub(super) plan: MaterialUniformPackPlan,
+}
+
+pub(super) fn uniform_plan_cache_key(
+    reflected: &ReflectedRasterLayout,
+    ids: &StemEmbeddedPropertyIds,
+    defaults: &super::MaterialUniformDefaults,
+) -> UniformPlanCacheKey {
+    UniformPlanCacheKey {
+        reflected: std::ptr::from_ref(reflected) as usize,
+        ids: std::ptr::from_ref(ids) as usize,
+        defaults: std::ptr::from_ref(defaults) as usize,
+    }
 }
 
 impl MaterialUniformPackPlan {

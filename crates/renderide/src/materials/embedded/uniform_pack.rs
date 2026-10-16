@@ -216,10 +216,24 @@ pub(crate) fn build_embedded_uniform_bytes_with_material_defaults(
     shader_variant_bits: Option<u32>,
 ) -> Option<Vec<u8>> {
     profiling::scope!("materials::embedded_uniform_pack");
+    let key = plan::uniform_plan_cache_key(reflected, ids, metadata.material_defaults);
+    if let Some(cached) = metadata.value_spaces.cached_plan().get()
+        && cached.key == key
+    {
+        let mut buf = Vec::new();
+        return cached
+            .plan
+            .pack_into(store, lookup, tex_ctx, shader_variant_bits, &mut buf)
+            .then_some(buf);
+    }
     let plan = MaterialUniformPackPlan::compile(reflected, ids, metadata);
     let mut buf = Vec::new();
-    plan.pack_into(store, lookup, tex_ctx, shader_variant_bits, &mut buf)
-        .then_some(buf)
+    let ready = plan.pack_into(store, lookup, tex_ctx, shader_variant_bits, &mut buf);
+    let _ = metadata
+        .value_spaces
+        .cached_plan()
+        .set(plan::CachedUniformPlan { key, plan });
+    ready.then_some(buf)
 }
 
 /// Returns whether a resolved texture binding is a host-uploaded texture with V-inverted storage.
