@@ -103,12 +103,15 @@ impl RendererRuntime {
 
     /// Copies debug HUD capture flags into the backend before the render graph runs.
     pub(super) fn sync_debug_hud_diagnostics_from_settings(&mut self) {
-        let flags = self
+        let mut flags = self
             .config
             .settings
             .read()
             .map(|s| debug_hud_metric_interest(&s))
             .unwrap_or_default();
+        if super::frame_bench_draw_stats() {
+            flags.force_world_mesh_draw_stats = true;
+        }
         self.backend
             .set_debug_hud_per_view_config(flags.per_view_hud_config());
         self.backend

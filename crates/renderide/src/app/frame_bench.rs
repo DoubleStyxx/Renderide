@@ -53,6 +53,7 @@ pub(crate) fn install_from_args() {
         params.warmup_frames,
         params.measured_frames
     );
+    crate::runtime::set_frame_bench_draw_stats(true);
     let mut guard = lock();
     if guard.is_none() {
         *guard = Some(Recorder {

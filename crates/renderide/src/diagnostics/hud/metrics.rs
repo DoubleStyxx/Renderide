@@ -22,6 +22,10 @@ pub struct DebugHudMetricInterest {
     pub scene_transforms: bool,
     /// Whether the **Textures** window needs texture rows and current-view usage.
     pub textures: bool,
+    /// Capture world-mesh draw counters even when the Stats tab is closed.
+    ///
+    /// Frame bench sets this from runtime. Settings never turn it on.
+    pub force_world_mesh_draw_stats: bool,
 }
 
 impl DebugHudMetricInterest {
@@ -47,6 +51,7 @@ impl DebugHudMetricInterest {
             stats_assets: stats_active && hud.stats_sections.assets,
             scene_transforms: settings.debug.debug_hud_transforms,
             textures: settings.debug.debug_hud_textures,
+            force_world_mesh_draw_stats: false,
         }
     }
 
