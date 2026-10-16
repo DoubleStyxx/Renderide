@@ -143,7 +143,6 @@ The workspace lives under `crates/`:
 | [`interprocess`](crates/interprocess) | Cloudtoid-compatible shared-memory ring queues used by every IPC channel. |
 | [`logger`](crates/logger) | File-first logging used by the bootstrapper, host capture, and renderer. |
 | [`renderide-test`](crates/renderide-test) | Integration test harness that drives the renderer end-to-end. |
-| [`renderide-bench`](crates/renderide-bench) | Criterion CPU microbenchmarks for hot paths (no host/GPU). |
 
 A C# generator under [`generators/SharedTypeGenerator`](generators/SharedTypeGenerator) emits `crates/renderide-shared/src/shared.rs`. Its test project lives under [`generators/SharedTypeGenerator.Tests`](generators/SharedTypeGenerator.Tests) and uses the `roundtrip` binary to compare C# and Rust packing. [`RenderideMod`](RenderideMod) contains the host-side Resonite mod, [`crates/renderide/assets`](crates/renderide/assets) contains runtime XR bindings and the shipped skybox model, and [`third_party/openxr_loader`](third_party/openxr_loader) contains vendored OpenXR loader binaries used by release artifacts on Windows and macOS.
 
@@ -239,13 +238,3 @@ Renderide depends on upstream projects with their own contribution rules. For ex
 MIT - see [`LICENSE`](LICENSE).
 
 
-## Benchmarks
-
-CPU microbenchmarks live in `crates/renderide-bench` (no Resonite host or GPU required):
-
-```bash
-cargo bench -p renderide-bench
-cargo bench -p renderide-bench --no-run   # compile only
-```
-
-See [PERFORMANCE_NOTES.md](PERFORMANCE_NOTES.md) for measured IPC packing gains and next profiling steps.
