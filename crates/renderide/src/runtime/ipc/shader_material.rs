@@ -112,6 +112,9 @@ pub(in crate::runtime) fn drain_pending_shader_resolutions(
         if let Some(shader_key) = resolved.retarget_shader_key.as_deref() {
             backend.retarget_named_shader_routes(shader_key);
         }
+        if resolved.material_override_changed {
+            backend.bump_material_route_generation();
+        }
         if asset_id < 0 {
             continue;
         }

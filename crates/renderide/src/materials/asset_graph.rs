@@ -348,6 +348,11 @@ impl MaterialAssetGraph {
         self.note_invalidation();
     }
 
+    /// Bumps router generation after a per-material shader override changes.
+    pub(crate) fn bump_route_generation(&mut self) {
+        self.router.bump_generation_for_shader_dependency();
+    }
+
     /// Points every route with this shader asset name at the live custom or packaged stem.
     pub(crate) fn retarget_named_shader_routes(&mut self, shader_key: &str) {
         let shader_key = crate::materials::custom_shader::normalize_shader_key(shader_key);
@@ -566,6 +571,14 @@ mod tests {
             observed > seen,
             "forced mtime {observed:?} did not advance past {seen:?}"
         );
+    }
+
+    #[test]
+    fn bump_route_generation_advances_the_router() {
+        let mut graph = MaterialAssetGraph::new(RasterPipelineKind::Null);
+        let before = graph.router().generation();
+        graph.bump_route_generation();
+        assert_ne!(graph.router().generation(), before);
     }
 
     #[test]

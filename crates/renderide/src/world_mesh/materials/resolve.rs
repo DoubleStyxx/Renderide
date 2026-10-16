@@ -12,8 +12,10 @@ use crate::materials::{
     RasterFrontFace, RasterPipelineKind, RasterPrimitiveTopology, SceneColorSnapshotMode,
     fallback_render_queue_for_material, first_float_from_maps, first_vec4_from_maps,
     material_blend_mode_from_maps, material_render_queue_from_maps,
-    material_render_state_from_maps, resolve_raster_pipeline,
+    material_render_state_from_maps,
 };
+
+mod shader_select;
 
 use super::FrameMaterialBatchCache;
 use super::key::MaterialDrawBatchKey;
@@ -288,10 +290,8 @@ pub(crate) fn resolve_material_batch_with_registry(
     shader_perm: ShaderPermutation,
     property_registry: Option<&PropertyIdRegistry>,
 ) -> ResolvedMaterialBatch {
-    let shader_asset_id = dict
-        .shader_asset_for_material(material_asset_id)
-        .unwrap_or(-1);
-    let pipeline = resolve_raster_pipeline(shader_asset_id, router);
+    let (shader_asset_id, pipeline) =
+        shader_select::resolve_material_shader(material_asset_id, dict, router);
     let embedded = embedded_material_features(&pipeline, shader_perm);
     let lookup_ids = MaterialPropertyLookupIds {
         material_asset_id,

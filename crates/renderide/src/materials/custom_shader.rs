@@ -8,6 +8,7 @@
 mod bindings;
 mod compose;
 mod keywords;
+mod overrides;
 mod passes;
 
 use std::sync::Arc;
@@ -69,14 +70,16 @@ struct InstalledKey {
 }
 
 #[derive(Default)]
-struct CustomShaderRegistry {
+pub(super) struct CustomShaderRegistry {
     targets: HashMap<String, InstalledTarget>,
     keys: HashMap<String, InstalledKey>,
+    /// Material asset id -> normalized custom shader key.
+    material_overrides: HashMap<i32, String>,
     next_generation: u64,
     invalidated_stems: Vec<String>,
 }
 
-fn registry() -> &'static RwLock<CustomShaderRegistry> {
+pub(super) fn registry() -> &'static RwLock<CustomShaderRegistry> {
     static REGISTRY: std::sync::OnceLock<RwLock<CustomShaderRegistry>> = std::sync::OnceLock::new();
     REGISTRY.get_or_init(|| RwLock::new(CustomShaderRegistry::default()))
 }
@@ -275,10 +278,34 @@ pub(crate) fn pipeline_for_shader_name(
 }
 
 /// Removes the custom program for `key`, if one was installed.
+pub(super) struct RemoveResult {
+    /// Program that was installed, when this key had one.
+    program: Option<RemovedCustomShader>,
+    /// `true` when at least one material override for this key was dropped.
+    cleared_overrides: bool,
+}
+
+/// Removes the custom program for `key`, if one was installed.
+#[cfg(test)]
 pub(crate) fn remove(key: &str) -> Option<RemovedCustomShader> {
+    remove_result(key).program
+}
+
+fn remove_result(key: &str) -> RemoveResult {
     let key = normalize_shader_key(key);
     let mut registry = registry().write();
-    let installed = registry.keys.remove(&key)?;
+    let before = registry.material_overrides.len();
+    registry
+        .material_overrides
+        .retain(|_, stored| stored != &key);
+    let cleared_overrides = registry.material_overrides.len() != before;
+    let Some(installed) = registry.keys.remove(&key) else {
+        drop(registry);
+        return RemoveResult {
+            program: None,
+            cleared_overrides,
+        };
+    };
     let multiview_stem = format!("{}_multiview", installed.base_stem);
     registry.targets.remove(&installed.default_stem);
     registry.targets.remove(&multiview_stem);
@@ -289,7 +316,28 @@ pub(crate) fn remove(key: &str) -> Option<RemovedCustomShader> {
     let base_stem = installed.base_stem;
     drop(registry);
     logger::info!("custom shader removed key={key} stem={base_stem}");
-    Some(RemovedCustomShader { key, base_stem })
+    RemoveResult {
+        program: Some(RemovedCustomShader { key, base_stem }),
+        cleared_overrides,
+    }
+}
+
+/// Drops the per-material override for `material_asset_id`.
+///
+/// Called when the host unloads that material so a reused asset id does not keep the old key.
+pub(crate) fn clear_material_override(material_asset_id: i32) -> bool {
+    overrides::clear(material_asset_id)
+}
+
+/// Replaces `stock` when `material_asset_id` has an installed custom program assigned.
+pub(crate) fn apply_material_shader_override(
+    material_asset_id: i32,
+    stock: crate::render_contract::RasterPipelineKind,
+) -> crate::render_contract::RasterPipelineKind {
+    match overrides::stem_for_material(material_asset_id) {
+        Some(stem) => crate::render_contract::RasterPipelineKind::EmbeddedStem(stem),
+        None => stock,
+    }
 }
 
 /// Installs or removes one custom payload and returns the shader route for it.
@@ -304,63 +352,81 @@ pub(crate) fn resolve_custom_shader_payload(
         Ok(payload) => payload,
         Err(error) => {
             logger::warn!("custom shader payload rejected: {error}");
-            return ResolvedShaderUpload {
-                shader_asset_name: None,
-                shader_variant_bits: None,
-                pipeline: RasterPipelineKind::Null,
-                retarget_shader_key: None,
-                rejected: true,
-            };
+            return rejected_shader_upload();
         }
     };
-    if matches!(
-        payload.op,
-        renderide_shared::custom_shader_ipc::CustomShaderOp::Assign
-            | renderide_shared::custom_shader_ipc::CustomShaderOp::Clear
-    ) {
-        logger::info!(
-            "custom shader material op={:?} material={:?} key={}",
-            payload.op,
-            payload.material_asset_id,
-            payload.key
-        );
-        return ResolvedShaderUpload {
-            shader_asset_name: None,
-            shader_variant_bits: None,
-            pipeline: RasterPipelineKind::Null,
-            retarget_shader_key: None,
-            rejected: false,
-        };
-    }
-    if payload.op == renderide_shared::custom_shader_ipc::CustomShaderOp::Remove {
-        remove(&payload.key);
-        let mut resolved: ResolvedShaderUpload =
-            plan_shader_route(Some(payload.key.clone()), None, stem_lookup).into();
-        resolved.retarget_shader_key = Some(payload.key);
-        return resolved;
+    use renderide_shared::custom_shader_ipc::CustomShaderOp;
+    match payload.op {
+        CustomShaderOp::Assign => {
+            return apply_material_payload(payload.material_asset_id, |material_asset_id| {
+                overrides::assign(material_asset_id, &payload.key)
+            });
+        }
+        CustomShaderOp::Clear => {
+            return apply_material_payload(payload.material_asset_id, overrides::clear);
+        }
+        CustomShaderOp::Remove => {
+            let removed = remove_result(&payload.key);
+            let _ = removed.program;
+            let mut resolved: ResolvedShaderUpload =
+                plan_shader_route(Some(payload.key.clone()), None, stem_lookup).into();
+            resolved.retarget_shader_key = Some(payload.key);
+            resolved.material_override_changed = removed.cleared_overrides;
+            return resolved;
+        }
+        CustomShaderOp::Install => {}
     }
     match install(&payload.key, &payload.wgsl) {
         Ok(installed) => ResolvedShaderUpload {
             shader_asset_name: Some(installed.key.clone()),
             shader_variant_bits: None,
             pipeline: RasterPipelineKind::EmbeddedStem(Arc::from(installed.default_stem)),
-            retarget_shader_key: Some(installed.key),
+            retarget_shader_key: Some(installed.key.clone()),
+            material_override_changed: overrides::key_has_material(&installed.key),
             rejected: false,
         },
         Err(error) => {
             if bindings::is_binding_rejection(&error) {
                 logger::error!("custom shader install failed for {}: {error}", payload.key);
-                return ResolvedShaderUpload {
-                    shader_asset_name: None,
-                    shader_variant_bits: None,
-                    pipeline: RasterPipelineKind::Null,
-                    retarget_shader_key: None,
-                    rejected: true,
-                };
+                return rejected_shader_upload();
             }
             logger::warn!("custom shader install failed for {}: {error}", payload.key);
             plan_shader_route(Some(payload.key), None, stem_lookup).into()
         }
+    }
+}
+
+fn rejected_shader_upload() -> crate::assets::ResolvedShaderUpload {
+    use crate::assets::shader::route::ResolvedShaderUpload;
+    use crate::render_contract::RasterPipelineKind;
+    ResolvedShaderUpload {
+        shader_asset_name: None,
+        shader_variant_bits: None,
+        pipeline: RasterPipelineKind::Null,
+        retarget_shader_key: None,
+        material_override_changed: false,
+        rejected: true,
+    }
+}
+
+fn apply_material_payload(
+    material_asset_id: Option<i32>,
+    apply: impl FnOnce(i32) -> bool,
+) -> crate::assets::ResolvedShaderUpload {
+    use crate::assets::shader::route::ResolvedShaderUpload;
+    use crate::render_contract::RasterPipelineKind;
+    let Some(material_asset_id) = material_asset_id else {
+        logger::warn!("custom shader material payload is missing a material id");
+        return rejected_shader_upload();
+    };
+    let changed = apply(material_asset_id);
+    ResolvedShaderUpload {
+        shader_asset_name: None,
+        shader_variant_bits: None,
+        pipeline: RasterPipelineKind::Null,
+        retarget_shader_key: None,
+        material_override_changed: changed,
+        rejected: false,
     }
 }
 

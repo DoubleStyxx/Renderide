@@ -189,6 +189,11 @@ impl MaterialRegistry {
         self.asset_graph.retarget_named_shader_routes(shader_key);
     }
 
+    /// Bumps route generation so material batch caches reread per-material shader overrides.
+    pub fn bump_route_generation(&mut self) {
+        self.asset_graph.bump_route_generation();
+    }
+
     /// Resolves a cached or new pipeline for an already-resolved raster pipeline kind.
     pub(crate) fn pipeline_for_resolved_kind(
         &self,

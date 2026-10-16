@@ -113,6 +113,8 @@ Header rules:
 
 `CustomShaders.AssignMaterial` writes the assign bytes above. `CustomShaders.ClearMaterial` writes the clear bytes. A key that does not match a stock shader name only registers the program; stock routes change only when the key equals a stock shader name.
 
+The renderer keeps a map from material asset id to that custom key. Material resolution uses the key's stem when the program is installed, and the stock route until then. Pipeline and bind-group caches for the stem stay keyed by `shader_source_generation`. `Remove` drops overrides for that key. Unloading the material drops its override.
+
 ## Authoring rules
 
 The source uses the same directives as `crates/renderide/shaders/materials`:

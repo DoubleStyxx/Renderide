@@ -180,3 +180,81 @@ fn fs_main(_in: VertexOutput) -> @location(0) vec4<f32> {
     );
     let _ = crate::materials::custom_shader::remove("kw-resolve");
 }
+
+#[test]
+fn per_material_override_replaces_only_the_assigned_material() {
+    let key = "per-mat-resolve";
+    let _ = crate::materials::custom_shader::remove(key);
+    let _ = crate::materials::custom_shader::clear_material_override(88011);
+    let _ = crate::materials::custom_shader::clear_material_override(88012);
+    let installed = crate::materials::custom_shader::install(
+        key,
+        include_str!("../../../../../../RenderideMod/Shaders/example_solid.wgsl"),
+    )
+    .expect("install");
+    let mut store = MaterialPropertyStore::new();
+    store.set_shader_asset_for_material(88011, 99);
+    store.set_shader_asset_for_material(88012, 99);
+    let dict = MaterialDictionary::new(&store);
+    let mut router = MaterialRouter::new(RasterPipelineKind::Null);
+    router.set_shader_pipeline(
+        99,
+        RasterPipelineKind::EmbeddedStem(Arc::from("unlit_default")),
+    );
+    let ids = MaterialPipelinePropertyIds::new(&PropertyIdRegistry::new());
+    let assign = renderide_shared::parse_custom_shader_payload(
+        &renderide_shared::format_custom_shader_assign(88011, key),
+    )
+    .expect("prefix")
+    .expect("header");
+    crate::materials::custom_shader::resolve_custom_shader_payload(Ok(assign), |_| None);
+
+    let assigned = resolve_material_batch(
+        88011,
+        None,
+        &dict,
+        &router,
+        &ids,
+        ShaderPermutation::default(),
+    );
+    let stock = resolve_material_batch(
+        88012,
+        None,
+        &dict,
+        &router,
+        &ids,
+        ShaderPermutation::default(),
+    );
+    assert_eq!(
+        assigned.pipeline,
+        RasterPipelineKind::EmbeddedStem(Arc::from(installed.default_stem.as_str()))
+    );
+    assert_eq!(
+        stock.pipeline,
+        RasterPipelineKind::EmbeddedStem(Arc::from("unlit_default"))
+    );
+    assert_ne!(
+        crate::materials::custom_shader::source_generation(&installed.default_stem),
+        0
+    );
+
+    let clear = renderide_shared::parse_custom_shader_payload(
+        &renderide_shared::format_custom_shader_clear(88011),
+    )
+    .expect("prefix")
+    .expect("header");
+    crate::materials::custom_shader::resolve_custom_shader_payload(Ok(clear), |_| None);
+    let restored = resolve_material_batch(
+        88011,
+        None,
+        &dict,
+        &router,
+        &ids,
+        ShaderPermutation::default(),
+    );
+    assert_eq!(
+        restored.pipeline,
+        RasterPipelineKind::EmbeddedStem(Arc::from("unlit_default"))
+    );
+    crate::materials::custom_shader::remove(key).expect("remove");
+}
