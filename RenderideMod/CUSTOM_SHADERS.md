@@ -42,9 +42,32 @@ A failed compile is logged (`custom shader install failed`) and the shader asset
 
 ## Smoke test
 
-1. Build RenderideMod (`dotnet build RenderideMod -c Release`, with `ResonitePath` set) and run Resonite with Renderide as the renderer.
-2. From a mod `OnEngineInit`, call `CustomShaders.Install("Unlit", CustomShaders.ExampleSolidWgsl);`.
-3. Mod log: `custom shader upload sent: assetId=-1 bytes=...` once the renderer reaches the `Rendering` state.
-4. Renderer log: a `shader_upload: asset_id=-1` line with a `renderide_custom_unlit` embedded stem, and no `custom shader install failed` or `payload rejected` warning.
-5. Spawn a box with an UnlitMaterial and set its Color. It draws as a flat fill of that color, untextured.
-6. `CustomShaders.Remove("Unlit");` restores the textured packaged Unlit.
+Path: install `Unlit` with `ExampleSolidWgsl`, confirm a negative carrier asset id, remove, confirm the packaged Unlit is back.
+
+Setup:
+
+1. `dotnet build RenderideMod -c Release`. `ResonitePath` is auto-detected for default Steam installs; pass `-p:ResonitePath=...` otherwise. The build copies `RenderideMod.dll` to `rml_mods`.
+2. Run Resonite with Renderide as the renderer. Spawn a box with an UnlitMaterial, a texture, and a non-white Color. Baseline: textured.
+
+Install:
+
+3. From a mod `OnEngineInit` (or any point after RenderideMod loads), call `CustomShaders.Install("Unlit", CustomShaders.ExampleSolidWgsl);`. The upload is queued and flushed from the `RenderSystem.SubmitFrame` postfix.
+4. Mod log: `custom shader upload sent: assetId=-1 bytes=<n>`. The first carrier id is `-1`; each later `Install`/`Remove` without an asset id takes the next lower id (`-2`, `-3`, ...). A non-negative id here means an explicit-id overload was called.
+5. Renderer log, in order:
+   - `custom shader installed key=unlit stem=renderide_custom_unlit_default`
+   - `shader_upload: asset_id=-1 shader_asset_name=Some("unlit") ... raster_pipeline=EmbeddedStem("renderide_custom_unlit_default")`
+   - no `custom shader payload rejected` or `custom shader install failed for unlit` warning.
+6. Box draws as a flat fill of its Color, texture ignored. Materials with no Color use the `//#mat_default` value from `example_solid.wgsl`.
+
+Remove:
+
+7. Call `CustomShaders.Remove("Unlit");`.
+8. Mod log: `custom shader upload sent: assetId=-2 bytes=<n>` (next carrier id).
+9. Renderer log: `custom shader removed key=unlit stem=renderide_custom_unlit`, then a `shader_upload: asset_id=-2` line. Remove of a key that was never installed logs no `removed` line.
+10. Box is textured again: matching shader assets are retargeted to the packaged Unlit stem. No restart.
+
+Fail triage:
+
+- No mod `upload sent` line: renderer never reached a state where the messaging host exists; queue holds until it does.
+- `payload rejected`: header malformed; payload must start with `renderide-custom-wgsl:v1`.
+- `install failed`: WGSL compose/reflect error; asset stays on the packaged route.
