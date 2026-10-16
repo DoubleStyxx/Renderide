@@ -14,7 +14,10 @@ use crate::materials::{
     ReflectedRasterLayout, ReflectedUniformScalarKind, reflect_raster_material_wgsl,
 };
 
-use super::uniform_pack::{MaterialUniformDefaults, MaterialUniformValueSpaces};
+use super::uniform_pack::{
+    MaterialUniformDefaults, MaterialUniformPackMetadata, MaterialUniformPackPlan,
+    MaterialUniformValueSpaces,
+};
 
 /// Cached reflection and layout for one composed shader stem.
 pub(crate) struct StemMaterialLayout {
@@ -23,6 +26,8 @@ pub(crate) struct StemMaterialLayout {
     pub(crate) ids: Arc<StemEmbeddedPropertyIds>,
     pub(crate) uniform_value_spaces: MaterialUniformValueSpaces,
     pub(crate) uniform_default_by_field: MaterialUniformDefaults,
+    /// Classified uniform fields. `None` when the stem has no material uniform block.
+    pub(crate) uniform_pack_plan: Option<MaterialUniformPackPlan>,
     pub(crate) texture_default_by_binding: HashMap<u32, EmbeddedTextureDefaultKind>,
 }
 
@@ -221,6 +226,16 @@ pub(crate) fn build_stem_material_layout(
     let uniform_value_spaces = MaterialUniformValueSpaces::for_stem(stem, &reflected);
     let uniform_default_by_field = material_default_uniform_fields_for_stem(stem, &reflected)?;
     let texture_default_by_binding = texture_default_bindings_for_stem(stem, &reflected)?;
+    let compiled_pack_plan = MaterialUniformPackPlan::compile(
+        &reflected,
+        ids.as_ref(),
+        &MaterialUniformPackMetadata {
+            value_spaces: &uniform_value_spaces,
+            material_defaults: &uniform_default_by_field,
+        },
+    );
+    let pack_plan_ready = compiled_pack_plan.is_ready();
+    let uniform_pack_plan = pack_plan_ready.then_some(compiled_pack_plan);
 
     Ok(Arc::new(StemMaterialLayout {
         bind_group_layout,
@@ -228,6 +243,7 @@ pub(crate) fn build_stem_material_layout(
         ids,
         uniform_value_spaces,
         uniform_default_by_field,
+        uniform_pack_plan,
         texture_default_by_binding,
     }))
 }

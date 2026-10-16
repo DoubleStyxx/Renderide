@@ -90,6 +90,32 @@ impl<'a> MaterialDictionary<'a> {
     }
 }
 
+/// Slot, material, and renderer-level property maps for one [`MaterialPropertyLookupIds`].
+///
+/// Built by [`MaterialPropertyStore::merged_maps`]. Any side is `None` when that id has no map.
+pub(crate) struct MergedPropertyMaps<'a> {
+    slot: Option<&'a HashMap<i32, MaterialPropertyValue>>,
+    material: Option<&'a HashMap<i32, MaterialPropertyValue>>,
+    renderer: Option<&'a HashMap<i32, MaterialPropertyValue>>,
+}
+
+impl MergedPropertyMaps<'_> {
+    /// Returns the winning value for `property_id` using [`MaterialPropertyStore::get_merged`] order.
+    pub(crate) fn get(&self, property_id: i32) -> Option<&MaterialPropertyValue> {
+        if let Some(map) = self.slot
+            && let Some(value) = map.get(&property_id)
+        {
+            return Some(value);
+        }
+        if let Some(map) = self.material
+            && let Some(value) = map.get(&property_id)
+        {
+            return Some(value);
+        }
+        self.renderer.and_then(|map| map.get(&property_id))
+    }
+}
+
 /// Pair of inner `property_id -> value` maps (material-side, property-block-side) returned by
 /// [`MaterialDictionary::fetch_property_maps`]. Either side may be `None` when no properties have
 /// been stored for the referenced id.
@@ -236,6 +262,22 @@ impl MaterialPropertyStore {
             .get(&property_id)
     }
 
+    /// Outer property maps for `ids`, probed once so a multi-field pack can reuse them.
+    ///
+    /// Lookup order matches [`Self::get_merged`]: per-slot property block, then material, then
+    /// renderer-level property block.
+    pub(crate) fn merged_maps(&self, ids: MaterialPropertyLookupIds) -> MergedPropertyMaps<'_> {
+        MergedPropertyMaps {
+            slot: ids
+                .mesh_property_block_slot0
+                .and_then(|block_id| self.property_block_properties.get(&block_id)),
+            material: self.material_properties.get(&ids.material_asset_id),
+            renderer: ids
+                .mesh_renderer_property_block_id
+                .and_then(|block_id| self.property_block_properties.get(&block_id)),
+        }
+    }
+
     /// Prefer per-slot property block, then material, then renderer-level property block
     /// (Unity override semantics, with the renderer-level PB acting as a default for slots
     /// whose per-slot PB and material both miss the property).
@@ -337,6 +379,25 @@ mod material_dictionary_tests {
             store.get_merged(ids, 42),
             Some(&MaterialPropertyValue::Float(0.75))
         );
+        assert_eq!(store.merged_maps(ids).get(42), store.get_merged(ids, 42));
+    }
+
+    #[test]
+    fn merged_maps_follow_slot_then_material_then_renderer() {
+        let mut store = MaterialPropertyStore::new();
+        store.set_material(1, 7, MaterialPropertyValue::Float(0.25));
+        store.set_property_block(5, 8, MaterialPropertyValue::Float(0.5));
+        store.set_property_block(9, 9, MaterialPropertyValue::Float(0.75));
+        let ids = MaterialPropertyLookupIds {
+            material_asset_id: 1,
+            mesh_property_block_slot0: Some(5),
+            mesh_renderer_property_block_id: Some(9),
+        };
+        let maps = store.merged_maps(ids);
+        assert_eq!(maps.get(8), store.get_merged(ids, 8));
+        assert_eq!(maps.get(7), store.get_merged(ids, 7));
+        assert_eq!(maps.get(9), store.get_merged(ids, 9));
+        assert_eq!(maps.get(3), store.get_merged(ids, 3));
     }
 
     #[test]

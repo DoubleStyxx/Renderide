@@ -8,10 +8,10 @@ use crate::assets::texture::HostTextureAssetKind;
 use crate::gpu_pools::{
     CubemapPool, RenderTexturePool, SamplerState, Texture3dPool, TexturePool, VideoTexturePool,
 };
-use crate::materials::ReflectedMaterialUniformBlock;
 use crate::materials::embedded::layout::StemEmbeddedPropertyIds;
 use crate::materials::embedded::texture_pools::EmbeddedTexturePools;
-use crate::materials::host_data::PropertyIdRegistry;
+use crate::materials::host_data::{MaterialPropertyValue, PropertyIdRegistry};
+use crate::materials::{ReflectedMaterialUniformBlock, ReflectedUniformScalarKind};
 use crate::shared::{TextureFilterMode, TextureWrapMode};
 
 fn lookup(material_id: i32) -> MaterialPropertyLookupIds {

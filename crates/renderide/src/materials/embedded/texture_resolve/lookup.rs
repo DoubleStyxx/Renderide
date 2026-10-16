@@ -161,12 +161,11 @@ pub(crate) fn default_2d_texture_color_for_host(host_name: &str) -> DefaultTextu
     }
 }
 
-fn texture_property_binding(
-    store: &MaterialPropertyStore,
-    lookup: MaterialPropertyLookupIds,
-    property_id: i32,
+/// Maps one merged property value to a texture binding. Non-texture values are [`ResolvedTextureBinding::None`].
+pub(crate) fn resolved_texture_binding_from_property(
+    value: Option<&MaterialPropertyValue>,
 ) -> ResolvedTextureBinding {
-    match store.get_merged(lookup, property_id) {
+    match value {
         Some(MaterialPropertyValue::Texture(packed)) => match unpack_host_texture_packed(*packed) {
             Some((id, HostTextureAssetKind::Texture2D)) => {
                 ResolvedTextureBinding::Texture2D { asset_id: id }
@@ -187,6 +186,14 @@ fn texture_property_binding(
         },
         _ => ResolvedTextureBinding::None,
     }
+}
+
+fn texture_property_binding(
+    store: &MaterialPropertyStore,
+    lookup: MaterialPropertyLookupIds,
+    property_id: i32,
+) -> ResolvedTextureBinding {
+    resolved_texture_binding_from_property(store.get_merged(lookup, property_id))
 }
 
 /// Resolves resident texture binding for a host property name, with primary-texture fallback for 2D-only slots.

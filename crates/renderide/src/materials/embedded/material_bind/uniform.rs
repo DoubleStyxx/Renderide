@@ -195,6 +195,8 @@ pub(super) struct MaterialUniformArena {
     device: Arc<wgpu::Device>,
     allocator: MaterialUniformArenaAllocator,
     buffer: Arc<wgpu::Buffer>,
+    /// Reused CPU bytes for the next dirty material on this shard.
+    pack_scratch: Vec<u8>,
 }
 
 impl MaterialUniformArena {
@@ -215,6 +217,7 @@ impl MaterialUniformArena {
             device,
             allocator: MaterialUniformArenaAllocator::new(initial, max_bytes, alignment),
             buffer,
+            pack_scratch: Vec::new(),
         }
     }
 
@@ -386,26 +389,45 @@ impl EmbeddedMaterialBindResources {
             arena.resolve_binding(*uniform_key, uniform_size, mutation_gen, texture_state_sig)?;
         if needs_write {
             profiling::scope!("materials::embedded_uniform_arena_write");
-            let uniform_bytes = build_embedded_uniform_bytes_with_material_defaults(
-                &layout.reflected,
-                layout.ids.as_ref(),
-                &MaterialUniformPackMetadata {
-                    value_spaces: &layout.uniform_value_spaces,
-                    material_defaults: &layout.uniform_default_by_field,
-                },
-                store,
-                lookup,
-                &tex_ctx,
-                shader_variant_bits,
-            )
-            .ok_or_else(|| {
-                format!("stem {stem}: uniform block missing (shader has no material uniform)")
-            })?;
-            uploads.write_buffer(
-                binding.buffer.as_ref(),
-                u64::from(binding.dynamic_offset),
-                &uniform_bytes,
-            );
+            if let Some(plan) = layout.uniform_pack_plan.as_ref() {
+                if !plan.pack_into(
+                    store,
+                    lookup,
+                    &tex_ctx,
+                    shader_variant_bits,
+                    &mut arena.pack_scratch,
+                ) {
+                    return Err(EmbeddedMaterialBindError::from(format!(
+                        "stem {stem}: uniform block missing (shader has no material uniform)"
+                    )));
+                }
+                uploads.write_buffer(
+                    binding.buffer.as_ref(),
+                    u64::from(binding.dynamic_offset),
+                    &arena.pack_scratch,
+                );
+            } else {
+                let uniform_bytes = build_embedded_uniform_bytes_with_material_defaults(
+                    &layout.reflected,
+                    layout.ids.as_ref(),
+                    &MaterialUniformPackMetadata {
+                        value_spaces: &layout.uniform_value_spaces,
+                        material_defaults: &layout.uniform_default_by_field,
+                    },
+                    store,
+                    lookup,
+                    &tex_ctx,
+                    shader_variant_bits,
+                )
+                .ok_or_else(|| {
+                    format!("stem {stem}: uniform block missing (shader has no material uniform)")
+                })?;
+                uploads.write_buffer(
+                    binding.buffer.as_ref(),
+                    u64::from(binding.dynamic_offset),
+                    &uniform_bytes,
+                );
+            }
             arena.mark_written(uniform_key, &binding, mutation_gen, texture_state_sig);
         } else {
             profiling::scope!("materials::embedded_uniform_arena_hit");
