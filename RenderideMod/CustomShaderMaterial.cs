@@ -13,7 +13,8 @@ namespace RenderideMod;
 /// <see cref="CustomShaders.AssignMaterial"/> with <see cref="DynamicRendererAsset{A}.AssetId"/>.
 /// A second material can stay on the packaged Unlit program. Floats, colors, and textures
 /// are written with <see cref="MaterialUpdateWriter"/> using property ids from
-/// <see cref="Ipc.MaterialPropertyIds"/>. Keywords go through <see cref="UpdateKeywords"/>.
+/// <see cref="Ipc.MaterialPropertyIds"/>. Keywords in the packaged Unlit set go through
+/// <see cref="UpdateKeywords"/>. Any other keyword is a 0/1 float of the same name.
 /// </para>
 /// <para>
 /// Enable and a non-empty <see cref="ShaderKey"/> assign. Disable, destroy, and a cleared key
@@ -35,8 +36,15 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
     /// <summary>Named textures. <see cref="TextureEntry.Texture"/> is the texture provider.</summary>
     public readonly SyncList<TextureEntry> Textures;
 
-    /// <summary>Named shader keywords. Passed to <see cref="UpdateKeywords"/>.</summary>
+    /// <summary>
+    /// Named shader keywords. Unlit metadata keywords use <see cref="UpdateKeywords"/>.
+    /// Other names are uploaded as 0/1 floats.
+    /// </summary>
     public readonly SyncList<KeywordEntry> Keywords;
+
+    private readonly HashSet<string> _floatKeywords = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _clearKeywordFloats = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _writtenKeywordFloats = new(StringComparer.Ordinal);
 
     private static bool _propertiesInitialized;
     private int? _boundMaterialId;
@@ -83,7 +91,7 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
             return;
 
         var generation = Ipc.MaterialPropertyIds.Generation;
-        if (generation != _propertyGeneration)
+        if (generation != _propertyGeneration || KeywordFloatsPending())
         {
             _propertyGeneration = generation;
             MarkChangeDirty();
@@ -109,14 +117,33 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
 
     /// <summary>Sets keyword state from <see cref="Keywords"/>.</summary>
     /// <param name="keywords">Host keyword set for this material.</param>
+    /// <remarks>
+    /// <c>SetKeyword</c> only accepts names in the packaged Unlit metadata. A miss returns -1
+    /// and the keyword is dropped. Those names are recorded for <see cref="PushKeywordFloats"/>.
+    /// </remarks>
     protected override void UpdateKeywords(ShaderKeywords keywords)
     {
+        var live = new HashSet<string>(StringComparer.Ordinal);
         foreach (var entry in Keywords)
         {
             if (!TryPropertyName(entry.PropertyName, out var keyword))
                 continue;
-            keywords.UpdateKeyword(keyword, entry.Value.Value);
+            keywords.UpdateKeyword(keyword, entry.Value);
+            if (keywords.SetKeyword(keyword, entry.Value.Value) >= 0)
+                continue;
+            live.Add(keyword);
+            Ipc.MaterialPropertyIds.Request(keyword);
         }
+
+        _floatKeywords.RemoveWhere(name =>
+        {
+            if (live.Contains(name))
+                return false;
+            _clearKeywordFloats.Add(name);
+            return true;
+        });
+        foreach (var name in live)
+            _floatKeywords.Add(name);
     }
 
     /// <summary>Writes named floats, colors, and textures by resolved property id.</summary>
@@ -127,6 +154,7 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
         PushFloats(ref writer);
         PushColors(ref writer);
         PushTextures(ref writer);
+        PushKeywordFloats(ref writer);
         SyncAssignment();
     }
 
@@ -181,6 +209,57 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
                 continue;
             writer.SetTexture(propertyId, entry.Texture.Target);
         }
+    }
+
+    private void PushKeywordFloats(ref MaterialUpdateWriter writer)
+    {
+        var wroteAll = true;
+        foreach (var entry in Keywords)
+        {
+            if (!TryPropertyName(entry.PropertyName, out var keyword))
+                continue;
+            if (!_floatKeywords.Contains(keyword))
+                continue;
+            if (!Ipc.MaterialPropertyIds.TryGet(keyword, out var propertyId))
+            {
+                wroteAll = false;
+                continue;
+            }
+
+            writer.SetFloat(propertyId, entry.Value.Value ? 1f : 0f);
+        }
+
+        foreach (var keyword in _clearKeywordFloats)
+        {
+            if (!Ipc.MaterialPropertyIds.TryGet(keyword, out var propertyId))
+            {
+                wroteAll = false;
+                continue;
+            }
+
+            writer.SetFloat(propertyId, 0f);
+        }
+
+        if (!wroteAll)
+            return;
+
+        _clearKeywordFloats.Clear();
+        _writtenKeywordFloats.Clear();
+        foreach (var keyword in _floatKeywords)
+            _writtenKeywordFloats.Add(keyword);
+    }
+
+    private bool KeywordFloatsPending()
+    {
+        if (_clearKeywordFloats.Count > 0 || _writtenKeywordFloats.Count != _floatKeywords.Count)
+            return true;
+        foreach (var keyword in _floatKeywords)
+        {
+            if (!_writtenKeywordFloats.Contains(keyword))
+                return true;
+        }
+
+        return false;
     }
 
     private void SyncAssignment()

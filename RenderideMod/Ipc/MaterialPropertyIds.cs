@@ -12,8 +12,9 @@ namespace RenderideMod.Ipc;
 /// Stock materials declare static <c>MaterialProperty</c> fields. <c>MaterialProviderBase</c>
 /// reflects those once per type and <c>RenderMaterialManager</c> fills them with
 /// <see cref="MaterialPropertyIdRequest"/>. Named list rows are not static fields, so this
-/// cache sends the same command for names it has not seen and applies
-/// <see cref="MaterialPropertyIdResult"/> for its own request ids.
+/// cache sends the same command for names it has not seen. Results come back on the
+/// host <c>_background</c> queue. Request ids at or above <c>1&lt;&lt;30</c> are consumed
+/// here and are not forwarded to <c>RenderMaterialManager</c>.
 /// </remarks>
 internal static class MaterialPropertyIds
 {
@@ -24,7 +25,7 @@ internal static class MaterialPropertyIds
     private static readonly Dictionary<string, int> Ids = new();
     private static readonly HashSet<string> Pending = new();
     private static readonly Dictionary<int, string[]> Inflight = new();
-    private static readonly RenderCommandHandler ObserveHandler = Observe;
+    private static readonly Dictionary<MessagingManager, RenderCommandHandler> Installed = new();
 
     private static int _nextRequestId = RequestIdBase;
     private static int _generation;
@@ -68,8 +69,9 @@ internal static class MaterialPropertyIds
     }
 
     /// <summary>
-    /// Hooks the host receive handler, then sends one <see cref="MaterialPropertyIdRequest"/>
-    /// for every name still pending.
+    /// Hooks <c>_background</c> (and <c>_primary</c> when present), then sends one
+    /// <see cref="MaterialPropertyIdRequest"/> for every name still pending.
+    /// Property id results arrive on the background queue.
     /// </summary>
     internal static void Flush(RenderiteMessagingHost messagingHost)
     {
@@ -117,82 +119,77 @@ internal static class MaterialPropertyIds
 
     private static bool TryHook(RenderiteMessagingHost messagingHost)
     {
-        var manager = FindManager(messagingHost);
-        if (manager is null)
+        var background = ManagerField(messagingHost, "_background");
+        if (background is null)
         {
             if (!_hookMissLogged)
             {
                 _hookMissLogged = true;
                 ResoniteMod.Warn(
-                    "CustomShaderMaterial: MessagingManager was not found on the render host. Property id requests are waiting.");
+                    "CustomShaderMaterial: _background MessagingManager was not found on the render host. Property id requests are waiting.");
             }
 
             return false;
         }
 
-        var current = manager.CommandHandler;
-        if (current is null)
+        if (!Install(background))
             return false;
-        if (ContainsObserve(current))
-            return true;
 
-        manager.CommandHandler = ObserveHandler + current;
+        var primary = ManagerField(messagingHost, "_primary");
+        if (primary is not null)
+            Install(primary);
         return true;
     }
 
-    private static bool ContainsObserve(RenderCommandHandler handler)
+    /// <summary>
+    /// Replaces <see cref="MessagingManager.CommandHandler"/> with a wrapper that keeps
+    /// mod property-id results (request ids at or above <see cref="RequestIdBase"/>) and
+    /// forwards every other command. The stock handler indexes only ids it allocated.
+    /// </summary>
+    private static bool Install(MessagingManager manager)
     {
-        foreach (var entry in handler.GetInvocationList())
-        {
-            if (entry.Method == ObserveHandler.Method)
-                return true;
-        }
+        var current = manager.CommandHandler;
+        if (current is null)
+            return false;
+        if (Installed.TryGetValue(manager, out var installed) && ReferenceEquals(current, installed))
+            return true;
 
-        return false;
+        RenderCommandHandler forward = current;
+        RenderCommandHandler wrapped = (command, messageSize) =>
+        {
+            if (command is MaterialPropertyIdResult result && result.requestId >= RequestIdBase)
+            {
+                Apply(result);
+                return;
+            }
+
+            forward(command, messageSize);
+        };
+        manager.CommandHandler = wrapped;
+        Installed[manager] = wrapped;
+        return true;
     }
 
-    private static MessagingManager? FindManager(object root)
+    private static MessagingManager? ManagerField(RenderiteMessagingHost host, string fieldName)
     {
-        const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
-        foreach (var field in root.GetType().GetFields(flags))
+        var field = host.GetType().GetField(
+            fieldName,
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        if (field is null)
+            return null;
+
+        try
         {
-            object? value;
-            try
-            {
-                value = field.GetValue(root);
-            }
-            catch (TargetException)
-            {
-                continue;
-            }
-
-            if (value is MessagingManager manager)
-                return manager;
+            return field.GetValue(host) as MessagingManager;
         }
-
-        foreach (var property in root.GetType().GetProperties(flags))
+        catch (TargetException)
         {
-            if (!property.CanRead || property.GetIndexParameters().Length != 0)
-                continue;
-            try
-            {
-                if (property.GetValue(root) is MessagingManager manager)
-                    return manager;
-            }
-            catch (TargetInvocationException)
-            {
-            }
+            return null;
         }
-
-        return null;
     }
 
-    private static void Observe(RendererCommand command, int messageSize)
+    private static void Apply(MaterialPropertyIdResult result)
     {
-        _ = messageSize;
-        if (command is not MaterialPropertyIdResult result)
-            return;
-
         lock (Gate)
         {
             if (!Inflight.Remove(result.requestId, out var names))
