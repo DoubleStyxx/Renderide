@@ -5,6 +5,8 @@
 //! publishes it under a `renderide_custom_<key>` stem so the existing embedded pipeline, bind
 //! group, and draw paths compile it with wgpu.
 
+#[cfg(feature = "bench-api")]
+mod bench;
 mod bindings;
 mod compose;
 mod keywords;
@@ -24,6 +26,8 @@ use crate::materials::shader_package::reflect_authored_material;
 use self::compose::compose_custom_material;
 use self::passes::OwnedMaterialPass;
 
+#[cfg(feature = "bench-api")]
+pub use bench::KeywordVariantCacheWorkload;
 pub(crate) use keywords::is_toggle_style_property_name;
 
 /// Stem prefix for every installed custom material. Host routes store the `_default` stem.

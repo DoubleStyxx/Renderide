@@ -9,16 +9,17 @@
 
 pub use renderide::bench_api::{
     BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload, CULL_BATCH,
-    CullWorkload, MATERIAL_UNIFORM_BATCH, MaterialUniformUpdateWorkload, TRANSFORM_BATCH,
-    TransformWorkload, WORLD_MATRIX_NODES, WorldMatrixWorkload,
+    CullWorkload, KeywordVariantCacheWorkload, MATERIAL_UNIFORM_BATCH,
+    MaterialUniformUpdateWorkload, TRANSFORM_BATCH, TransformWorkload, WORLD_MATRIX_NODES,
+    WorldMatrixWorkload,
 };
 
 #[cfg(test)]
 mod tests {
     use super::{
         BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload,
-        CULL_BATCH, CullWorkload, MaterialUniformUpdateWorkload, TransformWorkload,
-        WORLD_MATRIX_NODES, WorldMatrixWorkload,
+        CULL_BATCH, CullWorkload, KeywordVariantCacheWorkload, MaterialUniformUpdateWorkload,
+        TransformWorkload, WORLD_MATRIX_NODES, WorldMatrixWorkload,
     };
 
     #[test]
@@ -98,5 +99,23 @@ mod tests {
         let rebuilt = workload.miss_rebuild();
         assert!(rebuilt >= u64::try_from(BIND_GROUP_BATCH).unwrap_or(0));
         assert_eq!(workload.cache_hits(), hits);
+    }
+
+    #[test]
+    fn keyword_variant_cache_hit_miss_and_compose() {
+        let mut workload = KeywordVariantCacheWorkload::standard();
+        let error = workload.setup_error().unwrap_or("");
+        assert!(error.is_empty(), "{error}");
+        let hit = workload.cache_hit();
+        assert!(hit > 0);
+        assert_eq!(workload.cache_hit(), hit);
+        let miss = workload.cache_miss();
+        let miss_again = workload.cache_miss();
+        assert!(miss > 0);
+        assert!(miss_again > 0);
+        assert_ne!(miss, miss_again);
+        assert_eq!(workload.cache_hit(), hit);
+        let composed = workload.compose();
+        assert!(composed > 0);
     }
 }
