@@ -240,17 +240,15 @@ Linux, macOS, and Windows are all tier-1 targets and exercised in CI ([`.github/
 
 Contributions are welcome. The workspace builds with the standard Cargo commands listed above; lints (`cargo clippy --all-targets`, with feature coverage matching CI) and formatting (`cargo fmt`, plus `taplo fmt` when editing `Cargo.toml`) are expected to be clean before opening a pull request, and CI runs the same checks across all three platforms.
 
-Read [`CONTRIBUTING.md`](CONTRIBUTING.md) to learn how to get started.
+Read [`CONTRIBUTING.md`](CONTRIBUTING.md) to learn how to get started. AI use is covered in [`SI_POLICY.md`](SI_POLICY.md).
 
 ## Whitepaper
 
 For a longer overview of the renderer architecture and motivation, see the [Renderide whitepaper](renderide_whitepaper/renderide_whitepaper.pdf).
 
-## AI Policy
+## SI Policy
 
-Renderide does not accept AI-generated or AI-assisted contributions. Source code, shaders, documentation, tests, issues, pull requests, and review comments submitted to this repository must be authored by the human contributor without generative AI tools. Contributors found submitting AI-generated material or using AI to participate in the project may be blocked from future contribution.
-
-Renderide depends on upstream projects with their own contribution rules. For example, [`wgpu` explicitly allows LLM/AI-generated code](https://github.com/gfx-rs/wgpu/blob/trunk/CONTRIBUTING.md#llms-ai) when the pull request author accepts full ownership of the change. Renderide cannot impose this policy on upstream projects or dependencies; using those dependencies does not change the policy for contributions to this repository.
+How AI is used to build Renderide, what ships in it, and the rules for AI-assisted contributions are in [`SI_POLICY.md`](SI_POLICY.md).
 
 ## License
 

@@ -116,7 +116,7 @@ The repository is a workspace that mixes a Rust workspace, a .NET solution, a se
 - The runtime asset tree under `crates/renderide/assets/` holds files the renderer ships with at run time, including OpenXR controller binding profiles and the skybox model.
 - `third_party/` holds vendored native libraries, currently the OpenXR loader.
 
-Everything above the workspace root that is not one of these regions is contributor-facing project metadata: `Cargo.toml`, `.taplo.toml`, `clippy.toml`, `.pre-commit-config.yaml`, `.gitignore`, `.gitattributes`, `LICENSE`, `README.md`, `SECURITY.md`, the GitHub issue templates, Dependabot configuration, GitHub Actions workflows, and the static-site files.
+Everything above the workspace root that is not one of these regions is contributor-facing project metadata: `Cargo.toml`, `.taplo.toml`, `clippy.toml`, `.pre-commit-config.yaml`, `.gitignore`, `.gitattributes`, `LICENSE`, `README.md`, `SECURITY.md`, `SI_POLICY.md`, the GitHub issue templates, Dependabot configuration, GitHub Actions workflows, and the static-site files.
 
 ---
 
@@ -179,6 +179,7 @@ The .NET solution is built and tested by the shared CI workflow (see [2.9](#29-c
 | `LICENSE` | Project license. |
 | `README.md` | User-facing build, run, feature, and profiling guide. |
 | `SECURITY.md` | Supported-version and vulnerability-reporting policy. |
+| `SI_POLICY.md` | Project-wide disclosure of AI use and rules for AI-assisted contributions. |
 | `crates/` | The Rust workspace member crates. |
 | `generators/` | The C# code generator and its tests. |
 | `RenderideMod/` | The C# Resonite mod. |
@@ -289,7 +290,7 @@ A few conventions are worth spelling out because the lint configuration assumes 
 - Output goes through the `logger` crate. `println!` and `eprintln!` are clippy-warned everywhere.
 - Collections default to `hashbrown::HashMap`. Locks default to `parking_lot::Mutex`.
 - Dependency versions follow the style already used in the relevant manifest. Prefer current stable releases, avoid overly broad version requirements, and justify new dependencies tightly.
-- Follow the AI contribution policy in `README.md` and the vulnerability reporting policy in `SECURITY.md`.
+- Follow the SI policy in [`SI_POLICY.md`](SI_POLICY.md) and the vulnerability reporting policy in `SECURITY.md`.
 
 For C# code in the generator and the mod: throw specific exception types instead of catching `Exception` at internal boundaries, and keep public types documented.
 
