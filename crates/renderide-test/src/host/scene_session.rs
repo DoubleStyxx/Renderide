@@ -36,6 +36,7 @@ mod bench_drive;
 mod config;
 mod consts;
 mod custom_property;
+mod exotic_pair;
 
 pub use bench_drive::{BenchDriveConfig, drive_bench};
 pub mod png_readback;
@@ -97,6 +98,8 @@ pub enum SessionTemplate {
     /// Custom rainbow shader on one material. The session renders twice: once with `RAINBOW`
     /// off, then again after `_Color` and `RAINBOW` change. `_Speed` stays 0.
     CustomShaderPropertyUpdate,
+    /// Poincare disk on the left quad and a gyroid on the right. Both materials set `_Speed` to 0.
+    ExoticShaderPair,
 }
 
 /// Drives the full session end-to-end. The renderer process is killed on `Err` via [`Drop`] of
@@ -131,6 +134,7 @@ pub(super) fn run_session(
     )?;
 
     let property_recapture = matches!(template, SessionTemplate::CustomShaderPropertyUpdate);
+    let exotic_pair = matches!(template, SessionTemplate::ExoticShaderPair);
     let setup = build_scene_setup(template);
     let _uploaded_meshes = upload_scene_meshes(
         &mut session.queues,
@@ -148,6 +152,9 @@ pub(super) fn run_session(
     )?;
     if property_recapture {
         custom_property::install_and_assign(&mut session.queues, &mut lockstep, &setup)?;
+    }
+    if exotic_pair {
+        exotic_pair::install_and_assign(&mut session.queues, &mut lockstep, &setup)?;
     }
 
     let scene = build_scene_state(&prefix, &backing_dir, &setup.scene, &mut lockstep)?;
@@ -275,6 +282,7 @@ fn template_label(template: &SessionTemplate) -> &'static str {
         SessionTemplate::AlphaCutoutMaskedQuads { .. } => "AlphaCutoutMaskedQuads",
         SessionTemplate::GltfTexturedStaticMesh { .. } => "GltfTexturedStaticMesh",
         SessionTemplate::CustomShaderPropertyUpdate => "CustomShaderPropertyUpdate",
+        SessionTemplate::ExoticShaderPair => "ExoticShaderPair",
     }
 }
 
@@ -301,6 +309,7 @@ fn build_scene_setup(template: SessionTemplate) -> SceneSetup {
             texture_size,
         } => gltf_textured_static_mesh_setup(mesh, texture_rgba, texture_size),
         SessionTemplate::CustomShaderPropertyUpdate => custom_property::scene_setup(),
+        SessionTemplate::ExoticShaderPair => exotic_pair::scene_setup(),
     }
 }
 

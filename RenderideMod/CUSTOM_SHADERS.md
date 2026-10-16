@@ -18,6 +18,20 @@ CustomShaders.Install("Unlit", CustomShaders.ExampleSolidWgsl);
 
 `ExampleRainbowWgsl` is `Shaders/example_rainbow.wgsl`. It tints with `_Color`, samples `_MainTex` with `_MainTex_ST`, and cycles hue from `rg::frame.frame_time.x` scaled by `_Speed` (default 0.2) when `//#keyword RAINBOW` is on. Off, the fragment is `_MainTex * _Color`.
 
+`ExamplePoincareWgsl` is `Shaders/example_poincare.wgsl`. It draws a hyperbolic Poincare-disk {p,q} tiling. `_Schlafli` is a `vec4<f32>` whose `xy` are p and q (default 7, 3). `_Speed` rotates the disk. `//#keyword TILE` off writes `_MainTex * _Color`.
+
+`ExampleGyroidWgsl` is `Shaders/example_gyroid.wgsl`. It raymarches a gyroid SDF in object space. `_Frequency` is an `f32` scale. `_Speed` scrolls the phase. `//#keyword GYROID` off writes `_MainTex * _Color`.
+
+`ExampleHologramWgsl` is `Shaders/example_hologram.wgsl`. It mixes a Fresnel tint with scanlines. `_Scan` is a `vec4<f32>` (`x` density, `y` contrast). `_Fresnel` is an `f32` power. `_Speed` scrolls the lines. `//#keyword HOLO` off writes `_MainTex * _Color`.
+
+`ExampleHieroglyphWgsl` is `Shaders/example_hieroglyph.wgsl`. It draws a procedural glyph grid with a gold tint, a view-aligned specular, and an emissive pulse. `_Grid` is a `vec4<f32>` (`xy` cell count). `_Emission` is an `f32` scale. `_Speed` drives the pulse. `//#keyword EMIT` off writes `_MainTex * _Color`.
+
+`ExampleNebulaWgsl` is `Shaders/example_nebula.wgsl`. It is a domain-warped fbm. `_Warp` is a `vec4<f32>` (`x` warp amount, `y` pattern scale). `_Speed` scrolls the domain. `//#keyword NEBULA` off writes `_MainTex * _Color`.
+
+`ExampleDispersionWgsl` is `Shaders/example_dispersion.wgsl`. It offsets the red and blue `_MainTex` samples along a refraction axis and leaves green on the geometric UV. `_Spread` is an `f32` offset. `_Speed` rotates the axis. `//#keyword SPLIT` off writes one `_MainTex * _Color` sample.
+
+Each of those samples `_MainTex` with `_MainTex_ST`, tints with `_Color`, and reads time from `rg::frame.frame_time.x * _Speed`.
+
 `Unlit` is the Unity shader filename without `.shader`. The renderer normalizes it the same way it normalizes AssetBundle names (`Unlit.shader` and `unlit` are the same key; spaces become dashes). Materials whose shader asset resolves to that name start drawing with the custom program, including shaders the host uploads after the install. `CustomShaders.Remove("Unlit")` restores the packaged Unlit stem.
 
 `Shaders/example_solid.wgsl` is a working program. It writes the host `_Color` property, so an existing Unlit material picks the color up with no extra properties. Copy that file and edit the fragment entry.
@@ -139,6 +153,37 @@ The renderer reflects `@group(1)` with naga, maps each uniform member and textur
 An unset float or vector uses its `//#mat_default`, then zero. An unset texture binds white (`texture_2d_array` uses a one-layer white array). A reflected type the host cannot supply (`i32`, `mat4x4`, a default whose kind does not match the field) fails the install. Asset ids `>= 0` get `ShaderUploadResult`. Carrier ids below zero still get no ack. A rejected replace leaves the previous program in place.
 
 A failed compile is logged (`custom shader install failed`) and the shader asset keeps its packaged route. The next successful `Install` for that key replaces it.
+
+## Dynamic variable uniforms
+
+Resonite `DynamicVariableSpace` values feed custom-shader uniforms through the material property batch. The mapping is mod-side. This tree does not add a dynvar component, and `renderide-custom-wgsl:v1` is unchanged. No new IPC command is added. The renderer already applies `SetFloat`, `SetFloat4`, and `SetTexture` from `MaterialsUpdateBatch`.
+
+Naming:
+
+- The default prefix is `Shader/`.
+- The uniform name is the dynvar name with that prefix removed once. `Shader/_Speed` writes `_Speed`.
+- A helper may be configured with another prefix. A dynvar that does not start with the active prefix is not a shader uniform.
+
+Type mapping, written with the existing batch ops:
+
+- `float` -> `f32`, via `SetFloat`.
+- `float2` -> `vec4<f32>`, `xy` from the value, `zw` = 0, via `SetFloat4`.
+- `float3` -> `vec4<f32>`, `xyz` from the value, `w` = 0, via `SetFloat4`.
+- `float4` -> `vec4<f32>`, via `SetFloat4`.
+- `colorX` -> `vec4<f32>`, rgba, via `SetFloat4`.
+- texture -> `texture_2d` of the same uniform name, via `SetTexture`. An optional `float4` dynvar named `<uniform>_ST` (for example `Shader/_MainTex_ST`) is that texture's tiling and offset. Unset, `_ST` stays `(1, 1, 0, 0)`.
+
+Update timing:
+
+- The helper writes mapped values onto the host material with the same property ops FrooxEngine already uses. The renderer applies them when it applies that `MaterialsUpdateBatch`.
+- A dynvar change does not recompile the shader and does not allocate a new stem. It updates the uniform buffer or the texture bind the same way any other property write does.
+
+Limits:
+
+- Only a reflected `@group(1)` member is stored. A name with no matching uniform or texture does not change the buffer.
+- `float` fills an `f32` member. `float2`, `float3`, `float4`, and `colorX` fill a `vec4<f32>` member. A texture fills `texture_2d` only. Cubemaps and texture arrays are outside this contract.
+- Keyword toggles stay floats of the keyword name (`TILE`, `GYROID`, and the other example keywords). A nonzero value enables the `#ifdef`, same as any other float property of that name.
+- The wire payload is still the install, remove, assign, and clear bytes above.
 
 ## Smoke test
 

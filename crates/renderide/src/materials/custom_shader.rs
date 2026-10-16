@@ -13,6 +13,9 @@ mod keywords;
 mod overrides;
 mod passes;
 
+#[cfg(test)]
+mod example_shaders;
+
 use std::sync::Arc;
 
 use hashbrown::HashMap;

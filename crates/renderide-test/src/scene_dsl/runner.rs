@@ -216,6 +216,9 @@ fn prepare_template(
         CaseTemplate::CustomShaderPropertyUpdate => Ok(PreparedTemplate {
             session_template: SessionTemplate::CustomShaderPropertyUpdate,
         }),
+        CaseTemplate::ExoticShaderPair => Ok(PreparedTemplate {
+            session_template: SessionTemplate::ExoticShaderPair,
+        }),
         CaseTemplate::GltfTexturedStaticMesh { path } => {
             let imported = load_static_textured_mesh(path)?;
             let texture_size = imported.texture_size;
