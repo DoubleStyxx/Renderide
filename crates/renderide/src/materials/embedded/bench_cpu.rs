@@ -1,5 +1,9 @@
 //! CPU workloads for custom-material uniform updates and bind-group cache churn.
 //!
+//! [`MaterialUniformUpdateWorkload::pack_changed_properties`] times a batch of dirty-slot
+//! rewrites plus upload staging. [`MaterialUniformUpdateWorkload::repack_one`] times a full
+//! uniform-block pack of a single material.
+//!
 //! Setup installs one custom material through [`crate::materials::custom_shader::install`],
 //! reflects the composed WGSL, and fills a [`MaterialPropertyStore`]. Timed samples then call
 //! the production packer, uniform-arena slot table, frame-upload byte arena, texture-bind
@@ -108,7 +112,7 @@ fn fs_main(_in: VertexOutput) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// Packs and stages one custom material's uniform block after a property write.
+/// Packs custom-material uniform blocks after a property write.
 pub struct MaterialUniformUpdateWorkload {
     inner: Option<UniformInner>,
     setup_error: Option<String>,
@@ -200,6 +204,18 @@ impl MaterialUniformUpdateWorkload {
         inner.pack_changed()
     }
 
+    /// Writes `_Color` on one material and packs that material's whole uniform block.
+    ///
+    /// This is only the production packer. It does not resolve an arena slot or copy into the
+    /// frame-upload arena, which is what [`Self::pack_changed_properties`] adds for the batch.
+    #[must_use]
+    pub fn repack_one(&mut self) -> u64 {
+        let Some(inner) = self.inner.as_mut() else {
+            return 0;
+        };
+        inner.repack_one()
+    }
+
     fn failed(error: String) -> Self {
         Self {
             inner: None,
@@ -255,6 +271,22 @@ impl UniformInner {
         self.uploads.clear_staged_cpu_payload();
         self.tick = self.tick.wrapping_add(1);
         checksum
+    }
+
+    fn repack_one(&mut self) -> u64 {
+        let material_id = material_id(0);
+        let lookup = lookup_for(material_id);
+        self.store.set_material(
+            material_id,
+            self.color_pid,
+            MaterialPropertyValue::Float4(color_for(self.tick, 0)),
+        );
+        self.tick = self.tick.wrapping_add(1);
+        let primary = primary_texture_2d_asset_id(&self.reflected, &self.ids, &self.store, lookup);
+        let Some(bytes) = self.pack_current(lookup, primary) else {
+            return 0;
+        };
+        fold_full_block(&bytes)
     }
 
     fn pack_index(&mut self, index: usize) -> u64 {
@@ -567,6 +599,17 @@ fn fold_uniform_bytes(bytes: &[u8]) -> u64 {
     if let Some(head) = bytes.get(..4) {
         let raw = <[u8; 4]>::try_from(head).unwrap_or([0; 4]);
         acc = acc.wrapping_add(u64::from(u32::from_le_bytes(raw)));
+    }
+    acc
+}
+
+/// Folds every byte so a full-block pack cannot drop trailing fields.
+fn fold_full_block(bytes: &[u8]) -> u64 {
+    let mut acc = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in bytes {
+        acc = acc
+            .wrapping_mul(0x0000_0100_0000_01b3)
+            .wrapping_add(u64::from(*byte));
     }
     acc
 }

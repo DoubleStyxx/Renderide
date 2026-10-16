@@ -1,5 +1,5 @@
 //! Criterion batches for transform math, frustum culling, world matrices, buffer-pool reuse,
-//! custom-material uniform updates, and bind-group cache churn.
+//! custom-material uniform packing, and bind-group cache churn.
 //!
 //! `cargo bench -p renderide-bench` runs this file. Pass `--features gpu` to compile the GPU
 //! group as well. That group does not open a device; add adapter benches there when they exist.
@@ -56,6 +56,10 @@ fn material_uniforms(c: &mut Criterion) {
     group.throughput(Throughput::Elements(MATERIAL_UNIFORM_BATCH as u64));
     group.bench_function("property_change_pack", |b| {
         b.iter(|| black_box(workload.pack_changed_properties()));
+    });
+    group.throughput(Throughput::Elements(1));
+    group.bench_function("one_material_repack", |b| {
+        b.iter(|| black_box(workload.repack_one()));
     });
     group.finish();
 }

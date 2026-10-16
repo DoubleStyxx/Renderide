@@ -76,6 +76,17 @@ mod tests {
     }
 
     #[test]
+    fn one_material_repack_folds_the_full_block() {
+        let mut workload = MaterialUniformUpdateWorkload::standard();
+        let error = workload.setup_error().unwrap_or("");
+        assert!(error.is_empty(), "{error}");
+        let first = workload.repack_one();
+        let second = workload.repack_one();
+        assert!(first > 0);
+        assert_ne!(first, second);
+    }
+
+    #[test]
     fn bind_group_cache_hits_are_stable_and_rebuild_after_invalidate() {
         let workload = BindGroupChurnWorkload::standard();
         let error = workload.setup_error().unwrap_or("");
