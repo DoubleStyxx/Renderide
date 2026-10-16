@@ -53,12 +53,25 @@ fn direct_specular_clustered(
 ) -> vec3<f32> {
     let aa_roughness = brdf::filter_perceptual_roughness(s.roughness, s.normal, s.geometric_normal);
     let cluster_id = cluster_id_for_fragment(frag_xy, world_pos, view_layer);
-    let count = pcls::cluster_light_count_at(cluster_id);
+    let range = pcls::cluster_light_range_at(cluster_id);
+    let count = range.y;
     let visibility = clamp(options.direct_visibility, 0.0, 1.0);
+    if (count == 0u) {
+        return vec3<f32>(0.0);
+    }
+
+    var basis = brdf::DirectBrdfBasis(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 0.0, 1.0));
+    var alpha = 0.0;
+    var f90 = 0.0;
+    if (options.specular_highlights_enabled) {
+        basis = brdf::direct_brdf_basis(s.normal, view_dir);
+        alpha = brdf::direct_alpha_from_perceptual_roughness(aa_roughness);
+        f90 = brdf::f90_from_f0(s.specular_color);
+    }
 
     var direct = vec3<f32>(0.0);
     for (var i = 0u; i < count; i++) {
-        let light_index = pcls::cluster_light_index_at(cluster_id, i);
+        let light_index = pcls::cluster_light_index_from_range(range, i);
         if (light_index >= rg::frame.light_count) {
             continue;
         }
@@ -69,12 +82,13 @@ fn direct_specular_clustered(
         }
 
         if (options.specular_highlights_enabled) {
-            direct = direct + brdf::direct_radiance_specular(
+            direct = direct + brdf::direct_radiance_specular_prepared(
                 light,
                 world_pos,
                 s.normal,
-                view_dir,
-                aa_roughness,
+                basis,
+                alpha,
+                f90,
                 s.roughness,
                 s.base_color,
                 s.specular_color,

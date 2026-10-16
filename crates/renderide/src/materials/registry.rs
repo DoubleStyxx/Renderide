@@ -184,6 +184,11 @@ impl MaterialRegistry {
         self.asset_graph.unregister_shader_route(shader_asset_id);
     }
 
+    /// Rebinds live routes for one shader asset name after a custom program install or removal.
+    pub fn retarget_named_shader_routes(&mut self, shader_key: &str) {
+        self.asset_graph.retarget_named_shader_routes(shader_key);
+    }
+
     /// Resolves a cached or new pipeline for an already-resolved raster pipeline kind.
     pub(crate) fn pipeline_for_resolved_kind(
         &self,

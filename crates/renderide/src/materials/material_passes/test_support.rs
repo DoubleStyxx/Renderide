@@ -1,5 +1,7 @@
 //! Test-only constructors for pass scenarios expressed with explicit metadata.
 
+use std::sync::Arc;
+
 use super::{
     COLOR_WRITES_NONE, MaterialAlphaToCoverageMode, MaterialPassDesc, MaterialPassState,
     MaterialRenderStatePolicy, PASS_BLEND_ONE_ONE_MINUS_SRC_ALPHA,
@@ -8,12 +10,12 @@ use super::{
 use crate::materials::MaterialDepthCompareDomain;
 
 /// Returns the base forward descriptor used by tests.
-pub(crate) const fn forward_pass(fragment_entry: &'static str) -> MaterialPassDesc {
+pub(crate) fn forward_pass(fragment_entry: &'static str) -> MaterialPassDesc {
     base_forward_pass("forward", fragment_entry)
 }
 
 /// Returns a material-filter forward descriptor.
-pub(crate) const fn forward_filter_pass(fragment_entry: &'static str) -> MaterialPassDesc {
+pub(crate) fn forward_filter_pass(fragment_entry: &'static str) -> MaterialPassDesc {
     MaterialPassDesc {
         material_state: MaterialPassState::Filter,
         ..base_forward_pass("forward_filter", fragment_entry)
@@ -21,7 +23,7 @@ pub(crate) const fn forward_filter_pass(fragment_entry: &'static str) -> Materia
 }
 
 /// Returns a source-authored two-sided forward descriptor.
-pub(crate) const fn forward_two_sided_pass(fragment_entry: &'static str) -> MaterialPassDesc {
+pub(crate) fn forward_two_sided_pass(fragment_entry: &'static str) -> MaterialPassDesc {
     MaterialPassDesc {
         cull_mode: None,
         render_state_policy: fixed_cull_policy(),
@@ -30,7 +32,7 @@ pub(crate) const fn forward_two_sided_pass(fragment_entry: &'static str) -> Mate
 }
 
 /// Returns a fixed straight-alpha transparent descriptor.
-pub(crate) const fn forward_alpha_blend_pass(fragment_entry: &'static str) -> MaterialPassDesc {
+pub(crate) fn forward_alpha_blend_pass(fragment_entry: &'static str) -> MaterialPassDesc {
     fixed_transparent_pass(
         base_forward_pass("forward_alpha_blend", fragment_entry),
         false,
@@ -39,9 +41,7 @@ pub(crate) const fn forward_alpha_blend_pass(fragment_entry: &'static str) -> Ma
 }
 
 /// Returns a fixed straight-alpha transparent descriptor that writes depth.
-pub(crate) const fn forward_alpha_blend_zwrite_pass(
-    fragment_entry: &'static str,
-) -> MaterialPassDesc {
+pub(crate) fn forward_alpha_blend_zwrite_pass(fragment_entry: &'static str) -> MaterialPassDesc {
     fixed_transparent_pass(
         base_forward_pass("forward_alpha_blend_zwrite", fragment_entry),
         true,
@@ -50,7 +50,7 @@ pub(crate) const fn forward_alpha_blend_zwrite_pass(
 }
 
 /// Returns a fixed premultiplied transparent descriptor.
-pub(crate) const fn forward_premultiplied_transparent_pass(
+pub(crate) fn forward_premultiplied_transparent_pass(
     fragment_entry: &'static str,
 ) -> MaterialPassDesc {
     fixed_transparent_pass(
@@ -61,7 +61,7 @@ pub(crate) const fn forward_premultiplied_transparent_pass(
 }
 
 /// Returns a material-driven transparent forward descriptor.
-pub(crate) const fn forward_transparent_pass(fragment_entry: &'static str) -> MaterialPassDesc {
+pub(crate) fn forward_transparent_pass(fragment_entry: &'static str) -> MaterialPassDesc {
     transparent_pass(
         base_forward_pass("forward_transparent", fragment_entry),
         None,
@@ -70,7 +70,7 @@ pub(crate) const fn forward_transparent_pass(fragment_entry: &'static str) -> Ma
 }
 
 /// Returns a transparent forward descriptor with fixed front-face culling.
-pub(crate) const fn forward_transparent_cull_front_pass(
+pub(crate) fn forward_transparent_cull_front_pass(
     fragment_entry: &'static str,
 ) -> MaterialPassDesc {
     transparent_pass(
@@ -81,9 +81,7 @@ pub(crate) const fn forward_transparent_cull_front_pass(
 }
 
 /// Returns a transparent forward descriptor with fixed back-face culling.
-pub(crate) const fn forward_transparent_cull_back_pass(
-    fragment_entry: &'static str,
-) -> MaterialPassDesc {
+pub(crate) fn forward_transparent_cull_back_pass(fragment_entry: &'static str) -> MaterialPassDesc {
     transparent_pass(
         base_forward_pass("forward_transparent_cull_back", fragment_entry),
         Some(wgpu::Face::Back),
@@ -92,7 +90,7 @@ pub(crate) const fn forward_transparent_cull_back_pass(
 }
 
 /// Returns a fixed transparent RGB-only descriptor.
-pub(crate) const fn transparent_rgb_pass(fragment_entry: &'static str) -> MaterialPassDesc {
+pub(crate) fn transparent_rgb_pass(fragment_entry: &'static str) -> MaterialPassDesc {
     MaterialPassDesc {
         depth_write: false,
         cull_mode: None,
@@ -105,7 +103,7 @@ pub(crate) const fn transparent_rgb_pass(fragment_entry: &'static str) -> Materi
 }
 
 /// Returns a front-face culled material-driven volume descriptor.
-pub(crate) const fn volume_front_pass(fragment_entry: &'static str) -> MaterialPassDesc {
+pub(crate) fn volume_front_pass(fragment_entry: &'static str) -> MaterialPassDesc {
     MaterialPassDesc {
         depth_compare: wgpu::CompareFunction::Always,
         depth_write: false,
@@ -126,7 +124,7 @@ pub(crate) const fn volume_front_pass(fragment_entry: &'static str) -> MaterialP
 }
 
 /// Returns an outline shell descriptor.
-pub(crate) const fn outline_pass(fragment_entry: &'static str) -> MaterialPassDesc {
+pub(crate) fn outline_pass(fragment_entry: &'static str) -> MaterialPassDesc {
     MaterialPassDesc {
         cull_mode: Some(wgpu::Face::Front),
         material_state: MaterialPassState::Static,
@@ -136,7 +134,7 @@ pub(crate) const fn outline_pass(fragment_entry: &'static str) -> MaterialPassDe
 }
 
 /// Returns a material-driven stencil descriptor.
-pub(crate) const fn stencil_pass(fragment_entry: &'static str) -> MaterialPassDesc {
+pub(crate) fn stencil_pass(fragment_entry: &'static str) -> MaterialPassDesc {
     MaterialPassDesc {
         depth_write: false,
         cull_mode: Some(wgpu::Face::Front),
@@ -148,7 +146,7 @@ pub(crate) const fn stencil_pass(fragment_entry: &'static str) -> MaterialPassDe
 }
 
 /// Returns a depth-only prepass descriptor.
-pub(crate) const fn depth_prepass(fragment_entry: &'static str) -> MaterialPassDesc {
+pub(crate) fn depth_prepass(fragment_entry: &'static str) -> MaterialPassDesc {
     MaterialPassDesc {
         pass_type: PassType::DepthPrepass,
         write_mask: COLOR_WRITES_NONE,
@@ -166,7 +164,7 @@ pub(crate) const fn depth_prepass(fragment_entry: &'static str) -> MaterialPassD
 }
 
 /// Returns a fixed always-on-top overlay descriptor.
-pub(crate) const fn overlay_always_pass(fragment_entry: &'static str) -> MaterialPassDesc {
+pub(crate) fn overlay_always_pass(fragment_entry: &'static str) -> MaterialPassDesc {
     MaterialPassDesc {
         depth_compare: wgpu::CompareFunction::Always,
         depth_write: false,
@@ -179,7 +177,7 @@ pub(crate) const fn overlay_always_pass(fragment_entry: &'static str) -> Materia
 }
 
 /// Returns an overlay-front descriptor.
-pub(crate) const fn overlay_front_pass(fragment_entry: &'static str) -> MaterialPassDesc {
+pub(crate) fn overlay_front_pass(fragment_entry: &'static str) -> MaterialPassDesc {
     overlay_pass(
         base_forward_pass("overlay_front", fragment_entry),
         wgpu::CompareFunction::GreaterEqual,
@@ -187,7 +185,7 @@ pub(crate) const fn overlay_front_pass(fragment_entry: &'static str) -> Material
 }
 
 /// Returns an overlay-behind descriptor.
-pub(crate) const fn overlay_behind_pass(fragment_entry: &'static str) -> MaterialPassDesc {
+pub(crate) fn overlay_behind_pass(fragment_entry: &'static str) -> MaterialPassDesc {
     overlay_pass(
         base_forward_pass("overlay_behind", fragment_entry),
         wgpu::CompareFunction::Less,
@@ -195,12 +193,12 @@ pub(crate) const fn overlay_behind_pass(fragment_entry: &'static str) -> Materia
 }
 
 /// Returns the base forward descriptor used by test scenarios.
-const fn base_forward_pass(name: &'static str, fragment_entry: &'static str) -> MaterialPassDesc {
+fn base_forward_pass(name: &'static str, fragment_entry: &'static str) -> MaterialPassDesc {
     MaterialPassDesc {
-        name,
+        name: Arc::from(name),
         pass_type: PassType::Forward,
-        vertex_entry: "vs_main",
-        fragment_entry,
+        vertex_entry: Arc::from("vs_main"),
+        fragment_entry: Arc::from(fragment_entry),
         depth_compare: crate::gpu::MAIN_FORWARD_DEPTH_COMPARE,
         depth_compare_domain: MaterialDepthCompareDomain::FrooxZTest,
         depth_write: true,
@@ -216,7 +214,7 @@ const fn base_forward_pass(name: &'static str, fragment_entry: &'static str) -> 
 }
 
 /// Returns the policy for fully source-authored render state.
-const fn static_policy() -> MaterialRenderStatePolicy {
+fn static_policy() -> MaterialRenderStatePolicy {
     MaterialRenderStatePolicy {
         color_mask: false,
         depth_write: false,
@@ -228,7 +226,7 @@ const fn static_policy() -> MaterialRenderStatePolicy {
 }
 
 /// Fixed transparent pass policy shared by fixed blend scenarios.
-const fn fixed_transparent_policy() -> MaterialRenderStatePolicy {
+fn fixed_transparent_policy() -> MaterialRenderStatePolicy {
     MaterialRenderStatePolicy {
         color_mask: false,
         depth_write: false,
@@ -240,7 +238,7 @@ const fn fixed_transparent_policy() -> MaterialRenderStatePolicy {
 }
 
 /// Forward-style policy that preserves source-authored culling.
-const fn fixed_cull_policy() -> MaterialRenderStatePolicy {
+fn fixed_cull_policy() -> MaterialRenderStatePolicy {
     MaterialRenderStatePolicy {
         color_mask: true,
         depth_write: true,
@@ -252,7 +250,7 @@ const fn fixed_cull_policy() -> MaterialRenderStatePolicy {
 }
 
 /// Returns a fixed transparent descriptor.
-const fn fixed_transparent_pass(
+fn fixed_transparent_pass(
     base: MaterialPassDesc,
     depth_write: bool,
     blend: wgpu::BlendState,
@@ -268,7 +266,7 @@ const fn fixed_transparent_pass(
 }
 
 /// Returns a transparent forward descriptor.
-const fn transparent_pass(
+fn transparent_pass(
     base: MaterialPassDesc,
     cull_mode: Option<wgpu::Face>,
     render_state_policy: MaterialRenderStatePolicy,
@@ -285,10 +283,7 @@ const fn transparent_pass(
 }
 
 /// Returns an overlay descriptor.
-const fn overlay_pass(
-    base: MaterialPassDesc,
-    depth_compare: wgpu::CompareFunction,
-) -> MaterialPassDesc {
+fn overlay_pass(base: MaterialPassDesc, depth_compare: wgpu::CompareFunction) -> MaterialPassDesc {
     MaterialPassDesc {
         depth_compare,
         blend: Some(PASS_BLEND_OVERLAY_NOOP_COLOR_MAX_ALPHA),

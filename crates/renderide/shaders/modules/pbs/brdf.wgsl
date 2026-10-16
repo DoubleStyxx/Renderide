@@ -372,6 +372,22 @@ struct DirectSpecularEval {
     l_dot_h: f32,
 }
 
+/// View and shading normal shared by every direct light at one fragment.
+///
+/// Built once per fragment. `view` is `safe_normalize(v)` and `n` is `view_facing_normal` of that
+/// view, matching [`eval_direct_specular_lobe`] so hoisted lighting loops stay bit-identical.
+struct DirectBrdfBasis {
+    view: vec3<f32>,
+    n: vec3<f32>,
+}
+
+/// Builds the per-fragment basis consumed by [`eval_direct_specular_lobe_prepared`].
+fn direct_brdf_basis(n: vec3<f32>, v: vec3<f32>) -> DirectBrdfBasis {
+    let view = safe_normalize(v, vec3<f32>(0.0, 0.0, 1.0));
+    let brdf_n = view_facing_normal(n, view);
+    return DirectBrdfBasis(view, brdf_n);
+}
+
 /// Evaluates the canonical direct GGX specular lobe.
 ///
 /// `perceptual_roughness` may already include geometric specular AA. The direct-light roughness
@@ -404,6 +420,40 @@ fn eval_direct_specular_lobe(
     let l_dot_h = clamp(dot(light_dir, h), 0.0, 1.0);
     let alpha = direct_alpha_from_perceptual_roughness(perceptual_roughness);
     let f = f_schlick(f0, f90_from_f0(f0), v_dot_h);
+    let d = d_ggx(n_dot_h, alpha);
+    let vis = v_smith_ggx_correlated(n_dot_v, n_dot_l, alpha);
+    let fr = max(vec3<f32>(0.0), (d * vis) * f * energy_compensation);
+    return DirectSpecularEval(f, fr, n_dot_l, n_dot_v, l_dot_h);
+}
+
+/// Same lobe as [`eval_direct_specular_lobe`] with the per-fragment basis, linear alpha, and `f90` already resolved.
+fn eval_direct_specular_lobe_prepared(
+    basis: DirectBrdfBasis,
+    l: vec3<f32>,
+    alpha: f32,
+    f0: vec3<f32>,
+    f90: f32,
+    energy_compensation: vec3<f32>,
+) -> DirectSpecularEval {
+    let view = basis.view;
+    let brdf_n = basis.n;
+    let light_dir = safe_normalize(l, brdf_n);
+    let n_dot_l = max(dot(brdf_n, light_dir), 0.0);
+    let n_dot_v = max(dot(brdf_n, view), MIN_VIEW_FACING_N_DOT_V);
+    if n_dot_l <= 0.0 {
+        return DirectSpecularEval(vec3<f32>(0.0), vec3<f32>(0.0), n_dot_l, n_dot_v, 0.0);
+    }
+
+    let h_unorm = view + light_dir;
+    var h = brdf_n;
+    if dot(h_unorm, h_unorm) > 1e-12 {
+        h = normalize(h_unorm);
+    }
+
+    let n_dot_h = clamp(dot(brdf_n, h), 0.0, 1.0);
+    let v_dot_h = clamp(dot(view, h), 0.0, 1.0);
+    let l_dot_h = clamp(dot(light_dir, h), 0.0, 1.0);
+    let f = f_schlick(f0, f90, v_dot_h);
     let d = d_ggx(n_dot_h, alpha);
     let vis = v_smith_ggx_correlated(n_dot_v, n_dot_l, alpha);
     let fr = max(vec3<f32>(0.0), (d * vis) * f * energy_compensation);
@@ -465,6 +515,66 @@ fn direct_radiance_specular(
 ) -> vec3<f32> {
     let ls = eval_light(light, world_pos, n);
     let direct_lobe = eval_direct_specular_lobe(n, ls.l, v, specular_roughness, f0, energy_compensation);
+    if direct_lobe.n_dot_l <= 0.0 {
+        return vec3<f32>(0.0);
+    }
+
+    let diffuse_color = base_color * one_minus_reflectivity;
+    let fd = diffuse_color
+        * direct_diffuse_fresnel_transmission(direct_lobe.f, f0)
+        * fd_burley(direct_lobe.n_dot_v, direct_lobe.n_dot_l, direct_lobe.l_dot_h, diffuse_roughness);
+
+    let radiance = signed_light_radiance(light, ls.attenuation, direct_lobe.n_dot_l);
+    return (fd + direct_lobe.specular_brdf) * radiance;
+}
+
+/// [`direct_radiance_metallic`] with the fragment-invariant basis, alpha, and Fresnel `f90` hoisted by the caller.
+///
+/// `shading_normal` stays the pre-correction normal so shadow normal bias is unchanged.
+fn direct_radiance_metallic_prepared(
+    light: ft::GpuLight,
+    world_pos: vec3<f32>,
+    shading_normal: vec3<f32>,
+    basis: DirectBrdfBasis,
+    alpha: f32,
+    f90: f32,
+    diffuse_roughness: f32,
+    metallic: f32,
+    base_color: vec3<f32>,
+    f0: vec3<f32>,
+    energy_compensation: vec3<f32>,
+) -> vec3<f32> {
+    let ls = eval_light(light, world_pos, shading_normal);
+    let direct_lobe = eval_direct_specular_lobe_prepared(basis, ls.l, alpha, f0, f90, energy_compensation);
+    if direct_lobe.n_dot_l <= 0.0 {
+        return vec3<f32>(0.0);
+    }
+
+    let diffuse_color = base_color * (1.0 - metallic);
+    let fd = diffuse_color
+        * direct_diffuse_fresnel_transmission(direct_lobe.f, f0)
+        * fd_burley(direct_lobe.n_dot_v, direct_lobe.n_dot_l, direct_lobe.l_dot_h, diffuse_roughness);
+
+    let radiance = signed_light_radiance(light, ls.attenuation, direct_lobe.n_dot_l);
+    return (fd + direct_lobe.specular_brdf) * radiance;
+}
+
+/// [`direct_radiance_specular`] with the fragment-invariant basis, alpha, and Fresnel `f90` hoisted by the caller.
+fn direct_radiance_specular_prepared(
+    light: ft::GpuLight,
+    world_pos: vec3<f32>,
+    shading_normal: vec3<f32>,
+    basis: DirectBrdfBasis,
+    alpha: f32,
+    f90: f32,
+    diffuse_roughness: f32,
+    base_color: vec3<f32>,
+    f0: vec3<f32>,
+    one_minus_reflectivity: f32,
+    energy_compensation: vec3<f32>,
+) -> vec3<f32> {
+    let ls = eval_light(light, world_pos, shading_normal);
+    let direct_lobe = eval_direct_specular_lobe_prepared(basis, ls.l, alpha, f0, f90, energy_compensation);
     if direct_lobe.n_dot_l <= 0.0 {
         return vec3<f32>(0.0);
     }

@@ -20,6 +20,7 @@
 //!   counterpart.
 
 pub mod buffer;
+pub mod custom_shader_ipc;
 pub mod ipc;
 pub mod packing;
 pub mod test_hooks;
@@ -28,6 +29,10 @@ pub mod wire_writer;
 /// Automatically generated Renderite shared types and decode helpers.
 pub mod shared;
 
+pub use custom_shader_ipc::{
+    CustomShaderPayload, RENDERIDE_CUSTOM_WGSL_PREFIX, format_custom_shader_payload,
+    format_custom_shader_removal, parse_custom_shader_payload,
+};
 pub use ipc::shared_memory::{
     SharedMemoryWriter, SharedMemoryWriterConfig, SharedMemoryWriterError,
 };

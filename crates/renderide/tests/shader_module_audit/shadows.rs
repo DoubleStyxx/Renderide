@@ -59,7 +59,7 @@ fn point_shadow_receivers_remap_soft_taps_across_cube_faces() -> io::Result<()> 
         "fn point_face_right(face: u32) -> vec3<f32>",
         "fn point_shadow_face_uv(direction: vec3<f32>) -> PointShadowFaceUv",
         "fn point_shadow_direction_for_face_uv(face: u32, local_uv: vec2<f32>) -> vec3<f32>",
-        "let tap_direction = point_shadow_direction_for_face_uv(base.face, tap_uv);",
+        "let tap_direction = point_shadow_direction_for_basis(basis, tap_uv);",
         "point_shadow_face_uv(tap_direction)",
         "fn point_shadow_layer_visibility(light: ft::GpuLight, start: u32, world_pos: vec3<f32>, world_normal: vec3<f32>) -> f32",
         "let sampled = point_shadow_layer_visibility(light, start, world_pos, world_normal);",

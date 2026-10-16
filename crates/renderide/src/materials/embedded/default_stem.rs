@@ -10,6 +10,9 @@ mod tests;
 
 /// Returns the default package material stem for a Unity shader asset name.
 pub fn embedded_default_stem_for_shader_asset_name(name: &str) -> Option<String> {
+    if let Some(stem) = crate::materials::custom_shader::default_stem_for_asset_name(name) {
+        return Some(stem.to_string());
+    }
     let key = normalize_unity_shader_lookup_key(name);
     crate::materials::shader_package::default_material_stem_for_asset_key(&key)
         .map(|stem| stem.to_string())

@@ -138,6 +138,34 @@ fn direct_specular_ggx(
     intensity: f32,
     albedo_tint: f32,
 ) -> vec3<f32> {
+    let basis = brdf::direct_brdf_basis(normal, view_dir);
+    let alpha = brdf::direct_alpha_from_perceptual_roughness(perceptual_roughness);
+    let f90 = brdf::f90_from_f0(specular_reflectance);
+    return direct_specular_ggx_prepared(
+        s,
+        light,
+        basis,
+        alpha,
+        f90,
+        specular_reflectance,
+        energy_compensation,
+        intensity,
+        albedo_tint,
+    );
+}
+
+/// [`direct_specular_ggx`] with the fragment-invariant basis, alpha, and `f90` already resolved.
+fn direct_specular_ggx_prepared(
+    s: xb::SurfaceData,
+    light: xb::LightSample,
+    basis: brdf::DirectBrdfBasis,
+    alpha: f32,
+    f90: f32,
+    specular_reflectance: vec3<f32>,
+    energy_compensation: vec3<f32>,
+    intensity: f32,
+    albedo_tint: f32,
+) -> vec3<f32> {
     if (intensity <= 1e-4) {
         return vec3<f32>(0.0);
     }
@@ -146,12 +174,12 @@ fn direct_specular_ggx(
         return vec3<f32>(0.0);
     }
 
-    let direct_lobe = brdf::eval_direct_specular_lobe(
-        normal,
+    let direct_lobe = brdf::eval_direct_specular_lobe_prepared(
+        basis,
         light.direction,
-        view_dir,
-        perceptual_roughness,
+        alpha,
         specular_reflectance,
+        f90,
         energy_compensation,
     );
     if (direct_lobe.n_dot_l <= 1e-4) {
@@ -192,13 +220,25 @@ fn direct_diffuse_fresnel_transmission(
     view_dir: vec3<f32>,
     specular_reflectance: vec3<f32>,
 ) -> f32 {
-    let h = xb::safe_normalize(light_direction + view_dir, normal);
-    let ldh = xb::saturate(dot(light_direction, h));
-    let f = brdf::f_schlick(
+    return direct_diffuse_fresnel_transmission_prepared(
+        normal,
+        light_direction,
+        view_dir,
         specular_reflectance,
         brdf::f90_from_f0(specular_reflectance),
-        ldh,
     );
+}
+
+fn direct_diffuse_fresnel_transmission_prepared(
+    normal: vec3<f32>,
+    light_direction: vec3<f32>,
+    view_dir: vec3<f32>,
+    specular_reflectance: vec3<f32>,
+    f90: f32,
+) -> f32 {
+    let h = xb::safe_normalize(light_direction + view_dir, normal);
+    let ldh = xb::saturate(dot(light_direction, h));
+    let f = brdf::f_schlick(specular_reflectance, f90, ldh);
     return brdf::direct_diffuse_fresnel_transmission(f, specular_reflectance);
 }
 
@@ -209,7 +249,20 @@ fn direct_diffuse_brdf(
     view_dir: vec3<f32>,
     perceptual_roughness: f32,
 ) -> f32 {
-    let brdf_n = brdf::view_facing_normal(normal, view_dir);
+    return direct_diffuse_brdf_prepared(
+        brdf::view_facing_normal(normal, view_dir),
+        light_direction,
+        view_dir,
+        perceptual_roughness,
+    );
+}
+
+fn direct_diffuse_brdf_prepared(
+    brdf_n: vec3<f32>,
+    light_direction: vec3<f32>,
+    view_dir: vec3<f32>,
+    perceptual_roughness: f32,
+) -> f32 {
     let h = xb::safe_normalize(light_direction + view_dir, brdf_n);
     return brdf::fd_burley(
         xb::saturate(dot(brdf_n, view_dir)),
@@ -426,8 +479,8 @@ fn clustered_toon_lighting_for_layout(
         rg::frame.near_clip,
         rg::frame.far_clip,
     );
-    let count = pcls::cluster_light_count_at(cluster_id);
-    let i_max = count;
+    let range = pcls::cluster_light_range_at(cluster_id);
+    let count = range.y;
 
     var direct_diffuse = vec3<f32>(0.0);
     var direct_spec = vec3<f32>(0.0);
@@ -438,8 +491,19 @@ fn clustered_toon_lighting_for_layout(
     var dominant_ramp = vec3<f32>(0.0);
     var dominant_weight = -1.0;
 
-    for (var i = 0u; i < i_max; i++) {
-        let li = pcls::cluster_light_index_at(cluster_id, i);
+    var specular_basis = brdf::DirectBrdfBasis(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 0.0, 1.0));
+    var specular_alpha = 0.0;
+    var specular_f90 = 0.0;
+    var diffuse_n = vec3<f32>(0.0, 0.0, 1.0);
+    if (count > 0u) {
+        specular_basis = brdf::direct_brdf_basis(s.normal, view_dir);
+        specular_alpha = brdf::direct_alpha_from_perceptual_roughness(primary_specular_terms.aa_roughness);
+        specular_f90 = brdf::f90_from_f0(primary_specular_terms.specular_reflectance);
+        diffuse_n = brdf::view_facing_normal(s.normal, view_dir);
+    }
+
+    for (var i = 0u; i < count; i++) {
+        let li = pcls::cluster_light_index_from_range(range, i);
         if (li >= rg::frame.light_count) {
             continue;
         }
@@ -457,16 +521,27 @@ fn clustered_toon_lighting_for_layout(
         // stylized replacement for `NdL`; local distance and spot falloff remain in the light
         // energy term so they do not move the authored ramp bands across the mesh.
         // `s.albedo` is already metallic-discounted in `surface::sample_surface_for_layout`.
-        let diffuse_transmission = direct_diffuse_fresnel_transmission(
+        let diffuse_transmission = direct_diffuse_fresnel_transmission_prepared(
             s.normal,
             light.direction,
             view_dir,
             primary_specular_terms.specular_reflectance,
+            specular_f90,
         );
-        let diffuse_brdf = direct_diffuse_brdf(s.normal, light.direction, view_dir, s.roughness);
+        let diffuse_brdf = direct_diffuse_brdf_prepared(diffuse_n, light.direction, view_dir, s.roughness);
         direct_diffuse = direct_diffuse
             + s.albedo.rgb * diffuse_transmission * diffuse_brdf * light.color * light.attenuation * ramp;
-        direct_spec = direct_spec + direct_specular(s, light, view_dir, primary_specular_terms);
+        direct_spec = direct_spec + direct_specular_ggx_prepared(
+            s,
+            light,
+            specular_basis,
+            specular_alpha,
+            specular_f90,
+            primary_specular_terms.specular_reflectance,
+            primary_specular_terms.energy_compensation,
+            max(0.0, xb::mat._SpecularIntensity),
+            xb::mat._SpecularAlbedoTint,
+        );
         sss = sss + subsurface(s, light, view_dir, ambient);
 
         let weight = xb::grayscale(light_col_atten * vec3<f32>(xb::saturate(ndl)));
@@ -554,13 +629,13 @@ fn clustered_outline_lighting(
         rg::frame.near_clip,
         rg::frame.far_clip,
     );
-    let count = pcls::cluster_light_count_at(cluster_id);
-    let i_max = count;
+    let range = pcls::cluster_light_range_at(cluster_id);
+    let count = range.y;
 
     var dominant_direct = vec3<f32>(0.0);
     var dominant_weight = -1.0;
-    for (var i = 0u; i < i_max; i++) {
-        let li = pcls::cluster_light_index_at(cluster_id, i);
+    for (var i = 0u; i < count; i++) {
+        let li = pcls::cluster_light_index_from_range(range, i);
         if (li >= rg::frame.light_count) {
             continue;
         }

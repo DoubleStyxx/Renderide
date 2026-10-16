@@ -181,7 +181,7 @@ pub(super) fn create_source_bind_group(
 
 /// Returns the composed 2D light-cookie blit shader.
 fn light_cookie_blit_2d_wgsl() -> &'static str {
-    let Some(source) = crate::embedded_shaders::embedded_target_wgsl(LIGHT_COOKIE_BLIT_2D_STEM)
+    let Some(source) = crate::embedded_shaders::embedded_packaged_wgsl(LIGHT_COOKIE_BLIT_2D_STEM)
     else {
         logger::warn!(
             "embedded WGSL target `{LIGHT_COOKIE_BLIT_2D_STEM}` missing; using raw source fallback"

@@ -130,6 +130,7 @@ fn build_material_bind_cache_key(
     texture_bind_signature: u64,
     offscreen_write_target: OffscreenWriteTarget,
     uniform_binding: Option<&MaterialUniformArenaSlotBinding>,
+    shader_source_generation: u64,
 ) -> MaterialBindCacheKey {
     build_material_bind_cache_key_parts(
         stem_hash,
@@ -137,6 +138,7 @@ fn build_material_bind_cache_key(
         texture_bind_signature,
         offscreen_write_target,
         uniform_binding.map(|binding| binding.buffer_generation),
+        shader_source_generation,
     )
 }
 
@@ -146,6 +148,7 @@ fn build_material_bind_cache_key_parts(
     texture_bind_signature: u64,
     offscreen_write_target: OffscreenWriteTarget,
     uniform_arena_generation: Option<u64>,
+    shader_source_generation: u64,
 ) -> MaterialBindCacheKey {
     let (material_asset_id, property_block_slot0, renderer_property_block_id) =
         if uniform_arena_generation.is_some() {
@@ -165,6 +168,7 @@ fn build_material_bind_cache_key_parts(
         texture_bind_signature,
         offscreen_write_target,
         uniform_arena_generation: uniform_arena_generation.unwrap_or(0),
+        shader_source_generation,
     }
 }
 
@@ -191,7 +195,7 @@ pub struct EmbeddedMaterialBindResources {
     red_cube: PlaceholderTexture,
     default_sampler: Arc<wgpu::Sampler>,
     property_registry: Arc<PropertyIdRegistry>,
-    stem_cache: Mutex<HashMap<String, Arc<StemMaterialLayout>>>,
+    stem_cache: Mutex<HashMap<String, cache::CachedStemLayout>>,
     /// Sharded dynamic uniform arenas for `@group(1) @binding(0)` material constants.
     ///
     /// Each shard owns an independent growable GPU buffer and slot allocator; a uniform cache
@@ -369,6 +373,7 @@ impl EmbeddedMaterialBindResources {
             stem_hash,
             texture_bind_signature,
             texture_2d_asset_id,
+            shader_source_generation,
         } = self.resolve_embedded_bind_inputs(
             shader.stem,
             shader.shader_variant_bits,
@@ -414,6 +419,7 @@ impl EmbeddedMaterialBindResources {
             texture_bind_signature,
             offscreen_write_target,
             uniform_binding.as_ref(),
+            shader_source_generation,
         );
 
         let hit_bg = {
@@ -485,6 +491,7 @@ impl EmbeddedMaterialBindResources {
                 snapshot.texture_bind_signature,
                 offscreen_write_target,
                 uniform_binding,
+                lookup_bind_key.shader_source_generation,
             );
             if let Some(bg) = self.bind_cache.get_cloned(&updated) {
                 self.bind_cache_stats.note_hit();
@@ -528,8 +535,11 @@ impl EmbeddedMaterialBindResources {
         &self,
         stem: &str,
     ) -> Result<wgpu::BindGroupLayout, EmbeddedMaterialBindError> {
-        self.stem_layout(stem)
-            .map(|layout| layout.bind_group_layout.clone())
+        self.stem_layout(
+            stem,
+            crate::materials::custom_shader::source_generation(stem),
+        )
+        .map(|layout| layout.bind_group_layout.clone())
     }
 
     /// Captures embedded bind cache diagnostics.
@@ -579,6 +589,7 @@ mod tests {
             42,
             OffscreenWriteTarget::host_render_texture(5),
             None,
+            0,
         );
         let b = build_material_bind_cache_key_parts(
             11,
@@ -586,6 +597,7 @@ mod tests {
             42,
             OffscreenWriteTarget::host_render_texture(5),
             None,
+            0,
         );
 
         assert_eq!(a, b);
@@ -603,6 +615,7 @@ mod tests {
             42,
             OffscreenWriteTarget::host_render_texture(5),
             Some(7),
+            0,
         );
         let b = build_material_bind_cache_key_parts(
             11,
@@ -610,6 +623,7 @@ mod tests {
             42,
             OffscreenWriteTarget::host_render_texture(5),
             Some(7),
+            0,
         );
 
         assert_ne!(a, b);
@@ -627,6 +641,7 @@ mod tests {
             42,
             OffscreenWriteTarget::host_render_texture(5),
             Some(7),
+            0,
         );
         let changed_texture = build_material_bind_cache_key_parts(
             11,
@@ -634,6 +649,7 @@ mod tests {
             43,
             OffscreenWriteTarget::host_render_texture(5),
             Some(7),
+            0,
         );
         let changed_offscreen = build_material_bind_cache_key_parts(
             11,
@@ -641,6 +657,7 @@ mod tests {
             42,
             OffscreenWriteTarget::host_render_texture(6),
             Some(7),
+            0,
         );
         let untracked_offscreen = build_material_bind_cache_key_parts(
             11,
@@ -648,6 +665,7 @@ mod tests {
             42,
             OffscreenWriteTarget::Untracked,
             Some(7),
+            0,
         );
 
         assert_ne!(base, changed_texture);
@@ -663,6 +681,7 @@ mod tests {
             42,
             OffscreenWriteTarget::host_render_texture(5),
             Some(7),
+            0,
         );
         let allowed = build_material_bind_cache_key_parts(
             11,
@@ -673,6 +692,7 @@ mod tests {
                 crate::frame_contract::RenderTextureSelfSampling::AllowPreviousContents,
             ),
             Some(7),
+            0,
         );
 
         assert_ne!(suppressed, allowed);
@@ -686,6 +706,7 @@ mod tests {
             42,
             OffscreenWriteTarget::None,
             Some(7),
+            0,
         );
         let second = build_material_bind_cache_key_parts(
             11,
@@ -693,10 +714,35 @@ mod tests {
             42,
             OffscreenWriteTarget::None,
             Some(8),
+            0,
         );
 
         assert_ne!(first, second);
         assert_eq!(first.uniform_arena_generation, 7);
         assert_eq!(second.uniform_arena_generation, 8);
+    }
+
+    #[test]
+    fn bind_cache_key_tracks_shader_source_generation() {
+        let first = build_material_bind_cache_key_parts(
+            11,
+            lookup_ids(1, Some(10), Some(20)),
+            42,
+            OffscreenWriteTarget::None,
+            Some(7),
+            1,
+        );
+        let second = build_material_bind_cache_key_parts(
+            11,
+            lookup_ids(1, Some(10), Some(20)),
+            42,
+            OffscreenWriteTarget::None,
+            Some(7),
+            2,
+        );
+
+        assert_ne!(first, second);
+        assert_eq!(first.shader_source_generation, 1);
+        assert_eq!(second.shader_source_generation, 2);
     }
 }

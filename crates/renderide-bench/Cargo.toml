@@ -1,0 +1,31 @@
+[package]
+name = "renderide-bench"
+version = "0.1.0"
+edition = "2024"
+description = "Criterion microbenchmarks for Renderide CPU hot paths."
+publish = false
+autobenches = false
+
+[lib]
+name = "renderide_bench"
+path = "src/lib.rs"
+bench = false
+
+[features]
+## Compiles the GPU benchmark group. Default `cargo bench -p renderide-bench` leaves this
+## off, so the suite does not open a wgpu adapter or require Resonite. Device benches, when
+## added, belong behind this feature.
+gpu = []
+
+[dependencies]
+renderide = { path = "../renderide", features = ["bench-api"] }
+
+[dev-dependencies]
+criterion = "0.8"
+
+[[bench]]
+name = "cpu_hot"
+harness = false
+
+[lints]
+workspace = true

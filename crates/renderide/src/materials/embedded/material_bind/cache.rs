@@ -128,6 +128,15 @@ pub(crate) struct MaterialBindCacheKey {
     pub(super) offscreen_write_target: OffscreenWriteTarget,
     /// Bumps whenever the shared material uniform arena reallocates to a new GPU buffer.
     pub(super) uniform_arena_generation: u64,
+    /// Custom-shader source generation. Packaged stems stay at zero.
+    ///
+    /// A reinstall that changes `@group(1)` must miss both this key and the stem layout cache.
+    pub(super) shader_source_generation: u64,
+}
+
+pub(super) struct CachedStemLayout {
+    shader_source_generation: u64,
+    layout: Arc<StemMaterialLayout>,
 }
 
 use super::EmbeddedMaterialBindResources;
@@ -136,10 +145,14 @@ impl EmbeddedMaterialBindResources {
     pub(super) fn stem_layout(
         &self,
         stem: &str,
+        shader_source_generation: u64,
     ) -> Result<Arc<StemMaterialLayout>, EmbeddedMaterialBindError> {
         let mut cache = self.stem_cache.lock();
-        if let Some(s) = cache.get(stem) {
-            return Ok(s.clone());
+        if let Some(cached) = cache.get(stem) {
+            if cached.shader_source_generation == shader_source_generation {
+                return Ok(cached.layout.clone());
+            }
+            cache.remove(stem);
         }
 
         let layout = build_stem_material_layout(
@@ -147,7 +160,13 @@ impl EmbeddedMaterialBindResources {
             stem,
             self.property_registry.as_ref(),
         )?;
-        cache.insert(stem.to_string(), layout.clone());
+        cache.insert(
+            stem.to_string(),
+            CachedStemLayout {
+                shader_source_generation,
+                layout: layout.clone(),
+            },
+        );
         drop(cache);
         Ok(layout)
     }
@@ -159,7 +178,10 @@ impl EmbeddedMaterialBindResources {
         store: &MaterialPropertyStore,
         lookup: MaterialPropertyLookupIds,
     ) -> Vec<i32> {
-        let Ok(layout) = self.stem_layout(stem) else {
+        let Ok(layout) = self.stem_layout(
+            stem,
+            crate::materials::custom_shader::source_generation(stem),
+        ) else {
             return Vec::new();
         };
         let cache_key = TextureDebugCacheKey {

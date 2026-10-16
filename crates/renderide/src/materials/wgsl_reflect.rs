@@ -392,7 +392,7 @@ mod tests {
     #[test]
     fn reflect_null_default_embedded() {
         let wgsl = crate::embedded_shaders::embedded_target_wgsl("null_default").expect("stem");
-        let r = reflect_raster_material_wgsl(wgsl).expect("reflect");
+        let r = reflect_raster_material_wgsl(wgsl.as_ref()).expect("reflect");
         assert!(r.material_entries.is_empty());
         assert_eq!(r.snapshot_requirements(), SnapshotRequirements::default());
         validate_per_draw_group2(&r.per_draw_entries).expect("per_draw");
@@ -412,9 +412,10 @@ mod tests {
         let passes = crate::embedded_shaders::embedded_target_passes(stem);
         let vertex_entries = passes
             .iter()
-            .map(|pass| pass.vertex_entry)
+            .map(|pass| pass.vertex_entry.as_ref())
             .collect::<Vec<_>>();
-        let reflected = reflect_raster_material_wgsl_with_vertex_entries(wgsl, &vertex_entries)?;
+        let reflected =
+            reflect_raster_material_wgsl_with_vertex_entries(wgsl.as_ref(), &vertex_entries)?;
 
         assert!(reflected.vs_vertex_inputs.contains(&ReflectedVertexInput {
             location: 2,
@@ -490,7 +491,7 @@ mod tests {
         for stem in crate::embedded_shaders::COMPILED_MATERIAL_STEMS {
             let wgsl = crate::embedded_shaders::embedded_target_wgsl(stem)
                 .ok_or(ReflectError::EmbeddedTargetMissing(stem))?;
-            reflect_raster_material_wgsl(wgsl)?;
+            reflect_raster_material_wgsl(wgsl.as_ref())?;
         }
         Ok(())
     }
@@ -500,7 +501,7 @@ mod tests {
         for stem in crate::embedded_shaders::COMPILED_MATERIAL_STEMS {
             let wgsl = crate::embedded_shaders::embedded_target_wgsl(stem)
                 .ok_or(ReflectError::EmbeddedTargetMissing(stem))?;
-            let reflected = reflect_raster_material_wgsl(wgsl)?;
+            let reflected = reflect_raster_material_wgsl(wgsl.as_ref())?;
             let Some(uniform) = reflected.material_uniform.as_ref() else {
                 continue;
             };

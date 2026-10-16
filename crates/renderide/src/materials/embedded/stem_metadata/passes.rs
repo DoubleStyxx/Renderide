@@ -37,7 +37,7 @@ mod tests {
     fn first_shader_batch_fixed_state_stems_keep_expected_passes() {
         let circle = embedded_shaders::embedded_target_passes("circle_default");
         assert_eq!(circle.len(), 1);
-        assert_eq!(circle[0].name, "transparent_rgb");
+        assert_eq!(circle[0].name.as_ref(), "transparent_rgb");
         assert_eq!(circle[0].material_state, MaterialPassState::Static);
         assert_eq!(circle[0].write_mask, wgpu::ColorWrites::COLOR);
         assert!(!circle[0].depth_write);
@@ -46,7 +46,7 @@ mod tests {
 
         let depth_projection = embedded_shaders::embedded_target_passes("depthprojection_default");
         assert_eq!(depth_projection.len(), 1);
-        assert_eq!(depth_projection[0].name, "forward_two_sided");
+        assert_eq!(depth_projection[0].name.as_ref(), "forward_two_sided");
         assert_eq!(
             depth_projection[0].material_state,
             MaterialPassState::Filter

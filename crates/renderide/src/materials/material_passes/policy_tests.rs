@@ -216,7 +216,7 @@ fn volume_stems_use_volume_front_pass() {
     for stem in ["fogboxvolume_default", "volumeunlit_default"] {
         let passes = crate::embedded_shaders::embedded_target_passes(stem);
         assert_eq!(passes.len(), 1, "{stem}");
-        assert_eq!(passes[0].name, "volume_front", "{stem}");
+        assert_eq!(passes[0].name.as_ref(), "volume_front", "{stem}");
         assert_eq!(
             passes[0].depth_compare,
             wgpu::CompareFunction::Always,
@@ -232,7 +232,7 @@ fn volume_stems_use_volume_front_pass() {
 fn assert_material_filter_pass(stem: &str) {
     let passes = crate::embedded_shaders::embedded_target_passes(stem);
     assert_eq!(passes.len(), 1, "{stem}");
-    assert_eq!(passes[0].name, "forward_filter", "{stem}");
+    assert_eq!(passes[0].name.as_ref(), "forward_filter", "{stem}");
     assert_eq!(
         passes[0].material_state,
         MaterialPassState::Filter,
@@ -374,7 +374,7 @@ fn pbs_dualsided_opaque_stems_apply_material_cull_overrides() {
     for stem in ["pbsdualsided_default", "pbsdualsidedspecular_default"] {
         let passes = crate::embedded_shaders::embedded_target_passes(stem);
         assert_eq!(passes.len(), 1, "{stem} should declare one forward pass");
-        assert_eq!(passes[0].name, "forward_two_sided", "{stem}");
+        assert_eq!(passes[0].name.as_ref(), "forward_two_sided", "{stem}");
         assert_eq!(passes[0].cull_mode, None, "{stem}");
 
         for (cull_override, expected_cull) in [
@@ -462,8 +462,8 @@ fn pbsrim_zwrite_stems_keep_depth_prepass_before_transparent_forward() {
     ] {
         let passes = crate::embedded_shaders::embedded_target_passes(stem);
         assert_eq!(passes.len(), 2, "{stem} should declare two passes");
-        assert_eq!(passes[0].name, "depth_prepass");
-        assert_eq!(passes[1].name, "forward_transparent_cull_back");
+        assert_eq!(passes[0].name.as_ref(), "depth_prepass");
+        assert_eq!(passes[1].name.as_ref(), "forward_transparent_cull_back");
         assert_eq!(passes[1].cull_mode, Some(wgpu::Face::Back), "{stem}");
 
         let state = MaterialRenderState {
@@ -518,18 +518,18 @@ fn common_wireframe_stems_use_barycentric_material_passes() {
     let double_sided =
         crate::embedded_shaders::embedded_target_passes("wireframedoublesided_default");
     assert_eq!(double_sided.len(), 2);
-    assert_eq!(double_sided[0].name, "inner");
+    assert_eq!(double_sided[0].name.as_ref(), "inner");
     assert_eq!(double_sided[0].cull_mode, Some(wgpu::Face::Front));
-    assert_eq!(double_sided[1].name, "outer");
+    assert_eq!(double_sided[1].name.as_ref(), "outer");
     assert_eq!(double_sided[1].cull_mode, Some(wgpu::Face::Back));
 
     let transition =
         crate::embedded_shaders::embedded_target_passes("wireframeunlittransition_default");
     assert_eq!(transition.len(), 3);
-    assert_eq!(transition[0].name, "depth");
+    assert_eq!(transition[0].name.as_ref(), "depth");
     assert_eq!(transition[0].write_mask, COLOR_WRITES_NONE);
-    assert_eq!(transition[1].name, "fill");
-    assert_eq!(transition[2].name, "wire");
+    assert_eq!(transition[1].name.as_ref(), "fill");
+    assert_eq!(transition[2].name.as_ref(), "wire");
     let additive = transition[2].blend.expect("transition wire blend");
     assert_eq!(additive.color.src_factor, wgpu::BlendFactor::One);
     assert_eq!(additive.color.dst_factor, wgpu::BlendFactor::One);
@@ -582,7 +582,7 @@ fn assert_one_transparent_forward_pass(stem: &str) {
         1,
         "{stem} should declare one transparent forward pass"
     );
-    assert_eq!(passes[0].name, "forward_transparent", "{stem}");
+    assert_eq!(passes[0].name.as_ref(), "forward_transparent", "{stem}");
     assert!(!passes[0].depth_write, "{stem}");
     assert!(passes[0].blend.is_some(), "{stem}");
     assert_eq!(
@@ -610,10 +610,14 @@ fn assert_depth_prepass_before_back_culled_transparent_forward(stem: &str) {
         2,
         "{stem} should declare depth prepass then transparent forward pass"
     );
-    assert_eq!(passes[0].name, "depth_prepass", "{stem}");
+    assert_eq!(passes[0].name.as_ref(), "depth_prepass", "{stem}");
     assert!(passes[0].depth_write, "{stem}");
     assert_eq!(passes[0].write_mask, COLOR_WRITES_NONE, "{stem}");
-    assert_eq!(passes[1].name, "forward_transparent_cull_back", "{stem}");
+    assert_eq!(
+        passes[1].name.as_ref(),
+        "forward_transparent_cull_back",
+        "{stem}"
+    );
     assert_eq!(passes[1].cull_mode, Some(wgpu::Face::Back), "{stem}");
     assert!(!passes[1].depth_write, "{stem}");
     assert!(passes[1].blend.is_some(), "{stem}");
@@ -642,7 +646,11 @@ fn assert_one_back_face_culled_transparent_pass(stem: &str) {
         1,
         "{stem} should declare one back-face-culled transparent forward pass"
     );
-    assert_eq!(passes[0].name, "forward_transparent_cull_back", "{stem}");
+    assert_eq!(
+        passes[0].name.as_ref(),
+        "forward_transparent_cull_back",
+        "{stem}"
+    );
     assert_eq!(passes[0].cull_mode, Some(wgpu::Face::Back), "{stem}");
     assert!(!passes[0].depth_write, "{stem}");
     assert!(passes[0].blend.is_some(), "{stem}");
@@ -671,7 +679,11 @@ fn assert_dualsided_transparent_pass_pair(stem: &str) {
         2,
         "{stem} should declare back-face then front-face transparent passes"
     );
-    assert_eq!(passes[0].name, "forward_transparent_cull_front", "{stem}");
+    assert_eq!(
+        passes[0].name.as_ref(),
+        "forward_transparent_cull_front",
+        "{stem}"
+    );
     assert_eq!(passes[0].cull_mode, Some(wgpu::Face::Front), "{stem}");
     assert!(passes[0].blend.is_some(), "{stem}");
     assert_eq!(
@@ -679,7 +691,11 @@ fn assert_dualsided_transparent_pass_pair(stem: &str) {
         MaterialPassState::TransparentForward,
         "{stem}"
     );
-    assert_eq!(passes[1].name, "forward_transparent_cull_back", "{stem}");
+    assert_eq!(
+        passes[1].name.as_ref(),
+        "forward_transparent_cull_back",
+        "{stem}"
+    );
     assert_eq!(passes[1].cull_mode, Some(wgpu::Face::Back), "{stem}");
     assert!(passes[1].blend.is_some(), "{stem}");
     assert_eq!(
@@ -687,7 +703,7 @@ fn assert_dualsided_transparent_pass_pair(stem: &str) {
         MaterialPassState::TransparentForward,
         "{stem}"
     );
-    for pass in passes {
+    for pass in passes.iter() {
         let opaque = materialized_pass_for_blend_mode(pass, MaterialBlendMode::Opaque);
         let blend = opaque.blend.expect(stem);
         assert_eq!(blend.color.src_factor, wgpu::BlendFactor::One, "{stem}");
@@ -752,8 +768,8 @@ fn xstoon_outlined_stems_keep_outline_before_forward() {
     ] {
         let passes = crate::embedded_shaders::embedded_target_passes(stem);
         assert_eq!(passes.len(), 2, "{stem} should declare outline + forward");
-        assert_eq!(passes[0].name, "outline", "{stem}");
-        assert_eq!(passes[1].name, "forward", "{stem}");
+        assert_eq!(passes[0].name.as_ref(), "outline", "{stem}");
+        assert_eq!(passes[1].name.as_ref(), "forward", "{stem}");
     }
 }
 
@@ -773,7 +789,7 @@ fn xstoon_opaque_stems_keep_single_forward_pass() {
             1,
             "{stem} should declare a single forward pass"
         );
-        assert_eq!(passes[0].name, "forward", "{stem}");
+        assert_eq!(passes[0].name.as_ref(), "forward", "{stem}");
     }
 }
 
@@ -782,7 +798,7 @@ fn xstoon_opaque_stems_keep_single_forward_pass() {
 fn xstoon_fade_uses_source_alpha_blend_pass_state() {
     let fade_passes = crate::embedded_shaders::embedded_target_passes("xstoon2.0-fade_default");
     assert_eq!(fade_passes.len(), 1, "xstoon2.0-fade_default");
-    assert_eq!(fade_passes[0].name, "forward_alpha_blend");
+    assert_eq!(fade_passes[0].name.as_ref(), "forward_alpha_blend");
     assert_eq!(fade_passes[0].cull_mode, Some(wgpu::Face::Back));
     assert!(!fade_passes[0].depth_write);
     let fade_blend = fade_passes[0].blend.expect("xstoon2.0-fade blend");
@@ -805,7 +821,7 @@ fn xstoon_transparent_uses_source_premultiplied_pass_state() {
         crate::embedded_shaders::embedded_target_passes("xstoon2.0-transparent_default");
     assert_eq!(transparent_passes.len(), 1, "xstoon2.0-transparent_default");
     assert_eq!(
-        transparent_passes[0].name,
+        transparent_passes[0].name.as_ref(),
         "forward_premultiplied_transparent"
     );
     assert_eq!(transparent_passes[0].cull_mode, Some(wgpu::Face::Back));
@@ -825,7 +841,11 @@ fn xstoon_transparent_uses_source_premultiplied_pass_state() {
 fn xstoon_stenciler_uses_source_stencil_pass_state() {
     let stencil_passes = crate::embedded_shaders::embedded_target_passes("xstoonstenciler_default");
     assert_eq!(stencil_passes.len(), 1, "xstoonstenciler_default");
-    assert_eq!(stencil_passes[0].name, "stencil", "xstoonstenciler_default");
+    assert_eq!(
+        stencil_passes[0].name.as_ref(),
+        "stencil",
+        "xstoonstenciler_default"
+    );
     assert_eq!(stencil_passes[0].cull_mode, Some(wgpu::Face::Front));
     assert_eq!(stencil_passes[0].write_mask, wgpu::ColorWrites::ALL);
     assert_eq!(

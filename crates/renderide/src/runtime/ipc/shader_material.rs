@@ -42,7 +42,11 @@ pub(in crate::runtime) fn on_shader_upload(
     );
     let (tx, rx) = bounded::<ResolvedShaderUpload>(1);
     rayon::spawn(move || {
-        let resolved = resolve_shader_upload(&upload, embedded_default_stem_for_shader_asset_name);
+        let resolved = resolve_shader_upload(
+            &upload,
+            embedded_default_stem_for_shader_asset_name,
+            crate::materials::custom_shader::resolve_custom_shader_payload,
+        );
         let _ = tx.send(resolved);
     });
     pending.push(PendingShaderResolution { asset_id, rx });
@@ -75,8 +79,20 @@ pub(in crate::runtime) fn drain_pending_shader_resolutions(
             false
         }
     });
+    if !completed.is_empty() {
+        backend.invalidate_custom_shader_layouts();
+    }
     for (asset_id, resolved) in completed {
-        if matches!(resolved.pipeline, RasterPipelineKind::Null) {
+        // Carrier uploads use a negative asset id and have no host route to ack.
+        // A malformed payload on a real asset id falls through so the Null route
+        // is registered and ShaderUploadResult is sent.
+        if resolved.rejected && asset_id < 0 {
+            logger::warn!(
+                "shader_upload: asset_id={asset_id} dropped malformed custom shader payload"
+            );
+            continue;
+        }
+        if asset_id >= 0 && matches!(resolved.pipeline, RasterPipelineKind::Null) {
             match resolved.shader_asset_name.as_deref() {
                 Some(name) => logger::warn!(
                     "shader_upload: asset_id={asset_id} resolved shader_asset_name={name:?} has no embedded raster route; using Null pipeline"
@@ -93,6 +109,12 @@ pub(in crate::runtime) fn drain_pending_shader_resolutions(
             shader_variant_bits_log(resolved.shader_variant_bits),
             resolved.pipeline,
         );
+        if let Some(shader_key) = resolved.retarget_shader_key.as_deref() {
+            backend.retarget_named_shader_routes(shader_key);
+        }
+        if asset_id < 0 {
+            continue;
+        }
         let shader_asset_name = resolved.shader_asset_name.clone();
         let queued = backend.register_shader_route(
             asset_id,

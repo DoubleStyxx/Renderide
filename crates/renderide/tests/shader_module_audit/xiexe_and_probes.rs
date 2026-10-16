@@ -198,7 +198,7 @@ fn xiexe_primary_direct_specular_uses_ggx_pbr_core() -> io::Result<()> {
         "let dfg = brdf::sample_ibl_dfg_lut(direct_roughness, n_dot_v);",
         "let energy_compensation = brdf::energy_compensation_from_dfg(dfg, specular_reflectance);",
         "fn direct_specular_ggx(",
-        "let direct_lobe = brdf::eval_direct_specular_lobe(",
+        "let direct_lobe = brdf::eval_direct_specular_lobe_prepared(",
         "var specular = direct_lobe.specular_brdf;",
         "let radiance = light.color * light.attenuation * direct_lobe.n_dot_l;",
         "terms.aa_roughness",
@@ -477,8 +477,9 @@ fn xiexe_direct_diffuse_uses_burley_with_ramp_tint() -> io::Result<()> {
         "return brdf::direct_diffuse_fresnel_transmission(f, specular_reflectance);",
         "fn direct_diffuse_brdf(",
         "return brdf::fd_burley(",
-        "let diffuse_transmission = direct_diffuse_fresnel_transmission(",
-        "let diffuse_brdf = direct_diffuse_brdf(s.normal, light.direction, view_dir, s.roughness);",
+        "let diffuse_transmission = direct_diffuse_fresnel_transmission_prepared(",
+        "let diffuse_brdf = direct_diffuse_brdf_prepared(diffuse_n, light.direction, view_dir, s.roughness);",
+        "fn direct_diffuse_brdf(\n    normal: vec3<f32>,\n    light_direction: vec3<f32>,\n    view_dir: vec3<f32>,\n    perceptual_roughness: f32,",
         "s.albedo.rgb * diffuse_transmission * diffuse_brdf * light.color * light.attenuation * ramp",
     ] {
         assert!(
