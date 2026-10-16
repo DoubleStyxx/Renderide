@@ -272,6 +272,8 @@ impl CompiledRenderGraph {
             )?
         };
         command_diagnostics.apply_submit(submit_stats);
+        #[cfg(feature = "control-api")]
+        note_control_submit(submit_stats);
         {
             profiling::scope!("graph::command_diagnostics");
             command_diagnostics.record_flight_event(mv_ctx.gpu);
@@ -385,6 +387,24 @@ impl CompiledRenderGraph {
         }
         Ok(())
     }
+}
+
+#[cfg(feature = "control-api")]
+fn note_control_submit(stats: SubmitFrameBatchStats) {
+    if !crate::control::is_active() {
+        return;
+    }
+    crate::control::add_upload(
+        stats.upload_drain_ms,
+        usize_to_u64(stats.upload_stats.traffic.writes),
+        usize_to_u64(stats.upload_stats.traffic.bytes),
+    );
+    crate::control::add_submit(stats.submit_enqueue_ms);
+}
+
+#[cfg(feature = "control-api")]
+fn usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 mod pre_warm;

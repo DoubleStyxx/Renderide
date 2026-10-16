@@ -51,6 +51,8 @@ pub(crate) mod embedded_shaders {
 }
 
 mod camera;
+#[cfg(feature = "control-api")]
+mod control;
 mod ipc;
 mod log_throttle;
 mod mesh_deform;

@@ -13,6 +13,15 @@ pub(super) fn readback_and_write_png_atomically(
     let color_texture = gpu
         .headless_color_texture()
         .ok_or(HeadlessReadbackError::NoOffscreenTexture)?;
+    readback_color_texture(gpu, color_texture, output_path)
+}
+
+/// Copies one color texture to CPU memory and writes a PNG atomically.
+fn readback_color_texture(
+    gpu: &GpuContext,
+    color_texture: &wgpu::Texture,
+    output_path: &Path,
+) -> Result<(), HeadlessReadbackError> {
     let layout = compute_readback_layout(color_texture.size(), gpu.limits().max_buffer_size())?;
     let readback = create_readback_buffer(gpu, &layout);
 
@@ -26,6 +35,16 @@ pub(super) fn readback_and_write_png_atomically(
     readback.unmap();
 
     write_png_atomically(&tight, layout.width, layout.height, output_path)
+}
+
+/// Copies an arbitrary color texture to a PNG. Used by the dev-only `capture.png` method.
+#[cfg(feature = "control-api")]
+pub(crate) fn readback_texture_png(
+    gpu: &GpuContext,
+    color_texture: &wgpu::Texture,
+    output_path: &Path,
+) -> Result<(), HeadlessReadbackError> {
+    readback_color_texture(gpu, color_texture, output_path)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -176,7 +195,7 @@ fn write_png_atomically(
 
 /// Failures while copying the offscreen color texture back to CPU and writing the PNG.
 #[derive(Debug, thiserror::Error)]
-pub(super) enum HeadlessReadbackError {
+pub(crate) enum HeadlessReadbackError {
     /// The headless offscreen color texture has not been allocated.
     #[error("no headless offscreen color texture allocated")]
     NoOffscreenTexture,

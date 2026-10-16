@@ -149,6 +149,11 @@ impl CpuRenderSchedule {
             }
             CpuRenderPhase::Sort => {
                 profiling::scope!("render_schedule::sort");
+                #[cfg(feature = "control-api")]
+                {
+                    time_control_sort(work)
+                }
+                #[cfg(not(feature = "control-api"))]
                 work()
             }
             CpuRenderPhase::ResourcePrepare => {
@@ -176,6 +181,17 @@ impl CpuRenderPhaseScope {
         crash_context::set_cpu_render_phase(phase.crash_context_phase());
         Self
     }
+}
+
+#[cfg(feature = "control-api")]
+fn time_control_sort<T>(work: impl FnOnce() -> T) -> T {
+    if !crate::control::is_active() {
+        return work();
+    }
+    let started = std::time::Instant::now();
+    let value = work();
+    crate::control::add_draw_prep(started.elapsed());
+    value
 }
 
 impl Drop for CpuRenderPhaseScope {

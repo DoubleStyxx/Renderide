@@ -39,3 +39,15 @@ mod window_icon;
 
 pub use bootstrap::run;
 pub use exit::RunExit;
+#[cfg(feature = "control-api")]
+pub(crate) use headless::readback_texture_png as headless_readback_png;
+
+/// Control-API capture hook: PNG readback with a string error.
+#[cfg(feature = "control-api")]
+pub(crate) fn control_capture_readback(
+    gpu: &crate::gpu::GpuContext,
+    texture: &wgpu::Texture,
+    path: &std::path::Path,
+) -> Result<(), String> {
+    headless_readback_png(gpu, texture, path).map_err(|err| err.to_string())
+}

@@ -33,6 +33,10 @@ enum RunErrorKind {
     /// [`crate::gpu::GpuContext`] initialization (desktop or headless) failed.
     #[error("GPU init: {0}")]
     Gpu(GpuError),
+    /// The dev-only control API failed to parse `--control-port` or bind its socket.
+    #[cfg(feature = "control-api")]
+    #[error("control api: {0}")]
+    ControlApi(String),
 }
 
 impl RunError {
@@ -64,6 +68,12 @@ impl RunError {
     /// Wraps GPU initialization failure.
     pub(crate) fn gpu(source: GpuError) -> Self {
         Self(RunErrorKind::Gpu(source))
+    }
+
+    /// Wraps a dev-only control API startup failure.
+    #[cfg(feature = "control-api")]
+    pub(crate) fn control_api(message: impl Into<String>) -> Self {
+        Self(RunErrorKind::ControlApi(message.into()))
     }
 }
 

@@ -74,13 +74,42 @@ impl<'views, 'backend> ExtractedFrame<'views, 'backend> {
             shared,
             mesh_lod_bias,
         } = self;
-        let cull_snapshots = gather_view_cull_snapshots(&shared, prepared_views.plans());
-        let view_draws = queue_view_draws(
-            &shared,
-            prepared_views.plans(),
-            cull_snapshots,
-            mesh_lod_bias,
-        );
+        let cull_snapshots = {
+            #[cfg(feature = "control-api")]
+            {
+                time_control_phase(crate::control::add_cull, || {
+                    gather_view_cull_snapshots(&shared, prepared_views.plans())
+                })
+            }
+            #[cfg(not(feature = "control-api"))]
+            {
+                gather_view_cull_snapshots(&shared, prepared_views.plans())
+            }
+        };
+        let view_draws = {
+            #[cfg(feature = "control-api")]
+            {
+                time_control_phase(crate::control::add_draw_prep, || {
+                    queue_view_draws(
+                        &shared,
+                        prepared_views.plans(),
+                        cull_snapshots,
+                        mesh_lod_bias,
+                    )
+                })
+            }
+            #[cfg(not(feature = "control-api"))]
+            {
+                queue_view_draws(
+                    &shared,
+                    prepared_views.plans(),
+                    cull_snapshots,
+                    mesh_lod_bias,
+                )
+            }
+        };
+        #[cfg(feature = "control-api")]
+        note_control_main_draws(prepared_views.plans(), &view_draws);
         let arrange_parallelism = select_arrange_parallelism(&view_draws);
         QueuedDraws {
             prepared_views,
@@ -89,6 +118,35 @@ impl<'views, 'backend> ExtractedFrame<'views, 'backend> {
             command_cache: shared.command_cache,
         }
     }
+}
+
+#[cfg(feature = "control-api")]
+fn time_control_phase<T>(record: impl FnOnce(std::time::Duration), work: impl FnOnce() -> T) -> T {
+    if !crate::control::is_active() {
+        return work();
+    }
+    let started = std::time::Instant::now();
+    let value = work();
+    record(started.elapsed());
+    value
+}
+
+#[cfg(feature = "control-api")]
+fn note_control_main_draws(plans: &[FrameViewPlan<'_>], draws: &[QueuedViewDraws]) {
+    if !crate::control::is_active() {
+        return;
+    }
+    let Some(index) = plans
+        .iter()
+        .position(|plan| plan.view_id == crate::camera::ViewId::Main)
+    else {
+        return;
+    };
+    let Some(view) = draws.get(index) else {
+        return;
+    };
+    let (draw_calls, triangles) = view.control_world_counters();
+    crate::control::add_draws(draw_calls, draw_calls, triangles);
 }
 
 fn gather_view_cull_snapshots(

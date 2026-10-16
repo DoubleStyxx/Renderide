@@ -27,6 +27,12 @@ pub(super) struct QueuedViewDraws {
 }
 
 impl QueuedViewDraws {
+    /// World-draw count and triangle count for the dev-only control stats probe.
+    #[cfg(feature = "control-api")]
+    pub(super) fn control_world_counters(&self) -> (u64, u64) {
+        self.world.control_index_triangles()
+    }
+
     /// Number of queued draw candidates before final sorting and arrangement.
     pub(super) fn queued_draw_count(&self) -> usize {
         self.world.len()

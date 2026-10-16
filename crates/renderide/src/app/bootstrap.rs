@@ -33,6 +33,8 @@ pub fn run() -> Result<RunExit, RunError> {
     let logging = logging::init_logging()?;
     let app_config = config::load_app_config(logging.log_level_cli);
     let mut runtime = runtime::build_runtime(&app_config.load)?;
+    #[cfg(feature = "control-api")]
+    attach_control_server(&mut runtime)?;
     let services = services::install_app_services(app_config.load.settings.watchdog);
 
     if let Some(headless_params) = get_headless_params() {
@@ -129,6 +131,20 @@ fn create_window_event_loop(
 fn map_event_loop_create_error(error: winit::error::EventLoopError) -> RunError {
     logger::error!("EventLoop creation failed: {error}");
     RunError::event_loop_create(error)
+}
+
+#[cfg(feature = "control-api")]
+fn attach_control_server(runtime: &mut crate::runtime::RendererRuntime) -> Result<(), RunError> {
+    let args: Vec<String> = std::env::args().collect();
+    let port = crate::control::parse_control_port(&args).map_err(RunError::control_api)?;
+    let Some(port) = port else {
+        return Ok(());
+    };
+    let server = crate::control::ControlServer::bind(port)
+        .map_err(|err| RunError::control_api(format!("bind 127.0.0.1:{port}: {err}")))?;
+    logger::info!("control api listening on {}", server.local_addr());
+    runtime.attach_control_server(server);
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]

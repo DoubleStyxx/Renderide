@@ -352,6 +352,8 @@ impl AppDriver {
     }
 
     fn build_lock_step_inputs(&mut self) -> crate::shared::InputState {
+        #[cfg(feature = "control-api")]
+        self.runtime.apply_control_input_to_window(&mut self.input);
         let lock = self.runtime.host_cursor_lock_requested();
         let mut inputs = self.input.take_input_state(lock);
         crate::diagnostics::sanitize_input_state_for_imgui_host(
@@ -583,6 +585,8 @@ impl AppDriver {
     fn frame_tick_epilogue(&mut self, outcome: FrameTickOutcome) {
         profiling::scope!("tick::epilogue");
         super::tick_phase_trace("frame_tick_epilogue");
+        #[cfg(feature = "control-api")]
+        self.note_control_presented(outcome);
         self.drain_driver_thread_error();
         if outcome.records_frame_timing() {
             self.end_frame_timing_and_hud_capture();
@@ -597,6 +601,29 @@ impl AppDriver {
             self.runtime.note_render_tick_complete();
         }
         self.frame_clock.end_tick(Instant::now());
+    }
+
+    #[cfg(feature = "control-api")]
+    fn note_control_presented(&self, outcome: FrameTickOutcome) {
+        if outcome != FrameTickOutcome::Presented {
+            return;
+        }
+        let Some(session) = self.runtime.control_session() else {
+            return;
+        };
+        let Some(target) = self.target.as_ref() else {
+            return;
+        };
+        let cpu_frame_ms = self
+            .frame_clock
+            .last_frame_start()
+            .map_or(0.0, |start| start.elapsed().as_secs_f64() * 1000.0);
+        crate::control::finish_presented_frame(
+            &session,
+            target.gpu(),
+            cpu_frame_ms,
+            crate::app::control_capture_readback,
+        );
     }
 
     fn drain_driver_thread_error(&self) {

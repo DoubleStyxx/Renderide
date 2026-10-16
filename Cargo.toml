@@ -6,6 +6,7 @@ members = [
   "crates/renderide-shared",
   "crates/renderide-test",
   "crates/renderide-bench",
+  "crates/renderide-control-client",
   "crates/interprocess",
   "crates/bootstrapper",
   "crates/logger",
