@@ -201,6 +201,22 @@ impl MaterialSystem {
         self.embedded_material_bind.as_ref()
     }
 
+    /// Opens the embedded uniform-arena frame before graph recording.
+    pub(crate) fn begin_uniform_arena_frame(&self) {
+        if let Some(embedded) = self.embedded_material_bind.as_ref() {
+            embedded.begin_uniform_arena_frame();
+        }
+    }
+
+    /// `on_submitted_work_done` hook that retires the uniform-arena frame just recorded.
+    pub(crate) fn uniform_arena_submission_callback(
+        &self,
+    ) -> Option<Box<dyn FnOnce() + Send + 'static>> {
+        self.embedded_material_bind
+            .as_ref()
+            .and_then(EmbeddedMaterialBindResources::uniform_arena_submission_callback)
+    }
+
     /// Maps shader asset to raster pipeline kind and optional AssetBundle shader asset name, or defers until GPU attach.
     pub fn register_shader_route(
         &mut self,

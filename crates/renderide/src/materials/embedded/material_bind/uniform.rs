@@ -2,6 +2,7 @@
 
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use hashbrown::HashSet;
 use lru::LruCache;
@@ -69,12 +70,76 @@ struct FreeSpan {
     size: u64,
 }
 
+/// Evicted range a recorded frame may still sample through `dynamic_offset`.
+///
+/// Promoted to [`FreeSpan`] only after the frame that last referenced it has finished
+/// `Queue::submit` (`on_submitted_work_done`). Reusing it earlier lets a deferred
+/// `write_buffer` overwrite bytes an already-recorded draw still reads.
+#[derive(Clone, Copy, Debug)]
+struct PendingSpan {
+    offset: u64,
+    size: u64,
+    /// Recording frame that retired this range. `0` means no frame had begun yet.
+    frame: u64,
+}
+
+/// Shared frame clock for every uniform-arena shard.
+///
+/// The recording thread advances `recording_frame`. The submit-done callback only
+/// `fetch_max`es `completed_frame` (no wgpu calls: device-poll callbacks can deadlock).
+/// Shards promote pending ranges when they next allocate on the recording thread.
+#[derive(Debug)]
+pub(super) struct UniformArenaRetireClock {
+    recording_frame: AtomicU64,
+    completed_frame: AtomicU64,
+    open_frame: AtomicU64,
+}
+
+impl UniformArenaRetireClock {
+    pub(super) fn new() -> Self {
+        Self {
+            recording_frame: AtomicU64::new(0),
+            completed_frame: AtomicU64::new(0),
+            open_frame: AtomicU64::new(0),
+        }
+    }
+
+    /// Opens the next recording frame. The first frame is 1 so frame 0 never auto-promotes.
+    pub(super) fn begin_frame(&self) -> u64 {
+        let frame = self.recording_frame.fetch_add(1, Ordering::Relaxed) + 1;
+        self.open_frame.store(frame, Ordering::Relaxed);
+        frame
+    }
+
+    pub(super) fn mark_completed(&self, frame: u64) {
+        self.completed_frame.fetch_max(frame, Ordering::Release);
+    }
+
+    fn recording_frame(&self) -> u64 {
+        self.recording_frame.load(Ordering::Relaxed)
+    }
+
+    fn completed_frame(&self) -> u64 {
+        self.completed_frame.load(Ordering::Acquire)
+    }
+
+    fn open_frame(&self) -> u64 {
+        self.open_frame.load(Ordering::Relaxed)
+    }
+}
+
 /// Pure allocator state for material uniform arena slots.
 #[derive(Debug)]
 struct MaterialUniformArenaAllocator {
     slots: LruCache<MaterialUniformCacheKey, MaterialUniformSlot>,
-    /// Ranges whose owners were evicted. Same-sized inserts reuse these before the bump cursor.
+    /// Ranges whose recording frame has completed. Same-sized inserts reuse these first.
     free: Vec<FreeSpan>,
+    /// Ranges retired by eviction but still referenced by a recorded or in-flight frame.
+    pending: Vec<PendingSpan>,
+    /// Frame currently recording draws. `0` until a frame begins.
+    recording_frame: u64,
+    /// Highest frame whose submission has completed.
+    completed_frame: u64,
     cursor: u64,
     capacity: u64,
     max_bytes: u64,
@@ -102,12 +167,36 @@ impl MaterialUniformArenaAllocator {
         Self {
             slots: LruCache::new(slot_capacity),
             free: Vec::new(),
+            pending: Vec::new(),
+            recording_frame: 0,
+            completed_frame: 0,
             cursor: 0,
             capacity,
             max_bytes,
             alignment: alignment.max(1),
             generation: 0,
             slot_evictions: 0,
+        }
+    }
+
+    /// Test hook. Frame ids start at 1. Production frames come from [`UniformArenaRetireClock`].
+    #[cfg(test)]
+    fn begin_frame(&mut self) {
+        self.recording_frame = self.recording_frame.saturating_add(1);
+    }
+
+    /// Test hook. Marks the current recording frame submitted and promotes its retired ranges.
+    #[cfg(test)]
+    fn retire_submitted_frame(&mut self) {
+        self.completed_frame = self.completed_frame.max(self.recording_frame);
+        self.promote_retired();
+    }
+
+    fn observe_frames(&mut self, recording_frame: u64, completed_frame: u64) {
+        self.recording_frame = recording_frame;
+        if completed_frame > self.completed_frame {
+            self.completed_frame = completed_frame;
+            self.promote_retired();
         }
     }
 
@@ -168,7 +257,7 @@ impl MaterialUniformArenaAllocator {
             // `LruCache::push` also returns the previous value when the key is replaced.
             // Only a different key is an eviction whose range can be reused.
             self.note_slot_evictions(1);
-            self.release_slot(evicted_slot);
+            self.retire_slot(evicted_slot);
         }
         Ok(MaterialUniformSlotResolution {
             offset,
@@ -247,23 +336,27 @@ impl MaterialUniformArenaAllocator {
             // Rewinding onto the same GPU buffer would overwrite offsets already recorded
             // for this frame. Bump generation so the next resolve allocates a new buffer.
             self.free.clear();
+            self.pending.clear();
             self.cursor = 0;
             self.generation = self.generation.wrapping_add(1);
             return;
         }
         for slot in removed {
-            self.release_slot(slot);
+            self.retire_slot(slot);
         }
     }
 
-    /// Returns `size` bytes. Exact free spans are reused in place. When the slot table is full,
-    /// the LRU range is reclaimed before the arena grows. A bump that would still exceed capacity
-    /// repacks live slots; a move bumps generation so the GPU buffer is replaced.
+    /// Returns `size` bytes. Completed free spans are reused in place. A retired range stays
+    /// pending until its recording frame's submit completes, so this frame cannot land a new
+    /// occupant on a `dynamic_offset` it already recorded. Growth (a new buffer generation)
+    /// is preferred over compacting onto those pending holes. Compaction runs only when growth
+    /// would exceed `max_bytes`.
     fn allocate_offset(
         &mut self,
         size: u64,
         key: &MaterialUniformCacheKey,
     ) -> Result<u64, EmbeddedMaterialBindError> {
+        self.promote_retired();
         if let Some(offset) = self.take_free(size) {
             return Ok(offset);
         }
@@ -275,14 +368,21 @@ impl MaterialUniformArenaAllocator {
         {
             return Ok(offset);
         }
+        let needed = self.bump_end(size)?;
+        if needed <= self.max_bytes {
+            self.ensure_capacity(needed)?;
+            return self.try_bump(size)?.ok_or_else(|| {
+                EmbeddedMaterialBindError::from(
+                    "material uniform arena offset overflow".to_string(),
+                )
+            });
+        }
         if let Some(packed) = self.try_compact_for_new(size) {
             return Ok(packed);
         }
-        let needed = self.bump_end(size)?;
-        self.ensure_capacity(needed)?;
-        self.try_bump(size)?.ok_or_else(|| {
-            EmbeddedMaterialBindError::from("material uniform arena offset overflow".to_string())
-        })
+        Err(EmbeddedMaterialBindError::from(
+            "material uniform arena offset overflow".to_string(),
+        ))
     }
 
     fn try_bump(&mut self, size: u64) -> Result<Option<u64>, EmbeddedMaterialBindError> {
@@ -310,8 +410,11 @@ impl MaterialUniformArenaAllocator {
         self.slots.len() == self.slots.cap().get() && !self.slots.contains(key)
     }
 
-    /// Pops the LRU slot. Returns its offset when `size` matches so the caller can reuse it
-    /// without putting that range back on the free list.
+    /// Pops the LRU slot and parks its range on the pending list.
+    ///
+    /// The popped offset is not returned. A draw recorded earlier in this frame may already
+    /// hold it as `dynamic_offset`, and `write_buffer` for the new occupant would land before
+    /// that draw.
     fn reclaim_lru_for_insert(
         &mut self,
         size: u64,
@@ -321,10 +424,7 @@ impl MaterialUniformArenaAllocator {
         };
         let _ = evicted_key;
         self.note_slot_evictions(1);
-        if evicted_slot.size == size {
-            return Ok(Some(evicted_slot.offset));
-        }
-        self.release_slot(evicted_slot);
+        self.retire_slot(evicted_slot);
         if let Some(offset) = self.take_free(size) {
             return Ok(Some(offset));
         }
@@ -336,14 +436,48 @@ impl MaterialUniformArenaAllocator {
         Some(self.free.swap_remove(index).offset)
     }
 
-    fn release_slot(&mut self, slot: MaterialUniformSlot) {
+    fn retire_slot(&mut self, slot: MaterialUniformSlot) {
         if slot.size == 0 {
             return;
         }
-        self.free.push(FreeSpan {
+        self.pending.push(PendingSpan {
             offset: slot.offset,
             size: slot.size,
+            frame: self.recording_frame,
         });
+    }
+
+    /// Moves pending ranges onto the free list once their recording frame has submitted.
+    ///
+    /// A `frame` of 0 (retired before any `begin_frame`) stays pending until some later
+    /// submission completes, then becomes reusable. It is not reusable in the frame that
+    /// produced it, because `completed_frame` is still 0.
+    fn promote_retired(&mut self) {
+        if self.completed_frame == 0 {
+            return;
+        }
+        let mut index = 0;
+        while index < self.pending.len() {
+            let frame = self.pending[index].frame;
+            let retired = frame == 0 || frame <= self.completed_frame;
+            if retired {
+                let span = self.pending.swap_remove(index);
+                self.free.push(FreeSpan {
+                    offset: span.offset,
+                    size: span.size,
+                });
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    fn span_overlaps_pending(&self, offset: u64, size: u64) -> bool {
+        let end = offset.saturating_add(size);
+        self.pending.iter().any(|span| {
+            let span_end = span.offset.saturating_add(span.size);
+            offset < span_end && span.offset < end
+        })
     }
 
     /// Repacks live slots from offset 0 and reserves `size` bytes after them.
@@ -377,6 +511,7 @@ impl MaterialUniformArenaAllocator {
         if new_end > self.capacity {
             return None;
         }
+        let overlaps_pending = self.span_overlaps_pending(new_offset, size);
         for (key, offset) in packed {
             if let Some(slot) = self.slots.peek_mut(&key) {
                 slot.offset = offset;
@@ -384,7 +519,10 @@ impl MaterialUniformArenaAllocator {
         }
         self.free.clear();
         self.cursor = new_end;
-        if moved {
+        if moved || overlaps_pending {
+            // A moved live slot can sit on a pending hole. Drop those spans and replace the
+            // GPU buffer so in-flight draws keep the previous allocation.
+            self.pending.clear();
             self.generation = self.generation.wrapping_add(1);
         }
         Some(new_offset)
@@ -408,6 +546,8 @@ impl MaterialUniformArenaAllocator {
         }
         let grown = align_up(self.capacity.saturating_mul(2).max(needed), self.alignment);
         self.capacity = grown.min(self.max_bytes).max(needed);
+        // Pending holes are still unoccupied. In-flight draws reference the buffer this
+        // generation bump replaces, so the holes stay pending instead of being cleared.
         self.generation = self.generation.wrapping_add(1);
         Ok(())
     }
@@ -418,12 +558,17 @@ pub(super) struct MaterialUniformArena {
     device: Arc<wgpu::Device>,
     allocator: MaterialUniformArenaAllocator,
     buffer: Arc<wgpu::Buffer>,
+    retire_clock: Arc<UniformArenaRetireClock>,
     /// Reused CPU bytes for the next dirty material on this shard.
     pack_scratch: Vec<u8>,
 }
 
 impl MaterialUniformArena {
-    pub(super) fn new(device: Arc<wgpu::Device>, limits: Arc<crate::gpu::GpuLimits>) -> Self {
+    pub(super) fn new(
+        device: Arc<wgpu::Device>,
+        limits: Arc<crate::gpu::GpuLimits>,
+        retire_clock: Arc<UniformArenaRetireClock>,
+    ) -> Self {
         let alignment = u64::from(limits.min_uniform_buffer_offset_alignment()).max(1);
         let max_bytes = limits.max_buffer_size().min(u64::from(u32::MAX));
         let initial = align_up(
@@ -440,8 +585,16 @@ impl MaterialUniformArena {
             device,
             allocator: MaterialUniformArenaAllocator::new(initial, max_bytes, alignment),
             buffer,
+            retire_clock,
             pack_scratch: Vec::new(),
         }
+    }
+
+    fn sync_retire_clock(&mut self) {
+        self.allocator.observe_frames(
+            self.retire_clock.recording_frame(),
+            self.retire_clock.completed_frame(),
+        );
     }
 
     fn resolve_binding(
@@ -451,6 +604,7 @@ impl MaterialUniformArena {
         mutation_gen: u64,
         texture_state_sig: u64,
     ) -> Result<(MaterialUniformArenaSlotBinding, bool), EmbeddedMaterialBindError> {
+        self.sync_retire_clock();
         let previous_generation = self.allocator.generation();
         let resolved = self
             .allocator
@@ -503,11 +657,13 @@ impl MaterialUniformArena {
         material_ids: &HashSet<i32>,
         property_block_ids: &HashSet<i32>,
     ) -> usize {
+        self.sync_retire_clock();
         self.allocator
             .purge_material_assets(material_ids, property_block_ids)
     }
 
     pub(super) fn evict_stem(&mut self, stem_hash: u64) -> usize {
+        self.sync_retire_clock();
         self.allocator.evict_stem(stem_hash)
     }
 
@@ -516,6 +672,7 @@ impl MaterialUniformArena {
         stem_hash: u64,
         shader_source_generation: u64,
     ) -> usize {
+        self.sync_retire_clock();
         self.allocator
             .evict_stem_generation(stem_hash, shader_source_generation)
     }
@@ -567,6 +724,30 @@ pub(super) struct EmbeddedUniformArenaRequest<'a> {
 }
 
 use super::EmbeddedMaterialBindResources;
+
+impl EmbeddedMaterialBindResources {
+    /// Opens the uniform-arena recording frame. Call once before graph recording.
+    pub(crate) fn begin_uniform_arena_frame(&self) {
+        self.uniform_retire_clock.begin_frame();
+    }
+
+    /// Callback for `Queue::on_submitted_work_done`. Only records the open frame id.
+    ///
+    /// Pending ranges are promoted later on the recording thread. Doing wgpu work inside
+    /// this callback can deadlock against `queue.write_buffer`.
+    pub(crate) fn uniform_arena_submission_callback(
+        &self,
+    ) -> Option<Box<dyn FnOnce() + Send + 'static>> {
+        let frame = self.uniform_retire_clock.open_frame();
+        if frame == 0 {
+            return None;
+        }
+        let clock = Arc::clone(&self.uniform_retire_clock);
+        Some(Box::new(move || {
+            clock.mark_completed(frame);
+        }))
+    }
+}
 
 impl EmbeddedMaterialBindResources {
     /// Shared dynamic uniform arena slot for embedded `@group(1)` material constants.
@@ -760,6 +941,8 @@ impl CpuMaterialUniformArena {
             renderer_property_block_id: None,
             texture_2d_asset_id,
             shader_variant_bits: None,
+            shader_source_generation: 0,
+            texture_residency_generation: 0,
         };
         let resolved = self.allocator.resolve_slot(
             key,
@@ -979,55 +1162,34 @@ mod tests {
     }
 
     #[test]
-    fn evict_then_insert_reuses_offsets_without_growing() {
-        let live = 4usize;
-        let mut allocator = MaterialUniformArenaAllocator::with_slot_capacity(
-            2048,
-            8192,
-            256,
-            nonzero_slots(live * 2),
-        );
+    fn evicted_offset_not_reused_until_frame_retires() {
+        let mut allocator =
+            MaterialUniformArenaAllocator::with_slot_capacity(1024, 8192, 256, nonzero_slots(4));
         let size = NonZeroU64::new(80).unwrap();
-        let mut freed = Vec::new();
-        for id in 0..live {
-            freed.push(
-                allocator
-                    .resolve_slot(key(i32::try_from(id).unwrap_or(i32::MAX)), size, 0, 0)
-                    .unwrap()
-                    .offset,
-            );
+        allocator.begin_frame();
+        let first = allocator.resolve_slot(key(1), size, 0, 0).unwrap();
+        assert_eq!(first.offset, 0);
+        for id in 2..=4 {
+            allocator.resolve_slot(key(id), size, 0, 0).unwrap();
         }
-        for id in live..live * 2 {
-            allocator
-                .resolve_slot(key(i32::try_from(id).unwrap_or(i32::MAX)), size, 0, 0)
-                .unwrap();
-        }
+        assert_eq!(allocator.capacity(), 1024);
+        assert_eq!(allocator.generation(), 0);
+
+        // The table is full and the bump cursor is at capacity, so the insert reclaims the LRU
+        // offset. That offset stays pending until this frame's submit completes.
+        let same_frame = allocator.resolve_slot(key(5), size, 0, 0).unwrap();
+        assert_ne!(same_frame.offset, first.offset);
+        assert!(!allocator.slots.contains(&key(1)));
+        assert!(allocator.capacity() > 1024);
+
         let capacity = allocator.capacity();
         let generation = allocator.generation();
-        let mut materials = HashSet::new();
-        for id in 0..live {
-            materials.insert(i32::try_from(id).unwrap_or(i32::MAX));
-        }
-        assert_eq!(
-            allocator.purge_material_assets(&materials, &HashSet::new()),
-            live
-        );
-
-        let mut reused = Vec::new();
-        for id in 100..100 + live {
-            reused.push(
-                allocator
-                    .resolve_slot(key(i32::try_from(id).unwrap_or(i32::MAX)), size, 0, 0)
-                    .unwrap()
-                    .offset,
-            );
-        }
-        freed.sort_unstable();
-        reused.sort_unstable();
-        assert_eq!(reused, freed);
+        allocator.retire_submitted_frame();
+        allocator.begin_frame();
+        let reused = allocator.resolve_slot(key(6), size, 0, 0).unwrap();
+        assert_eq!(reused.offset, first.offset);
         assert_eq!(allocator.capacity(), capacity);
         assert_eq!(allocator.generation(), generation);
-        assert_eq!(allocator.slot_count(), live * 2);
     }
 
     #[test]
@@ -1035,15 +1197,28 @@ mod tests {
         let mut allocator =
             MaterialUniformArenaAllocator::with_slot_capacity(1024, 65_536, 256, nonzero_slots(4));
         let size = NonZeroU64::new(64).unwrap();
-        let generation = allocator.generation();
+        let mut settled_capacity = 0;
+        let mut settled_generation = 0;
 
-        for id in 0..128 {
-            allocator.resolve_slot(key(id), size, 0, 0).unwrap();
+        for frame in 0..32u32 {
+            if frame > 0 {
+                allocator.retire_submitted_frame();
+            }
+            allocator.begin_frame();
+            for slot in 0..4u32 {
+                let id = i32::try_from(frame * 4 + slot).unwrap_or(i32::MAX);
+                allocator.resolve_slot(key(id), size, 0, 0).unwrap();
+            }
+            if frame == 1 {
+                settled_capacity = allocator.capacity();
+                settled_generation = allocator.generation();
+            }
         }
 
         assert_eq!(allocator.slot_count(), 4);
-        assert_eq!(allocator.capacity(), 1024);
-        assert_eq!(allocator.generation(), generation);
+        assert!(settled_capacity <= 2048);
+        assert_eq!(allocator.capacity(), settled_capacity);
+        assert_eq!(allocator.generation(), settled_generation);
     }
 
     #[test]

@@ -49,7 +49,7 @@ use cache::{
 use texture_signature::compute_uniform_texture_state_signature;
 use uniform::{
     EmbeddedUniformArenaRequest, MaterialUniformArena, MaterialUniformArenaSlotBinding,
-    MaterialUniformCacheKey,
+    MaterialUniformCacheKey, UniformArenaRetireClock,
 };
 use white_texture::{
     PlaceholderTexture, create_black, create_checkerboard_2d, create_flat_normal, create_gray,
@@ -236,6 +236,9 @@ pub struct EmbeddedMaterialBindResources {
     /// Per-shard growth bumps that shard's `buffer_generation`; the bind group cache key already
     /// includes the slot's `buffer_generation`, so per-shard generations are self-consistent.
     uniform_arena_shards: Box<[Mutex<MaterialUniformArena>]>,
+    /// Frame clock shared by every shard. Evicted offsets stay pending until the frame that
+    /// recorded them has completed `Queue::submit`.
+    uniform_retire_clock: Arc<UniformArenaRetireClock>,
     /// Deterministic per-process hasher routing a [`MaterialUniformCacheKey`] to its shard.
     uniform_arena_hasher: RandomState,
     /// Sharded LRU caches for `@group(1)` bind groups and samplers.
@@ -279,6 +282,7 @@ impl EmbeddedMaterialBindResources {
         let red_cube = create_red(device.as_ref(), TextureBindKind::Cube);
 
         let default_sampler = Arc::new(default_embedded_sampler(device.as_ref()));
+        let uniform_retire_clock = Arc::new(UniformArenaRetireClock::new());
 
         Ok(Self {
             device: device.clone(),
@@ -304,8 +308,15 @@ impl EmbeddedMaterialBindResources {
             property_registry,
             stem_cache: Mutex::new(HashMap::new()),
             uniform_arena_shards: (0..EMBEDDED_CACHE_SHARDS)
-                .map(|_| Mutex::new(MaterialUniformArena::new(device.clone(), limits.clone())))
+                .map(|_| {
+                    Mutex::new(MaterialUniformArena::new(
+                        device.clone(),
+                        limits.clone(),
+                        Arc::clone(&uniform_retire_clock),
+                    ))
+                })
                 .collect(),
+            uniform_retire_clock,
             uniform_arena_hasher: RandomState::new(),
             bind_cache: ShardedLru::new(max_cached_embedded_bind_groups(), EMBEDDED_CACHE_SHARDS),
             bind_cache_stats: AtomicCacheCounters::default(),
