@@ -19,17 +19,44 @@ Tag releases are draft GitHub releases created by `.github/workflows/release.yml
    ```
 
    A `-` in the tag (for example `vX.Y.Z-rc.1`) marks the release as a prerelease. `make_latest` stays false. The workflow leaves the release as a draft.
-7. Check the draft release. It should contain one zip per platform, `RenderideMod.dll`, and `SHA256SUMS`. Download the assets and verify them:
+7. Check the draft release. Assets are one zip per platform and `SHA256SUMS`. Download them and verify:
 
    ```bash
    sha256sum -c SHA256SUMS
    gh attestation verify renderide-linux-x86_64-vX.Y.Z.zip --repo DoubleStyxx/Renderide
-   gh attestation verify RenderideMod.dll --repo DoubleStyxx/Renderide
    gh attestation verify SHA256SUMS --repo DoubleStyxx/Renderide
    ```
 
-   `RenderideMod.dll` is built only when `FrooxEngine.dll` and `Renderite.Shared.dll` are on the runner. Those assemblies ship with Resonite and are not in this repository. The job fails closed instead of uploading a stand-in. Put both DLLs in the directory named by the `RESONITE_REF_DIR` repository variable, or in `RenderideMod/Resonite/`, before tagging if the draft must contain the mod.
 8. A person publishes the draft from the GitHub release page. The workflow does not publish it.
+
+## Build RenderideMod.dll locally (CachyOS)
+
+Build `RenderideMod.dll` on the maintainer Linux PC against a local Resonite install. The draft release assets are the platform zips and `SHA256SUMS`.
+
+Install the .NET 10 SDK. `RenderideMod.csproj` targets `net10.0`.
+
+```bash
+sudo pacman -S dotnet-sdk-10.0
+```
+
+`FrooxEngine.dll` and `Renderite.Shared.dll` are HintPath references `$(ResonitePath)FrooxEngine.dll` and `$(ResonitePath)Renderite.Shared.dll`. `ResonitePath` is an MSBuild property. Pass it as `-p:ResonitePath=`, or export the `ResonitePath` environment variable (MSBuild imports environment variables as properties before it evaluates the project). The value needs a trailing slash. When `ResonitePath` is empty, the csproj sets it to `RenderideMod/Resonite/`, then replaces that when one of these directories exists:
+
+- `C:\Program Files (x86)\Steam\steamapps\common\Resonite\`
+- `$HOME/.steam/steam/steamapps/common/Resonite/`
+
+A default CachyOS Steam install matches the `$HOME/.steam/steam/...` path:
+
+```bash
+dotnet build RenderideMod/RenderideMod.csproj -c Release
+```
+
+For a Resonite install on another path:
+
+```bash
+dotnet build RenderideMod/RenderideMod.csproj -c Release -p:ResonitePath="$HOME/Games/Resonite/"
+```
+
+Output path: `RenderideMod/bin/Release/net10.0/RenderideMod.dll`. `CopyToMods` defaults to true, so the build copies that DLL to `$(ResonitePath)rml_mods`. If the copy misses, put `RenderideMod.dll` in `rml_mods` under the Resonite install. Launch with the README argument `-LoadAssembly Libraries/ResoniteModLoader.dll`.
 
 ## Linux install (CachyOS, NVIDIA RTX 50-series)
 
@@ -48,7 +75,7 @@ unzip renderide-linux-x86_64-vX.Y.Z.zip
 
 The zip contains `renderide`, `renderide-renderer`, `shaders`, and `xr`. Linux uses the system OpenXR loader.
 
-Place `RenderideMod.dll` in the game mods directory. The README starts mods by passing `-LoadAssembly Libraries/ResoniteModLoader.dll` to the launcher. ResoniteModLoader reads `rml_mods` under the Resonite install (the folder `RenderideMod.csproj` copies into on a local build):
+Place the locally built `RenderideMod.dll` in `rml_mods` under the Resonite install (see above). The README starts mods by passing `-LoadAssembly Libraries/ResoniteModLoader.dll` to the launcher:
 
 ```bash
 ./renderide -LoadAssembly Libraries/ResoniteModLoader.dll
