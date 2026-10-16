@@ -15,6 +15,11 @@ namespace RenderideMod;
 /// <c>Unlit</c>) to replace that shader for assets the host has uploaded or uploads later.
 /// Pass an explicit asset id when the material should follow one shader asset only.
 /// </para>
+/// <para>
+/// Floats, float4 colors, and textures already travel on the host material update batch,
+/// keyed by property name (<c>_Color</c>, <c>_MainTex</c>, <c>_Speed</c>). Property blocks
+/// use that same batch. WGSL <c>@group(1)</c> members with those names read the values.
+/// </para>
 /// </remarks>
 public static class CustomShaders
 {
@@ -26,6 +31,16 @@ public static class CustomShaders
     /// material into a flat <c>_Color</c> fill.
     /// </remarks>
     public static string ExampleSolidWgsl => ReadEmbeddedShader("example_solid.wgsl");
+
+    /// <summary>
+    /// Text of <c>Shaders/example_rainbow.wgsl</c>, embedded in the mod assembly.
+    /// </summary>
+    /// <remarks>
+    /// Samples <c>_MainTex</c>, multiplies by <c>_Color</c>, and cycles hue with <c>_Speed</c>
+    /// (default 0.2). FrooxEngine already uploads those values on the material batch; this mod
+    /// does not open a second property channel.
+    /// </remarks>
+    public static string ExampleRainbowWgsl => ReadEmbeddedShader("example_rainbow.wgsl");
 
     /// <summary>Reads an embedded WGSL file shipped under <c>Shaders/</c>.</summary>
     /// <param name="fileName">File name, for example <c>example_solid.wgsl</c>.</param>

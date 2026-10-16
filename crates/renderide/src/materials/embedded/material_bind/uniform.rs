@@ -590,6 +590,21 @@ mod tests {
     }
 
     #[test]
+    fn arena_allocator_property_change_rewrites_slot_without_new_buffer() {
+        let mut allocator = MaterialUniformArenaAllocator::new(1024, 4096, 256);
+        let size = NonZeroU64::new(64).unwrap();
+        let first = allocator.resolve_slot(key(1), size, 1, 0).unwrap();
+        allocator.mark_written(&key(1), first.buffer_generation, 1, 0);
+
+        let updated = allocator.resolve_slot(key(1), size, 2, 0).unwrap();
+
+        assert!(updated.needs_write);
+        assert_eq!(updated.offset, first.offset);
+        assert_eq!(updated.buffer_generation, first.buffer_generation);
+        assert_eq!(allocator.generation(), first.buffer_generation);
+    }
+
+    #[test]
     fn arena_allocator_reuses_stable_slot() {
         let mut allocator = MaterialUniformArenaAllocator::new(1024, 4096, 256);
         let size = NonZeroU64::new(80).unwrap();

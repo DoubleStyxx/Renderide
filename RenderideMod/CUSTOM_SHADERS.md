@@ -16,6 +16,8 @@ CustomShaders.Install("Unlit", CustomShaders.ExampleSolidWgsl);
 
 `ExampleSolidWgsl` is `Shaders/example_solid.wgsl`, embedded in RenderideMod.dll. Your own file works the same way: `CustomShaders.Install("Unlit", File.ReadAllText(path))`.
 
+`ExampleRainbowWgsl` is `Shaders/example_rainbow.wgsl`. It tints with `_Color`, samples `_MainTex`, and cycles hue with `_Speed` (default 0.2).
+
 `Unlit` is the Unity shader filename without `.shader`. The renderer normalizes it the same way it normalizes AssetBundle names (`Unlit.shader` and `unlit` are the same key; spaces become dashes). Materials whose shader asset resolves to that name start drawing with the custom program, including shaders the host uploads after the install. `CustomShaders.Remove("Unlit")` restores the packaged Unlit stem.
 
 `Shaders/example_solid.wgsl` is a working program. It writes the host `_Color` property, so an existing Unlit material picks the color up with no extra properties. Copy that file and edit the fragment entry.
@@ -59,9 +61,19 @@ The source uses the same directives as `crates/renderide/shaders/materials`:
 
 - `#import renderide::frame::globals`, `renderide::draw::per_draw`, and `renderide::mesh::vertex`.
 - Call `rg::retain_globals_additive` from the fragment shader so the fixed frame bind group stays intact.
-- Declare `@group(1) @binding(0)` for material uniforms. Property names such as `_Color` match the host material. Add `//#mat_default _Color vec4 1 1 1 1` for the fallback value.
+- Declare `@group(1) @binding(0)` for material uniforms. Property names such as `_Color`, `_MainTex`, and `_Speed` match the host material. Add `//#mat_default _Color vec4 1 1 1 1` for the fallback value.
+- Put each `texture_2d` at `@group(1)` and its sampler on the next binding (`_MainTex` then `_MainTex_sampler`).
+- Supported uniform members are `f32`, `vec2<f32>`, `vec3<f32>`, `vec4<f32>`, `u32`, `array<f32, N>`, and `array<vec4<f32>, N>`. `//#mat_default` is `float` for `f32` and `vec4` for `vec4<f32>`.
 - Put `//#pass type=forward` immediately above the `@fragment` entry. The vertex entry defaults to `vs_main`.
 - Wrap `@builtin(view_index)` in `#ifdef MULTIVIEW`. The renderer composes a desktop target and a stereo target.
+
+## Material properties
+
+FrooxEngine already uploads the material property block on `MaterialsUpdateBatch`: `SetFloat`, `SetFloat4` (colors and vectors), `SetFloatArray`, `SetFloat4Array`, and `SetTexture`, keyed by property name. Material property blocks ride the same batch and override the material values. RenderideMod does not add a command for that block.
+
+The renderer reflects `@group(1)` with naga, maps each uniform member and texture name to those property names, and packs a per-material uniform buffer in WGSL uniform (std140) layout. A later property write updates that buffer, or the texture bind group, without rebuilding the pipeline. The bind-group cache and the stem layout stay keyed by `shader_source_generation`, so a new shader source still misses the old layout.
+
+An unset float or vector uses its `//#mat_default`, then zero. An unset texture binds white. A reflected type the host cannot supply (`i32`, `mat4x4`, a default whose kind does not match the field, a texture without its sampler) fails the install. Asset ids `>= 0` get `ShaderUploadResult`. Carrier ids below zero still get no ack. A rejected replace leaves the previous program in place.
 
 A failed compile is logged (`custom shader install failed`) and the shader asset keeps its packaged route. The next successful `Install` for that key replaces it.
 

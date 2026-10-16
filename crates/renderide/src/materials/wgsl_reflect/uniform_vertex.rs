@@ -118,28 +118,56 @@ pub(super) fn reflect_vs_main_vertex_inputs(module: &Module) -> Vec<ReflectedVer
     inputs
 }
 
-fn uniform_member_kind(
-    module: &Module,
-    ty: naga::Handle<naga::Type>,
-) -> ReflectedUniformScalarKind {
+struct UniformMemberLayout {
+    kind: ReflectedUniformScalarKind,
+    array_stride: u32,
+}
+
+fn uniform_member_layout(module: &Module, ty: naga::Handle<naga::Type>) -> UniformMemberLayout {
     match &module.types[ty].inner {
-        TypeInner::Scalar(sc) => match sc.kind {
-            naga::ScalarKind::Float => ReflectedUniformScalarKind::F32,
-            naga::ScalarKind::Uint => ReflectedUniformScalarKind::U32,
-            naga::ScalarKind::Sint => ReflectedUniformScalarKind::Unsupported,
-            naga::ScalarKind::Bool => ReflectedUniformScalarKind::Unsupported,
-            naga::ScalarKind::AbstractInt | naga::ScalarKind::AbstractFloat => {
-                ReflectedUniformScalarKind::Unsupported
-            }
+        TypeInner::Scalar(sc) => UniformMemberLayout {
+            kind: match sc.kind {
+                naga::ScalarKind::Float => ReflectedUniformScalarKind::F32,
+                naga::ScalarKind::Uint => ReflectedUniformScalarKind::U32,
+                naga::ScalarKind::Sint
+                | naga::ScalarKind::Bool
+                | naga::ScalarKind::AbstractInt
+                | naga::ScalarKind::AbstractFloat => ReflectedUniformScalarKind::Unsupported,
+            },
+            array_stride: 0,
         },
-        TypeInner::Vector { size, scalar } => {
-            if *size == VectorSize::Quad && scalar.kind == naga::ScalarKind::Float {
-                ReflectedUniformScalarKind::Vec4
-            } else {
-                ReflectedUniformScalarKind::Unsupported
+        TypeInner::Vector { size, scalar } if scalar.kind == naga::ScalarKind::Float => {
+            let kind = match size {
+                VectorSize::Bi => ReflectedUniformScalarKind::Vec2,
+                VectorSize::Tri => ReflectedUniformScalarKind::Vec3,
+                VectorSize::Quad => ReflectedUniformScalarKind::Vec4,
+            };
+            UniformMemberLayout {
+                kind,
+                array_stride: 0,
             }
         }
-        _ => ReflectedUniformScalarKind::Unsupported,
+        TypeInner::Array { base, size, stride } => {
+            let element = uniform_member_layout(module, *base);
+            let constant = matches!(size, naga::ArraySize::Constant(_));
+            let kind = if constant {
+                match element.kind {
+                    ReflectedUniformScalarKind::F32 => ReflectedUniformScalarKind::F32Array,
+                    ReflectedUniformScalarKind::Vec4 => ReflectedUniformScalarKind::Vec4Array,
+                    _ => ReflectedUniformScalarKind::Unsupported,
+                }
+            } else {
+                ReflectedUniformScalarKind::Unsupported
+            };
+            UniformMemberLayout {
+                kind,
+                array_stride: *stride,
+            }
+        }
+        _ => UniformMemberLayout {
+            kind: ReflectedUniformScalarKind::Unsupported,
+            array_stride: 0,
+        },
     }
 }
 
@@ -169,13 +197,14 @@ pub(super) fn reflect_first_group1_uniform_struct(
                 continue;
             };
             let size = layouter[m.ty].size;
-            let kind = uniform_member_kind(module, m.ty);
+            let layout = uniform_member_layout(module, m.ty);
             fields.insert(
                 name.to_string(),
                 ReflectedUniformField {
                     offset: m.offset,
                     size,
-                    kind,
+                    kind: layout.kind,
+                    array_stride: layout.array_stride,
                 },
             );
         }

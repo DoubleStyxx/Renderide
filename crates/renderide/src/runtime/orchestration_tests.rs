@@ -817,6 +817,106 @@ fn custom_shader_rejected_payload_registers_null_route_and_sends_result() {
     assert!(results[0].instance_changed);
 }
 
+const CUSTOM_SHADER_UNSUPPORTED_WGSL: &str = r#"
+#import renderide::frame::globals as rg
+#import renderide::draw::per_draw as pd
+#import renderide::mesh::vertex as mv
+
+struct Material {
+    _Bad: i32,
+}
+
+@group(1) @binding(0) var<uniform> mat: Material;
+
+struct VertexOutput {
+    @builtin(position) clip_pos: vec4<f32>,
+}
+
+@vertex
+fn vs_main(
+    @builtin(instance_index) instance_index: u32,
+#ifdef MULTIVIEW
+    @builtin(view_index) view_idx: u32,
+#endif
+    @location(0) pos: vec4<f32>,
+    @location(1) _n: vec4<f32>,
+) -> VertexOutput {
+    let d = pd::get_draw(instance_index);
+    let world_p = mv::world_position(d, pos);
+#ifdef MULTIVIEW
+    let vp = mv::select_view_proj(d, view_idx);
+#else
+    let vp = mv::select_view_proj(d, 0u);
+#endif
+    var out: VertexOutput;
+    out.clip_pos = vp * world_p;
+    return out;
+}
+
+//#pass type=forward
+@fragment
+fn fs_main(_in: VertexOutput) -> @location(0) vec4<f32> {
+    return rg::retain_globals_additive(vec4<f32>(f32(mat._Bad), 0.0, 0.0, 1.0));
+}
+"#;
+
+#[test]
+fn custom_shader_unsupported_type_negative_asset_id_sends_no_result() {
+    let _guard = RemoveCustomShader::prepare("custom-bad-neg");
+    let (mut host, mut rt) = test_runtime_connected_ipc();
+    assert!(rt.test_shared_memory_available());
+    let _ = take_shader_upload_results(&mut host);
+
+    rt.handle_ipc_command(RendererCommand::ShaderUpload(ShaderUpload {
+        asset_id: -3,
+        file: Some(format_custom_shader_payload(
+            "custom-bad-neg",
+            CUSTOM_SHADER_UNSUPPORTED_WGSL,
+        )),
+    }));
+    drain_completed_shader_uploads(&mut rt);
+
+    assert_no_shader_route(&rt, -3);
+    assert!(take_shader_upload_results(&mut host).is_empty());
+    assert!(
+        crate::materials::custom_shader::default_stem_for_asset_name("custom-bad-neg").is_none()
+    );
+}
+
+#[test]
+fn custom_shader_unsupported_type_sends_upload_result() {
+    let _guard = RemoveCustomShader::prepare("custom-bad-pos");
+    let (mut host, mut rt) = test_runtime_connected_ipc();
+    assert!(rt.test_shared_memory_available());
+    let _ = take_shader_upload_results(&mut host);
+    let asset_id = 11;
+
+    rt.handle_ipc_command(RendererCommand::ShaderUpload(ShaderUpload {
+        asset_id,
+        file: Some(format_custom_shader_payload(
+            "custom-bad-pos",
+            CUSTOM_SHADER_UNSUPPORTED_WGSL,
+        )),
+    }));
+    drain_completed_shader_uploads(&mut rt);
+
+    let (pipeline, name, bits) = rt
+        .backend
+        .materials
+        .pending_shader_route_for_tests(asset_id)
+        .expect("null route");
+    assert_eq!(pipeline, RasterPipelineKind::Null);
+    assert_eq!(name, None);
+    assert_eq!(bits, None);
+    let results = take_shader_upload_results(&mut host);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].asset_id, asset_id);
+    assert!(results[0].instance_changed);
+    assert!(
+        crate::materials::custom_shader::default_stem_for_asset_name("custom-bad-pos").is_none()
+    );
+}
+
 #[test]
 fn custom_shader_negative_asset_id_installs_and_retargets_named_routes() {
     let key = "custom-neg-retarget";

@@ -9,8 +9,16 @@ use thiserror::Error;
 pub enum ReflectedUniformScalarKind {
     /// Single `f32`.
     F32,
+    /// `vec2<f32>`.
+    Vec2,
+    /// `vec3<f32>`. Uniform address space aligns this to 16 bytes and stores 12.
+    Vec3,
     /// `vec4<f32>` (or equivalent 16-byte float vector).
     Vec4,
+    /// `array<f32, N>` with the uniform-address-space element stride in [`ReflectedUniformField::array_stride`].
+    F32Array,
+    /// `array<vec4<f32>, N>` with the uniform-address-space element stride in [`ReflectedUniformField::array_stride`].
+    Vec4Array,
     /// Single `u32` (e.g. shader `flags`).
     U32,
     /// Not mapped automatically (padding or unsupported type).
@@ -26,6 +34,10 @@ pub struct ReflectedUniformField {
     pub size: u32,
     /// Host packing strategy for this member.
     pub kind: ReflectedUniformScalarKind,
+    /// Element stride in bytes for array members. `0` for scalars and vectors.
+    ///
+    /// WGSL uniform address space rounds array strides up to a multiple of 16.
+    pub array_stride: u32,
 }
 
 /// Uniform block at `@group(1)` (typically `@binding(0)`) used for material constants.

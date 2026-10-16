@@ -5,6 +5,7 @@
 //! publishes it under a `renderide_custom_<key>` stem so the existing embedded pipeline, bind
 //! group, and draw paths compile it with wgpu.
 
+mod bindings;
 mod compose;
 mod passes;
 
@@ -106,12 +107,14 @@ pub(crate) fn install(key: &str, wgsl: &str) -> Result<InstalledCustomShader, St
 
     let default_wgsl = Arc::<str>::from(composed.default_wgsl);
     let multiview_wgsl = Arc::<str>::from(composed.multiview_wgsl);
+    // Reflect and reject unsupported @group(1) types before swapping the published program,
+    // so a bad replace leaves the previous stem in place.
+    validate_composed_bindings(&default_wgsl, &composed.material_defaults)?;
+    validate_composed_bindings(&multiview_wgsl, &composed.material_defaults)?;
     let default_passes = owned_passes(composed.default_passes);
     let multiview_passes = owned_passes(composed.multiview_passes);
     let material_defaults = owned_material_defaults(composed.material_defaults);
 
-    // Free the previous generation before reflection. A reflect failure drops the
-    // in-progress Arcs and does not put the replaced program back.
     {
         let mut registry = registry().write();
         if registry.targets.remove(&default_stem).is_some() {
@@ -284,6 +287,16 @@ pub(crate) fn resolve_custom_shader_payload(
             rejected: false,
         },
         Err(error) => {
+            if bindings::is_binding_rejection(&error) {
+                logger::error!("custom shader install failed for {}: {error}", payload.key);
+                return ResolvedShaderUpload {
+                    shader_asset_name: None,
+                    shader_variant_bits: None,
+                    pipeline: RasterPipelineKind::Null,
+                    retarget_shader_key: None,
+                    rejected: true,
+                };
+            }
             logger::warn!("custom shader install failed for {}: {error}", payload.key);
             plan_shader_route(Some(payload.key), None, stem_lookup).into()
         }
@@ -355,6 +368,21 @@ pub(crate) fn material_uniform_defaults(stem: &str) -> Option<Arc<[EmbeddedMater
 /// Stems whose reflected `@group(1)` layout and bind groups must be dropped.
 pub(crate) fn take_invalidated_stems() -> Vec<String> {
     std::mem::take(&mut registry().write().invalidated_stems)
+}
+
+fn validate_composed_bindings(
+    wgsl: &str,
+    defaults: &[passes::OwnedMaterialDefault],
+) -> Result<(), String> {
+    let reflected = crate::materials::reflect_raster_material_wgsl(wgsl).map_err(|error| {
+        let text = error.to_string();
+        if text.contains("unsupported") {
+            bindings::binding_rejected(text)
+        } else {
+            text
+        }
+    })?;
+    bindings::validate_custom_material_bindings(&reflected, defaults)
 }
 
 fn owned_passes(passes: Vec<OwnedMaterialPass>) -> Arc<[MaterialPassDesc]> {

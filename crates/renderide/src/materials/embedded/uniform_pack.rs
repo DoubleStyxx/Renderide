@@ -55,22 +55,34 @@ fn write_u32_at(buf: &mut [u8], field: &ReflectedUniformField, v: u32) {
     }
 }
 
-fn write_f32x4_at(buf: &mut [u8], field: &ReflectedUniformField, v: &[f32; 4]) {
+fn write_f32_slice_at(buf: &mut [u8], field: &ReflectedUniformField, values: &[f32]) {
     let off = field.offset as usize;
-    if off + 16 <= buf.len() && field.size >= 16 {
-        for (i, c) in v.iter().enumerate() {
-            let o = off + i * 4;
-            buf[o..o + 4].copy_from_slice(&c.to_le_bytes());
+    let bytes = values.len().saturating_mul(4);
+    if off + bytes <= buf.len() && field.size as usize >= bytes {
+        for (i, value) in values.iter().enumerate() {
+            let component_off = off + i * 4;
+            buf[component_off..component_off + 4].copy_from_slice(&value.to_le_bytes());
         }
     }
+}
+
+fn write_f32x4_at(buf: &mut [u8], field: &ReflectedUniformField, v: &[f32; 4]) {
+    write_f32_slice_at(buf, field, v);
+}
+
+/// Element stride for a reflected uniform array. Non-array fields keep the historical 16-byte stride.
+fn array_element_stride(field: &ReflectedUniformField) -> usize {
+    let stride = field.array_stride as usize;
+    if stride >= 4 { stride } else { 16 }
 }
 
 /// Writes a host `float4[]` material property into a reflected uniform array field.
 fn write_f32x4_array_at(buf: &mut [u8], field: &ReflectedUniformField, values: &[[f32; 4]]) {
     let off = field.offset as usize;
-    let max_values = (field.size as usize) / 16;
+    let stride = array_element_stride(field);
+    let max_values = (field.size as usize) / stride;
     for (i, value) in values.iter().take(max_values).enumerate() {
-        let elem_off = off + i * 16;
+        let elem_off = off + i * stride;
         if elem_off + 16 > buf.len() {
             return;
         }
@@ -84,9 +96,10 @@ fn write_f32x4_array_at(buf: &mut [u8], field: &ReflectedUniformField, values: &
 /// Writes a host `float[]` material property into a reflected uniform scalar array field.
 fn write_f32_array_at(buf: &mut [u8], field: &ReflectedUniformField, values: &[f32]) {
     let off = field.offset as usize;
-    let max_values = (field.size as usize) / 16;
+    let stride = array_element_stride(field);
+    let max_values = (field.size as usize) / stride;
     for (i, value) in values.iter().take(max_values).enumerate() {
-        let elem_off = off + i * 16;
+        let elem_off = off + i * stride;
         if elem_off + 4 > buf.len() {
             return;
         }
@@ -96,9 +109,10 @@ fn write_f32_array_at(buf: &mut [u8], field: &ReflectedUniformField, values: &[f
 
 fn write_srgb_f32x4_array_at(buf: &mut [u8], field: &ReflectedUniformField, values: &[[f32; 4]]) {
     let off = field.offset as usize;
-    let max_values = (field.size as usize) / 16;
+    let stride = array_element_stride(field);
+    let max_values = (field.size as usize) / stride;
     for (i, value) in values.iter().take(max_values).enumerate() {
-        let elem_off = off + i * 16;
+        let elem_off = off + i * stride;
         if elem_off + 16 > buf.len() {
             return;
         }
