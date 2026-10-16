@@ -1,6 +1,9 @@
 //! Integration: roundtrip tests for [`MemoryPacker`] and [`MemoryUnpacker`] wire primitives
 //! (host-compatible layout).
 
+#![forbid(unsafe_code)]
+#![deny(clippy::multiple_unsafe_ops_per_block)]
+
 use renderide_shared::WireDecodeError;
 use renderide_shared::default_entity_pool::DefaultEntityPool;
 use renderide_shared::enum_repr::EnumRepr;

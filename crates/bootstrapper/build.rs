@@ -2,6 +2,10 @@
 //! dependency on Common Controls v6, so `rfd`'s `TaskDialogIndirect` import
 //! resolves at process load time instead of failing with "Entry Point Not
 //! Found in comctl32.dll".
+
+#![forbid(unsafe_code)]
+#![deny(clippy::multiple_unsafe_ops_per_block)]
+
 mod build_support;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

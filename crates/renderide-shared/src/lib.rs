@@ -18,6 +18,14 @@
 //!   ([`ipc::DualQueueIpc`]), the host-side wrapper ([`ipc::HostDualQueueIpc`]), the read-only
 //!   [`ipc::SharedMemoryAccessor`], and its host-side [`ipc::shared_memory::SharedMemoryWriter`]
 //!   counterpart.
+//!
+//! `unsafe` is denied for this crate. Production exceptions are `expect(unsafe_code)`
+//! on the shared-memory platform backends (`ipc::shared_memory` unix/windows and the
+//! host writer backends) and on `packing::memory_unpacker` (Pod bulk copy). New
+//! `unsafe` anywhere else does not compile.
+
+#![deny(unsafe_code)]
+#![deny(clippy::multiple_unsafe_ops_per_block)]
 
 pub mod buffer;
 pub mod ipc;

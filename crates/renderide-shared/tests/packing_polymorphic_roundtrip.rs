@@ -1,6 +1,9 @@
 //! Integration: roundtrip [`MemoryPacker::write_polymorphic_list`] through
 //! [`MemoryUnpacker::read_polymorphic_list`] using a small in-test sum type.
 
+#![forbid(unsafe_code)]
+#![deny(clippy::multiple_unsafe_ops_per_block)]
+
 use renderide_shared::WireDecodeError;
 use renderide_shared::default_entity_pool::DefaultEntityPool;
 use renderide_shared::memory_packer::MemoryPacker;

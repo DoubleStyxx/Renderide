@@ -1,5 +1,10 @@
 //! File-backed `mmap` on Unix (including macOS).
 
+#![expect(
+    unsafe_code,
+    reason = "memmap2 map_mut FFI; cross-process writes are the queue protocol"
+)]
+
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::os::unix::fs::OpenOptionsExt;

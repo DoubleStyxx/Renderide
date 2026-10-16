@@ -1,5 +1,8 @@
 //! Integration tests using only the public `interprocess` API.
 
+#![forbid(unsafe_code)]
+#![deny(clippy::multiple_unsafe_ops_per_block)]
+
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;

@@ -1,5 +1,7 @@
 //! Exercises the bootstrapper build-script cleanup helper under `cargo test`.
 
+#![forbid(unsafe_code)]
+#![deny(clippy::multiple_unsafe_ops_per_block)]
 #![allow(
     clippy::print_stdout,
     reason = "the included build-script helper emits Cargo warnings through println!"

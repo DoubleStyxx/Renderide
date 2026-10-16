@@ -5,6 +5,11 @@
 //! [`crate::layout::MessageHeader::state`] and the shared [`crate::layout::QueueHeader`] atomics;
 //! this type therefore exposes mutating helpers through `&self` while holding a `*mut u8` base.
 
+#![expect(
+    unsafe_code,
+    reason = "raw ring copies and header pointers over the shared mapping"
+)]
+
 use std::sync::atomic::Ordering;
 
 use crate::layout::MessageHeader;
@@ -117,9 +122,12 @@ impl RingView {
         out.reserve(len);
         let segments = WrappedSegments::new(offset, self.capacity, len);
         // SAFETY: `reserve` made `len` bytes of spare capacity available at `out.as_mut_ptr()`.
-        // `copy_from_ring_raw` initializes every one of those bytes before `set_len`.
+        // `copy_from_ring_raw` initializes every one of those bytes.
         unsafe {
             segments.copy_from_ring_raw(self.ptr, out.as_mut_ptr());
+        }
+        // SAFETY: the copy above initialized `len` bytes at the start of `out`.
+        unsafe {
             out.set_len(len);
         }
     }
@@ -178,18 +186,22 @@ impl WrappedSegments {
     unsafe fn copy_from_ring_raw(self, ring_ptr: *mut u8, dst: *mut u8) {
         if self.first > 0 {
             // SAFETY: `new` guarantees `phys + first <= capacity`; the ring region is live and
-            // readable for `capacity` bytes per the `RingView` type invariant. `dst` is valid
-            // for `first` bytes by the caller contract.
+            // readable for `capacity` bytes per the `RingView` type invariant.
+            let src = unsafe { ring_ptr.add(self.phys) };
+            // SAFETY: `src` and `dst` are valid for `first` bytes and do not alias. `dst` is
+            // valid for `first` bytes by the caller contract.
             unsafe {
-                std::ptr::copy_nonoverlapping(ring_ptr.add(self.phys), dst, self.first);
+                std::ptr::copy_nonoverlapping(src, dst, self.first);
             }
         }
         if self.second > 0 {
+            // SAFETY: `dst.add(first)` is in bounds by the caller contract covering
+            // `first + second` bytes.
+            let dst_second = unsafe { dst.add(self.first) };
             // SAFETY: `new` guarantees the wrapped segment begins at the ring base and fits the
-            // caller-constrained logical range. `dst.add(first)` is in bounds by the caller
-            // contract covering `first + second` bytes.
+            // caller-constrained logical range. Source and destination do not alias.
             unsafe {
-                std::ptr::copy_nonoverlapping(ring_ptr, dst.add(self.first), self.second);
+                std::ptr::copy_nonoverlapping(ring_ptr, dst_second, self.second);
             }
         }
     }
@@ -197,17 +209,21 @@ impl WrappedSegments {
     /// Copies `data` into the described bytes at `ring_ptr`.
     fn copy_to_ring(self, ring_ptr: *mut u8, data: &[u8]) {
         if self.first > 0 {
-            // SAFETY: `new` guarantees `phys + first <= capacity`; `data[..first]` and the ring
-            // region do not alias. The single-writer wire protocol guards writes to this slot.
+            // SAFETY: `new` guarantees `phys + first <= capacity`.
+            let dst = unsafe { ring_ptr.add(self.phys) };
+            // SAFETY: `data[..first]` and the ring region do not alias. The single-writer wire
+            // protocol guards writes to this slot.
             unsafe {
-                std::ptr::copy_nonoverlapping(data.as_ptr(), ring_ptr.add(self.phys), self.first);
+                std::ptr::copy_nonoverlapping(data.as_ptr(), dst, self.first);
             }
         }
         if self.second > 0 {
+            // SAFETY: `first + second == data.len()`, so this stays inside `data`.
+            let src = unsafe { data.as_ptr().add(self.first) };
             // SAFETY: `new` guarantees the wrapped segment starts at the ring base; source and
             // destination are distinct allocations under the queue wire protocol.
             unsafe {
-                std::ptr::copy_nonoverlapping(data.as_ptr().add(self.first), ring_ptr, self.second);
+                std::ptr::copy_nonoverlapping(src, ring_ptr, self.second);
             }
         }
     }
@@ -215,10 +231,11 @@ impl WrappedSegments {
     /// Zero-fills the described bytes at `ring_ptr`.
     fn clear_ring(self, ring_ptr: *mut u8) {
         if self.first > 0 {
-            // SAFETY: `new` guarantees `phys + first <= capacity`; the slot is guarded by the
-            // single-reader consumption protocol.
+            // SAFETY: `new` guarantees `phys + first <= capacity`.
+            let dst = unsafe { ring_ptr.add(self.phys) };
+            // SAFETY: the slot is guarded by the single-reader consumption protocol.
             unsafe {
-                std::ptr::write_bytes(ring_ptr.add(self.phys), 0, self.first);
+                std::ptr::write_bytes(dst, 0, self.first);
             }
         }
         if self.second > 0 {

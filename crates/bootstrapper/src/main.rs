@@ -1,5 +1,7 @@
 //! Bootstrapper binary entry point.
 
+#![forbid(unsafe_code)]
+#![deny(clippy::multiple_unsafe_ops_per_block)]
 #![warn(missing_docs)]
 #![cfg_attr(windows, windows_subsystem = "windows")]
 

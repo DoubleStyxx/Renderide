@@ -1,5 +1,8 @@
 //! Release manifest signing helper.
 
+#![forbid(unsafe_code)]
+#![deny(clippy::multiple_unsafe_ops_per_block)]
+
 use std::env;
 use std::fs;
 use std::io::{self, Write};
