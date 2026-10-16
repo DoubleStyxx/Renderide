@@ -425,4 +425,9 @@ impl RenderBackend {
     pub fn retarget_named_shader_routes(&mut self, shader_key: &str) {
         self.materials.retarget_named_shader_routes(shader_key);
     }
+
+    /// Drops bind-group and stem layouts invalidated by custom shader install or remove.
+    pub fn invalidate_custom_shader_layouts(&self) {
+        self.materials.invalidate_custom_shader_layouts();
+    }
 }

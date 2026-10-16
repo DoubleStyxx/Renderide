@@ -380,7 +380,7 @@ pub(crate) fn build_pipeline_from_pass(
                 layout: Some(shared.layout),
                 vertex: wgpu::VertexState {
                     module: shared.module,
-                    entry_point: Some(pass.vertex_entry),
+                    entry_point: Some(pass.vertex_entry.as_ref()),
                     compilation_options: wgpu::PipelineCompilationOptions {
                         constants: shader_specialization_constants.as_slice(),
                         ..Default::default()
@@ -389,7 +389,7 @@ pub(crate) fn build_pipeline_from_pass(
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: shared.module,
-                    entry_point: Some(pass.fragment_entry),
+                    entry_point: Some(pass.fragment_entry.as_ref()),
                     compilation_options: wgpu::PipelineCompilationOptions {
                         constants: shader_specialization_constants.as_slice(),
                         ..Default::default()
@@ -475,7 +475,7 @@ pub(crate) fn create_reflective_raster_mesh_forward_pipeline(
         use_alpha_blending: raster.use_alpha_blending,
         depth_write: raster.depth_write_enabled,
     });
-    let vertex_entries = [pass.vertex_entry];
+    let vertex_entries = [pass.vertex_entry.as_ref()];
     let (layout, vertex_streams) =
         pipeline_layout_and_vertex_streams(device, limits, wgsl_source, label, &vertex_entries)?;
     let wide_low_uv_attributes = wide_low_uv_attributes_for_streams(
@@ -528,7 +528,7 @@ pub(crate) fn create_reflective_raster_mesh_forward_pipelines(
     }
     let vertex_entries = passes
         .iter()
-        .map(|pass| pass.vertex_entry)
+        .map(|pass| pass.vertex_entry.as_ref())
         .collect::<Vec<_>>();
     let (layout, vertex_streams) = pipeline_layout_and_vertex_streams(
         shader.device,

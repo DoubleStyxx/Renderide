@@ -313,7 +313,7 @@ impl SkyboxRenderer {
         let source = embedded_shaders::embedded_target_wgsl(shader_target)?;
         let shader_specialization =
             MaterialShaderSpecializationKey::from_optional_variant_bits(shader_variant_bits)
-                .for_wgsl_source(source);
+                .for_wgsl_source(source.as_ref());
         let key = SkyboxPipelineKey {
             family,
             target,
@@ -328,7 +328,7 @@ impl SkyboxRenderer {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(shader_target),
-            source: wgpu::ShaderSource::Wgsl(source.into()),
+            source: wgpu::ShaderSource::Wgsl(source.as_ref().into()),
         });
         let frame_layout = frame_bind_group_layout(device);
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -345,7 +345,7 @@ impl SkyboxRenderer {
             SkyboxPipelineBuildDesc {
                 label: shader_target,
                 shader: &shader,
-                wgsl_source: source,
+                wgsl_source: source.as_ref(),
                 layout: &layout,
                 vertex_buffer_layouts: family.vertex_buffer_layouts(),
                 target,
@@ -380,7 +380,7 @@ impl SkyboxRenderer {
         let source = embedded_shaders::embedded_target_wgsl(shader_target)?;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(shader_target),
-            source: wgpu::ShaderSource::Wgsl(source.into()),
+            source: wgpu::ShaderSource::Wgsl(source.as_ref().into()),
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some(shader_target),
@@ -392,7 +392,7 @@ impl SkyboxRenderer {
             SkyboxPipelineBuildDesc {
                 label: shader_target,
                 shader: &shader,
-                wgsl_source: source,
+                wgsl_source: source.as_ref(),
                 layout: &layout,
                 vertex_buffer_layouts: &[],
                 target: key,

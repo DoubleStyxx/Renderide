@@ -70,7 +70,7 @@ struct EmbeddedStemMetadataKey {
 }
 
 /// Reflection-derived metadata used by draw collection, pre-warm, and pipeline setup.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct EmbeddedStemMetadata {
     /// Exact mesh-forward vertex streams declared by reflected material pass vertex entries.
     vertex_stream_mask: EmbeddedVertexStreamMask,
@@ -125,7 +125,7 @@ impl EmbeddedStemMetadata {
 /// Hot paths (draw collection, pre-warm, pipeline setup) call [`Self::for_stem`] once and then
 /// query as many flags as they need without re-running naga reflection or hashing through the
 /// metadata cache.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct EmbeddedStemQuery {
     metadata: EmbeddedStemMetadata,
 }
@@ -254,7 +254,7 @@ impl EmbeddedStemQuery {
 
     /// Returns the single forward pass that can be mirrored by the generic depth prepass.
     pub fn depth_prepass_pass(&self) -> Option<MaterialPassDesc> {
-        self.metadata.depth_prepass_pass
+        self.metadata.depth_prepass_pass.clone()
     }
 }
 
@@ -278,13 +278,13 @@ fn embedded_stem_metadata(base_stem: &str, permutation: ShaderPermutation) -> Em
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(metadata) = guard.get(&key) {
-        return *metadata;
+        return metadata.clone();
     }
 
     let passes = embedded_shaders::embedded_target_passes(&composed);
     let default_render_queue = embedded_shaders::embedded_target_default_render_queue(&composed);
     let reflection = embedded_shaders::embedded_target_reflection(&composed);
-    let depth_prepass_pass = depth_prepass_pass_for_target(reflection, passes);
+    let depth_prepass_pass = depth_prepass_pass_for_target(reflection, &passes);
     let snapshot_requirements =
         snapshot_requirements_from_embedded(reflection.snapshot_requirements);
     let metadata = EmbeddedStemMetadata {
@@ -297,7 +297,7 @@ fn embedded_stem_metadata(base_stem: &str, permutation: ShaderPermutation) -> Em
         uses_ui_transparent_fallback: stem_uses_ui_transparent_fallback(base_stem),
         uses_alpha_blending: passes.iter().any(|p| p.blend.is_some()),
         uses_blended_depth_write: passes.iter().any(|p| p.blend.is_some() && p.depth_write),
-        uses_two_sided_transparency: passes_use_two_sided_transparency(passes),
+        uses_two_sided_transparency: passes_use_two_sided_transparency(&passes),
         scene_color_snapshot_mode: scene_color_snapshot_mode_for_stem(
             base_stem,
             snapshot_requirements,
@@ -306,7 +306,7 @@ fn embedded_stem_metadata(base_stem: &str, permutation: ShaderPermutation) -> Em
         uses_renderide_variant_bits: reflection.uses_renderide_variant_bits,
         depth_prepass_pass,
     };
-    guard.insert(key, metadata);
+    guard.insert(key, metadata.clone());
     metadata
 }
 
@@ -354,7 +354,7 @@ fn depth_prepass_pass_for_target(
     };
     (reflection.supports_generic_depth_prepass
         && pass.pass_type == crate::materials::PassType::Forward)
-        .then_some(*pass)
+        .then(|| pass.clone())
 }
 
 fn vertex_stream_mask_from_embedded(

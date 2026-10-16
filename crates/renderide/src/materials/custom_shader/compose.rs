@@ -1,6 +1,5 @@
 //! Composes custom material WGSL through the same naga-oil modules the build script uses.
 
-use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use hashbrown::HashMap;
@@ -208,67 +207,15 @@ fn shader_modules() -> Result<&'static [(String, String)], String> {
 }
 
 fn load_shader_modules() -> Result<Vec<(String, String)>, String> {
-    let mut searched = Vec::new();
-    if let Some(dir) = crate::materials::shader_package::default_package_dir() {
-        let modules = dir.join("modules");
-        searched.push(modules.clone());
-        if modules.is_dir() {
-            return read_module_tree(&modules);
-        }
+    let embedded = crate::embedded_shaders::embedded_shader_modules();
+    if embedded.is_empty() {
+        return Err("renderide shader modules were not embedded in this build".to_string());
     }
-    if let Some(manifest) = option_env!("CARGO_MANIFEST_DIR") {
-        let modules = PathBuf::from(manifest).join("shaders/modules");
-        searched.push(modules.clone());
-        if modules.is_dir() {
-            return read_module_tree(&modules);
-        }
-    }
-    Err(format!(
-        "custom shader modules were not found; searched {searched:?}"
-    ))
-}
-
-fn read_module_tree(modules_dir: &Path) -> Result<Vec<(String, String)>, String> {
-    let mut paths = Vec::new();
-    collect_wgsl_paths(modules_dir, &mut paths)?;
-    paths.sort();
-    let mut modules = Vec::with_capacity(paths.len());
-    for path in paths {
-        let source = std::fs::read_to_string(&path)
-            .map_err(|err| format!("read {}: {err}", path.display()))?;
-        let relative = path.strip_prefix(modules_dir).map_err(|err| {
-            format!(
-                "module {} is outside {}: {err}",
-                path.display(),
-                modules_dir.display()
-            )
-        })?;
-        let file_path = format!(
-            "shaders/modules/{}",
-            relative.to_string_lossy().replace('\\', "/")
-        );
-        modules.push((file_path, source));
-    }
-    if modules.is_empty() {
-        return Err(format!("no WGSL modules under {}", modules_dir.display()));
-    }
+    let modules = embedded
+        .iter()
+        .map(|(path, source)| ((*path).to_string(), (*source).to_string()))
+        .collect::<Vec<_>>();
     topo_sort_modules(&modules)
-}
-
-fn collect_wgsl_paths(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
-    for entry in std::fs::read_dir(dir).map_err(|err| format!("read {}: {err}", dir.display()))? {
-        let entry = entry.map_err(|err| format!("read {} entry: {err}", dir.display()))?;
-        let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .map_err(|err| format!("stat {}: {err}", path.display()))?;
-        if file_type.is_dir() {
-            collect_wgsl_paths(&path, out)?;
-        } else if path.extension().is_some_and(|ext| ext == "wgsl") {
-            out.push(path);
-        }
-    }
-    Ok(())
 }
 
 fn topo_sort_modules(modules: &[(String, String)]) -> Result<Vec<(String, String)>, String> {
@@ -343,7 +290,7 @@ fn parse_import_paths(source: &str) -> Vec<String> {
         let Some(rest) = trimmed.strip_prefix("#import") else {
             continue;
         };
-        let Some(path) = rest.trim().split_whitespace().next() else {
+        let Some(path) = rest.split_whitespace().next() else {
             continue;
         };
         let path = path.trim_end_matches('{');

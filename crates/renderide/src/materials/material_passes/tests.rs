@@ -485,7 +485,7 @@ fn fixed_alpha_blend_pass_matches_unity_fade_state() {
     let pass = forward_alpha_blend_pass("fs_forward_base");
     let blend = pass.blend.expect("fade blend");
 
-    assert_eq!(pass.name, "forward_alpha_blend");
+    assert_eq!(pass.name.as_ref(), "forward_alpha_blend");
     assert_eq!(pass.material_state, MaterialPassState::Static);
     assert!(!pass.depth_write);
     assert_eq!(pass.cull_mode, Some(wgpu::Face::Back));
@@ -509,7 +509,7 @@ fn fixed_alpha_blend_zwrite_pass_matches_unity_fur_state() {
     let pass = forward_alpha_blend_zwrite_pass("fs_forward_fur");
     let blend = pass.blend.expect("fur blend");
 
-    assert_eq!(pass.name, "forward_alpha_blend_zwrite");
+    assert_eq!(pass.name.as_ref(), "forward_alpha_blend_zwrite");
     assert_eq!(pass.material_state, MaterialPassState::Static);
     assert!(pass.depth_write);
     assert_eq!(pass.cull_mode, Some(wgpu::Face::Back));
@@ -533,7 +533,7 @@ fn fixed_premultiplied_transparent_pass_matches_unity_state() {
     let pass = forward_premultiplied_transparent_pass("fs_forward_base");
     let blend = pass.blend.expect("premultiplied blend");
 
-    assert_eq!(pass.name, "forward_premultiplied_transparent");
+    assert_eq!(pass.name.as_ref(), "forward_premultiplied_transparent");
     assert_eq!(pass.material_state, MaterialPassState::Static);
     assert!(!pass.depth_write);
     assert_eq!(pass.cull_mode, Some(wgpu::Face::Back));
@@ -546,7 +546,7 @@ fn fixed_premultiplied_transparent_pass_matches_unity_state() {
 #[test]
 fn stencil_pass_uses_source_color_mask_and_stencil_state() {
     let pass = stencil_pass("fs_main");
-    assert_eq!(pass.name, "stencil");
+    assert_eq!(pass.name.as_ref(), "stencil");
     assert!(!pass.depth_write);
     assert_eq!(pass.cull_mode, Some(wgpu::Face::Front));
     assert_eq!(pass.write_mask, wgpu::ColorWrites::ALL);
@@ -585,7 +585,7 @@ fn filter_pass_preserves_explicit_blend_one_zero_for_alpha_max() {
         materialized_pass_for_blend_mode(&pass, MaterialBlendMode::UnityBlend { src: 1, dst: 0 });
     let blend = materialized.blend.expect("filter blend");
 
-    assert_eq!(pass.name, "forward_filter");
+    assert_eq!(pass.name.as_ref(), "forward_filter");
     assert_eq!(materialized.material_state, MaterialPassState::Filter);
     assert!(materialized.depth_write);
     assert_eq!(materialized.write_mask, wgpu::ColorWrites::ALL);
@@ -601,7 +601,7 @@ fn volume_front_pass_matches_unity_volume_state() {
     let pass = volume_front_pass("fs_volume");
     let blend = pass.blend.expect("volume blend");
 
-    assert_eq!(pass.name, "volume_front");
+    assert_eq!(pass.name.as_ref(), "volume_front");
     assert_eq!(pass.material_state, MaterialPassState::Overlay);
     assert_eq!(pass.depth_compare, wgpu::CompareFunction::Always);
     assert!(!pass.depth_write);
@@ -671,7 +671,7 @@ fn overlay_always_pass_matches_fixed_overlay_shader_state() {
     let pass = overlay_always_pass("fs_main");
     let blend = pass.blend.expect("overlay blend");
 
-    assert_eq!(pass.name, "overlay_always");
+    assert_eq!(pass.name.as_ref(), "overlay_always");
     assert_eq!(pass.material_state, MaterialPassState::Static);
     assert_eq!(pass.depth_compare, wgpu::CompareFunction::Always);
     assert!(!pass.depth_write);

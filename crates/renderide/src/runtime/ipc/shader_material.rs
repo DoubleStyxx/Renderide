@@ -75,8 +75,17 @@ pub(in crate::runtime) fn drain_pending_shader_resolutions(
             false
         }
     });
+    if !completed.is_empty() {
+        backend.invalidate_custom_shader_layouts();
+    }
     for (asset_id, resolved) in completed {
-        if matches!(resolved.pipeline, RasterPipelineKind::Null) {
+        if resolved.rejected {
+            logger::warn!(
+                "shader_upload: asset_id={asset_id} dropped malformed custom shader payload"
+            );
+            continue;
+        }
+        if asset_id >= 0 && matches!(resolved.pipeline, RasterPipelineKind::Null) {
             match resolved.shader_asset_name.as_deref() {
                 Some(name) => logger::warn!(
                     "shader_upload: asset_id={asset_id} resolved shader_asset_name={name:?} has no embedded raster route; using Null pipeline"
@@ -93,10 +102,13 @@ pub(in crate::runtime) fn drain_pending_shader_resolutions(
             shader_variant_bits_log(resolved.shader_variant_bits),
             resolved.pipeline,
         );
-        let shader_asset_name = resolved.shader_asset_name.clone();
         if let Some(shader_key) = resolved.retarget_shader_key.as_deref() {
             backend.retarget_named_shader_routes(shader_key);
         }
+        if asset_id < 0 {
+            continue;
+        }
+        let shader_asset_name = resolved.shader_asset_name.clone();
         let queued = backend.register_shader_route(
             asset_id,
             resolved.pipeline,

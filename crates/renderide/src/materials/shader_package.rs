@@ -219,10 +219,10 @@ fn material_target_metadata(material: schema::MaterialShaderManifest) -> Materia
 
 fn material_pass_desc(pass: MaterialPassManifest) -> MaterialPassDesc {
     MaterialPassDesc {
-        name: leak_string(pass.name),
+        name: Arc::from(pass.name),
         pass_type: pass_type(pass.pass_type),
-        vertex_entry: leak_string(pass.vertex_entry),
-        fragment_entry: leak_string(pass.fragment_entry),
+        vertex_entry: Arc::from(pass.vertex_entry),
+        fragment_entry: Arc::from(pass.fragment_entry),
         depth_compare: depth_compare(pass.depth_compare),
         depth_compare_domain: depth_compare_domain(pass.depth_compare_domain),
         depth_write: pass.depth_write,
@@ -343,7 +343,7 @@ fn texture_default_kind(value: TextureDefaultKindManifest) -> EmbeddedTextureDef
 
 fn material_default(default: MaterialDefaultManifest) -> EmbeddedMaterialDefault {
     EmbeddedMaterialDefault {
-        property: leak_string(default.property),
+        property: Arc::from(default.property),
         value: material_default_value(default.value),
     }
 }
@@ -424,28 +424,41 @@ fn dedup_dirs(dirs: Vec<PathBuf>) -> Vec<PathBuf> {
     deduped
 }
 
-/// Returns WGSL source for a target stem.
-pub(crate) fn target_wgsl(stem: &str) -> Option<&'static str> {
-    if let Some(wgsl) = super::custom_shader::target_wgsl(stem) {
-        return Some(wgsl);
-    }
+/// Returns packaged WGSL for a target stem.
+///
+/// The package lives for the process, so the borrow is `'static`. Custom stems are not included.
+pub(crate) fn packaged_target_wgsl(stem: &str) -> Option<&'static str> {
     let package = global_package()?;
     package.targets.get(stem).map(|target| target.wgsl.as_ref())
 }
 
+/// Returns WGSL source for a target stem.
+pub(crate) fn target_wgsl(stem: &str) -> Option<Arc<str>> {
+    if let Some(wgsl) = super::custom_shader::target_wgsl(stem) {
+        return Some(wgsl);
+    }
+    global_package()?
+        .targets
+        .get(stem)
+        .map(|target| target.wgsl.clone())
+}
+
 /// Returns declared material passes for a target stem.
-pub(crate) fn material_passes(stem: &str) -> &'static [MaterialPassDesc] {
+pub(crate) fn material_passes(stem: &str) -> Arc<[MaterialPassDesc]> {
     if let Some(passes) = super::custom_shader::material_passes(stem) {
         return passes;
     }
     let Some(package) = global_package() else {
-        return &[];
+        return Arc::from([]);
     };
     package
         .targets
         .get(stem)
         .and_then(|target| target.material.as_ref())
-        .map_or(&[], |material| material.passes.as_slice())
+        .map_or_else(
+            || Arc::from([]),
+            |material| Arc::<[MaterialPassDesc]>::from(material.passes.as_slice()),
+        )
 }
 
 /// Returns the default render queue for a material target stem.
@@ -492,18 +505,23 @@ pub(crate) fn material_texture_defaults(stem: &str) -> &'static [EmbeddedTexture
 }
 
 /// Returns material uniform defaults for a material target stem.
-pub(crate) fn material_uniform_defaults(stem: &str) -> &'static [EmbeddedMaterialDefault] {
+pub(crate) fn material_uniform_defaults(stem: &str) -> Arc<[EmbeddedMaterialDefault]> {
     if let Some(defaults) = super::custom_shader::material_uniform_defaults(stem) {
         return defaults;
     }
     let Some(package) = global_package() else {
-        return &[];
+        return Arc::from([]);
     };
     package
         .targets
         .get(stem)
         .and_then(|target| target.material.as_ref())
-        .map_or(&[], |material| material.material_defaults.as_slice())
+        .map_or_else(
+            || Arc::from([]),
+            |material| {
+                Arc::<[EmbeddedMaterialDefault]>::from(material.material_defaults.as_slice())
+            },
+        )
 }
 
 /// Returns Naga-reflected material metadata for a target stem.
@@ -535,7 +553,7 @@ pub(crate) fn reflect_authored_material(
 ) -> Result<EmbeddedShaderReflection, String> {
     let vertex_entries = passes
         .iter()
-        .map(|pass| pass.vertex_entry)
+        .map(|pass| pass.vertex_entry.as_ref())
         .collect::<Vec<_>>();
     let reflected = reflect_raster_material_wgsl_with_vertex_entries(wgsl, &vertex_entries)
         .map_err(|error| error.to_string())?;
@@ -559,7 +577,7 @@ fn reflect_material_target(stem: &str, target: &ShaderTarget) -> EmbeddedShaderR
     let vertex_entries = material
         .passes
         .iter()
-        .map(|pass| pass.vertex_entry)
+        .map(|pass| pass.vertex_entry.as_ref())
         .collect::<Vec<_>>();
     match reflect_raster_material_wgsl_with_vertex_entries(&target.wgsl, &vertex_entries) {
         Ok(reflected) => reflection_from_layout(&target.wgsl, &material.passes, &reflected),

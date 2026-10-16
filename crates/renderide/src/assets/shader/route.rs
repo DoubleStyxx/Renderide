@@ -45,6 +45,8 @@ pub struct ResolvedShaderUpload {
     pub pipeline: RasterPipelineKind,
     /// Shader asset name whose existing routes should adopt [`Self::pipeline`].
     pub retarget_shader_key: Option<String>,
+    /// Malformed custom payload. Callers must not register a route for it.
+    pub rejected: bool,
 }
 
 /// Pure shader route selected from an already-resolved shader asset name.
@@ -65,6 +67,7 @@ impl From<ShaderRoutePlan> for ResolvedShaderUpload {
             shader_variant_bits: plan.shader_variant_bits,
             pipeline: plan.pipeline,
             retarget_shader_key: None,
+            rejected: false,
         }
     }
 }
@@ -143,7 +146,13 @@ fn resolve_custom_shader_payload(
         Ok(payload) => payload,
         Err(error) => {
             logger::warn!("custom shader payload rejected: {error}");
-            return plan_shader_route(None, None, stem_lookup).into();
+            return ResolvedShaderUpload {
+                shader_asset_name: None,
+                shader_variant_bits: None,
+                pipeline: RasterPipelineKind::Null,
+                retarget_shader_key: None,
+                rejected: true,
+            };
         }
     };
     if payload.remove {
@@ -159,6 +168,7 @@ fn resolve_custom_shader_payload(
             shader_variant_bits: None,
             pipeline: RasterPipelineKind::EmbeddedStem(Arc::from(installed.default_stem)),
             retarget_shader_key: Some(installed.key),
+            rejected: false,
         },
         Err(error) => {
             logger::warn!("custom shader install failed for {}: {error}", payload.key);
@@ -380,6 +390,17 @@ mod tests {
         assert_eq!(removed.pipeline, RasterPipelineKind::Null);
         assert_eq!(removed.retarget_shader_key.as_deref(), Some(key));
         assert_eq!(embedded_default_stem_for_shader_asset_name(key), None);
+    }
+
+    #[test]
+    fn malformed_custom_header_is_dropped() {
+        let upload = ShaderUpload {
+            asset_id: 42,
+            file: Some("renderide-custom-wgsl:v1\nkey=unlit\n".to_string()),
+        };
+        let resolved = resolve_shader_upload(&upload, embedded_default_stem_for_shader_asset_name);
+        assert!(resolved.rejected);
+        assert!(resolved.retarget_shader_key.is_none());
     }
 
     #[test]

@@ -258,6 +258,17 @@ impl MaterialSystem {
         }
     }
 
+    /// Drops reflected layouts and bind groups for stems installed or removed since the last call.
+    pub fn invalidate_custom_shader_layouts(&self) {
+        let stems = crate::materials::custom_shader::take_invalidated_stems();
+        let Some(embedded) = self.embedded_material_bind.as_ref() else {
+            return;
+        };
+        for stem in stems {
+            embedded.invalidate_stem_layout(&stem);
+        }
+    }
+
     /// Queue a materials batch when shared memory is not yet available.
     pub fn enqueue_materials_batch_no_shm(&mut self, batch: MaterialsUpdateBatch) {
         if self.pending_material_batches.len() >= MAX_PENDING_MATERIAL_BATCHES {

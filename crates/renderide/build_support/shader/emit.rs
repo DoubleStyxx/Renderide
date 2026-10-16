@@ -1,5 +1,6 @@
 //! Flattened WGSL and generated Rust emission.
 
+use std::fmt::Write;
 use std::fs;
 use std::path::Path;
 
@@ -142,10 +143,10 @@ impl EmbeddedMaterialDefaultValue {
 }
 
 /// One reflected material uniform property and its Unity fallback value.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct EmbeddedMaterialDefault {
     /// Reflected host material uniform property name.
-    pub property: &'static str,
+    pub property: std::sync::Arc<str>,
     /// Unity fallback value for the uniform property.
     pub value: EmbeddedMaterialDefaultValue,
 }
@@ -203,13 +204,18 @@ pub struct EmbeddedShaderReflection {
 
 /// Generated Rust lookup wrappers over the runtime shader package.
 fn embedded_shader_lookup_fn_defs() -> &'static str {
-    r#"/// Flattened WGSL for `stem` from the runtime shader package.
-pub fn embedded_target_wgsl(stem: &str) -> Option<&'static str> {
+    r#"/// Flattened WGSL for `stem` from the runtime shader package or an installed custom program.
+pub fn embedded_target_wgsl(stem: &str) -> Option<std::sync::Arc<str>> {
     crate::materials::shader_package::target_wgsl(stem)
 }
 
-/// Declared render passes for `stem`, parsed from package TOML metadata.
-pub fn embedded_target_passes(stem: &str) -> &'static [crate::materials::MaterialPassDesc] {
+/// Packaged WGSL for `stem`. Custom programs are not included.
+pub fn embedded_packaged_wgsl(stem: &str) -> Option<&'static str> {
+    crate::materials::shader_package::packaged_target_wgsl(stem)
+}
+
+/// Declared render passes for `stem`, parsed from package TOML metadata or a custom program.
+pub fn embedded_target_passes(stem: &str) -> std::sync::Arc<[crate::materials::MaterialPassDesc]> {
     crate::materials::shader_package::material_passes(stem)
 }
 
@@ -229,7 +235,7 @@ pub fn embedded_target_texture_defaults(stem: &str) -> &'static [EmbeddedTexture
 }
 
 /// Declared material uniform fallbacks for `stem`, parsed from package TOML metadata.
-pub fn embedded_target_material_defaults(stem: &str) -> &'static [EmbeddedMaterialDefault] {
+pub fn embedded_target_material_defaults(stem: &str) -> std::sync::Arc<[EmbeddedMaterialDefault]> {
     crate::materials::shader_package::material_uniform_defaults(stem)
 }
 
@@ -240,8 +246,34 @@ pub fn embedded_target_reflection(stem: &str) -> EmbeddedShaderReflection {
 "#
 }
 
+fn rust_raw_string(value: &str) -> String {
+    let mut longest = 0usize;
+    let mut run = 0usize;
+    for byte in value.bytes() {
+        if byte == b'#' {
+            run += 1;
+            longest = longest.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    let fence = "#".repeat(longest + 1);
+    format!("r{fence}\"{value}\"{fence}")
+}
+
 /// Renders generated `embedded_shaders.rs`.
-pub(super) fn render_embedded_shaders_rs(c: &ComposedShaders) -> String {
+pub(super) fn render_embedded_shaders_rs(
+    c: &ComposedShaders,
+    modules: &[(String, String)],
+) -> String {
+    let mut module_entries = String::new();
+    for (path, source) in modules {
+        module_entries.push_str("    (");
+        let _ = write!(module_entries, "{path:?}");
+        module_entries.push_str(", ");
+        module_entries.push_str(&rust_raw_string(source));
+        module_entries.push_str("),\n");
+    }
     let stems_list = |stems: &[String]| {
         stems
             .iter()
@@ -255,7 +287,7 @@ pub(super) fn render_embedded_shaders_rs(c: &ComposedShaders) -> String {
 /// Returns packaged WGSL for a compile-time known shader target stem.
 macro_rules! embedded_wgsl {{
     ($stem:literal) => {{
-        match $crate::embedded_shaders::embedded_target_wgsl($stem) {{
+        match $crate::embedded_shaders::embedded_packaged_wgsl($stem) {{
             Some(source) => source,
             None => {{
                 logger::error!("shader package target missing: {{}}", $stem);
@@ -308,6 +340,16 @@ pub struct EmbeddedTextureDefault {{
 
 {lookup_fn_defs}
 
+/// Composable `renderide::` modules embedded from the bytes hashed by this build.
+#[expect(
+    clippy::too_many_lines,
+    reason = "generated table of embedded shader module sources"
+)]
+pub fn embedded_shader_modules() -> &'static [(&'static str, &'static str)] {{
+    &[
+{module_entries}    ]
+}}
+
 /// Material target stems (composed from `shaders/materials/*.wgsl`).
 #[cfg(test)]
 pub const COMPILED_MATERIAL_STEMS: &[&str] = &[
@@ -317,6 +359,7 @@ pub const COMPILED_MATERIAL_STEMS: &[&str] = &[
         material_default_type_defs = embedded_material_default_type_defs(),
         descriptor_type_defs = embedded_shader_descriptor_type_defs(),
         lookup_fn_defs = embedded_shader_lookup_fn_defs(),
+        module_entries = module_entries,
         material_stems = stems_list(&c.material_stems),
     )
 }
@@ -398,7 +441,7 @@ mod tests {
         );
 
         emit_compiled_shader(&compiled, target_dir.path(), &mut composed)?;
-        let embedded = render_embedded_shaders_rs(&composed);
+        let embedded = render_embedded_shaders_rs(&composed, &[]);
 
         assert!(embedded.contains("COMPILED_MATERIAL_STEMS"));
         assert!(embedded.contains("EmbeddedTextureDefaultKind"));

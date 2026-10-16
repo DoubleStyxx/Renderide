@@ -11,6 +11,9 @@
 /// RenderideMod's `CustomShaderPayload` copies this string. Changing it is a wire break.
 pub const RENDERIDE_CUSTOM_WGSL_PREFIX: &str = "renderide-custom-wgsl:v1\n";
 
+/// Maximum accepted custom-shader `ShaderUpload.file` size, in bytes.
+pub const MAX_CUSTOM_SHADER_PAYLOAD_BYTES: usize = 1024 * 1024;
+
 /// Parsed custom-shader body from [`crate::shared::ShaderUpload::file`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CustomShaderPayload {
@@ -38,6 +41,12 @@ pub fn format_custom_shader_removal(key: &str) -> String {
 /// prefix matches but the header is invalid, so callers do not treat the text as an AssetBundle path.
 pub fn parse_custom_shader_payload(file: &str) -> Option<Result<CustomShaderPayload, String>> {
     let rest = file.strip_prefix(RENDERIDE_CUSTOM_WGSL_PREFIX)?;
+    if file.len() > MAX_CUSTOM_SHADER_PAYLOAD_BYTES {
+        return Some(Err(format!(
+            "custom shader payload is {} bytes; cap is {MAX_CUSTOM_SHADER_PAYLOAD_BYTES}",
+            file.len()
+        )));
+    }
     Some(parse_custom_shader_body(rest))
 }
 
@@ -130,5 +139,15 @@ mod tests {
             .expect("prefix")
             .expect_err("separator");
         assert!(err.contains("---"));
+    }
+
+    #[test]
+    fn oversized_payload_is_rejected() {
+        let wgsl = "a".repeat(MAX_CUSTOM_SHADER_PAYLOAD_BYTES);
+        let encoded = format_custom_shader_payload("Unlit", &wgsl);
+        let err = parse_custom_shader_payload(&encoded)
+            .expect("prefix")
+            .expect_err("cap");
+        assert!(err.contains("cap"));
     }
 }

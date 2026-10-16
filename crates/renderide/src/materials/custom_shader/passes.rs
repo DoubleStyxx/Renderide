@@ -91,11 +91,7 @@ pub(super) fn parse_pass_directives(
 
 /// Parses an optional `//#render_queue` directive. Absent directives use Unity Geometry (`2000`).
 pub(super) fn parse_render_queue(source: &str, file: &str) -> Result<i32, String> {
-    const BACKGROUND: i32 = 1000;
     const GEOMETRY: i32 = 2000;
-    const ALPHA_TEST: i32 = 2450;
-    const TRANSPARENT: i32 = 3000;
-    const OVERLAY: i32 = 4000;
 
     let mut directive = None;
     for (line_idx, line) in source.lines().enumerate() {
@@ -114,30 +110,18 @@ pub(super) fn parse_render_queue(source: &str, file: &str) -> Result<i32, String
                 "{file}:{line_no}: `//#render_queue` requires a Unity queue name"
             ));
         }
-        directive = Some(parse_render_queue_expression(
-            &expression,
-            file,
-            line_no,
-            BACKGROUND,
-            GEOMETRY,
-            ALPHA_TEST,
-            TRANSPARENT,
-            OVERLAY,
-        )?);
+        directive = Some(parse_render_queue_expression(&expression, file, line_no)?);
     }
     Ok(directive.unwrap_or(GEOMETRY))
 }
 
-fn parse_render_queue_expression(
-    value: &str,
-    file: &str,
-    line: usize,
-    background: i32,
-    geometry: i32,
-    alpha_test: i32,
-    transparent: i32,
-    overlay: i32,
-) -> Result<i32, String> {
+fn parse_render_queue_expression(value: &str, file: &str, line: usize) -> Result<i32, String> {
+    const BACKGROUND: i32 = 1000;
+    const GEOMETRY: i32 = 2000;
+    const ALPHA_TEST: i32 = 2450;
+    const TRANSPARENT: i32 = 3000;
+    const OVERLAY: i32 = 4000;
+
     let (queue_name, offset) = if let Some((offset_start, sign)) =
         value.char_indices().find(|(_, c)| *c == '+' || *c == '-')
     {
@@ -153,11 +137,11 @@ fn parse_render_queue_expression(
         (value, 0)
     };
     let base = match queue_name.to_ascii_lowercase().as_str() {
-        "background" => background,
-        "geometry" => geometry,
-        "alphatest" => alpha_test,
-        "transparent" => transparent,
-        "overlay" => overlay,
+        "background" => BACKGROUND,
+        "geometry" => GEOMETRY,
+        "alphatest" => ALPHA_TEST,
+        "transparent" => TRANSPARENT,
+        "overlay" => OVERLAY,
         _ => {
             return Err(format!(
                 "{file}:{line}: unknown `//#render_queue` queue `{queue_name}`"

@@ -48,11 +48,11 @@ pub(crate) struct RemovedCustomShader {
 
 struct InstalledTarget {
     generation: u64,
-    wgsl: &'static str,
-    passes: &'static [MaterialPassDesc],
+    wgsl: Arc<str>,
+    passes: Arc<[MaterialPassDesc]>,
     reflection: crate::embedded_shaders::EmbeddedShaderReflection,
     default_render_queue: i32,
-    material_defaults: &'static [EmbeddedMaterialDefault],
+    material_defaults: Arc<[EmbeddedMaterialDefault]>,
 }
 
 struct InstalledKey {
@@ -65,6 +65,7 @@ struct CustomShaderRegistry {
     targets: HashMap<String, InstalledTarget>,
     keys: HashMap<String, InstalledKey>,
     next_generation: u64,
+    invalidated_stems: Vec<String>,
 }
 
 fn registry() -> &'static RwLock<CustomShaderRegistry> {
@@ -103,18 +104,31 @@ pub(crate) fn install(key: &str, wgsl: &str) -> Result<InstalledCustomShader, St
         return Ok(installed);
     }
 
+    let default_wgsl = Arc::<str>::from(composed.default_wgsl);
+    let multiview_wgsl = Arc::<str>::from(composed.multiview_wgsl);
+    let default_passes = owned_passes(composed.default_passes);
+    let multiview_passes = owned_passes(composed.multiview_passes);
+    let material_defaults = owned_material_defaults(composed.material_defaults);
+
+    // Free the previous generation before reflection. A reflect failure drops the
+    // in-progress Arcs and does not put the replaced program back.
+    {
+        let mut registry = registry().write();
+        if registry.targets.remove(&default_stem).is_some() {
+            registry.invalidated_stems.push(default_stem.clone());
+        }
+        if registry.targets.remove(&multiview_stem).is_some() {
+            registry.invalidated_stems.push(multiview_stem.clone());
+        }
+        registry.keys.remove(&key);
+    }
+
+    let default_reflection = reflect_authored_material(&default_wgsl, &default_passes)?;
+    let multiview_reflection = reflect_authored_material(&multiview_wgsl, &multiview_passes)?;
+
     let mut registry = registry().write();
     let generation = registry.next_generation.saturating_add(1);
     registry.next_generation = generation;
-
-    let default_passes = leak_passes(composed.default_passes);
-    let multiview_passes = leak_passes(composed.multiview_passes);
-    let default_wgsl = leak_string(composed.default_wgsl);
-    let multiview_wgsl = leak_string(composed.multiview_wgsl);
-    let material_defaults = leak_material_defaults(composed.material_defaults);
-    let default_reflection = reflect_authored_material(default_wgsl, default_passes)?;
-    let multiview_reflection = reflect_authored_material(multiview_wgsl, multiview_passes)?;
-
     registry.targets.insert(
         default_stem.clone(),
         InstalledTarget {
@@ -123,7 +137,7 @@ pub(crate) fn install(key: &str, wgsl: &str) -> Result<InstalledCustomShader, St
             passes: default_passes,
             reflection: default_reflection,
             default_render_queue: composed.default_render_queue,
-            material_defaults,
+            material_defaults: material_defaults.clone(),
         },
     );
     registry.targets.insert(
@@ -162,10 +176,24 @@ fn unchanged_install(
     multiview_stem: &str,
     composed: &compose::ComposedCustomShader,
 ) -> Option<InstalledCustomShader> {
-    let registry = registry().read();
-    let previous = registry.targets.get(default_stem)?;
-    let multiview = registry.targets.get(multiview_stem)?;
-    if previous.wgsl != composed.default_wgsl || multiview.wgsl != composed.multiview_wgsl {
+    let unchanged = {
+        let registry = registry().read();
+        let copied = match (
+            registry.targets.get(default_stem),
+            registry.targets.get(multiview_stem),
+        ) {
+            (Some(previous), Some(multiview)) => {
+                Some((Arc::clone(&previous.wgsl), Arc::clone(&multiview.wgsl)))
+            }
+            _ => None,
+        };
+        drop(registry);
+        copied.is_some_and(|(default_wgsl, multiview_wgsl)| {
+            default_wgsl.as_ref() == composed.default_wgsl
+                && multiview_wgsl.as_ref() == composed.multiview_wgsl
+        })
+    };
+    if !unchanged {
         return None;
     }
     Some(InstalledCustomShader {
@@ -206,18 +234,17 @@ pub(crate) fn remove(key: &str) -> Option<RemovedCustomShader> {
     let key = normalize_shader_key(key);
     let mut registry = registry().write();
     let installed = registry.keys.remove(&key)?;
+    let multiview_stem = format!("{}_multiview", installed.base_stem);
     registry.targets.remove(&installed.default_stem);
+    registry.targets.remove(&multiview_stem);
     registry
-        .targets
-        .remove(&format!("{}_multiview", installed.base_stem));
-    logger::info!(
-        "custom shader removed key={key} stem={}",
-        installed.base_stem
-    );
-    Some(RemovedCustomShader {
-        key,
-        base_stem: installed.base_stem,
-    })
+        .invalidated_stems
+        .push(installed.default_stem.clone());
+    registry.invalidated_stems.push(multiview_stem);
+    let base_stem = installed.base_stem;
+    drop(registry);
+    logger::info!("custom shader removed key={key} stem={base_stem}");
+    Some(RemovedCustomShader { key, base_stem })
 }
 
 /// Default embedded stem for a host shader asset name when a custom program is installed.
@@ -240,20 +267,20 @@ pub(crate) fn source_generation(stem: &str) -> u64 {
         .unwrap_or(0)
 }
 
-pub(crate) fn target_wgsl(stem: &str) -> Option<&'static str> {
+pub(crate) fn target_wgsl(stem: &str) -> Option<Arc<str>> {
     registry()
         .read()
         .targets
         .get(stem)
-        .map(|target| target.wgsl)
+        .map(|target| target.wgsl.clone())
 }
 
-pub(crate) fn material_passes(stem: &str) -> Option<&'static [MaterialPassDesc]> {
+pub(crate) fn material_passes(stem: &str) -> Option<Arc<[MaterialPassDesc]>> {
     registry()
         .read()
         .targets
         .get(stem)
-        .map(|target| target.passes)
+        .map(|target| target.passes.clone())
 }
 
 pub(crate) fn material_reflection(
@@ -274,26 +301,27 @@ pub(crate) fn material_default_render_queue(stem: &str) -> Option<i32> {
         .map(|target| target.default_render_queue)
 }
 
-pub(crate) fn material_uniform_defaults(stem: &str) -> Option<&'static [EmbeddedMaterialDefault]> {
+pub(crate) fn material_uniform_defaults(stem: &str) -> Option<Arc<[EmbeddedMaterialDefault]>> {
     registry()
         .read()
         .targets
         .get(stem)
-        .map(|target| target.material_defaults)
+        .map(|target| target.material_defaults.clone())
 }
 
-fn leak_string(value: String) -> &'static str {
-    Box::leak(value.into_boxed_str())
+/// Stems whose reflected `@group(1)` layout and bind groups must be dropped.
+pub(crate) fn take_invalidated_stems() -> Vec<String> {
+    std::mem::take(&mut registry().write().invalidated_stems)
 }
 
-fn leak_passes(passes: Vec<OwnedMaterialPass>) -> &'static [MaterialPassDesc] {
-    let leaked: Vec<MaterialPassDesc> = passes
+fn owned_passes(passes: Vec<OwnedMaterialPass>) -> Arc<[MaterialPassDesc]> {
+    passes
         .into_iter()
         .map(|pass| MaterialPassDesc {
-            name: leak_string(pass.name),
+            name: Arc::from(pass.name),
             pass_type: pass.pass_type,
-            vertex_entry: leak_string(pass.vertex_entry),
-            fragment_entry: leak_string(pass.fragment_entry),
+            vertex_entry: Arc::from(pass.vertex_entry),
+            fragment_entry: Arc::from(pass.fragment_entry),
             depth_compare: pass.depth_compare,
             depth_compare_domain: pass.depth_compare_domain,
             depth_write: pass.depth_write,
@@ -306,25 +334,25 @@ fn leak_passes(passes: Vec<OwnedMaterialPass>) -> &'static [MaterialPassDesc] {
             material_state: pass.material_state,
             render_state_policy: pass.render_state_policy,
         })
-        .collect();
-    Box::leak(leaked.into_boxed_slice())
+        .collect::<Vec<_>>()
+        .into()
 }
 
-fn leak_material_defaults(
+fn owned_material_defaults(
     defaults: Vec<passes::OwnedMaterialDefault>,
-) -> &'static [EmbeddedMaterialDefault] {
-    let leaked: Vec<EmbeddedMaterialDefault> = defaults
+) -> Arc<[EmbeddedMaterialDefault]> {
+    defaults
         .into_iter()
         .map(|default| EmbeddedMaterialDefault {
-            property: leak_string(default.property),
+            property: Arc::from(default.property),
             value: if default.is_vec4 {
                 EmbeddedMaterialDefaultValue::vec4(default.values)
             } else {
                 EmbeddedMaterialDefaultValue::float(default.values[0])
             },
         })
-        .collect();
-    Box::leak(leaked.into_boxed_slice())
+        .collect::<Vec<_>>()
+        .into()
 }
 
 #[cfg(test)]
@@ -332,8 +360,7 @@ mod tests {
     use super::*;
     use crate::materials::reflect_raster_material_wgsl;
 
-    const EXAMPLE_SOLID: &str =
-        include_str!("../../../../../RenderideMod/Shaders/example_solid.wgsl");
+    const EXAMPLE_SOLID: &str = include_str!("../../../../RenderideMod/Shaders/example_solid.wgsl");
 
     #[test]
     fn example_solid_composes_reflects_and_publishes_a_stem() {
@@ -346,7 +373,7 @@ mod tests {
         assert!(installed.source_changed);
 
         let wgsl = target_wgsl(&installed.default_stem).expect("wgsl");
-        reflect_raster_material_wgsl(wgsl).expect("group 0 and material reflection");
+        reflect_raster_material_wgsl(&wgsl).expect("group 0 and material reflection");
         let passes = material_passes(&installed.default_stem).expect("passes");
         assert_eq!(passes.len(), 1);
         assert!(!passes[0].fragment_entry.is_empty());
@@ -365,7 +392,7 @@ mod tests {
     fn example_solid_compiles_with_wgpu_when_an_adapter_exists() {
         let installed = install("wgpu-example-solid", EXAMPLE_SOLID).expect("install");
         let wgsl = target_wgsl(&installed.default_stem).expect("wgsl");
-        reflect_raster_material_wgsl(wgsl).expect("naga reflection is the compile frontend");
+        reflect_raster_material_wgsl(&wgsl).expect("naga reflection is the compile frontend");
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
@@ -382,7 +409,7 @@ mod tests {
         let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let _module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("custom-shader-example"),
-            source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+            source: wgpu::ShaderSource::Wgsl(wgsl.as_ref().into()),
         });
         let error = pollster::block_on(error_scope.pop());
         assert!(
@@ -390,5 +417,25 @@ mod tests {
             "wgpu rejected the custom shader: {error:?}"
         );
         let _ = remove("wgpu-example-solid");
+    }
+
+    #[test]
+    fn replace_and_remove_drop_the_previous_program() {
+        let installed = install("arc-owned", EXAMPLE_SOLID).expect("install");
+        let first = target_wgsl(&installed.default_stem).expect("first wgsl");
+        assert!(Arc::strong_count(&first) >= 2);
+
+        let replaced = EXAMPLE_SOLID.replace(
+            "return rg::retain_globals_additive(mat._Color);",
+            "return rg::retain_globals_additive(mat._Color) * 0.5;",
+        );
+        install("arc-owned", &replaced).expect("replace");
+        let second = target_wgsl(&installed.default_stem).expect("second wgsl");
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert_eq!(Arc::strong_count(&first), 1);
+
+        remove("arc-owned").expect("remove");
+        assert!(target_wgsl(&installed.default_stem).is_none());
+        assert_eq!(Arc::strong_count(&second), 1);
     }
 }

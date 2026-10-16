@@ -121,7 +121,7 @@ pub(super) fn ensure_pipeline<'a>(
             .ok_or(SkyboxIblBakeError::MissingShader(stem))?;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(stem),
-            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(source)),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(source.as_ref())),
         });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some(&format!("{stem} bind group layout")),

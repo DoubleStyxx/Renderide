@@ -35,6 +35,7 @@ pub(super) struct EmbeddedBindInputResolution {
     pub(super) stem_hash: u64,
     pub(super) texture_bind_signature: u64,
     pub(super) texture_2d_asset_id: i32,
+    pub(super) shader_source_generation: u64,
 }
 
 use super::EmbeddedMaterialBindResources;
@@ -57,7 +58,8 @@ impl EmbeddedMaterialBindResources {
         offscreen_write_target: OffscreenWriteTarget,
     ) -> Result<EmbeddedBindInputResolution, EmbeddedMaterialBindError> {
         profiling::scope!("materials::embedded_resolve_bind_inputs");
-        let layout = self.stem_layout(stem)?;
+        let shader_source_generation = crate::materials::custom_shader::source_generation(stem);
+        let layout = self.stem_layout(stem, shader_source_generation)?;
         let sh = stem_hash(stem);
 
         let texture_2d_asset_id =
@@ -86,6 +88,7 @@ impl EmbeddedMaterialBindResources {
             stem_hash: sh,
             texture_bind_signature,
             texture_2d_asset_id,
+            shader_source_generation,
         })
     }
 
