@@ -209,8 +209,10 @@ The canonical name is the component `VariableName` when it contains a slash, oth
 | --- | --- |
 | `float` | `SetFloat` |
 | `float2`, `float3`, `float4` | `SetFloat4`, missing lanes zero |
-| `colorX` | `SetFloat4` of the linear profile (`ToProfile(ColorProfile.Linear)`) |
+| `colorX` | `SetColor`, same path as static `Colors` and stock `UnlitMaterial` |
 | `IAssetProvider<ITexture2D>` | `SetTexture` |
+
+`SetColor` (`MaterialUpdateWriter.cs:223`) converts with `ToProfile(RenderSystem.MaterialColorProfile)` and then calls `SetFloat4` (`MaterialUpdateWriter.cs:217`). Stock `UnlitMaterial.cs:510` uses `writer.UpdateColor`, which calls `SetColor`. Static `Colors` already use `SetColor`. A color dynvar uses that same call so the profile matches a stock material.
 
 Other types are ignored. A dynvar property replaces a `Floats`, `Colors`, or `Textures` row of the same name. The value still uses `MaterialPropertyIdRequest` and `MaterialUpdateWriter`. `ShaderUpload` is unchanged: it only installs or removes WGSL, and only when `ShaderKey` or the source changes.
 
