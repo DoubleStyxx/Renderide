@@ -203,7 +203,7 @@ Limits:
 
 `VariablePrefix` reads dynamic variables from `DynamicVariableSpace` components on the material slot and its parents. That is the same parent walk a variable uses to bind: a name `Space/Local` binds to the space named `Space`, and a name with no slash binds to the first ancestor space whose `OnlyDirectBinding` is false.
 
-The canonical name is the component `VariableName` when it contains a slash, otherwise `SpaceName/VariableName`. Names that start with the prefix are sampled. The property name is that canonical name with the prefix removed (`Shader/_Speed` and a space named `Shader` with a variable `_Speed` both become `_Speed`).
+The canonical name is the component `VariableName` when it contains a slash, otherwise `SpaceName/VariableName`. Names that start with the prefix are sampled. The property name is that canonical name with the prefix removed once. `Trim` drops whitespace only, so a leading underscore stays. `Shader/_Speed` and a space named `Shader` with a variable `_Speed` both write `_Speed`.
 
 | Dynvar type | Writer call |
 | --- | --- |
@@ -214,6 +214,48 @@ The canonical name is the component `VariableName` when it contains a slash, oth
 
 `SetColor` (`MaterialUpdateWriter.cs:223`) converts with `ToProfile(RenderSystem.MaterialColorProfile)` and then calls `SetFloat4` (`MaterialUpdateWriter.cs:217`). Stock `UnlitMaterial.cs:510` uses `writer.UpdateColor`, which calls `SetColor`. Static `Colors` already use `SetColor`. A color dynvar uses that same call so the profile matches a stock material.
 
+Example programs on `shaders/exotic-dynvars` (`7997b084`) use the names below with prefix `Shader/`. The written property is the dynvar name after that prefix. Each program except `example_solid` also declares `_MainTex` (`texture_2d`) and `_MainTex_sampler`. The sampler is paired with the texture and is not a dynvar.
+
+| Example | Dynvar name | Type |
+| --- | --- | --- |
+| `example_solid` | `Shader/_Color` | `colorX` |
+| `example_rainbow` | `Shader/_Color` | `colorX` |
+| `example_rainbow` | `Shader/_MainTex` | `IAssetProvider<ITexture2D>` |
+| `example_rainbow` | `Shader/_MainTex_ST` | `float4` |
+| `example_rainbow` | `Shader/_Speed` | `float` |
+| `example_poincare` | `Shader/_Color` | `colorX` |
+| `example_poincare` | `Shader/_MainTex` | `IAssetProvider<ITexture2D>` |
+| `example_poincare` | `Shader/_MainTex_ST` | `float4` |
+| `example_poincare` | `Shader/_Schlafli` | `float4` |
+| `example_poincare` | `Shader/_Speed` | `float` |
+| `example_gyroid` | `Shader/_Color` | `colorX` |
+| `example_gyroid` | `Shader/_MainTex` | `IAssetProvider<ITexture2D>` |
+| `example_gyroid` | `Shader/_MainTex_ST` | `float4` |
+| `example_gyroid` | `Shader/_Frequency` | `float` |
+| `example_gyroid` | `Shader/_Speed` | `float` |
+| `example_hologram` | `Shader/_Color` | `colorX` |
+| `example_hologram` | `Shader/_MainTex` | `IAssetProvider<ITexture2D>` |
+| `example_hologram` | `Shader/_MainTex_ST` | `float4` |
+| `example_hologram` | `Shader/_Scan` | `float4` |
+| `example_hologram` | `Shader/_Fresnel` | `float` |
+| `example_hologram` | `Shader/_Speed` | `float` |
+| `example_hieroglyph` | `Shader/_Color` | `colorX` |
+| `example_hieroglyph` | `Shader/_MainTex` | `IAssetProvider<ITexture2D>` |
+| `example_hieroglyph` | `Shader/_MainTex_ST` | `float4` |
+| `example_hieroglyph` | `Shader/_Grid` | `float4` |
+| `example_hieroglyph` | `Shader/_Emission` | `float` |
+| `example_hieroglyph` | `Shader/_Speed` | `float` |
+| `example_nebula` | `Shader/_Color` | `colorX` |
+| `example_nebula` | `Shader/_MainTex` | `IAssetProvider<ITexture2D>` |
+| `example_nebula` | `Shader/_MainTex_ST` | `float4` |
+| `example_nebula` | `Shader/_Warp` | `float4` |
+| `example_nebula` | `Shader/_Speed` | `float` |
+| `example_dispersion` | `Shader/_Color` | `colorX` |
+| `example_dispersion` | `Shader/_MainTex` | `IAssetProvider<ITexture2D>` |
+| `example_dispersion` | `Shader/_MainTex_ST` | `float4` |
+| `example_dispersion` | `Shader/_Spread` | `float` |
+| `example_dispersion` | `Shader/_Speed` | `float` |
+
 Other types are ignored. A dynvar property replaces a `Floats`, `Colors`, or `Textures` row of the same name. The value still uses `MaterialPropertyIdRequest` and `MaterialUpdateWriter`. `ShaderUpload` is unchanged: it only installs or removes WGSL, and only when `ShaderKey` or the source changes.
 
 The component subscribes to space, slot, and variable change events and calls `MarkChangeDirty` only when the mapped value or the mapped set changes. It does not poll variable values from `OnCommonUpdate`.
@@ -222,17 +264,17 @@ Nearest ancestor space wins when two variables map to one property. Inside one s
 
 ## Smoke checklist: dynamic variables
 
-Build and run the rainbow-beside-unlit setup first (`CustomShaders.Install("Rainbow", CustomShaders.ExampleRainbowWgsl)`).
+Build and run the rainbow-beside-unlit setup first. Install `example_rainbow` with `CustomShaders.Install("Rainbow", CustomShaders.ExampleRainbowWgsl)`.
 
 1. On box A, `CustomShaderMaterial` has `ShaderKey` `Rainbow` and `VariablePrefix` `Shader/` (the attach default).
 2. On that slot, or a parent, add `DynamicVariableSpace`. Set `SpaceName` to `Shader`. Leave `OnlyDirectBinding` false.
-3. Under that space, add `DynamicValueVariable<float>` named `_Speed` (or `Shader/_Speed`) set to `0.5`.
-4. Add `DynamicValueVariable<colorX>` named `_Color`, `DynamicReferenceVariable<IAssetProvider<ITexture2D>>` named `_MainTex` with a texture, and optionally `DynamicValueVariable<float4>` named `_MainTex_ST`.
+3. Under that space, add `DynamicValueVariable<float>` with `VariableName` `Shader/_Speed` set to `0.5`.
+4. Add `DynamicValueVariable<colorX>` with `VariableName` `Shader/_Color`. The written properties are `_Speed` and `_Color`. The leading underscore stays.
 5. Also add a `Floats` row `_Speed` = `0.2` and a `Colors` row `_Color`. These are the static values the dynvars must hide.
-6. Mod log includes `custom shader material dynvars: count=<n> prefix=Shader/` with `_Speed`, `_Color`, and `_MainTex` in the property-id lines. Box A uses the dynvar speed, color, and texture. The static `0.2` and static color are not the values on the material.
-7. Change `_Speed` once. The material updates on that change. Leaving the value alone does not keep dirtying the material.
-8. `float2` / `float3` dynvars, if added under names such as `_Pad`, upload as `SetFloat4` with the unused lanes at 0.
-9. Delete the `_Speed` variable, or disable it. The static `Floats` value `0.2` is written again. Box B is unchanged.
+6. Mod log includes `custom shader material dynvars: count=<n> prefix=Shader/` with `_Speed` and `_Color` in the property-id lines. Box A uses the dynvar speed and color. The static `0.2` and static color are not the values on the material.
+7. Change `Shader/_Speed` once. The material updates on that change. Leaving the value alone does not keep dirtying the material.
+8. `float2` / `float3` dynvars, if added under names such as `Shader/_Pad`, upload as `SetFloat4` with the unused lanes at 0. The property is `_Pad`.
+9. Delete the `Shader/_Speed` variable, or disable it. The static `Floats` value `0.2` is written again. Box B is unchanged.
 10. Clear `ShaderKey` or disable the component. Mod log: `custom shader material clear: material=<id>`. Box A returns to packaged Unlit.
 11. Move the material slot out from under the `Shader` space. The dynvar overrides drop and the static rows apply. Move it back and the overrides return.
 12. Set `VariablePrefix` to `Other/`. The `Shader/` variables stop overriding. Set it back to `Shader/` and they return. Blank prefix is `Shader/`.
