@@ -16,6 +16,11 @@
 //! Binary layout details live in [`layout`]. Typical usage: build [`QueueOptions`], then
 //! [`Publisher::new`] / [`Subscriber::new`] or [`QueueFactory`].
 
+#![deny(
+    clippy::undocumented_unsafe_blocks,
+    clippy::multiple_unsafe_ops_per_block
+)]
+
 #[cfg(not(any(unix, windows)))]
 compile_error!("The `interprocess` crate only supports `cfg(unix)` and `cfg(windows)` targets.");
 

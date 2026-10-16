@@ -5,6 +5,7 @@
 //! every type exercised from `tests/*.rs` is reached through this crate root.
 
 #![warn(missing_docs)]
+#![cfg_attr(not(test), forbid(unsafe_code))]
 
 pub mod cli;
 pub mod error;

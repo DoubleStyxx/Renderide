@@ -37,6 +37,8 @@
 //! Do not call [`flush`] from a panic handler if the panic might have occurred while holding the
 //! logger's internal mutex (for example inside a log macro), or you risk deadlock.
 
+#![cfg_attr(not(test), forbid(unsafe_code))]
+
 mod level;
 mod output;
 mod panic;

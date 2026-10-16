@@ -10,6 +10,11 @@
 //!
 //! The binary entry point is [`run`]; use [`BootstrapOptions`] to supply Host arguments and logging.
 
+#![deny(
+    clippy::undocumented_unsafe_blocks,
+    clippy::multiple_unsafe_ops_per_block
+)]
+
 use std::path::PathBuf;
 
 mod child_lifetime;

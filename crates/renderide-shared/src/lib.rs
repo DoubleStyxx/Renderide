@@ -19,6 +19,11 @@
 //!   [`ipc::SharedMemoryAccessor`], and its host-side [`ipc::shared_memory::SharedMemoryWriter`]
 //!   counterpart.
 
+#![deny(
+    clippy::undocumented_unsafe_blocks,
+    clippy::multiple_unsafe_ops_per_block
+)]
+
 pub mod buffer;
 pub mod custom_shader_ipc;
 pub mod ipc;
