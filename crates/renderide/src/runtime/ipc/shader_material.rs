@@ -79,7 +79,10 @@ pub(in crate::runtime) fn drain_pending_shader_resolutions(
         backend.invalidate_custom_shader_layouts();
     }
     for (asset_id, resolved) in completed {
-        if resolved.rejected {
+        // Carrier uploads use a negative asset id and have no host route to ack.
+        // A malformed payload on a real asset id falls through so the Null route
+        // is registered and ShaderUploadResult is sent.
+        if resolved.rejected && asset_id < 0 {
             logger::warn!(
                 "shader_upload: asset_id={asset_id} dropped malformed custom shader payload"
             );

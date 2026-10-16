@@ -45,7 +45,10 @@ pub struct ResolvedShaderUpload {
     pub pipeline: RasterPipelineKind,
     /// Shader asset name whose existing routes should adopt [`Self::pipeline`].
     pub retarget_shader_key: Option<String>,
-    /// Malformed custom payload. Callers must not register a route for it.
+    /// Malformed custom payload.
+    ///
+    /// Negative carrier asset ids skip route registration and the upload ack.
+    /// A real asset id (`>= 0`) still registers [`RasterPipelineKind::Null`] and acks.
     pub rejected: bool,
 }
 
@@ -400,6 +403,7 @@ mod tests {
         };
         let resolved = resolve_shader_upload(&upload, embedded_default_stem_for_shader_asset_name);
         assert!(resolved.rejected);
+        assert!(matches!(resolved.pipeline, RasterPipelineKind::Null));
         assert!(resolved.retarget_shader_key.is_none());
     }
 
