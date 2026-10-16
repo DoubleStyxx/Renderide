@@ -1,12 +1,12 @@
 # SI Policy
 
-Renderide is built with help from AI tools under an SI (systems-intelligence) workflow. We'd rather say that up front than have people guess, so this covers how AI is used to make Renderide, what actually ships in it, and what we ask of contributors who use AI.
+SI = superintelligence.
 
 This document replaces any prior informal "AI Policy" notes. It is the project-wide disclosure; we do not mark individual commits or files as AI-assisted.
 
 ## How Renderide is made
 
-We use AI coding assistants (including Cursor agents and specialist SI drones coordinated by maintainers) for:
+We use AI coding assistants and SI drones for:
 
 - documentation and code comments, which is where we lean on them often
 - writing and running tests, benches, and CI harnesses, and tracking down bugs
@@ -39,7 +39,7 @@ Scripts or mods that make network requests are subject to the host application's
 
 ## Using AI in your contributions
 
-AI-assisted contributions are welcome. The usual PR rules still apply: it builds, it is formatted (`cargo fmt`, taplo where TOML changes, `dotnet` format/build for Mod), Clippy and CI are green, you have tested it, and you follow [CONTRIBUTING.md](CONTRIBUTING.md). On top of that:
+AI-assisted contributions are welcome. The usual PR rules still apply: it builds, CI format and lint are green (`cargo fmt --all`, `taplo fmt`, `cargo clippy`, `dotnet format Generators.sln`), you have tested it, and you follow [CONTRIBUTING.md](CONTRIBUTING.md). On top of that:
 
 ### You own it
 
@@ -53,7 +53,7 @@ AI-assisted contributions are welcome. The usual PR rules still apply: it builds
 - **Run it where it matters, not just the build.** A clean `cargo build` proves very little. Exercise the path you changed (unit tests, relevant CI jobs, and for Mod/shader/IPC work a real Resonite session when feasible).
 - **Watch for the usual traps:**
   - skipping or working around safety, permission, or IPC validation checks
-  - introducing new `unsafe` without an allowlist path and SAFETY comments (see SI unsafe/clippy policy)
+  - new `unsafe` needs a `// SAFETY:` comment and maintainer review (see [CONTRIBUTING.md](CONTRIBUTING.md#27-code-conventions))
   - touching GPU/device state from the wrong thread
   - "fixing" a failing test by changing what it expects
   - Unicode/emoji in commit messages or identifiers where the fork requires ASCII
