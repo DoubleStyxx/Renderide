@@ -7,18 +7,23 @@ use std::time::{Duration, Instant};
 
 use glam::IVec2;
 use renderide_shared::ipc::HostDualQueueIpc;
+use renderide_shared::{
+    RENDERIDE_CUSTOM_WGSL_PREFIX, RENDERIDE_TEST_STEM_PREFIX, format_custom_shader_payload,
+};
 
+use crate::backend::asset_transfers::AssetTask;
 use crate::config::{PresentationModeSetting, RendererSettings, RendererSettingsHandle};
 use crate::connection::ConnectionParams;
 use crate::ipc::SharedMemoryAccessor;
+use crate::materials::RasterPipelineKind;
 use crate::shared::buffer::SharedMemoryBufferDescriptor;
 use crate::shared::{
     CameraRenderParameters, CameraRenderTask, DesktopConfig, FrameSubmitData, FreeSharedMemoryView,
     Guid, HeadOutputDevice, InputState, KeepAlive, MeshRenderablesUpdate, PostProcessingConfig,
     QualityConfig, ReflectionProbeRenderResult, ReflectionProbeRenderTask, RenderSpaceUpdate,
     RendererCommand, RendererEngineReady, RendererInitData, RendererInitFinalizeData,
-    RendererShutdown, SetTexture2DFormat, SetWindowIcon, ShaderUpload, SkinWeightMode,
-    TextureFormat,
+    RendererShutdown, SetTexture2DFormat, SetWindowIcon, ShaderUpload, ShaderUploadResult,
+    SkinWeightMode, TextureFormat,
 };
 
 use super::RendererRuntime;
@@ -707,4 +712,174 @@ fn post_wait_asset_integration_drains_completed_shader_uploads() {
     }
 
     panic!("shader upload resolution did not drain");
+}
+
+const CUSTOM_SHADER_EXAMPLE_WGSL: &str =
+    include_str!("../../../../RenderideMod/Shaders/example_solid.wgsl");
+
+struct RemoveCustomShader(&'static str);
+
+impl RemoveCustomShader {
+    fn prepare(key: &'static str) -> Self {
+        let _ = crate::materials::custom_shader::remove(key);
+        Self(key)
+    }
+}
+
+impl Drop for RemoveCustomShader {
+    fn drop(&mut self) {
+        let _ = crate::materials::custom_shader::remove(self.0);
+    }
+}
+
+fn drain_completed_shader_uploads(rt: &mut RendererRuntime) {
+    for _ in 0..500 {
+        rt.run_asset_integration_after_wait_poll();
+        if rt.ipc_state.pending_shader_resolutions.is_empty() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    panic!("shader upload resolution did not drain");
+}
+
+fn take_shader_upload_results(host: &mut HostDualQueueIpc) -> Vec<ShaderUploadResult> {
+    let mut commands = Vec::new();
+    host.poll_into(&mut commands);
+    commands
+        .into_iter()
+        .filter_map(|command| match command {
+            RendererCommand::ShaderUploadResult(result) => Some(result),
+            _ => None,
+        })
+        .collect()
+}
+
+fn has_queued_shader_route(rt: &RendererRuntime, asset_id: i32) -> bool {
+    let integrator = &rt.backend.asset_transfers.integrator;
+    [
+        &integrator.main,
+        &integrator.high_priority,
+        &integrator.normal_priority,
+        &integrator.render,
+        &integrator.particle,
+    ]
+    .into_iter()
+    .any(|lane| {
+        lane.iter()
+            .any(|task| matches!(task, AssetTask::ShaderRoute(route) if route.asset_id == asset_id))
+    })
+}
+
+fn assert_no_shader_route(rt: &RendererRuntime, asset_id: i32) {
+    assert!(
+        rt.backend
+            .materials
+            .pending_shader_route_for_tests(asset_id)
+            .is_none()
+    );
+    assert!(!has_queued_shader_route(rt, asset_id));
+}
+
+#[test]
+fn custom_shader_negative_asset_id_registers_no_route_and_sends_no_result() {
+    let _guard = RemoveCustomShader::prepare("custom-neg-carrier");
+    let (mut host, mut rt) = test_runtime_connected_ipc();
+    assert!(rt.test_shared_memory_available());
+    let _ = take_shader_upload_results(&mut host);
+
+    rt.handle_ipc_command(RendererCommand::ShaderUpload(ShaderUpload {
+        asset_id: -1,
+        file: Some(format_custom_shader_payload(
+            "custom-neg-carrier",
+            CUSTOM_SHADER_EXAMPLE_WGSL,
+        )),
+    }));
+    assert_eq!(rt.ipc_state.pending_shader_resolutions.len(), 1);
+
+    drain_completed_shader_uploads(&mut rt);
+
+    assert_no_shader_route(&rt, -1);
+    assert!(take_shader_upload_results(&mut host).is_empty());
+}
+
+#[test]
+fn custom_shader_rejected_payload_registers_null_route_and_sends_result() {
+    let (mut host, mut rt) = test_runtime_connected_ipc();
+    assert!(rt.test_shared_memory_available());
+    let _ = take_shader_upload_results(&mut host);
+    let asset_id = 4;
+
+    rt.handle_ipc_command(RendererCommand::ShaderUpload(ShaderUpload {
+        asset_id,
+        file: Some(format!(
+            "{RENDERIDE_CUSTOM_WGSL_PREFIX}key=rejected-custom\n"
+        )),
+    }));
+    assert_eq!(rt.ipc_state.pending_shader_resolutions.len(), 1);
+
+    drain_completed_shader_uploads(&mut rt);
+
+    let (pipeline, name, bits) = rt
+        .backend
+        .materials
+        .pending_shader_route_for_tests(asset_id)
+        .expect("null route");
+    assert_eq!(pipeline, RasterPipelineKind::Null);
+    assert_eq!(name, None);
+    assert_eq!(bits, None);
+    let results = take_shader_upload_results(&mut host);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].asset_id, asset_id);
+    assert!(results[0].instance_changed);
+}
+
+#[test]
+fn custom_shader_negative_asset_id_installs_and_retargets_named_routes() {
+    let key = "custom-neg-retarget";
+    let _guard = RemoveCustomShader::prepare(key);
+    let (mut host, mut rt) = test_runtime_connected_ipc();
+    assert!(rt.test_shared_memory_available());
+    let _ = take_shader_upload_results(&mut host);
+    let named_id = 7;
+    let carrier_id = -2;
+
+    rt.handle_ipc_command(RendererCommand::ShaderUpload(ShaderUpload {
+        asset_id: named_id,
+        file: Some(format!("{RENDERIDE_TEST_STEM_PREFIX}{key}_00000020")),
+    }));
+    drain_completed_shader_uploads(&mut rt);
+    let (pipeline, name, bits) = rt
+        .backend
+        .materials
+        .pending_shader_route_for_tests(named_id)
+        .expect("named route");
+    assert_eq!(pipeline, RasterPipelineKind::Null);
+    assert_eq!(name.as_deref(), Some(key));
+    assert_eq!(bits, Some(0x20));
+    let _ = take_shader_upload_results(&mut host);
+
+    rt.handle_ipc_command(RendererCommand::ShaderUpload(ShaderUpload {
+        asset_id: carrier_id,
+        file: Some(format_custom_shader_payload(
+            key,
+            CUSTOM_SHADER_EXAMPLE_WGSL,
+        )),
+    }));
+    drain_completed_shader_uploads(&mut rt);
+
+    let installed =
+        crate::materials::embedded_default_stem_for_shader_asset_name(key).expect("custom stem");
+    let (pipeline, name, bits) = rt
+        .backend
+        .materials
+        .pending_shader_route_for_tests(named_id)
+        .expect("retargeted route");
+    assert_eq!(name.as_deref(), Some(key));
+    assert_eq!(bits, Some(0x20));
+    assert!(
+        matches!(pipeline, RasterPipelineKind::EmbeddedStem(stem) if stem.as_ref() == installed)
+    );
+    assert_no_shader_route(&rt, carrier_id);
+    assert!(take_shader_upload_results(&mut host).is_empty());
 }
