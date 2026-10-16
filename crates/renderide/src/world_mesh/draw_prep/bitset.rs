@@ -7,6 +7,16 @@ pub(super) struct DenseBitSet {
 }
 
 impl DenseBitSet {
+    /// Creates an empty bitset without allocating.
+    pub(super) const fn new_empty() -> Self {
+        Self { words: Vec::new() }
+    }
+
+    /// Allocated word capacity, used when recycling scratch bitsets.
+    pub(super) fn word_capacity(&self) -> usize {
+        self.words.capacity()
+    }
+
     /// Clears all set bits while retaining allocation.
     #[inline]
     pub(super) fn clear(&mut self) {

@@ -56,6 +56,12 @@ pub struct FrameResourceManager {
     pub(super) mesh_deform_dispatched_this_submission: AtomicBool,
     /// Optional visible deform filter derived from prefetched per-view draw lists.
     pub(super) visible_mesh_deform_keys: Mutex<Option<HashSet<SkinCacheKey>>>,
+    /// Capacity retained across submissions for the visible deform key set.
+    pub(super) deform_key_scratch: HashSet<SkinCacheKey>,
+    /// Reused shadow-caster grouping tables.
+    pub(super) shadow_caster_plan_scratch: super::shadows::ShadowCasterPlanScratch,
+    /// Reused view-desc list for light preparation.
+    pub(super) light_view_scratch: Vec<super::view_desc::FrameLightViewDesc>,
     /// Reused per-view scratch for per-draw VP/pack before graph upload.
     ///
     /// Each view owns its own mutex-wrapped slot so rayon workers never alias the same scratch.
@@ -90,6 +96,9 @@ impl FrameResourceManager {
             signed_scene_color_required: false,
             mesh_deform_dispatched_this_submission: AtomicBool::new(false),
             visible_mesh_deform_keys: Mutex::new(None),
+            deform_key_scratch: HashSet::new(),
+            shadow_caster_plan_scratch: super::shadows::ShadowCasterPlanScratch::default(),
+            light_view_scratch: Vec::new(),
             per_view_per_draw_scratch: PerViewResourceMap::new(),
             lights_overflow_warned: false,
             signed_scene_color_required_logged: false,

@@ -388,6 +388,8 @@ impl GraphBuilder {
             pass_info: &pass_info,
         });
 
+        let raster_merge_cache =
+            super::compiled::build_raster_merge_cache(&schedule, &ordered_passes, &pass_info);
         Ok(CompiledRenderGraph {
             passes: ordered_passes,
             needs_surface_acquire,
@@ -405,6 +407,7 @@ impl GraphBuilder {
             validation_report,
             validation_mode: self.validation_mode,
             main_graph_msaa_transient_handles: None,
+            raster_merge_cache,
         })
     }
 
@@ -454,6 +457,7 @@ impl GraphBuilder {
             validation_report: GraphValidationReport::new(self.validation_mode),
             validation_mode: self.validation_mode,
             main_graph_msaa_transient_handles: None,
+            raster_merge_cache: Vec::new(),
         }
     }
 

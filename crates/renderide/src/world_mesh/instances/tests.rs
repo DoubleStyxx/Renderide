@@ -962,3 +962,13 @@ fn submission_class_parallel_keeps_downlevel_groups_singleton() {
             .all(|group| group.instance_range.end - group.instance_range.start == 1)
     );
 }
+
+#[test]
+fn phase_debug_group_label_matches_debug_format() {
+    for phase in WorldMeshPhase::ALL {
+        assert_eq!(
+            phase.debug_group_label(),
+            format!("world_mesh_forward::{phase:?}")
+        );
+    }
+}

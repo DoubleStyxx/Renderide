@@ -72,6 +72,7 @@ fn aggressive_deform_collect_matches_serial_for_missing_meshes() {
     let mut serial = Vec::new();
     let mut aggressive = Vec::new();
     let mut chunks = Vec::new();
+    let mut specs = Vec::new();
 
     let render_contexts = [RenderingContext::UserView];
     collect_deform_work_for_space(
@@ -88,8 +89,11 @@ fn aggressive_deform_collect_matches_serial_for_missing_meshes() {
         None,
         &render_contexts,
         space_id,
-        &mut chunks,
-        &mut aggressive,
+        &mut AggressiveDeformCollect {
+            specs: &mut specs,
+            chunks: &mut chunks,
+            work: &mut aggressive,
+        },
     );
 
     assert!(serial.is_empty());

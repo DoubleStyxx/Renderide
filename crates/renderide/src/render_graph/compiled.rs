@@ -18,7 +18,12 @@ pub(super) mod cache;
 mod exec;
 mod frame_view;
 mod helpers;
+mod merge_cache;
 mod resource;
+
+pub(super) use merge_cache::{
+    CachedRasterMergeGroup, RasterMergeCacheEntry, build_raster_merge_cache,
+};
 
 #[cfg(test)]
 mod dot;
@@ -126,6 +131,8 @@ pub struct CompiledRenderGraph {
     /// When this graph is the main frame graph from [`super::build_main_graph`], transient handles
     /// for the MSAA depth and R32-float depth-resolve scratch resources.
     pub(super) main_graph_msaa_transient_handles: Option<[TextureHandle; 2]>,
+    /// Static raster-merge labels and coalesced templates, keyed like the materialization plan.
+    pub(super) raster_merge_cache: Vec<CachedRasterMergeGroup>,
 }
 
 pub(super) struct ResolvedView<'a> {
