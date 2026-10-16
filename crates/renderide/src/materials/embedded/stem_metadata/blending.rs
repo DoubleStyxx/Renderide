@@ -173,7 +173,8 @@ mod tests {
                     "{composed:?} should declare exactly one raster pass",
                 );
                 assert_eq!(
-                    passes[0].name, "forward_filter",
+                    passes[0].name.as_ref(),
+                    "forward_filter",
                     "{composed:?} should draw through the filter pass",
                 );
             }
@@ -228,7 +229,7 @@ mod tests {
             );
 
             let pass = &passes[0];
-            assert_eq!(pass.name, "forward_filter", "{composed:?}");
+            assert_eq!(pass.name.as_ref(), "forward_filter", "{composed:?}");
             assert_eq!(
                 pass.material_state,
                 MaterialPassState::Filter,

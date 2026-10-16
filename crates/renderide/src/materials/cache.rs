@@ -37,6 +37,9 @@ use super::raster_pipeline::MaterialPipelineDesc;
 /// Maximum raster pipelines retained (LRU eviction).
 const MAX_CACHED_PIPELINES: usize = 512;
 
+/// Maximum shader modules retained (LRU eviction).
+const MAX_CACHED_SHADER_MODULES: usize = 256;
+
 /// Number of shards across which the pipeline cache, pending-build set, and failed-build map are
 /// split. Must be a power of two so shard routing collapses to a bitmask. Sized to keep each
 /// recording worker on a distinct shard for the common case where N rayon workers issue
@@ -252,11 +255,22 @@ struct ShaderModuleCacheEntry {
     module: Arc<wgpu::ShaderModule>,
 }
 
-#[derive(Default)]
 struct ShaderModuleCache {
-    entries: Mutex<HashMap<ShaderModuleCacheKey, Vec<ShaderModuleCacheEntry>>>,
+    entries: Mutex<LruCache<ShaderModuleCacheKey, Vec<ShaderModuleCacheEntry>>>,
     builds: KeyedSingleFlight<ShaderModuleCacheKey>,
     stats: AtomicCacheCounters,
+}
+
+impl Default for ShaderModuleCache {
+    fn default() -> Self {
+        Self {
+            entries: Mutex::new(LruCache::new(
+                NonZeroUsize::new(MAX_CACHED_SHADER_MODULES).unwrap_or(NonZeroUsize::MIN),
+            )),
+            builds: KeyedSingleFlight::default(),
+            stats: AtomicCacheCounters::default(),
+        }
+    }
 }
 
 impl ShaderModuleCache {
@@ -299,17 +313,45 @@ impl ShaderModuleCache {
                     source: wgpu::ShaderSource::Wgsl(source.as_ref().into()),
                 }))
             };
-            self.entries
-                .lock()
-                .entry(key)
-                .or_default()
-                .push(ShaderModuleCacheEntry {
+            self.insert_module(
+                key,
+                ShaderModuleCacheEntry {
                     source,
                     module: module.clone(),
-                });
-            self.stats.note_insertion();
+                },
+            );
             drop(leader);
             return module;
+        }
+    }
+
+    fn insert_module(&self, key: ShaderModuleCacheKey, entry: ShaderModuleCacheEntry) {
+        let mut entries = self.entries.lock();
+        if let Some(bucket) = entries.get_mut(&key) {
+            bucket.push(entry);
+        } else if let Some((_, evicted)) = entries.push(key, vec![entry]) {
+            self.note_module_evictions(evicted.len());
+        }
+        self.stats.note_insertion();
+        loop {
+            let count = entries
+                .iter()
+                .map(|(_, bucket)| bucket.len())
+                .sum::<usize>();
+            if count <= MAX_CACHED_SHADER_MODULES {
+                break;
+            }
+            let Some((_, evicted)) = entries.pop_lru() else {
+                break;
+            };
+            self.note_module_evictions(evicted.len());
+        }
+        drop(entries);
+    }
+
+    fn note_module_evictions(&self, count: usize) {
+        for _ in 0..count {
+            self.stats.note_eviction();
         }
     }
 
@@ -318,16 +360,21 @@ impl ShaderModuleCache {
         key: &ShaderModuleCacheKey,
         source: &str,
     ) -> Option<Arc<wgpu::ShaderModule>> {
-        self.entries
-            .lock()
-            .get(key)?
-            .iter()
-            .find(|entry| entry.source.as_ref() == source)
-            .map(|entry| entry.module.clone())
+        let mut entries = self.entries.lock();
+        entries.get(key).and_then(|bucket| {
+            bucket
+                .iter()
+                .find(|entry| entry.source.as_ref() == source)
+                .map(|entry| entry.module.clone())
+        })
     }
 
     fn entry_count(&self) -> usize {
-        self.entries.lock().values().map(Vec::len).sum()
+        self.entries
+            .lock()
+            .iter()
+            .map(|(_, bucket)| bucket.len())
+            .sum()
     }
 
     fn stats(&self) -> CacheStats {

@@ -153,8 +153,8 @@ fn material_default_uniform_fields_for_stem(
             (field_name.as_str(), field.kind),
         );
     }
-    for default in material_defaults {
-        let property = shader_writer_unescaped_property_name(default.property);
+    for default in material_defaults.iter() {
+        let property = shader_writer_unescaped_property_name(default.property.as_ref());
         let (field_name, field_kind) =
             reflected_fields.get(property).copied().ok_or_else(|| {
                 format!(
@@ -207,7 +207,7 @@ pub(crate) fn build_stem_material_layout(
     let wgsl = embedded_shaders::embedded_target_wgsl(stem)
         .ok_or_else(|| format!("shader package WGSL missing for stem {stem}"))?;
     let reflected =
-        reflect_raster_material_wgsl(wgsl).map_err(|e| format!("reflect {stem}: {e}"))?;
+        reflect_raster_material_wgsl(wgsl.as_ref()).map_err(|e| format!("reflect {stem}: {e}"))?;
 
     let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("embedded_raster_material"),
@@ -248,7 +248,7 @@ mod tests {
     fn xiexe_module_textures_resolve_to_unmangled_property_ids() {
         let wgsl =
             embedded_shaders::embedded_target_wgsl("xstoon2.0_default").expect("xiexe target WGSL");
-        let reflected = reflect_raster_material_wgsl(wgsl).expect("xiexe WGSL reflection");
+        let reflected = reflect_raster_material_wgsl(wgsl.as_ref()).expect("xiexe WGSL reflection");
         let registry = PropertyIdRegistry::new();
 
         let ids = StemEmbeddedPropertyIds::build(&registry, &reflected);
@@ -263,7 +263,7 @@ mod tests {
     fn xiexe_outline_emissive_typo_alias_is_preserved() {
         let wgsl =
             embedded_shaders::embedded_target_wgsl("xstoon2.0_default").expect("xiexe target WGSL");
-        let reflected = reflect_raster_material_wgsl(wgsl).expect("xiexe WGSL reflection");
+        let reflected = reflect_raster_material_wgsl(wgsl.as_ref()).expect("xiexe WGSL reflection");
         let uniform = reflected
             .material_uniform
             .as_ref()
@@ -282,7 +282,8 @@ mod tests {
             .filter(|stem| stem.starts_with("xstoon2.0"))
         {
             let wgsl = embedded_shaders::embedded_target_wgsl(stem).expect("xiexe target WGSL");
-            let reflected = reflect_raster_material_wgsl(wgsl).expect("xiexe WGSL reflection");
+            let reflected =
+                reflect_raster_material_wgsl(wgsl.as_ref()).expect("xiexe WGSL reflection");
             let unmangled: Vec<String> = reflected
                 .material_group1_names
                 .values()
@@ -342,7 +343,8 @@ mod tests {
     fn all_embedded_material_textures_declare_default_directives() {
         for stem in embedded_shaders::COMPILED_MATERIAL_STEMS {
             let wgsl = embedded_shaders::embedded_target_wgsl(stem).expect("embedded target WGSL");
-            let reflected = reflect_raster_material_wgsl(wgsl).expect("embedded reflection");
+            let reflected =
+                reflect_raster_material_wgsl(wgsl.as_ref()).expect("embedded reflection");
             let reflected_texture_names = reflected
                 .material_entries
                 .iter()
@@ -371,7 +373,8 @@ mod tests {
     fn all_embedded_material_defaults_resolve_to_uniform_fields() {
         for stem in embedded_shaders::COMPILED_MATERIAL_STEMS {
             let wgsl = embedded_shaders::embedded_target_wgsl(stem).expect("embedded target WGSL");
-            let reflected = reflect_raster_material_wgsl(wgsl).expect("embedded reflection");
+            let reflected =
+                reflect_raster_material_wgsl(wgsl.as_ref()).expect("embedded reflection");
 
             material_default_uniform_fields_for_stem(stem, &reflected)
                 .expect("material defaults map to reflected uniform fields");

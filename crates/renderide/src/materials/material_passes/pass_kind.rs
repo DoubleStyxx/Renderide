@@ -5,6 +5,8 @@
 //! offset behavior lives on [`MaterialPassDesc`] as explicit state plus per-field material override
 //! policy.
 
+use std::sync::Arc;
+
 use super::super::render_state::{MaterialDepthCompareDomain, MaterialRenderState};
 use super::blend_mode::MaterialBlendMode;
 use super::wire_tables::{unity_blend_state, unity_filter_blend_state, unity_overlay_blend_state};
@@ -160,16 +162,16 @@ impl MaterialRenderStatePolicy {
 }
 
 /// Pipeline state for one pass of a material shader.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct MaterialPassDesc {
     /// Debug label for logs / pipeline names.
-    pub name: &'static str,
+    pub name: Arc<str>,
     /// Semantic pass role.
     pub pass_type: PassType,
     /// Vertex shader entry point.
-    pub vertex_entry: &'static str,
+    pub vertex_entry: Arc<str>,
     /// Fragment shader entry point.
-    pub fragment_entry: &'static str,
+    pub fragment_entry: Arc<str>,
     /// Depth comparison under reverse-Z. Unity `LEqual` maps to `GreaterEqual`; Unity `Greater` maps to `Less`.
     pub depth_compare: wgpu::CompareFunction,
     /// Enum layout used when `_ZTest` overrides [`Self::depth_compare`].
@@ -280,7 +282,7 @@ pub struct DefaultPassParams {
 }
 
 /// Static opaque/transparent pass descriptor used by null fallback pipelines.
-pub const fn default_pass(params: DefaultPassParams) -> MaterialPassDesc {
+pub fn default_pass(params: DefaultPassParams) -> MaterialPassDesc {
     let (blend, write_mask, cull_mode) = if params.use_alpha_blending {
         (
             Some(wgpu::BlendState::ALPHA_BLENDING),
@@ -291,10 +293,10 @@ pub const fn default_pass(params: DefaultPassParams) -> MaterialPassDesc {
         (None, wgpu::ColorWrites::COLOR, Some(wgpu::Face::Back))
     };
     MaterialPassDesc {
-        name: "main",
+        name: Arc::from("main"),
         pass_type: PassType::Forward,
-        vertex_entry: "vs_main",
-        fragment_entry: "fs_main",
+        vertex_entry: Arc::from("vs_main"),
+        fragment_entry: Arc::from("fs_main"),
         depth_compare: crate::gpu::MAIN_FORWARD_DEPTH_COMPARE,
         depth_compare_domain: MaterialDepthCompareDomain::FrooxZTest,
         depth_write: params.depth_write,
@@ -327,13 +329,13 @@ pub(crate) fn materialized_pass_for_blend_mode_with_routing(
     match pass.material_state {
         MaterialPassState::Static => MaterialPassDesc {
             alpha_to_coverage,
-            ..*pass
+            ..pass.clone()
         },
         MaterialPassState::Forward => {
             let Some((src, dst)) = blend_mode.unity_blend_factors() else {
                 return MaterialPassDesc {
                     alpha_to_coverage,
-                    ..*pass
+                    ..pass.clone()
                 };
             };
             let blend = unity_blend_state(src, dst);
@@ -346,19 +348,19 @@ pub(crate) fn materialized_pass_for_blend_mode_with_routing(
                 },
                 depth_write: src == 1 && dst == 0,
                 alpha_to_coverage,
-                ..*pass
+                ..pass.clone()
             }
         }
         MaterialPassState::TransparentForward => match blend_mode {
             MaterialBlendMode::StemDefault | MaterialBlendMode::Opaque => MaterialPassDesc {
                 alpha_to_coverage,
-                ..*pass
+                ..pass.clone()
             },
             MaterialBlendMode::UnityBlend { src, dst } => {
                 let Some(blend) = unity_blend_state(src, dst) else {
                     return MaterialPassDesc {
                         alpha_to_coverage,
-                        ..*pass
+                        ..pass.clone()
                     };
                 };
                 MaterialPassDesc {
@@ -366,7 +368,7 @@ pub(crate) fn materialized_pass_for_blend_mode_with_routing(
                     write_mask: wgpu::ColorWrites::ALL,
                     depth_write: false,
                     alpha_to_coverage,
-                    ..*pass
+                    ..pass.clone()
                 }
             }
         },
@@ -374,21 +376,21 @@ pub(crate) fn materialized_pass_for_blend_mode_with_routing(
             let Some((src, dst)) = blend_mode.unity_blend_factors() else {
                 return MaterialPassDesc {
                     alpha_to_coverage,
-                    ..*pass
+                    ..pass.clone()
                 };
             };
             let blend = unity_overlay_blend_state(src, dst);
             MaterialPassDesc {
                 blend,
                 alpha_to_coverage,
-                ..*pass
+                ..pass.clone()
             }
         }
         MaterialPassState::Filter => {
             let Some((src, dst)) = blend_mode.unity_blend_factors() else {
                 return MaterialPassDesc {
                     alpha_to_coverage,
-                    ..*pass
+                    ..pass.clone()
                 };
             };
             let blend = unity_filter_blend_state(src, dst);
@@ -401,7 +403,7 @@ pub(crate) fn materialized_pass_for_blend_mode_with_routing(
                 },
                 depth_write: src == 1 && dst == 0,
                 alpha_to_coverage,
-                ..*pass
+                ..pass.clone()
             }
         }
     }

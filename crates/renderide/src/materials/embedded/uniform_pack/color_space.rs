@@ -169,7 +169,8 @@ mod tests {
 
     fn reflected_material_value_spaces(stem: &str) -> MaterialUniformValueSpaces {
         let wgsl = embedded_shaders::embedded_target_wgsl(stem).expect("embedded WGSL target");
-        let reflected = reflect_raster_material_wgsl(wgsl).expect("reflect embedded WGSL target");
+        let reflected =
+            reflect_raster_material_wgsl(wgsl.as_ref()).expect("reflect embedded WGSL target");
         MaterialUniformValueSpaces::for_stem(stem, &reflected)
     }
 
@@ -288,7 +289,7 @@ mod tests {
         for stem in embedded_shaders::COMPILED_MATERIAL_STEMS {
             let wgsl = embedded_shaders::embedded_target_wgsl(stem).expect("embedded WGSL target");
             let reflected =
-                reflect_raster_material_wgsl(wgsl).expect("reflect embedded WGSL target");
+                reflect_raster_material_wgsl(wgsl.as_ref()).expect("reflect embedded WGSL target");
             let spaces = MaterialUniformValueSpaces::for_stem(stem, &reflected);
             let Some(uniform) = reflected.material_uniform.as_ref() else {
                 continue;
@@ -310,7 +311,7 @@ mod tests {
         for stem in embedded_shaders::COMPILED_MATERIAL_STEMS {
             let wgsl = embedded_shaders::embedded_target_wgsl(stem).expect("embedded WGSL target");
             let reflected =
-                reflect_raster_material_wgsl(wgsl).expect("reflect embedded WGSL target");
+                reflect_raster_material_wgsl(wgsl.as_ref()).expect("reflect embedded WGSL target");
             let spaces = MaterialUniformValueSpaces::for_stem(stem, &reflected);
             let Some(uniform) = reflected.material_uniform.as_ref() else {
                 continue;

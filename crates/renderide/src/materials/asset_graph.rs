@@ -228,9 +228,18 @@ impl ShaderSourceGraphState {
         &mut self,
         key: EmbeddedShaderSourceKey,
     ) -> MaterialShaderSourceSnapshot {
+        let custom_generation =
+            crate::materials::custom_shader::source_generation(&key.composed_stem());
         let node = self.node_for_key(key);
+        let generation = if custom_generation == 0 {
+            node.generation
+        } else {
+            custom_generation
+                .saturating_mul(1_000_003)
+                .saturating_add(node.generation)
+        };
         MaterialShaderSourceSnapshot {
-            generation: node.generation,
+            generation,
             source_override: node.source_override.clone(),
         }
     }
@@ -316,6 +325,10 @@ impl MaterialAssetGraph {
         shader_asset_name: Option<String>,
         shader_variant_bits: Option<u32>,
     ) {
+        let pipeline = match shader_asset_name.as_deref() {
+            Some(name) => crate::materials::custom_shader::pipeline_for_shader_name(name, pipeline),
+            None => pipeline,
+        };
         let route = ShaderRouteEntry {
             pipeline,
             shader_asset_name,
@@ -333,6 +346,27 @@ impl MaterialAssetGraph {
         self.shader_nodes
             .insert(shader_asset_id, ShaderAssetNode::new(route, generation));
         self.note_invalidation();
+    }
+
+    /// Points every route with this shader asset name at the live custom or packaged stem.
+    pub(crate) fn retarget_named_shader_routes(&mut self, shader_key: &str) {
+        let shader_key = crate::materials::custom_shader::normalize_shader_key(shader_key);
+        let matches = self
+            .router
+            .routes_sorted_for_hud()
+            .into_iter()
+            .filter_map(
+                |(asset_id, pipeline, shader_asset_name, shader_variant_bits)| {
+                    let name = shader_asset_name?;
+                    (crate::materials::custom_shader::normalize_shader_key(&name) == shader_key)
+                        .then_some((asset_id, pipeline, name, shader_variant_bits))
+                },
+            )
+            .collect::<Vec<_>>();
+        for (asset_id, pipeline, name, shader_variant_bits) in matches {
+            let next = crate::materials::custom_shader::pipeline_for_shader_name(&name, pipeline);
+            self.register_shader_route(asset_id, next, Some(name), shader_variant_bits);
+        }
     }
 
     /// Removes a host shader route.
@@ -523,6 +557,32 @@ mod tests {
         assert_eq!(graph.variant_bits_for_shader_asset(7), Some(0x20));
         assert_eq!(graph.diagnostic_snapshot().shader_nodes, 1);
         assert_eq!(graph.diagnostic_snapshot().embedded_source_nodes, 1);
+    }
+
+    #[test]
+    fn custom_shader_retarget_rebinds_and_restores_a_named_route() {
+        let mut graph = MaterialAssetGraph::new(RasterPipelineKind::Null);
+        let key = "route-retarget-only";
+        graph.register_shader_route(
+            7,
+            RasterPipelineKind::Null,
+            Some(key.to_string()),
+            Some(0x20),
+        );
+
+        let wgsl = include_str!("../../../../RenderideMod/Shaders/example_solid.wgsl");
+        crate::materials::custom_shader::install(key, wgsl).expect("install custom shader");
+        graph.retarget_named_shader_routes(key);
+        assert_eq!(
+            graph.stem_for_shader_asset(7),
+            Some("renderide_custom_route-retarget-only_default")
+        );
+        assert_eq!(graph.variant_bits_for_shader_asset(7), Some(0x20));
+
+        crate::materials::custom_shader::remove(key).expect("remove custom shader");
+        graph.retarget_named_shader_routes(key);
+        assert_eq!(graph.stem_for_shader_asset(7), None);
+        assert_eq!(graph.variant_bits_for_shader_asset(7), Some(0x20));
     }
 
     #[test]

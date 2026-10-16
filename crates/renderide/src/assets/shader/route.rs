@@ -13,10 +13,16 @@
 //! The integration harness can bypass AssetBundle parsing by setting [`ShaderUpload::file`] to
 //! `RENDERIDE_TEST_STEM:<stem>` (see [`renderide_shared::test_hooks::RENDERIDE_TEST_STEM_PREFIX`]). The prefix
 //! is never produced by the production host, so this path is inert outside the test harness.
+//!
+//! RenderideMod loads authored WGSL by setting [`ShaderUpload::file`] to a
+//! [`renderide_shared::custom_shader_ipc`] payload. That path compiles the program and routes the
+//! asset id onto a `renderide_custom_<key>` stem. [`ResolvedShaderUpload::retarget_shader_key`]
+//! tells the caller to rebind other host assets that use the same shader name.
 
 use std::path::Path;
 use std::sync::Arc;
 
+use renderide_shared::custom_shader_ipc::{CustomShaderPayload, parse_custom_shader_payload};
 use renderide_shared::test_hooks::RENDERIDE_TEST_STEM_PREFIX;
 
 use crate::render_contract::RasterPipelineKind;
@@ -28,6 +34,12 @@ use super::unity_asset;
 /// Lookup function mapping a Unity shader asset name to the default embedded material stem.
 pub type ShaderRouteStemLookup = fn(&str) -> Option<String>;
 
+/// Installs or removes a parsed custom-shader payload.
+///
+/// The implementation lives in `materials` so shader routing does not import that crate root.
+pub type ApplyCustomShaderPayload =
+    fn(Result<CustomShaderPayload, String>, ShaderRouteStemLookup) -> ResolvedShaderUpload;
+
 /// Resolved upload: optional AssetBundle shader asset name plus the raster pipeline kind.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedShaderUpload {
@@ -37,6 +49,13 @@ pub struct ResolvedShaderUpload {
     pub shader_variant_bits: Option<u32>,
     /// Pipeline kind passed to [`crate::materials::MaterialRegistry::map_shader_route`].
     pub pipeline: RasterPipelineKind,
+    /// Shader asset name whose existing routes should adopt [`Self::pipeline`].
+    pub retarget_shader_key: Option<String>,
+    /// Malformed custom payload.
+    ///
+    /// Negative carrier asset ids skip route registration and the upload ack.
+    /// A real asset id (`>= 0`) still registers [`RasterPipelineKind::Null`] and acks.
+    pub rejected: bool,
 }
 
 /// Pure shader route selected from an already-resolved shader asset name.
@@ -56,6 +75,8 @@ impl From<ShaderRoutePlan> for ResolvedShaderUpload {
             shader_asset_name: plan.shader_asset_name,
             shader_variant_bits: plan.shader_variant_bits,
             pipeline: plan.pipeline,
+            retarget_shader_key: None,
+            rejected: false,
         }
     }
 }
@@ -87,7 +108,11 @@ pub fn plan_shader_route(
 pub fn resolve_shader_upload(
     data: &ShaderUpload,
     stem_lookup: ShaderRouteStemLookup,
+    apply_custom: ApplyCustomShaderPayload,
 ) -> ResolvedShaderUpload {
+    if let Some(payload) = data.file.as_deref().and_then(parse_custom_shader_payload) {
+        return apply_custom(payload, stem_lookup);
+    }
     if let Some(suffix) = data
         .file
         .as_deref()
@@ -143,13 +168,24 @@ mod tests {
         None
     }
 
+    fn resolve_for_test(
+        data: &ShaderUpload,
+        stem_lookup: ShaderRouteStemLookup,
+    ) -> ResolvedShaderUpload {
+        resolve_shader_upload(
+            data,
+            stem_lookup,
+            crate::materials::custom_shader::resolve_custom_shader_payload,
+        )
+    }
+
     #[test]
     fn missing_file_uses_null_pipeline() {
         let u = ShaderUpload {
             asset_id: 1,
             file: None,
         };
-        let r = resolve_shader_upload(&u, missing_stem_lookup);
+        let r = resolve_for_test(&u, missing_stem_lookup);
         assert_eq!(r.shader_asset_name, None);
         assert_eq!(r.shader_variant_bits, None);
         assert_eq!(r.pipeline, RasterPipelineKind::Null);
@@ -161,7 +197,7 @@ mod tests {
             asset_id: 2,
             file: Some("Shader \"Unlit\"\n{\n".to_string()),
         };
-        let r = resolve_shader_upload(&u, missing_stem_lookup);
+        let r = resolve_for_test(&u, missing_stem_lookup);
         assert_eq!(r.shader_asset_name, None);
         assert_eq!(r.shader_variant_bits, None);
         assert_eq!(r.pipeline, RasterPipelineKind::Null);
@@ -176,7 +212,7 @@ mod tests {
             asset_id: 3,
             file: Some(path.to_string_lossy().to_string()),
         };
-        let r = resolve_shader_upload(&u, missing_stem_lookup);
+        let r = resolve_for_test(&u, missing_stem_lookup);
         assert_eq!(r.shader_asset_name, None);
         assert_eq!(r.shader_variant_bits, None);
         assert_eq!(r.pipeline, RasterPipelineKind::Null);
@@ -230,7 +266,7 @@ mod tests {
             asset_id: 7,
             file: Some(format!("{RENDERIDE_TEST_STEM_PREFIX}ui_textunlit")),
         };
-        let r = resolve_shader_upload(&u, embedded_default_stem_for_shader_asset_name);
+        let r = resolve_for_test(&u, embedded_default_stem_for_shader_asset_name);
         assert_eq!(r.shader_asset_name.as_deref(), Some("ui_textunlit"));
         assert_eq!(r.shader_variant_bits, None);
         assert!(matches!(r.pipeline, RasterPipelineKind::EmbeddedStem(_)));
@@ -244,7 +280,7 @@ mod tests {
             asset_id: 8,
             file: Some(format!("{RENDERIDE_TEST_STEM_PREFIX}{nonexistent}")),
         };
-        let r = resolve_shader_upload(&u, missing_stem_lookup);
+        let r = resolve_for_test(&u, missing_stem_lookup);
         assert_eq!(r.shader_asset_name.as_deref(), Some(nonexistent));
         assert_eq!(r.shader_variant_bits, None);
         assert_eq!(r.pipeline, RasterPipelineKind::Null);
@@ -258,7 +294,7 @@ mod tests {
                 "{RENDERIDE_TEST_STEM_PREFIX}definitely_missing_shader"
             )),
         };
-        let r = resolve_shader_upload(&u, embedded_default_stem_for_shader_asset_name);
+        let r = resolve_for_test(&u, embedded_default_stem_for_shader_asset_name);
         assert_eq!(
             r.shader_asset_name.as_deref(),
             Some("definitely_missing_shader")
@@ -273,7 +309,7 @@ mod tests {
             asset_id: 10,
             file: Some(format!("{RENDERIDE_TEST_STEM_PREFIX}Unlit.shader")),
         };
-        let r = resolve_shader_upload(&u, embedded_default_stem_for_shader_asset_name);
+        let r = resolve_for_test(&u, embedded_default_stem_for_shader_asset_name);
         assert_eq!(r.shader_asset_name.as_deref(), Some("unlit"));
         assert_eq!(r.shader_variant_bits, None);
         assert!(matches!(r.pipeline, RasterPipelineKind::EmbeddedStem(_)));
@@ -285,7 +321,7 @@ mod tests {
             asset_id: 11,
             file: Some(format!("{RENDERIDE_TEST_STEM_PREFIX}TextureDebug.SHADER")),
         };
-        let r = resolve_shader_upload(&u, embedded_default_stem_for_shader_asset_name);
+        let r = resolve_for_test(&u, embedded_default_stem_for_shader_asset_name);
         assert_eq!(r.shader_asset_name.as_deref(), Some("texturedebug"));
         assert_eq!(r.shader_variant_bits, None);
         assert!(matches!(r.pipeline, RasterPipelineKind::EmbeddedStem(_)));
@@ -297,10 +333,57 @@ mod tests {
             asset_id: 12,
             file: Some(format!("{RENDERIDE_TEST_STEM_PREFIX}Unlit_00002202.shader")),
         };
-        let r = resolve_shader_upload(&u, embedded_default_stem_for_shader_asset_name);
+        let r = resolve_for_test(&u, embedded_default_stem_for_shader_asset_name);
         assert_eq!(r.shader_asset_name.as_deref(), Some("unlit"));
         assert_eq!(r.shader_variant_bits, Some(0x2202));
         assert!(matches!(r.pipeline, RasterPipelineKind::EmbeddedStem(_)));
+    }
+
+    #[test]
+    fn custom_wgsl_payload_installs_a_stem_and_removal_falls_back() {
+        let wgsl = include_str!("../../../../../RenderideMod/Shaders/example_solid.wgsl");
+        let key = "route-example-solid";
+        let upload = ShaderUpload {
+            asset_id: 40,
+            file: Some(renderide_shared::format_custom_shader_payload(key, wgsl)),
+        };
+        let installed = resolve_for_test(&upload, embedded_default_stem_for_shader_asset_name);
+        assert_eq!(installed.shader_asset_name.as_deref(), Some(key));
+        assert_eq!(installed.retarget_shader_key.as_deref(), Some(key));
+        match installed.pipeline {
+            RasterPipelineKind::EmbeddedStem(stem) => {
+                assert_eq!(
+                    stem.as_ref(),
+                    "renderide_custom_route-example-solid_default"
+                );
+            }
+            RasterPipelineKind::Null => panic!("custom shader did not resolve a stem"),
+        }
+        assert_eq!(
+            embedded_default_stem_for_shader_asset_name(key).as_deref(),
+            Some("renderide_custom_route-example-solid_default")
+        );
+
+        let removal = ShaderUpload {
+            asset_id: 41,
+            file: Some(renderide_shared::format_custom_shader_removal(key)),
+        };
+        let removed = resolve_for_test(&removal, embedded_default_stem_for_shader_asset_name);
+        assert_eq!(removed.pipeline, RasterPipelineKind::Null);
+        assert_eq!(removed.retarget_shader_key.as_deref(), Some(key));
+        assert_eq!(embedded_default_stem_for_shader_asset_name(key), None);
+    }
+
+    #[test]
+    fn malformed_custom_header_is_dropped() {
+        let upload = ShaderUpload {
+            asset_id: 42,
+            file: Some("renderide-custom-wgsl:v1\nkey=unlit\n".to_string()),
+        };
+        let resolved = resolve_for_test(&upload, embedded_default_stem_for_shader_asset_name);
+        assert!(resolved.rejected);
+        assert!(matches!(resolved.pipeline, RasterPipelineKind::Null));
+        assert!(resolved.retarget_shader_key.is_none());
     }
 
     #[test]
@@ -309,7 +392,7 @@ mod tests {
             asset_id: 13,
             file: Some(format!("{RENDERIDE_TEST_STEM_PREFIX}Unlit_00000200.shader")),
         };
-        let r = resolve_shader_upload(&u, embedded_default_stem_for_shader_asset_name);
+        let r = resolve_for_test(&u, embedded_default_stem_for_shader_asset_name);
         assert_eq!(r.shader_asset_name.as_deref(), Some("unlit"));
         assert_eq!(r.shader_variant_bits, Some(0x200));
         assert!(matches!(r.pipeline, RasterPipelineKind::EmbeddedStem(_)));

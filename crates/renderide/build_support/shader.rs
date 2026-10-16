@@ -230,6 +230,7 @@ pub fn compile(manifest_dir: &Path, out_dir: &Path) -> Result<(), BuildError> {
     fs::create_dir_all(&shader_root)?;
     fs::create_dir_all(&target_dir)?;
 
+    let shader_modules = discover_shader_modules(manifest_dir)?;
     let gen_path = out_dir.join("embedded_shaders.rs");
     let composed = match cached_composed_shaders(&shader_root, &target_dir, &gen_path)? {
         Some(cached) => cached,
@@ -239,7 +240,7 @@ pub fn compile(manifest_dir: &Path, out_dir: &Path) -> Result<(), BuildError> {
             composed
         }
     };
-    let embedded_rs = render_embedded_shaders_rs(&composed);
+    let embedded_rs = render_embedded_shaders_rs(&composed, &shader_modules);
     fs::write(&gen_path, embedded_rs)?;
     Ok(())
 }

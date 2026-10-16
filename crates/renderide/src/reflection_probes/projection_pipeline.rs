@@ -84,7 +84,7 @@ fn build_projection_pipeline(
         .ok_or_else(|| format!("embedded shader {stem} not found"))?;
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(stem),
-        source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(source)),
+        source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(source.as_ref())),
     });
     let layout_entries = projection_layout_entries(stem);
     let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
