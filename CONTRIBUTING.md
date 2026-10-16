@@ -124,7 +124,7 @@ Everything above the workspace root that is not one of these regions is contribu
 
 ### 2.1 The Rust workspace
 
-The workspace lists six member crates in `Cargo.toml`. Each has a single, focused job.
+The workspace lists seven member crates in `Cargo.toml`. Each has a single, focused job.
 
 | Crate | Kind | Purpose |
 | --- | --- | --- |
@@ -134,6 +134,7 @@ The workspace lists six member crates in `Cargo.toml`. Each has a single, focuse
 | [`renderide-shared`](crates/renderide-shared) | library | The host-renderer wire-format crate. Holds the generated shared types, the binary packing helpers, the dual-queue IPC wrappers (one for the host side, one for the renderer side), and the shared-memory accessor and writer. |
 | [`renderide`](crates/renderide) | two binaries plus library | The renderer itself. Owns winit, wgpu, OpenXR, the scene model, the render graph, materials, assets, profiling, and diagnostics. Builds the `renderide-renderer` binary (the renderer process) and the `roundtrip` binary (a small CLI used by the .NET generator's roundtrip tests to validate that Rust packing and C# packing agree on the bytes). |
 | [`renderide-test`](crates/renderide-test) | binary plus library | Headless integration harness. Acts as a minimal host, drives the real IPC protocol, spawns the renderer, captures its output, and validates the result against golden images and golden state machines. |
+| [`renderide-bench`](crates/renderide-bench) | library plus benches | Criterion microbenchmarks for CPU transform, culling, and buffer-pool helpers. Links `renderide` with the `bench-api` feature. Does not launch Resonite or open a GPU device. |
 
 `bootstrapper`, `interprocess`, and `logger` know nothing about graphics. `renderide-shared` knows nothing about graphics either. The graphics knowledge is concentrated in `renderide`. `renderide-test` deliberately does not link the renderer crate; it spawns `renderide-renderer` and validates it through the same IPC contract a real host would use.
 
@@ -149,6 +150,7 @@ flowchart TB
     renderide_test --> logger
     renderide_test --> renderide_shared
     renderide_test -. spawns and inspects .-> renderide_renderer[renderide-renderer]
+    renderide_bench[renderide-bench] --> renderide
     renderide_shared --> interprocess
     renderide_shared --> logger
 ```
@@ -193,15 +195,17 @@ Inside the renderer crate at `crates/renderide/`, three top-level companions liv
 
 ### 2.4 Build profiles and feature flags
 
-The workspace customizes two profiles in `Cargo.toml`:
+The workspace customizes three profiles in `Cargo.toml`:
 
 - `dev` raises the default development optimization level to 1, keeps incremental compilation on, uses many codegen units, and emits line-table debug info so routine debug builds run faster while retaining assertions.
 - `release` raises optimization to 3, disables incremental compilation and debug assertions, uses one codegen unit, enables thin LTO, emits line-table debug info, strips debuginfo from the final binaries, and keeps unwind panics.
+- `bench` inherits `release`, so `cargo bench` measures the same codegen the renderer ships.
 
-The `renderide` crate declares two opt-in Cargo features. Both are off by default to keep stock builds and CI lean.
+The `renderide` crate declares three opt-in Cargo features. All are off by default to keep stock builds and CI lean.
 
 - `tracy` enables Tracy profiling. CPU spans come from the `profiling` crate. GPU timestamp queries come from `wgpu-profiler`. The Tracy client links statically and runs in on-demand mode, so a profiled build idles near zero cost when no GUI is connected.
 - `video-textures` enables GStreamer-backed video texture decoding. Without this feature, the renderer still accepts video texture IPC commands and allocates GPU placeholders, but no decoding runs and the placeholder stays black. On Linux, install `libgstreamer1.0-dev`, `libgstreamer-plugins-base1.0-dev`, and `libgstreamer-plugins-good1.0-dev`; the last package provides the `videoflip` element used to land decoded frames in the texture orientation shaders expect.
+- `bench-api` exposes CPU-only transform, culling, and buffer-pool helpers to `renderide-bench`. The renderer process does not enable it. `cargo bench -p renderide-bench` turns it on for the bench crate.
 
 See `README.md` for the exact build commands and platform-specific dependencies for each feature.
 
@@ -222,6 +226,14 @@ The supporting crates each have their own integration tests:
 - `crates/logger/tests/` covers per-component init layouts, append-versus-truncate semantics, malicious-timestamp sanitization, mirror writers, the log facade, the macros routed through `init_for_*`, second-init no-op behavior, the uninitialized state, and concurrency under torn-line conditions.
 - `crates/renderide-shared/tests/` covers wire packing for polymorphic types (`packing_polymorphic_roundtrip.rs`) and primitives (`packing_wire_primitives.rs`), plus the singleton claim that prevents two renderers from racing on the same IPC name (`renderer_singleton_claim.rs`).
 - `crates/renderide-test/tests/` covers the harness itself: golden-image diff writing, golden round-trips, log folder routing, the PNG stability state machine, the spawn argument table, an end-to-end sphere pipeline, and the current scene integration test binaries (`unlit_sphere` and `torus_unlit_perlin`). The tracked golden cases also include `alpha_cutout_masked_quads`, `multi_primitive_unlit_grid`, and `pbs_lit_material_matrix`.
+
+CPU microbenchmarks live in `crates/renderide-bench`. They do not need Resonite or a GPU adapter:
+
+```bash
+cargo bench -p renderide-bench
+```
+
+GPU-device benches belong behind that crate's `gpu` feature (`cargo bench -p renderide-bench --features gpu`) and are not part of the default command.
 
 Ordinary renderer integration tests should stay non-GPU unless they belong in the dedicated harness. GPU-backed validation lives in `renderide-test`, which CI runs as a headless golden-image suite:
 

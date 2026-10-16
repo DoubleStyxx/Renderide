@@ -86,6 +86,8 @@ pub use ids::RenderSpaceId;
 pub use lights::{ResolvedLight, light_contributes, light_has_negative_contribution};
 pub(crate) use lod_groups::{LodEntry, LodGroupEntry, LodRendererKind, LodRendererRef};
 pub use math::render_transform_to_matrix;
+#[cfg(feature = "bench-api")]
+pub(crate) use math::{render_matrix_has_degenerate_scale, render_transform_has_degenerate_scale};
 pub use meshes::types::{
     MeshMaterialSlot, MeshRendererInstanceId, SkinnedMeshRenderer, StaticMeshRenderer,
 };
@@ -104,3 +106,5 @@ pub(crate) use render_buffers::{
     BillboardRenderBufferEntry, MeshRenderBufferEntry, TrailRenderBufferEntry,
 };
 pub use render_space::RenderSpaceView;
+#[cfg(feature = "bench-api")]
+pub(crate) use world::{WorldTransformCache, compute_world_matrices_for_space};

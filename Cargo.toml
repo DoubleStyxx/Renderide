@@ -5,6 +5,7 @@ members = [
   "crates/renderide",
   "crates/renderide-shared",
   "crates/renderide-test",
+  "crates/renderide-bench",
   "crates/interprocess",
   "crates/bootstrapper",
   "crates/logger",
@@ -27,6 +28,10 @@ debug-assertions = false
 lto = "thin"
 overflow-checks = false
 
+# Benchmarks inherit release optimizations so `cargo bench` measures the same
+# codegen the renderer ships, including thin LTO.
+[profile.bench]
+inherits = "release"
 
 [workspace.lints.rustdoc]
 all = "warn"

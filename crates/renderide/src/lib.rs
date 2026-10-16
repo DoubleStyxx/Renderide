@@ -18,6 +18,8 @@ pub(crate) use process_io::native_stdio;
 mod app;
 mod assets;
 mod backend;
+#[cfg(feature = "bench-api")]
+pub mod bench_api;
 mod blackboard_contract;
 mod bounds;
 mod build_info;
