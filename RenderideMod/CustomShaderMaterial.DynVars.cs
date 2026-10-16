@@ -307,6 +307,7 @@ public partial class CustomShaderMaterial
 
             current.FloatValue = mapped.FloatValue;
             current.Vector = mapped.Vector;
+            current.Color = mapped.Color;
             current.Texture = mapped.Texture;
             MarkChangeDirty();
         }
@@ -412,7 +413,7 @@ public partial class CustomShaderMaterial
         var property = canonical.Substring(prefix.Length).Trim();
         if (property.Length == 0)
             return false;
-        if (!TrySample(variable, out var kind, out var scalar, out var vector, out var texture))
+        if (!TrySample(variable, out var kind, out var scalar, out var vector, out var color, out var texture))
             return false;
 
         mapped = new BoundDynVar
@@ -422,6 +423,7 @@ public partial class CustomShaderMaterial
             Kind = kind,
             FloatValue = scalar,
             Vector = vector,
+            Color = color,
             Texture = texture,
         };
         return true;
@@ -478,10 +480,12 @@ public partial class CustomShaderMaterial
         out DynKind kind,
         out float scalar,
         out float4 vector,
+        out colorX color,
         out IAssetProvider<ITexture2D>? texture)
     {
         scalar = 0f;
         vector = default;
+        color = default;
         texture = null;
         if (variable is DynamicVariableBase<float> floatVar)
         {
@@ -515,8 +519,8 @@ public partial class CustomShaderMaterial
 
         if (variable is DynamicVariableBase<colorX> colorVar)
         {
-            kind = DynKind.Float4;
-            vector = LinearColor(colorVar.DynamicValue);
+            kind = DynKind.Color;
+            color = colorVar.DynamicValue;
             return true;
         }
 
@@ -529,12 +533,6 @@ public partial class CustomShaderMaterial
 
         kind = default;
         return false;
-    }
-
-    private static float4 LinearColor(colorX color)
-    {
-        var linear = color.ToProfile(ColorProfile.Linear);
-        return new float4(linear.r, linear.g, linear.b, linear.a);
     }
 
     private static bool IsLive(Component component)
@@ -572,6 +570,8 @@ public partial class CustomShaderMaterial
                     && left.Vector.y == right.Vector.y
                     && left.Vector.z == right.Vector.z
                     && left.Vector.w == right.Vector.w;
+            case DynKind.Color:
+                return left.Color.Equals(right.Color);
             case DynKind.Texture:
                 return ReferenceEquals(left.Texture, right.Texture);
             default:
@@ -628,6 +628,11 @@ public partial class CustomShaderMaterial
                     var vector = binding.Vector;
                     writer.SetFloat4(propertyId, in vector);
                     break;
+                case DynKind.Color:
+                    // SetColor profiles through RenderSystem.MaterialColorProfile (MaterialUpdateWriter.cs:223).
+                    var color = binding.Color;
+                    writer.SetColor(propertyId, in color);
+                    break;
                 case DynKind.Texture:
                     writer.SetTexture(propertyId, binding.Texture);
                     break;
@@ -639,6 +644,7 @@ public partial class CustomShaderMaterial
     {
         Float,
         Float4,
+        Color,
         Texture,
     }
 
@@ -649,6 +655,7 @@ public partial class CustomShaderMaterial
         public DynKind Kind;
         public float FloatValue;
         public float4 Vector;
+        public colorX Color;
         public IAssetProvider<ITexture2D>? Texture;
     }
 }
