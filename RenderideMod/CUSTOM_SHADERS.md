@@ -63,7 +63,7 @@ The source uses the same directives as `crates/renderide/shaders/materials`:
 - Call `rg::retain_globals_additive` from the fragment shader so the fixed frame bind group stays intact.
 - Declare `@group(1) @binding(0)` for material uniforms. Property names such as `_Color`, `_MainTex`, and `_Speed` match the host material. Add `//#mat_default _Color vec4 1 1 1 1` for the fallback value.
 - Put each `texture_2d` at `@group(1)` and its sampler on the next binding (`_MainTex` then `_MainTex_sampler`).
-- Supported uniform members are `f32`, `vec2<f32>`, `vec3<f32>`, `vec4<f32>`, `u32`, `array<f32, N>`, and `array<vec4<f32>, N>`. `//#mat_default` is `float` for `f32` and `vec4` for `vec4<f32>`.
+- Supported uniform members are `f32`, `vec2<f32>`, `vec3<f32>`, `vec4<f32>`, `u32`, and `array<vec4<f32>, N>`. `array<f32, N>` is not a uniform type: its stride is 4, and uniform arrays require a stride of 16. `//#mat_default` is `float` for `f32` and `vec4` for `vec4<f32>`.
 - Put `//#pass type=forward` immediately above the `@fragment` entry. The vertex entry defaults to `vs_main`.
 - Wrap `@builtin(view_index)` in `#ifdef MULTIVIEW`. The renderer composes a desktop target and a stereo target.
 

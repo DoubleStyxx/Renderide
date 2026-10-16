@@ -1,10 +1,10 @@
 //! Custom-shader material properties: reflection, uniform layout, defaults, and updates.
 
-use super::common::{empty_texture_pools, lookup, read_f32_at, read_f32x4};
 use super::super::{
     MaterialUniformDefaults, MaterialUniformPackMetadata, MaterialUniformValueSpaces,
     UniformPackTextureContext, build_embedded_uniform_bytes_with_material_defaults,
 };
+use super::common::{empty_texture_pools, lookup, read_f32_at, read_f32x4};
 use crate::embedded_shaders::{EmbeddedMaterialDefaultKind, EmbeddedMaterialDefaultValue};
 use crate::materials::custom_shader::{self, InstalledCustomShader};
 use crate::materials::embedded::layout::StemEmbeddedPropertyIds;
@@ -18,10 +18,11 @@ use crate::materials::host_data::{
 };
 use crate::materials::wgsl_reflect::identifier_names::unescape_property_name;
 use crate::materials::{
-    ReflectedRasterLayout, ReflectedUniformField, ReflectedUniformScalarKind,
-    reflect_raster_material_wgsl,
+    ReflectedMaterialUniformBlock, ReflectedRasterLayout, ReflectedUniformField,
+    ReflectedUniformScalarKind, reflect_raster_material_wgsl,
 };
 use crate::render_contract::RasterPipelineKind;
+use hashbrown::HashMap;
 
 const RAINBOW_WGSL: &str =
     include_str!("../../../../../../../RenderideMod/Shaders/example_rainbow.wgsl");
@@ -36,7 +37,6 @@ struct Material {
     _Speed: f32,
     _Color: vec4<f32>,
     _Tints: array<vec4<f32>, 4>,
-    _Weights: array<f32, 3>,
 }
 
 @group(1) @binding(0) var<uniform> mat: Material;
@@ -72,8 +72,7 @@ fn vs_main(
 @fragment
 fn fs_main(_in: VertexOutput) -> @location(0) vec4<f32> {
     let tint = mat._Tints[0] + mat._Tints[1] + mat._Tints[2] + mat._Tints[3];
-    let weight = mat._Weights[0] + mat._Weights[1] + mat._Weights[2];
-    let dir = vec4<f32>(mat._Dir, mat._Speed + weight);
+    let dir = vec4<f32>(mat._Dir, mat._Speed);
     return rg::retain_globals_additive(mat._Color + tint + dir);
 }
 "#;
@@ -345,8 +344,14 @@ fn rainbow_maps_group1_names_to_host_properties() {
     let speed = field(&loaded, "_Speed");
     assert_eq!(color.kind, ReflectedUniformScalarKind::Vec4);
     assert_eq!(speed.kind, ReflectedUniformScalarKind::F32);
-    assert_eq!(property_id(&loaded, "_Color"), loaded.registry.intern("_Color"));
-    assert_eq!(property_id(&loaded, "_Speed"), loaded.registry.intern("_Speed"));
+    assert_eq!(
+        property_id(&loaded, "_Color"),
+        loaded.registry.intern("_Color")
+    );
+    assert_eq!(
+        property_id(&loaded, "_Speed"),
+        loaded.registry.intern("_Speed")
+    );
 
     let (&binding, _) = loaded
         .reflected
@@ -381,7 +386,6 @@ fn packs_vec3_f32_vec4_arrays_and_mixed_types_at_uniform_alignment() {
     let speed = field(&loaded, "_Speed");
     let color = field(&loaded, "_Color");
     let tints = field(&loaded, "_Tints");
-    let weights = field(&loaded, "_Weights");
 
     assert_eq!(dir.offset, 0);
     assert_eq!(dir.size, 12);
@@ -395,11 +399,7 @@ fn packs_vec3_f32_vec4_arrays_and_mixed_types_at_uniform_alignment() {
     assert_eq!(tints.kind, ReflectedUniformScalarKind::Vec4Array);
     assert_eq!(tints.array_stride, 16);
     assert_eq!(tints.size, 64);
-    assert_eq!(weights.offset, 96);
-    assert_eq!(weights.kind, ReflectedUniformScalarKind::F32Array);
-    assert_eq!(weights.array_stride, 16);
-    assert_eq!(weights.size, 48);
-    assert_eq!(uniform.total_size, 144);
+    assert_eq!(uniform.total_size, 96);
 
     let mut store = MaterialPropertyStore::new();
     let material_id = 41;
@@ -423,11 +423,6 @@ fn packs_vec3_f32_vec4_arrays_and_mixed_types_at_uniform_alignment() {
         property_id(&loaded, "_Tints"),
         MaterialPropertyValue::Float4Array(vec![[8.0, 0.0, 0.0, 1.0], [0.0, 8.0, 0.0, 1.0]]),
     );
-    store.set_material(
-        material_id,
-        property_id(&loaded, "_Weights"),
-        MaterialPropertyValue::FloatArray(vec![0.25, 0.5]),
-    );
 
     let bytes = pack(&loaded, &store, material_id);
     assert_eq!(read_f32_at(&bytes, 0), 1.0);
@@ -438,9 +433,7 @@ fn packs_vec3_f32_vec4_arrays_and_mixed_types_at_uniform_alignment() {
     assert_eq!(read_f32x4(&bytes, 32), [8.0, 0.0, 0.0, 1.0]);
     assert_eq!(read_f32x4(&bytes, 48), [0.0, 8.0, 0.0, 1.0]);
     assert_eq!(read_f32x4(&bytes, 64), [0.0, 0.0, 0.0, 0.0]);
-    assert_eq!(read_f32_at(&bytes, 96), 0.25);
-    assert_eq!(read_f32_at(&bytes, 112), 0.5);
-    assert_eq!(read_f32_at(&bytes, 128), 0.0);
+    assert_eq!(read_f32x4(&bytes, 80), [0.0, 0.0, 0.0, 0.0]);
 }
 
 #[test]
@@ -584,4 +577,123 @@ fn rejects_unsupported_types_mismatched_defaults_and_unpaired_textures() {
     assert!(matches!(resolved.pipeline, RasterPipelineKind::Null));
     assert!(resolved.retarget_shader_key.is_none());
     assert!(custom_shader::default_stem_for_asset_name("prop-rejected-upload").is_none());
+
+    let float_array =
+        custom_shader::install("prop-f32-array", FLOAT_ARRAY_WGSL).expect_err("f32 array");
+    assert!(
+        float_array.contains("custom shader binding rejected"),
+        "uniform array<f32> should be rejected: {float_array}"
+    );
+    assert!(custom_shader::default_stem_for_asset_name("prop-f32-array").is_none());
+}
+
+const FLOAT_ARRAY_WGSL: &str = r#"
+#import renderide::frame::globals as rg
+#import renderide::draw::per_draw as pd
+#import renderide::mesh::vertex as mv
+
+struct Material {
+    _Weights: array<f32, 3>,
+}
+
+@group(1) @binding(0) var<uniform> mat: Material;
+
+struct VertexOutput {
+    @builtin(position) clip_pos: vec4<f32>,
+}
+
+@vertex
+fn vs_main(
+    @builtin(instance_index) instance_index: u32,
+#ifdef MULTIVIEW
+    @builtin(view_index) view_idx: u32,
+#endif
+    @location(0) pos: vec4<f32>,
+    @location(1) _n: vec4<f32>,
+) -> VertexOutput {
+    let d = pd::get_draw(instance_index);
+    let world_p = mv::world_position(d, pos);
+#ifdef MULTIVIEW
+    let vp = mv::select_view_proj(d, view_idx);
+#else
+    let vp = mv::select_view_proj(d, 0u);
+#endif
+    var out: VertexOutput;
+    out.clip_pos = vp * world_p;
+    return out;
+}
+
+//#pass type=forward
+@fragment
+fn fs_main(_in: VertexOutput) -> @location(0) vec4<f32> {
+    let weight = mat._Weights[0] + mat._Weights[1] + mat._Weights[2];
+    return rg::retain_globals_additive(vec4<f32>(weight, 0.0, 0.0, 1.0));
+}
+"#;
+
+#[test]
+fn packs_f32_array_elements_on_16_byte_stride() {
+    let mut fields = HashMap::new();
+    fields.insert(
+        "_Weights".to_string(),
+        ReflectedUniformField {
+            offset: 0,
+            size: 48,
+            kind: ReflectedUniformScalarKind::F32Array,
+            array_stride: 16,
+        },
+    );
+    fields.insert(
+        "_Tints".to_string(),
+        ReflectedUniformField {
+            offset: 48,
+            size: 32,
+            kind: ReflectedUniformScalarKind::Vec4Array,
+            array_stride: 16,
+        },
+    );
+    let reflected = ReflectedRasterLayout {
+        layout_fingerprint: 0,
+        material_entries: Vec::new(),
+        per_draw_entries: Vec::new(),
+        material_uniform: Some(ReflectedMaterialUniformBlock {
+            binding: 0,
+            total_size: 80,
+            fields,
+        }),
+        material_group1_names: HashMap::new(),
+        vs_vertex_inputs: Vec::new(),
+        vs_max_vertex_location: None,
+        uses_scene_depth_snapshot: false,
+        uses_scene_color_snapshot: false,
+        requires_intersection_pass: false,
+    };
+    let registry = PropertyIdRegistry::new();
+    let ids = StemEmbeddedPropertyIds::build(&registry, &reflected);
+    let mut store = MaterialPropertyStore::new();
+    let material_id = 77;
+    let weights = *ids.uniform_field_ids.get("_Weights").expect("weights id");
+    let tints = *ids.uniform_field_ids.get("_Tints").expect("tints id");
+    store.set_material(
+        material_id,
+        weights,
+        MaterialPropertyValue::FloatArray(vec![0.25, 0.5]),
+    );
+    store.set_material(
+        material_id,
+        tints,
+        MaterialPropertyValue::Float4Array(vec![[1.0, 2.0, 3.0, 4.0]]),
+    );
+    let loaded = LoadedMaterial {
+        reflected,
+        ids,
+        registry,
+        defaults: MaterialUniformDefaults::default(),
+    };
+    let bytes = pack(&loaded, &store, material_id);
+    assert_eq!(read_f32_at(&bytes, 0), 0.25);
+    assert_eq!(read_f32_at(&bytes, 16), 0.5);
+    assert_eq!(read_f32_at(&bytes, 32), 0.0);
+    assert_eq!(read_f32x4(&bytes, 48), [1.0, 2.0, 3.0, 4.0]);
+    assert_eq!(read_f32x4(&bytes, 64), [0.0, 0.0, 0.0, 0.0]);
 }

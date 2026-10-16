@@ -24,7 +24,10 @@ pub(super) fn validate_custom_material_bindings(
     reflected: &ReflectedRasterLayout,
     defaults: &[OwnedMaterialDefault],
 ) -> Result<(), String> {
-    let uniform_binding = reflected.material_uniform.as_ref().map(|uniform| uniform.binding);
+    let uniform_binding = reflected
+        .material_uniform
+        .as_ref()
+        .map(|uniform| uniform.binding);
     let mut texture_bindings = Vec::new();
     let mut sampler_bindings = Vec::new();
     for entry in &reflected.material_entries {
@@ -88,9 +91,10 @@ pub(super) fn validate_custom_material_bindings(
             }
         }
         for default in defaults {
-            let field = uniform.fields.iter().find(|(field_name, _)| {
-                unescape_property_name(field_name) == default.property
-            });
+            let field = uniform
+                .fields
+                .iter()
+                .find(|(field_name, _)| unescape_property_name(field_name) == default.property);
             let Some((_, field)) = field else {
                 return Err(binding_rejected(format!(
                     "//#mat_default `{}` does not match a reflected uniform field",

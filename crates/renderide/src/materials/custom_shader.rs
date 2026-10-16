@@ -95,7 +95,15 @@ pub(crate) fn install(key: &str, wgsl: &str) -> Result<InstalledCustomShader, St
     if key.is_empty() {
         return Err("custom shader key is empty".to_string());
     }
-    let composed = compose_custom_material(wgsl, &format!("custom:{key}"))?;
+    let composed = compose_custom_material(wgsl, &format!("custom:{key}")).map_err(|error| {
+        // `array<f32, N>` fails naga uniform validation (stride 4) before reflection.
+        // That is a binding rejection, not a packaged-shader fallback.
+        if error.contains("address space Uniform") {
+            bindings::binding_rejected(error)
+        } else {
+            error
+        }
+    })?;
     let base_stem = format!("{CUSTOM_STEM_PREFIX}{key}");
     let default_stem = format!("{base_stem}_default");
     let multiview_stem = format!("{base_stem}_multiview");
