@@ -538,12 +538,35 @@ fn default_shader_target_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::Path;
     use std::sync::Arc;
-    use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime};
 
     use super::{GlobalUniformValueType, MaterialAssetGraph};
     use crate::materials::{RasterPipelineKind, ShaderPermutation};
+
+    /// Moves `path`'s mtime strictly after `seen`.
+    ///
+    /// A rewrite can land in the same filesystem timestamp tick the previous
+    /// poll recorded. Hot reload treats that as unchanged, so tests that need
+    /// a visible edit stamp the file instead of sleeping.
+    fn bump_mtime_after(path: &Path, seen: SystemTime) {
+        let bumped = seen
+            .checked_add(Duration::from_secs(1))
+            .expect("mtime bump");
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .and_then(|file| file.set_modified(bumped))
+            .expect("bump target mtime");
+        let observed = fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .expect("read bumped mtime");
+        assert!(
+            observed > seen,
+            "forced mtime {observed:?} did not advance past {seen:?}"
+        );
+    }
 
     #[test]
     fn register_shader_route_tracks_router_and_graph_node() {
@@ -609,8 +632,11 @@ mod tests {
 
         let report = graph.poll_dev_hot_reload();
         let after_first = graph.shader_source_snapshot(&kind, ShaderPermutation::default());
-        thread::sleep(Duration::from_millis(2));
+        let seen = fs::metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .expect("target mtime");
         fs::write(&path, "fn second() {}\n").expect("rewrite target");
+        bump_mtime_after(&path, seen);
         let report_second = graph.poll_dev_hot_reload();
         let after_second = graph.shader_source_snapshot(&kind, ShaderPermutation::default());
 
