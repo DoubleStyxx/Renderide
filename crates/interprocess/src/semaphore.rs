@@ -23,7 +23,7 @@ const MAX_WAIT_DURATION: Duration = Duration::from_hours(24 * 365);
 /// Threshold above which the Windows wait helper switches to `WaitForSingleObject(INFINITE)`
 /// instead of converting the timeout to milliseconds.
 #[cfg(windows)]
-pub(super) const WIN_WAIT_INFINITE_THRESHOLD: Duration = Duration::from_secs(60 * 60 * 24 * 7);
+pub(super) const WIN_WAIT_INFINITE_THRESHOLD: Duration = Duration::from_hours(24 * 7);
 
 /// Cross-process wakeup primitive paired with the queue mapping (post on enqueue, wait while idle).
 ///
