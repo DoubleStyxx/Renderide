@@ -700,8 +700,9 @@ fn rejects_unsupported_types_and_mismatched_defaults() {
 
     let resolved = custom_shader::resolve_custom_shader_payload(
         Ok(renderide_shared::custom_shader_ipc::CustomShaderPayload {
+            op: renderide_shared::custom_shader_ipc::CustomShaderOp::Install,
             key: "prop-rejected-upload".to_string(),
-            remove: false,
+            material_asset_id: None,
             wgsl: I32_WGSL.to_string(),
         }),
         |_| None,

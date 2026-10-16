@@ -313,7 +313,26 @@ pub(crate) fn resolve_custom_shader_payload(
             };
         }
     };
-    if payload.remove {
+    if matches!(
+        payload.op,
+        renderide_shared::custom_shader_ipc::CustomShaderOp::Assign
+            | renderide_shared::custom_shader_ipc::CustomShaderOp::Clear
+    ) {
+        logger::info!(
+            "custom shader material op={:?} material={:?} key={}",
+            payload.op,
+            payload.material_asset_id,
+            payload.key
+        );
+        return ResolvedShaderUpload {
+            shader_asset_name: None,
+            shader_variant_bits: None,
+            pipeline: RasterPipelineKind::Null,
+            retarget_shader_key: None,
+            rejected: false,
+        };
+    }
+    if payload.op == renderide_shared::custom_shader_ipc::CustomShaderOp::Remove {
         remove(&payload.key);
         let mut resolved: ResolvedShaderUpload =
             plan_shader_route(Some(payload.key.clone()), None, stem_lookup).into();

@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Globalization;
 using FrooxEngine;
 using Renderite.Shared;
 
@@ -29,6 +30,24 @@ internal static class CustomShaderQueue
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(shaderKey);
         Enqueue(assetId, FormatRemoval(shaderKey));
+    }
+
+    /// <summary>
+    /// Queues a per-material assign. <paramref name="shaderKey"/> is the custom program key.
+    /// The <c>ShaderUpload</c> asset id is a negative carrier; the material id is the payload header.
+    /// </summary>
+    internal static void EnqueueAssign(int materialAssetId, string shaderKey)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(shaderKey);
+        Enqueue(null, FormatAssign(materialAssetId, shaderKey));
+    }
+
+    /// <summary>
+    /// Queues a per-material clear. The <c>ShaderUpload</c> asset id is a negative carrier.
+    /// </summary>
+    internal static void EnqueueClear(int materialAssetId)
+    {
+        Enqueue(null, FormatClear(materialAssetId));
     }
 
     /// <summary>Sends every queued upload. Later uploads stay queued when the host is missing.</summary>
@@ -88,6 +107,19 @@ internal static class CustomShaderQueue
     {
         var key = HeaderKey(shaderKey);
         return $"{PayloadPrefix}key={key}\nremove=1\n---\n";
+    }
+
+    private static string FormatAssign(int materialAssetId, string shaderKey)
+    {
+        var key = HeaderKey(shaderKey);
+        var material = materialAssetId.ToString(CultureInfo.InvariantCulture);
+        return $"{PayloadPrefix}op=assign\nmaterial={material}\nkey={key}\n---\n";
+    }
+
+    private static string FormatClear(int materialAssetId)
+    {
+        var material = materialAssetId.ToString(CultureInfo.InvariantCulture);
+        return $"{PayloadPrefix}op=clear\nmaterial={material}\n---\n";
     }
 
     private static string HeaderKey(string shaderKey)

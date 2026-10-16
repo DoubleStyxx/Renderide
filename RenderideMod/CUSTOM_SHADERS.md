@@ -47,6 +47,10 @@ CustomShaders.Remove("Unlit");
 // Explicit asset id: bind this shader asset (and same-name assets) to the program.
 CustomShaders.Install(shaderAssetId, "MySolid", wgsl);
 CustomShaders.Remove(shaderAssetId, "MySolid");
+
+// Route one material onto an installed key. Stock shader routes stay put.
+CustomShaders.AssignMaterial(materialAssetId, "MySolid");
+CustomShaders.ClearMaterial(materialAssetId);
 ```
 
 - All calls queue; nothing is sent until the next `RenderSystem.SubmitFrame` postfix with a live messaging host.
@@ -54,6 +58,60 @@ CustomShaders.Remove(shaderAssetId, "MySolid");
 - `Remove` key must match the `Install` key after normalization (`Unlit`, `Unlit.shader`, `unlit` are equal).
 - Remove of an unknown key is a silent no-op on the renderer.
 - Empty/whitespace key or WGSL, or a key containing a newline, throws `ArgumentException` at the call site.
+- `AssignMaterial` and `ClearMaterial` also queue on a negative carrier id. The material asset id is the `material=` header, not `ShaderUpload.assetId`.
+
+## Wire format
+
+`ShaderUpload.file` is ASCII. The first line is exactly `renderide-custom-wgsl:v1`. Header lines follow until a separator. The separator is a line whose text is `---`. Bytes after that line are the WGSL body. Header lines are `name=value`. Blank header lines are ignored. Names and values are trimmed. Duplicate names are rejected. Unknown names are rejected.
+
+`ShaderUpload.assetId` is the host shader asset id for an install that names one asset, or a negative carrier (`-1`, `-2`, ...) otherwise. Assign and clear always use a carrier. A carrier id gets no `ShaderUploadResult`.
+
+Install, bytes unchanged:
+
+```
+renderide-custom-wgsl:v1
+key=<shader key>
+---
+<wgsl>
+```
+
+Remove, bytes unchanged:
+
+```
+renderide-custom-wgsl:v1
+key=<shader key>
+remove=1
+---
+```
+
+Assign:
+
+```
+renderide-custom-wgsl:v1
+op=assign
+material=<material asset id>
+key=<shader key>
+---
+```
+
+Clear:
+
+```
+renderide-custom-wgsl:v1
+op=clear
+material=<material asset id>
+---
+```
+
+Header rules:
+
+- `key` is required for install, remove, and assign. It is forbidden on clear. It is one line, non-empty after trim.
+- `material` is a base-10 `i32` (optional leading `-`). It is required for assign and clear, and forbidden on install and remove.
+- `op` is `install`, `remove`, `assign`, or `clear`. Omitted `op` means install, unless `remove` is `1`, `true`, or `yes`, which means remove. `op=remove` is the same as `remove=1`. `op=install` together with `remove=1` is rejected. `remove=1` on assign or clear is rejected.
+- Install body is the WGSL and must be non-empty after trim. Remove, assign, and clear bodies must be empty. The formatter writes a trailing newline after `---`.
+- `key` is normalized by the renderer the same way as a Unity shader filename (`Unlit.shader` and `unlit` match). The header itself keeps the key text the caller passed.
+
+`CustomShaders.AssignMaterial` writes the assign bytes above. `CustomShaders.ClearMaterial` writes the clear bytes. A key that does not match a stock shader name only registers the program; stock routes change only when the key equals a stock shader name.
 
 ## Authoring rules
 

@@ -96,4 +96,28 @@ public static class CustomShaders
     {
         Ipc.CustomShaderQueue.EnqueueRemove(assetId, shaderKey);
     }
+
+    /// <summary>
+    /// Routes <paramref name="materialAssetId"/> onto the installed program
+    /// <paramref name="shaderKey"/> without changing stock shader routes.
+    /// </summary>
+    /// <param name="materialAssetId">Host material asset id.</param>
+    /// <param name="shaderKey">Key previously passed to <see cref="Install(string, string)"/>.</param>
+    /// <remarks>
+    /// The upload uses a negative carrier asset id. The material id travels in the
+    /// <c>material=</c> header. See <c>CUSTOM_SHADERS.md</c> for the exact bytes.
+    /// </remarks>
+    public static void AssignMaterial(int materialAssetId, string shaderKey)
+    {
+        Ipc.CustomShaderQueue.EnqueueAssign(materialAssetId, shaderKey);
+    }
+
+    /// <summary>
+    /// Drops the per-material program override for <paramref name="materialAssetId"/>.
+    /// </summary>
+    /// <param name="materialAssetId">Host material asset id passed to <see cref="AssignMaterial"/>.</param>
+    public static void ClearMaterial(int materialAssetId)
+    {
+        Ipc.CustomShaderQueue.EnqueueClear(materialAssetId);
+    }
 }
