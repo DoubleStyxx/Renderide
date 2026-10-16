@@ -150,7 +150,7 @@ fn host_tangent_stream_bytes(
             .enumerate()
             .for_each(|(vertex, slot)| copy_one(slot, vertex));
     } else {
-        for (vertex, slot) in out.chunks_exact_mut(16).enumerate() {
+        for (vertex, slot) in out.as_chunks_mut::<16>().0.iter_mut().enumerate() {
             copy_one(slot, vertex);
         }
     }
@@ -306,7 +306,9 @@ fn decode_indices(index_data: &[u8], index_format: IndexBufferFormat) -> Option<
                     .collect()
             } else {
                 index_data
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]) as u32)
                     .collect()
             };
@@ -325,7 +327,9 @@ fn decode_indices(index_data: &[u8], index_format: IndexBufferFormat) -> Option<
                     .collect()
             } else {
                 index_data
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
                     .collect()
             };
@@ -377,7 +381,9 @@ fn collect_triangle_faces_from_indices(
     } else {
         out.extend(
             indices
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .filter_map(|triangle| valid_triangle_face(triangle, vertex_count)),
         );
     }
@@ -414,7 +420,7 @@ fn encode_tangents(tangents: &[Vec4]) -> Vec<u8> {
             )
             .for_each(|(slot, tangent)| write_one(slot, tangent));
     } else {
-        for (slot, tangent) in out.chunks_exact_mut(16).zip(tangents.iter()) {
+        for (slot, tangent) in out.as_chunks_mut::<16>().0.iter_mut().zip(tangents.iter()) {
             write_one(slot, tangent);
         }
     }
@@ -727,8 +733,18 @@ mod tests {
         let generated = tangent_stream_bytes(source, true).expect("generated tangent stream");
         let defaulted = tangent_stream_bytes(source, false).expect("default tangent stream");
 
-        assert_ne!(read_tangent(&generated, 0), DEFAULT_TANGENT);
-        assert_eq!(read_tangent(&defaulted, 0), DEFAULT_TANGENT);
+        assert!(
+            read_tangent(&generated, 0)
+                .iter()
+                .zip(DEFAULT_TANGENT)
+                .any(|(actual, expected)| (actual - expected).abs() != 0.0)
+        );
+        assert!(
+            read_tangent(&defaulted, 0)
+                .iter()
+                .zip(DEFAULT_TANGENT)
+                .all(|(actual, expected)| (actual - expected).abs() == 0.0)
+        );
     }
 
     #[test]
@@ -747,7 +763,12 @@ mod tests {
         .expect("tangent stream");
 
         for vertex in 0..4 {
-            assert_eq!(read_tangent(&tangents, vertex), DEFAULT_TANGENT);
+            assert!(
+                read_tangent(&tangents, vertex)
+                    .iter()
+                    .zip(DEFAULT_TANGENT)
+                    .all(|(actual, expected)| (actual - expected).abs() == 0.0)
+            );
         }
     }
 
@@ -863,7 +884,12 @@ mod tests {
         .expect("tangent stream");
 
         for vertex in 0..4 {
-            assert_eq!(read_tangent(&tangents, vertex), DEFAULT_TANGENT);
+            assert!(
+                read_tangent(&tangents, vertex)
+                    .iter()
+                    .zip(DEFAULT_TANGENT)
+                    .all(|(actual, expected)| (actual - expected).abs() == 0.0)
+            );
         }
     }
 }

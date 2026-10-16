@@ -36,11 +36,10 @@ pub(super) fn resolve_controller_frame(
 ) -> Option<ControllerFrame> {
     let (position, rotation) = if let Some(palm_pose) = palm_ext_pose {
         openxr_tracking_pose_to_host(palm_pose.0, palm_pose.1)
-    } else if let Some(grip_pose) = grip_pose {
+    } else {
+        let grip_pose = grip_pose?;
         let palm_pose = grip_to_palm_ext_pose(profile, side, grip_pose);
         openxr_tracking_pose_to_host(palm_pose.0, palm_pose.1)
-    } else {
-        return None;
     };
     let (hand_position, hand_rotation) = hand_pose_defaults(side);
 

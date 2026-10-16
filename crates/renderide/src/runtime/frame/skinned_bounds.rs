@@ -349,10 +349,11 @@ mod tests {
 
     fn encode_realtime_bounds_rows(rows: &mut [SkinnedMeshRealtimeBoundsUpdate]) -> Vec<u8> {
         let mut bytes = vec![0u8; rows.len() * SKINNED_MESH_REALTIME_BOUNDS_UPDATE_HOST_ROW_BYTES];
-        for (row, chunk) in rows
-            .iter_mut()
-            .zip(bytes.chunks_exact_mut(SKINNED_MESH_REALTIME_BOUNDS_UPDATE_HOST_ROW_BYTES))
-        {
+        for (row, chunk) in rows.iter_mut().zip(
+            bytes
+                .as_chunks_mut::<SKINNED_MESH_REALTIME_BOUNDS_UPDATE_HOST_ROW_BYTES>()
+                .0,
+        ) {
             let mut packer = MemoryPacker::new(chunk);
             row.pack(&mut packer);
             assert_eq!(packer.remaining_len(), 0, "test row must fill host stride");

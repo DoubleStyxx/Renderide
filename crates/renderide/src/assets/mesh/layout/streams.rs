@@ -125,8 +125,10 @@ pub fn extract_float3_position_normal_as_vec4_streams(
             })?;
     } else {
         for (i, (pos_slot, nrm_slot)) in pos_out
-            .chunks_exact_mut(16)
-            .zip(nrm_out.chunks_exact_mut(16))
+            .as_chunks_mut::<16>()
+            .0
+            .iter_mut()
+            .zip(nrm_out.as_chunks_mut::<16>().0)
             .enumerate()
         {
             write_position_normal_vertex(
@@ -180,7 +182,10 @@ fn fill_normal_stream_with_forward_z(out: &mut [u8]) {
             .with_min_len(VERTEX_STREAM_PARALLEL_CHUNK_VERTICES)
             .for_each(write_chunk);
     } else {
-        out.chunks_exact_mut(16).for_each(write_chunk);
+        out.as_chunks_mut::<16>()
+            .0
+            .iter_mut()
+            .for_each(|chunk| write_chunk(chunk));
     }
 }
 
@@ -233,7 +238,7 @@ pub fn vertex_float2_stream_bytes(
             .enumerate()
             .try_for_each(|(i, slot)| write_vertex_float2(&reader, i, slot))?;
     } else {
-        for (i, slot) in out.chunks_exact_mut(8).enumerate() {
+        for (i, slot) in out.as_chunks_mut::<8>().0.iter_mut().enumerate() {
             write_vertex_float2(&reader, i, slot)?;
         }
     }
@@ -351,7 +356,9 @@ fn wide_uv_page_stream_bytes(
             .try_for_each(|(vertex, slot)| write_wide_uv_page_vertex(&readers, vertex, slot))?;
     } else {
         for (vertex, slot) in out
-            .chunks_exact_mut(WIDE_UV_PAGE_VERTEX_STRIDE_BYTES)
+            .as_chunks_mut::<WIDE_UV_PAGE_VERTEX_STRIDE_BYTES>()
+            .0
+            .iter_mut()
             .enumerate()
         {
             write_wide_uv_page_vertex(&readers, vertex, slot)?;
@@ -409,7 +416,7 @@ fn vertex_float4_stream_bytes_with_kind(
             .enumerate()
             .try_for_each(|(i, slot)| write_vertex_float4(&reader, i, slot, default))?;
     } else {
-        for (i, slot) in out.chunks_exact_mut(16).enumerate() {
+        for (i, slot) in out.as_chunks_mut::<16>().0.iter_mut().enumerate() {
             write_vertex_float4(&reader, i, slot, default)?;
         }
     }
@@ -511,7 +518,7 @@ pub fn color_float4_stream_bytes(
             .enumerate()
             .try_for_each(|(i, slot)| write_vertex_float4(&reader, i, slot, [1.0; 4]))?;
     } else {
-        for (i, slot) in out.chunks_exact_mut(16).enumerate() {
+        for (i, slot) in out.as_chunks_mut::<16>().0.iter_mut().enumerate() {
             write_vertex_float4(&reader, i, slot, [1.0; 4])?;
         }
     }
@@ -532,7 +539,10 @@ fn fill_float4_stream_with_default(out: &mut [u8], default: [f32; 4]) {
             .with_min_len(VERTEX_STREAM_PARALLEL_CHUNK_VERTICES)
             .for_each(write_chunk);
     } else {
-        out.chunks_exact_mut(16).for_each(write_chunk);
+        out.as_chunks_mut::<16>()
+            .0
+            .iter_mut()
+            .for_each(|chunk| write_chunk(chunk));
     }
 }
 

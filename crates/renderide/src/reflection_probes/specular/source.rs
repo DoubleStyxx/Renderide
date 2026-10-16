@@ -316,10 +316,7 @@ mod tests {
 
         let metadata = metadata_for_spatial(&spatial, state, Some(&sh));
 
-        assert_eq!(
-            metadata.params[3],
-            REFLECTION_PROBE_METADATA_SH2_SOURCE_LOCAL
-        );
+        assert!((metadata.params[3] - REFLECTION_PROBE_METADATA_SH2_SOURCE_LOCAL).abs() == 0.0);
     }
 
     #[test]
@@ -338,10 +335,7 @@ mod tests {
 
         let metadata = metadata_for_spatial(&spatial, state, Some(&sh));
 
-        assert_eq!(
-            metadata.params[3],
-            REFLECTION_PROBE_METADATA_SH2_SOURCE_LOCAL
-        );
+        assert!((metadata.params[3] - REFLECTION_PROBE_METADATA_SH2_SOURCE_LOCAL).abs() == 0.0);
     }
 
     #[test]

@@ -201,7 +201,7 @@ fn fixup_camera_portal_static_mesh_target(
     if target_index == removed_index {
         *target = -1;
     } else if target_index == last_index_before_swap {
-        *target = i32::try_from(removed_index).map_or(-1, |index| index);
+        *target = i32::try_from(removed_index).unwrap_or(-1);
     } else if target_index > last_index_before_swap {
         *target = -1;
     }

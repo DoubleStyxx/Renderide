@@ -89,8 +89,7 @@ impl RenderBackend {
         let mesh_validation_scopes_enabled = cfg!(debug_assertions)
             || renderer_settings
                 .read()
-                .ok()
-                .is_some_and(|settings| settings.debug.gpu_validation_layers);
+                .is_ok_and(|settings| settings.debug.gpu_validation_layers);
         self.asset_transfers
             .attach_gpu_runtime(AssetGpuRuntimeAttach {
                 device: device.clone(),

@@ -186,9 +186,9 @@ fn trace_head_pose(tick: &OpenxrFrameTick, (ipc_p, ipc_q): (Vec3, Quat)) {
     };
     let rp0 = &v0.pose.position;
     let rp1 = &v1.pose.position;
-    let render_center_x = (rp0.x + rp1.x) * 0.5;
-    let render_center_y = (rp0.y + rp1.y) * 0.5;
-    let render_center_z = (rp0.z + rp1.z) * 0.5;
+    let render_center_x = f32::midpoint(rp0.x, rp1.x);
+    let render_center_y = f32::midpoint(rp0.y, rp1.y);
+    let render_center_z = f32::midpoint(rp0.z, rp1.z);
     logger::trace!(
         "HEAD POS | render(OpenXR RH): ({:.3},{:.3},{:.3}) | ipc->host(Unity LH): ({:.3},{:.3},{:.3}) | ipc_quat: ({:.4},{:.4},{:.4},{:.4})",
         render_center_x,

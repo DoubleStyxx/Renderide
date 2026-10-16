@@ -163,7 +163,7 @@ mod tests {
             AssetIntegrationPerformanceState::default(),
         )
         .expect("payload built");
-        assert_eq!(p.render_time, RENDER_TIME_UNAVAILABLE);
+        assert!((p.render_time - RENDER_TIME_UNAVAILABLE).abs() == 0.0);
     }
 
     #[test]

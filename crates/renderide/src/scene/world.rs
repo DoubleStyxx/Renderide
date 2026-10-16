@@ -738,13 +738,9 @@ pub(super) fn ensure_cache_shapes(
         cache.degenerate_scales.resize(node_count, false);
         cache.hierarchy.visit_epoch.resize(node_count, 0);
         cache.hierarchy.children_dirty = true;
-        for c in &mut cache.computed {
-            *c = false;
-        }
+        cache.computed.fill(false);
     } else if force_invalidate {
-        for c in &mut cache.computed {
-            *c = false;
-        }
+        cache.computed.fill(false);
     }
 }
 

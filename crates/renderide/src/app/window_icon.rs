@@ -68,7 +68,7 @@ fn bgra_to_rgba(size: IVec2, bgra: &[u8]) -> Result<(Vec<u8>, u32, u32), HostWin
     let mut rgba = Vec::with_capacity(expected);
     let row_stride = width as usize * 4;
     for row in bgra.chunks_exact(row_stride).rev() {
-        for pixel in row.chunks_exact(4) {
+        for pixel in row.as_chunks::<4>().0 {
             rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
         }
     }

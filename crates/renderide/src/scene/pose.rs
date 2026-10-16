@@ -126,11 +126,11 @@ mod tests {
 
         let repaired = repair_render_transform(&pose, &baseline());
 
-        assert_eq!(repaired.position.x, POSE_REPAIR_CLAMP_LIMIT);
-        assert_eq!(repaired.position.y, -POSE_REPAIR_CLAMP_LIMIT);
+        assert!((repaired.position.x - POSE_REPAIR_CLAMP_LIMIT).abs() == 0.0);
+        assert!((repaired.position.y + POSE_REPAIR_CLAMP_LIMIT).abs() == 0.0);
         assert_eq!(repaired.position.z, 3.0);
-        assert_eq!(repaired.scale.x, POSE_REPAIR_CLAMP_LIMIT);
-        assert_eq!(repaired.scale.y, -POSE_REPAIR_CLAMP_LIMIT);
+        assert!((repaired.scale.x - POSE_REPAIR_CLAMP_LIMIT).abs() == 0.0);
+        assert!((repaired.scale.y + POSE_REPAIR_CLAMP_LIMIT).abs() == 0.0);
         assert_eq!(repaired.scale.z, -5.0);
         repaired_components_are_valid(&repaired);
     }
