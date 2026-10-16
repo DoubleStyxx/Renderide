@@ -28,6 +28,31 @@ CustomShaders.Install(shaderAssetId, "MySolid", wgsl);
 
 Negative carrier ids are used when you omit the asset id. Those ids only carry the upload; rebinding is by shader name.
 
+## Lifecycle
+
+```csharp
+using RenderideMod;
+
+// Install by name: every shader asset named Unlit, now and later.
+CustomShaders.Install("Unlit", CustomShaders.ExampleSolidWgsl);
+
+// Re-Install with the same key replaces the program. Identical source is a no-op.
+CustomShaders.Install("Unlit", File.ReadAllText(path));
+
+// Remove by name: drops the program, matching assets return to the packaged stem.
+CustomShaders.Remove("Unlit");
+
+// Explicit asset id: bind this shader asset (and same-name assets) to the program.
+CustomShaders.Install(shaderAssetId, "MySolid", wgsl);
+CustomShaders.Remove(shaderAssetId, "MySolid");
+```
+
+- All calls queue; nothing is sent until the next `RenderSystem.SubmitFrame` postfix with a live messaging host.
+- Calls without an asset id consume a negative carrier id (`-1`, `-2`, ...). Remove included.
+- `Remove` key must match the `Install` key after normalization (`Unlit`, `Unlit.shader`, `unlit` are equal).
+- Remove of an unknown key is a silent no-op on the renderer.
+- Empty/whitespace key or WGSL, or a key containing a newline, throws `ArgumentException` at the call site.
+
 ## Authoring rules
 
 The source uses the same directives as `crates/renderide/shaders/materials`:
