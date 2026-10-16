@@ -62,10 +62,19 @@ struct MaterialUniformSlotResolution {
     needs_write: bool,
 }
 
+/// Exact byte range returned by an evicted slot. Offsets stay aligned.
+#[derive(Clone, Copy, Debug)]
+struct FreeSpan {
+    offset: u64,
+    size: u64,
+}
+
 /// Pure allocator state for material uniform arena slots.
 #[derive(Debug)]
 struct MaterialUniformArenaAllocator {
     slots: LruCache<MaterialUniformCacheKey, MaterialUniformSlot>,
+    /// Ranges whose owners were evicted. Same-sized inserts reuse these before the bump cursor.
+    free: Vec<FreeSpan>,
     cursor: u64,
     capacity: u64,
     max_bytes: u64,
@@ -92,6 +101,7 @@ impl MaterialUniformArenaAllocator {
     ) -> Self {
         Self {
             slots: LruCache::new(slot_capacity),
+            free: Vec::new(),
             cursor: 0,
             capacity,
             max_bytes,
@@ -143,13 +153,8 @@ impl MaterialUniformArenaAllocator {
             });
         }
 
-        let offset = align_up(self.cursor, self.alignment);
-        let end = offset.checked_add(size).ok_or_else(|| {
-            EmbeddedMaterialBindError::from("material uniform arena offset overflow".to_string())
-        })?;
-        self.ensure_capacity(end)?;
-        self.cursor = end;
-        let evicted = self.slots.push(
+        let offset = self.allocate_offset(size, &key)?;
+        if let Some((evicted_key, evicted_slot)) = self.slots.push(
             key,
             MaterialUniformSlot {
                 offset,
@@ -158,9 +163,12 @@ impl MaterialUniformArenaAllocator {
                 last_written_texture_state_sig: u64::MAX,
                 buffer_generation: self.generation,
             },
-        );
-        if evicted.is_some() {
+        ) && evicted_key != key
+        {
+            // `LruCache::push` also returns the previous value when the key is replaced.
+            // Only a different key is an eviction whose range can be reused.
             self.note_slot_evictions(1);
+            self.release_slot(evicted_slot);
         }
         Ok(MaterialUniformSlotResolution {
             offset,
@@ -219,25 +227,167 @@ impl MaterialUniformArenaAllocator {
             .filter(|(key, _slot)| !pred(key))
             .map(|(key, _slot)| *key)
             .collect();
-        let mut removed = 0usize;
+        let mut removed_slots = Vec::new();
         for key in stale {
-            if self.slots.pop(&key).is_some() {
-                removed = removed.saturating_add(1);
+            if let Some(slot) = self.slots.pop(&key) {
+                removed_slots.push(slot);
             }
         }
-        self.finish_slot_removal(removed);
+        let removed = removed_slots.len();
+        self.finish_slot_removal(removed_slots);
         removed
     }
 
-    fn finish_slot_removal(&mut self, removed: usize) {
-        if removed == 0 {
+    fn finish_slot_removal(&mut self, removed: Vec<MaterialUniformSlot>) {
+        if removed.is_empty() {
             return;
         }
-        self.note_slot_evictions(removed);
+        self.note_slot_evictions(removed.len());
         if self.slots.is_empty() {
+            // Rewinding onto the same GPU buffer would overwrite offsets already recorded
+            // for this frame. Bump generation so the next resolve allocates a new buffer.
+            self.free.clear();
             self.cursor = 0;
             self.generation = self.generation.wrapping_add(1);
+            return;
         }
+        for slot in removed {
+            self.release_slot(slot);
+        }
+    }
+
+    /// Returns `size` bytes. Exact free spans are reused in place. When the slot table is full,
+    /// the LRU range is reclaimed before the arena grows. A bump that would still exceed capacity
+    /// repacks live slots; a move bumps generation so the GPU buffer is replaced.
+    fn allocate_offset(
+        &mut self,
+        size: u64,
+        key: &MaterialUniformCacheKey,
+    ) -> Result<u64, EmbeddedMaterialBindError> {
+        if let Some(offset) = self.take_free(size) {
+            return Ok(offset);
+        }
+        if let Some(offset) = self.try_bump(size)? {
+            return Ok(offset);
+        }
+        if self.will_evict_on_insert(key)
+            && let Some(offset) = self.reclaim_lru_for_insert(size)?
+        {
+            return Ok(offset);
+        }
+        if let Some(packed) = self.try_compact_for_new(size) {
+            return Ok(packed);
+        }
+        let needed = self.bump_end(size)?;
+        self.ensure_capacity(needed)?;
+        self.try_bump(size)?.ok_or_else(|| {
+            EmbeddedMaterialBindError::from("material uniform arena offset overflow".to_string())
+        })
+    }
+
+    fn try_bump(&mut self, size: u64) -> Result<Option<u64>, EmbeddedMaterialBindError> {
+        let offset = align_up(self.cursor, self.alignment);
+        let end = self.checked_end(offset, size)?;
+        if end > self.capacity {
+            return Ok(None);
+        }
+        self.cursor = end;
+        Ok(Some(offset))
+    }
+
+    fn bump_end(&self, size: u64) -> Result<u64, EmbeddedMaterialBindError> {
+        let offset = align_up(self.cursor, self.alignment);
+        self.checked_end(offset, size)
+    }
+
+    fn checked_end(&self, offset: u64, size: u64) -> Result<u64, EmbeddedMaterialBindError> {
+        offset.checked_add(size).ok_or_else(|| {
+            EmbeddedMaterialBindError::from("material uniform arena offset overflow".to_string())
+        })
+    }
+
+    fn will_evict_on_insert(&self, key: &MaterialUniformCacheKey) -> bool {
+        self.slots.len() == self.slots.cap().get() && !self.slots.contains(key)
+    }
+
+    /// Pops the LRU slot. Returns its offset when `size` matches so the caller can reuse it
+    /// without putting that range back on the free list.
+    fn reclaim_lru_for_insert(
+        &mut self,
+        size: u64,
+    ) -> Result<Option<u64>, EmbeddedMaterialBindError> {
+        let Some((evicted_key, evicted_slot)) = self.slots.pop_lru() else {
+            return Ok(None);
+        };
+        let _ = evicted_key;
+        self.note_slot_evictions(1);
+        if evicted_slot.size == size {
+            return Ok(Some(evicted_slot.offset));
+        }
+        self.release_slot(evicted_slot);
+        if let Some(offset) = self.take_free(size) {
+            return Ok(Some(offset));
+        }
+        self.try_bump(size)
+    }
+
+    fn take_free(&mut self, size: u64) -> Option<u64> {
+        let index = self.free.iter().position(|span| span.size == size)?;
+        Some(self.free.swap_remove(index).offset)
+    }
+
+    fn release_slot(&mut self, slot: MaterialUniformSlot) {
+        if slot.size == 0 {
+            return;
+        }
+        self.free.push(FreeSpan {
+            offset: slot.offset,
+            size: slot.size,
+        });
+    }
+
+    /// Repacks live slots from offset 0 and reserves `size` bytes after them.
+    ///
+    /// Returns the new slot offset when that reservation fits in the current capacity.
+    /// Live offsets that move bump `generation`.
+    fn try_compact_for_new(&mut self, size: u64) -> Option<u64> {
+        let mut live: Vec<(MaterialUniformCacheKey, u64, u64)> = self
+            .slots
+            .iter()
+            .map(|(key, slot)| (*key, slot.offset, slot.size))
+            .collect();
+        live.sort_by_key(|(_key, offset, _size)| *offset);
+        let mut cursor = 0u64;
+        let mut packed = Vec::with_capacity(live.len());
+        let mut moved = false;
+        for (key, old_offset, slot_size) in live {
+            let offset = align_up(cursor, self.alignment);
+            let end = offset.checked_add(slot_size)?;
+            if end > self.capacity {
+                return None;
+            }
+            if offset != old_offset {
+                moved = true;
+            }
+            packed.push((key, offset));
+            cursor = end;
+        }
+        let new_offset = align_up(cursor, self.alignment);
+        let new_end = new_offset.checked_add(size)?;
+        if new_end > self.capacity {
+            return None;
+        }
+        for (key, offset) in packed {
+            if let Some(slot) = self.slots.peek_mut(&key) {
+                slot.offset = offset;
+            }
+        }
+        self.free.clear();
+        self.cursor = new_end;
+        if moved {
+            self.generation = self.generation.wrapping_add(1);
+        }
+        Some(new_offset)
     }
 
     fn note_slot_evictions(&mut self, removed: usize) {
@@ -810,6 +960,210 @@ mod tests {
         assert!(allocator.slots.contains(&key(2)));
         assert!(allocator.slots.contains(&key(3)));
         assert_eq!(allocator.eviction_count(), 1);
+    }
+
+    #[test]
+    fn mutation_rewrites_slot_without_new_offset_or_generation() {
+        let mut allocator = MaterialUniformArenaAllocator::new(1024, 4096, 256);
+        let size = NonZeroU64::new(64).unwrap();
+        let first = allocator.resolve_slot(key(1), size, 1, 0).unwrap();
+        allocator.mark_written(&key(1), first.buffer_generation, 1, 0);
+
+        let updated = allocator.resolve_slot(key(1), size, 2, 0).unwrap();
+
+        assert!(updated.needs_write);
+        assert_eq!(updated.offset, first.offset);
+        assert_eq!(updated.buffer_generation, first.buffer_generation);
+        assert_eq!(allocator.generation(), 0);
+        assert_eq!(allocator.capacity(), 1024);
+    }
+
+    #[test]
+    fn evict_then_insert_reuses_offsets_without_growing() {
+        let live = 4usize;
+        let mut allocator = MaterialUniformArenaAllocator::with_slot_capacity(
+            2048,
+            8192,
+            256,
+            nonzero_slots(live * 2),
+        );
+        let size = NonZeroU64::new(80).unwrap();
+        let mut freed = Vec::new();
+        for id in 0..live {
+            freed.push(
+                allocator
+                    .resolve_slot(key(i32::try_from(id).unwrap_or(i32::MAX)), size, 0, 0)
+                    .unwrap()
+                    .offset,
+            );
+        }
+        for id in live..live * 2 {
+            allocator
+                .resolve_slot(key(i32::try_from(id).unwrap_or(i32::MAX)), size, 0, 0)
+                .unwrap();
+        }
+        let capacity = allocator.capacity();
+        let generation = allocator.generation();
+        let mut materials = HashSet::new();
+        for id in 0..live {
+            materials.insert(i32::try_from(id).unwrap_or(i32::MAX));
+        }
+        assert_eq!(
+            allocator.purge_material_assets(&materials, &HashSet::new()),
+            live
+        );
+
+        let mut reused = Vec::new();
+        for id in 100..100 + live {
+            reused.push(
+                allocator
+                    .resolve_slot(key(i32::try_from(id).unwrap_or(i32::MAX)), size, 0, 0)
+                    .unwrap()
+                    .offset,
+            );
+        }
+        freed.sort_unstable();
+        reused.sort_unstable();
+        assert_eq!(reused, freed);
+        assert_eq!(allocator.capacity(), capacity);
+        assert_eq!(allocator.generation(), generation);
+        assert_eq!(allocator.slot_count(), live * 2);
+    }
+
+    #[test]
+    fn churn_keeps_arena_capacity_bounded() {
+        let mut allocator =
+            MaterialUniformArenaAllocator::with_slot_capacity(1024, 65_536, 256, nonzero_slots(4));
+        let size = NonZeroU64::new(64).unwrap();
+        let generation = allocator.generation();
+
+        for id in 0..128 {
+            allocator.resolve_slot(key(id), size, 0, 0).unwrap();
+        }
+
+        assert_eq!(allocator.slot_count(), 4);
+        assert_eq!(allocator.capacity(), 1024);
+        assert_eq!(allocator.generation(), generation);
+    }
+
+    #[test]
+    fn reallocation_bumps_generation_when_free_span_cannot_fit() {
+        let mut allocator =
+            MaterialUniformArenaAllocator::with_slot_capacity(512, 8192, 256, nonzero_slots(8));
+        let small = NonZeroU64::new(64).unwrap();
+        allocator.resolve_slot(key(1), small, 0, 0).unwrap();
+        allocator.resolve_slot(key(2), small, 0, 0).unwrap();
+        let mut drop_first = HashSet::new();
+        drop_first.insert(1);
+        assert_eq!(
+            allocator.purge_material_assets(&drop_first, &HashSet::new()),
+            1
+        );
+        assert_eq!(allocator.generation(), 0);
+        let before_capacity = allocator.capacity();
+
+        let allocated = allocator
+            .resolve_slot(key(3), NonZeroU64::new(400).unwrap(), 0, 0)
+            .unwrap();
+
+        assert!(allocator.generation() > 0);
+        assert!(allocator.capacity() > before_capacity);
+        assert_eq!(allocated.buffer_generation, allocator.generation());
+        assert!(allocated.needs_write);
+    }
+
+    #[test]
+    fn compaction_bumps_generation_without_growing() {
+        let mut allocator =
+            MaterialUniformArenaAllocator::with_slot_capacity(1024, 1024, 256, nonzero_slots(8));
+        let small = NonZeroU64::new(80).unwrap();
+        let first = allocator.resolve_slot(key(1), small, 1, 1).unwrap();
+        allocator.mark_written(&key(1), first.buffer_generation, 1, 1);
+        allocator.resolve_slot(key(2), small, 1, 1).unwrap();
+        let third = allocator.resolve_slot(key(3), small, 1, 1).unwrap();
+        allocator.mark_written(&key(3), third.buffer_generation, 1, 1);
+        let mut drop_middle = HashSet::new();
+        drop_middle.insert(2);
+        assert_eq!(
+            allocator.purge_material_assets(&drop_middle, &HashSet::new()),
+            1
+        );
+        assert_eq!(allocator.generation(), 0);
+
+        let allocated = allocator
+            .resolve_slot(key(4), NonZeroU64::new(300).unwrap(), 0, 0)
+            .unwrap();
+
+        assert_eq!(allocator.capacity(), 1024);
+        assert_eq!(allocator.generation(), 1);
+        assert_eq!(allocated.buffer_generation, 1);
+        let repacked = allocator.resolve_slot(key(3), small, 1, 1).unwrap();
+        assert!(repacked.needs_write);
+        assert_eq!(repacked.buffer_generation, 1);
+        assert!(repacked.offset < third.offset);
+    }
+
+    #[test]
+    fn uniform_key_covers_pr24_material_inputs() {
+        let base = MaterialUniformCacheKey {
+            property_block_slot0: Some(2),
+            renderer_property_block_id: Some(3),
+            texture_2d_asset_id: 4,
+            shader_variant_bits: Some(1),
+            shader_source_generation: 5,
+            texture_residency_generation: 6,
+            ..key(1)
+        };
+
+        assert_ne!(
+            base,
+            MaterialUniformCacheKey {
+                material_asset_id: 2,
+                ..base
+            }
+        );
+        assert_ne!(
+            base,
+            MaterialUniformCacheKey {
+                property_block_slot0: Some(9),
+                ..base
+            }
+        );
+        assert_ne!(
+            base,
+            MaterialUniformCacheKey {
+                renderer_property_block_id: Some(8),
+                ..base
+            }
+        );
+        assert_ne!(
+            base,
+            MaterialUniformCacheKey {
+                texture_2d_asset_id: 5,
+                ..base
+            }
+        );
+        assert_ne!(
+            base,
+            MaterialUniformCacheKey {
+                shader_variant_bits: Some(2),
+                ..base
+            }
+        );
+        assert_ne!(
+            base,
+            MaterialUniformCacheKey {
+                shader_source_generation: 6,
+                ..base
+            }
+        );
+        assert_ne!(
+            base,
+            MaterialUniformCacheKey {
+                texture_residency_generation: 7,
+                ..base
+            }
+        );
     }
 
     fn nonzero_slots(cap: usize) -> NonZeroUsize {
