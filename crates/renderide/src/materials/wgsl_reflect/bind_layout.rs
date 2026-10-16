@@ -180,22 +180,18 @@ fn layout_entry_for_sampled_image(
     binding: u32,
     visibility: wgpu::ShaderStages,
 ) -> Result<wgpu::BindGroupLayoutEntry, ReflectError> {
-    if arrayed {
-        return Err(ReflectError::UnsupportedBinding {
-            group,
-            binding,
-            reason: "arrayed images not supported yet".into(),
-        });
-    }
-    let view_dimension = match dim {
-        ImageDimension::D2 => wgpu::TextureViewDimension::D2,
-        ImageDimension::D3 => wgpu::TextureViewDimension::D3,
-        ImageDimension::Cube => wgpu::TextureViewDimension::Cube,
-        ImageDimension::D1 => {
+    let view_dimension = match (dim, arrayed) {
+        (ImageDimension::D2, false) => wgpu::TextureViewDimension::D2,
+        (ImageDimension::D2, true) => wgpu::TextureViewDimension::D2Array,
+        (ImageDimension::D3, false) => wgpu::TextureViewDimension::D3,
+        (ImageDimension::Cube, false) => wgpu::TextureViewDimension::Cube,
+        (ImageDimension::D1, _) | (ImageDimension::D3 | ImageDimension::Cube, true) => {
             return Err(ReflectError::UnsupportedBinding {
                 group,
                 binding,
-                reason: "only 2D, 3D, and cube textures supported".into(),
+                reason:
+                    "only texture_2d, texture_2d_array, texture_3d, and texture_cube are supported"
+                        .into(),
             });
         }
     };

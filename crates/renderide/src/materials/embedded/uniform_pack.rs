@@ -30,6 +30,8 @@ pub(crate) struct MaterialUniformPackMetadata<'a> {
     pub(crate) value_spaces: &'a MaterialUniformValueSpaces,
     /// Per-field fallback values declared by shader source metadata.
     pub(crate) material_defaults: &'a MaterialUniformDefaults,
+    /// When set, toggle-style `f32` uniforms (`_EMISSION`) pack as 0 or 1.
+    pub(crate) quantize_toggle_floats: bool,
 }
 
 /// Suffix convention that opts a uniform field in to host `mipmap_bias` population.
@@ -55,38 +57,64 @@ fn write_u32_at(buf: &mut [u8], field: &ReflectedUniformField, v: u32) {
     }
 }
 
-fn write_f32x4_at(buf: &mut [u8], field: &ReflectedUniformField, v: &[f32; 4]) {
+fn write_f32_slice_at(buf: &mut [u8], field: &ReflectedUniformField, values: &[f32]) {
     let off = field.offset as usize;
-    if off + 16 <= buf.len() && field.size >= 16 {
-        for (i, c) in v.iter().enumerate() {
-            let o = off + i * 4;
-            buf[o..o + 4].copy_from_slice(&c.to_le_bytes());
+    let bytes = values.len().saturating_mul(4);
+    if off + bytes <= buf.len() && field.size as usize >= bytes {
+        for (i, value) in values.iter().enumerate() {
+            let component_off = off + i * 4;
+            buf[component_off..component_off + 4].copy_from_slice(&value.to_le_bytes());
         }
     }
 }
 
-/// Writes a host `float4[]` material property into a reflected uniform array field.
+fn write_f32x4_at(buf: &mut [u8], field: &ReflectedUniformField, v: &[f32; 4]) {
+    write_f32_slice_at(buf, field, v);
+}
+
+/// Element stride for a reflected uniform array. Non-array fields keep the historical 16-byte stride.
+fn array_element_stride(field: &ReflectedUniformField) -> usize {
+    let stride = field.array_stride as usize;
+    if stride >= 4 { stride } else { 16 }
+}
+
+/// `array<vec4<f32>, N>` is a uniform array, so each element occupies 16 bytes.
+fn vec4_array_stride(field: &ReflectedUniformField) -> usize {
+    let stride = field.array_stride as usize;
+    if stride >= 16 { stride } else { 16 }
+}
+
+fn write_f32x4_bytes(buf: &mut [u8], offset: usize, value: &[f32; 4]) {
+    for (component, v) in value.iter().enumerate() {
+        let component_off = offset + component * 4;
+        buf[component_off..component_off + 4].copy_from_slice(&v.to_le_bytes());
+    }
+}
+
+/// Writes a host `float4[]` into `array<vec4<f32>, N>`.
+///
+/// Extra host elements are dropped. Slots past the host array are zero.
 fn write_f32x4_array_at(buf: &mut [u8], field: &ReflectedUniformField, values: &[[f32; 4]]) {
     let off = field.offset as usize;
-    let max_values = (field.size as usize) / 16;
-    for (i, value) in values.iter().take(max_values).enumerate() {
-        let elem_off = off + i * 16;
+    let stride = vec4_array_stride(field);
+    let max_values = (field.size as usize) / stride;
+    for i in 0..max_values {
+        let elem_off = off + i * stride;
         if elem_off + 16 > buf.len() {
             return;
         }
-        for (component, v) in value.iter().enumerate() {
-            let component_off = elem_off + component * 4;
-            buf[component_off..component_off + 4].copy_from_slice(&v.to_le_bytes());
-        }
+        let value = values.get(i).copied().unwrap_or([0.0; 4]);
+        write_f32x4_bytes(buf, elem_off, &value);
     }
 }
 
 /// Writes a host `float[]` material property into a reflected uniform scalar array field.
 fn write_f32_array_at(buf: &mut [u8], field: &ReflectedUniformField, values: &[f32]) {
     let off = field.offset as usize;
-    let max_values = (field.size as usize) / 16;
+    let stride = array_element_stride(field);
+    let max_values = (field.size as usize) / stride;
     for (i, value) in values.iter().take(max_values).enumerate() {
-        let elem_off = off + i * 16;
+        let elem_off = off + i * stride;
         if elem_off + 4 > buf.len() {
             return;
         }
@@ -96,16 +124,32 @@ fn write_f32_array_at(buf: &mut [u8], field: &ReflectedUniformField, values: &[f
 
 fn write_srgb_f32x4_array_at(buf: &mut [u8], field: &ReflectedUniformField, values: &[[f32; 4]]) {
     let off = field.offset as usize;
-    let max_values = (field.size as usize) / 16;
-    for (i, value) in values.iter().take(max_values).enumerate() {
-        let elem_off = off + i * 16;
+    let stride = vec4_array_stride(field);
+    let max_values = (field.size as usize) / stride;
+    for i in 0..max_values {
+        let elem_off = off + i * stride;
         if elem_off + 16 > buf.len() {
             return;
         }
-        for (component, v) in srgb_vec4_rgb_to_linear(*value).iter().enumerate() {
-            let component_off = elem_off + component * 4;
-            buf[component_off..component_off + 4].copy_from_slice(&v.to_le_bytes());
-        }
+        let value = values
+            .get(i)
+            .copied()
+            .map(srgb_vec4_rgb_to_linear)
+            .unwrap_or([0.0; 4]);
+        write_f32x4_bytes(buf, elem_off, &value);
+    }
+}
+
+/// Maps a toggle-style float (`_EMISSION`) to 0 or 1. Other floats stay as uploaded.
+///
+/// A missing property keeps its `//#mat_default` or zero. A name that is also a `//#keyword`
+/// still packs 0 or 1 when the uniform exists; the keyword mask selects the shader variant.
+fn quantize_toggle_float(enabled: bool, field_name: &str, value: f32) -> f32 {
+    let name = shader_writer_unescaped_field_name(field_name);
+    if enabled && crate::materials::custom_shader::is_toggle_style_property_name(name) {
+        if value == 0.0 { 0.0 } else { 1.0 }
+    } else {
+        value
     }
 }
 
@@ -197,6 +241,7 @@ pub(crate) fn build_embedded_uniform_bytes_with_value_spaces(
         &MaterialUniformPackMetadata {
             value_spaces,
             material_defaults: &MaterialUniformDefaults::default(),
+            quantize_toggle_floats: false,
         },
         store,
         lookup,
@@ -216,7 +261,12 @@ pub(crate) fn build_embedded_uniform_bytes_with_material_defaults(
     shader_variant_bits: Option<u32>,
 ) -> Option<Vec<u8>> {
     profiling::scope!("materials::embedded_uniform_pack");
-    let key = plan::uniform_plan_cache_key(reflected, ids, metadata.material_defaults);
+    let key = plan::uniform_plan_cache_key(
+        reflected,
+        ids,
+        metadata.material_defaults,
+        metadata.quantize_toggle_floats,
+    );
     if let Some(cached) = metadata.value_spaces.cached_plan().get()
         && cached.key == key
     {

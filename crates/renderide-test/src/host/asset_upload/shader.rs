@@ -21,16 +21,32 @@ pub(in crate::host) fn upload_shader(
     timeout: Duration,
 ) -> Result<(), HarnessError> {
     let sentinel = format_test_shader_upload_file(shader_name, shader_variant_bits);
+    upload_shader_file(queues, lockstep, asset_id, &sentinel, timeout)
+}
+
+/// Sends a `ShaderUpload` whose `file` field is `file` and waits for `ShaderUploadResult`.
+///
+/// `asset_id` must be non-negative. Negative carrier ids are not acknowledged.
+pub(in crate::host) fn upload_shader_file(
+    queues: &mut HostDualQueueIpc,
+    lockstep: &mut LockstepDriver,
+    asset_id: i32,
+    file: &str,
+    timeout: Duration,
+) -> Result<(), HarnessError> {
     let upload = ShaderUpload {
         asset_id,
-        file: Some(sentinel.clone()),
+        file: Some(file.to_string()),
     };
     if !queues.send_background(RendererCommand::ShaderUpload(upload)) {
         return Err(HarnessError::QueueOptions(
             "send_background(ShaderUpload) returned false (queue full?)".to_string(),
         ));
     }
-    logger::info!("AssetUpload: sent ShaderUpload(asset_id={asset_id}, sentinel={sentinel:?})");
+    logger::info!(
+        "AssetUpload: sent ShaderUpload(asset_id={asset_id}, file_bytes={})",
+        file.len()
+    );
     wait_for_shader_upload_result(queues, lockstep, asset_id, timeout)?;
     logger::info!("AssetUpload: received ShaderUploadResult(asset_id={asset_id})");
     Ok(())

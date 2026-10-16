@@ -231,6 +231,19 @@ fn promote_case_golden(
     }
 
     crate::golden::generate(&outcome.layout.actual_png, &case.golden_path)?;
+    if let Some(plain_golden) = case.plain_capture_golden() {
+        let plain_actual = outcome.layout.actual_png.with_file_name("plain.png");
+        let plain = load_rgba(&plain_actual)?;
+        let eval = case.tolerance.evaluate(&plain, &plain).map_err(|msg| {
+            HarnessError::ImageCompare(format!("plain post-update self-compare: {msg}"))
+        })?;
+        if !eval.passed {
+            return Err(HarnessError::ImageCompare(
+                "plain post-update self-compare failed coverage gates".to_string(),
+            ));
+        }
+        crate::golden::generate(&plain_actual, &plain_golden)?;
+    }
     if let Err(e) = std::fs::copy(&outcome.layout.actual_png, &outcome.layout.golden_png_copy) {
         logger::warn!("suite update: failed to refresh artifact golden copy: {e}");
     }

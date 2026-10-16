@@ -238,6 +238,13 @@ impl MaterialSystem {
         self.pending_shader_routes.get(&asset_id).cloned()
     }
 
+    /// Bumps shader-route generation after a per-material custom shader override changes.
+    pub fn bump_material_route_generation(&mut self) {
+        if let Some(reg) = self.material_registry.as_mut() {
+            reg.bump_route_generation();
+        }
+    }
+
     /// Rebinds routes whose shader asset name matches `shader_key` to the live custom program.
     pub fn retarget_named_shader_routes(&mut self, shader_key: &str) {
         let shader_key = crate::materials::custom_shader::normalize_shader_key(shader_key);
@@ -540,6 +547,9 @@ impl MaterialSystem {
 
     /// Remove material / property-block entries from the host store.
     pub fn on_unload_material(&mut self, asset_id: i32) {
+        if crate::materials::custom_shader::clear_material_override(asset_id) {
+            self.bump_material_route_generation();
+        }
         if let Some(embedded) = self.embedded_material_bind.as_ref() {
             embedded.purge_material_asset(asset_id);
         }

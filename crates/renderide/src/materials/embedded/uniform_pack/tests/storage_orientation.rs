@@ -59,6 +59,7 @@ fn reflected_with_texture_and_fields(
                 offset: *field_offset,
                 size: *field_size,
                 kind: *field_kind,
+                array_stride: 0,
             },
         );
         total_size = total_size.max(field_offset.saturating_add(*field_size));

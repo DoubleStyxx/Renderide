@@ -389,6 +389,8 @@ impl EmbeddedMaterialBindResources {
             arena.resolve_binding(*uniform_key, uniform_size, mutation_gen, texture_state_sig)?;
         if needs_write {
             profiling::scope!("materials::embedded_uniform_arena_write");
+            let quantize_toggle_floats =
+                stem.starts_with(crate::materials::custom_shader::CUSTOM_STEM_PREFIX);
             if let Some(plan) = layout.uniform_pack_plan.as_ref() {
                 if !plan.pack_into(
                     store,
@@ -413,6 +415,7 @@ impl EmbeddedMaterialBindResources {
                     &MaterialUniformPackMetadata {
                         value_spaces: &layout.uniform_value_spaces,
                         material_defaults: &layout.uniform_default_by_field,
+                        quantize_toggle_floats,
                     },
                     store,
                     lookup,
@@ -587,6 +590,21 @@ mod tests {
 
         assert_eq!(a.offset, 0);
         assert_eq!(b.offset, 256);
+    }
+
+    #[test]
+    fn arena_allocator_property_change_rewrites_slot_without_new_buffer() {
+        let mut allocator = MaterialUniformArenaAllocator::new(1024, 4096, 256);
+        let size = NonZeroU64::new(64).unwrap();
+        let first = allocator.resolve_slot(key(1), size, 1, 0).unwrap();
+        allocator.mark_written(&key(1), first.buffer_generation, 1, 0);
+
+        let updated = allocator.resolve_slot(key(1), size, 2, 0).unwrap();
+
+        assert!(updated.needs_write);
+        assert_eq!(updated.offset, first.offset);
+        assert_eq!(updated.buffer_generation, first.buffer_generation);
+        assert_eq!(allocator.generation(), first.buffer_generation);
     }
 
     #[test]

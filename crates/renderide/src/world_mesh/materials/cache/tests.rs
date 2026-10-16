@@ -43,6 +43,7 @@ fn make_ctx<'a>(
         router,
         pipeline_property_ids: ids,
         shader_perm: perm,
+        property_registry: None,
     }
 }
 

@@ -197,6 +197,7 @@ fn build_draw_collection_context<'a>(
             router: setup.router,
             pipeline_property_ids: &setup.pipeline_property_ids,
             shader_perm,
+            property_registry: Some(setup.property_registry),
         },
         view,
         caches: DrawCollectionFrameCaches {
@@ -293,6 +294,7 @@ fn queue_desktop_overlay_draws(
                 router: setup.router,
                 pipeline_property_ids: &setup.pipeline_property_ids,
                 shader_perm,
+                property_registry: Some(setup.property_registry),
             },
             view: desktop_overlay_view_inputs(prep, mesh_lod_bias),
             caches: DrawCollectionFrameCaches {
@@ -464,6 +466,7 @@ mod tests {
             property_store: materials.material_property_store(),
             router: &router,
             pipeline_property_ids,
+            property_registry: materials.property_id_registry(),
             render_worlds: &render_worlds,
             material_caches: &material_caches,
             command_cache: &command_cache,

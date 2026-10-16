@@ -53,11 +53,15 @@ impl CaseOutputLayout {
     /// previous run so consumers see a clean slate.
     pub fn prepare(&self) -> io::Result<()> {
         std::fs::create_dir_all(&self.root)?;
+        let plain_png = self.actual_png.with_file_name("plain.png");
+        let plain_diff = self.root.join("plain_diff.png");
         for stale in [
             &self.actual_png,
             &self.golden_png_copy,
             &self.diff_png,
             &self.report_json,
+            &plain_png,
+            &plain_diff,
         ] {
             if stale.exists() {
                 std::fs::remove_file(stale)?;

@@ -402,7 +402,16 @@ pub(in crate::materials) fn embedded_composed_stem_for_permutation(
 pub(in crate::materials) fn build_embedded_wgsl(
     stem: &Arc<str>,
     permutation: ShaderPermutation,
+    keyword_mask: u32,
 ) -> Result<String, PipelineBuildError> {
+    if keyword_mask != 0
+        && let Some(wgsl) = crate::materials::custom_shader::variant_wgsl(stem, keyword_mask)
+            .map_err(|error| {
+                PipelineBuildError::MissingEmbeddedShader(format!("{stem}: {error}"))
+            })?
+    {
+        return Ok(wgsl.to_string());
+    }
     let composed = embedded_composed_stem_for_permutation(stem.as_ref(), permutation);
     let wgsl = embedded_shaders::embedded_target_wgsl(&composed)
         .ok_or_else(|| PipelineBuildError::MissingEmbeddedShader(composed.clone()))?;

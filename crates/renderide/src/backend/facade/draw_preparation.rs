@@ -143,14 +143,20 @@ impl BackendDrawPreparation {
             material_cache_seen_contexts,
             material_cache_seen_permutations,
         } = self;
-        let (property_store, router, pipeline_property_ids) = {
+        let (property_store, router, pipeline_property_ids, property_registry) = {
             profiling::scope!("render::extract_frame_shared::material_inputs");
             let property_store = materials.material_property_store();
             let router = materials
                 .material_registry()
                 .map_or(&*null_material_router, |registry| registry.router());
             let pipeline_property_ids = materials.pipeline_property_resolver().resolve();
-            (property_store, router, pipeline_property_ids)
+            let property_registry = materials.property_id_registry();
+            (
+                property_store,
+                router,
+                pipeline_property_ids,
+                property_registry,
+            )
         };
         {
             profiling::scope!("render::build_frame_prepared_renderables");
@@ -171,6 +177,7 @@ impl BackendDrawPreparation {
                 caches: material_cache_work,
                 seen_contexts: material_cache_seen_contexts,
                 seen_permutations: material_cache_seen_permutations,
+                property_registry: Some(property_registry),
             },
             render_worlds,
             scene,
@@ -186,6 +193,7 @@ impl BackendDrawPreparation {
             property_store,
             router,
             pipeline_property_ids,
+            property_registry,
             render_worlds,
             material_caches: material_batch_caches,
             command_cache,
@@ -312,6 +320,8 @@ struct MaterialCacheWork<'a> {
     seen_contexts: &'a mut HashSet<u8>,
     /// Context and permutation keys already queued for view-specific caches.
     seen_permutations: &'a mut HashSet<(u8, ShaderPermutation)>,
+    /// Intern table for keyword toggle property names.
+    property_registry: Option<&'a crate::materials::host_data::PropertyIdRegistry>,
 }
 
 /// Refreshes material batch caches for every unique context and shader permutation.
@@ -330,6 +340,7 @@ fn refresh_material_caches(
         MaterialDictionary::new(property_store)
     };
     unique_material_cache_work(scene, view_draw_preparations, work);
+    let property_registry = work.property_registry;
     let admission = FrameParallelPolicy::for_current_thread_pool().admit_independent_items(
         FrameCpuWorkload::independent_items(work.caches.len()),
         MATERIAL_CACHE_PREP_PARALLEL_CHUNK_CACHES,
@@ -354,6 +365,7 @@ fn refresh_material_caches(
                         router,
                         pipeline_property_ids,
                         *shader_perm,
+                        property_registry,
                     );
                 }
             });
@@ -367,6 +379,7 @@ fn refresh_material_caches(
                     router,
                     pipeline_property_ids,
                     *shader_perm,
+                    property_registry,
                 );
             }
         }

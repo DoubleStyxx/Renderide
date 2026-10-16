@@ -15,6 +15,11 @@ namespace RenderideMod;
 /// <c>Unlit</c>) to replace that shader for assets the host has uploaded or uploads later.
 /// Pass an explicit asset id when the material should follow one shader asset only.
 /// </para>
+/// <para>
+/// Floats, float4 colors, and textures already travel on the host material update batch,
+/// keyed by property name (<c>_Color</c>, <c>_MainTex</c>, <c>_Speed</c>). Property blocks
+/// use that same batch. WGSL <c>@group(1)</c> members with those names read the values.
+/// </para>
 /// </remarks>
 public static class CustomShaders
 {
@@ -26,6 +31,16 @@ public static class CustomShaders
     /// material into a flat <c>_Color</c> fill.
     /// </remarks>
     public static string ExampleSolidWgsl => ReadEmbeddedShader("example_solid.wgsl");
+
+    /// <summary>
+    /// Text of <c>Shaders/example_rainbow.wgsl</c>, embedded in the mod assembly.
+    /// </summary>
+    /// <remarks>
+    /// Samples <c>_MainTex</c> with <c>_MainTex_ST</c>, multiplies by <c>_Color</c>, and cycles
+    /// hue with <c>_Speed</c> (default 0.2) when <c>//#keyword RAINBOW</c> is on. Off writes
+    /// <c>_MainTex * _Color</c>. FrooxEngine already uploads those values on the material batch.
+    /// </remarks>
+    public static string ExampleRainbowWgsl => ReadEmbeddedShader("example_rainbow.wgsl");
 
     /// <summary>Reads an embedded WGSL file shipped under <c>Shaders/</c>.</summary>
     /// <param name="fileName">File name, for example <c>example_solid.wgsl</c>.</param>
@@ -80,5 +95,29 @@ public static class CustomShaders
     public static void Remove(int assetId, string shaderKey)
     {
         Ipc.CustomShaderQueue.EnqueueRemove(assetId, shaderKey);
+    }
+
+    /// <summary>
+    /// Routes <paramref name="materialAssetId"/> onto the installed program
+    /// <paramref name="shaderKey"/> without changing stock shader routes.
+    /// </summary>
+    /// <param name="materialAssetId">Host material asset id.</param>
+    /// <param name="shaderKey">Key previously passed to <see cref="Install(string, string)"/>.</param>
+    /// <remarks>
+    /// The upload uses a negative carrier asset id. The material id travels in the
+    /// <c>material=</c> header. See <c>CUSTOM_SHADERS.md</c> for the exact bytes.
+    /// </remarks>
+    public static void AssignMaterial(int materialAssetId, string shaderKey)
+    {
+        Ipc.CustomShaderQueue.EnqueueAssign(materialAssetId, shaderKey);
+    }
+
+    /// <summary>
+    /// Drops the per-material program override for <paramref name="materialAssetId"/>.
+    /// </summary>
+    /// <param name="materialAssetId">Host material asset id passed to <see cref="AssignMaterial"/>.</param>
+    public static void ClearMaterial(int materialAssetId)
+    {
+        Ipc.CustomShaderQueue.EnqueueClear(materialAssetId);
     }
 }

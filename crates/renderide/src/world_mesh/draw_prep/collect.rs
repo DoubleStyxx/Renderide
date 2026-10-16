@@ -143,6 +143,8 @@ pub struct DrawCollectionMaterialInputs<'a> {
     pub pipeline_property_ids: &'a MaterialPipelinePropertyIds,
     /// Default vs multiview permutation for embedded materials.
     pub shader_perm: ShaderPermutation,
+    /// Intern table for keyword toggle property names. `None` skips float toggles.
+    pub property_registry: Option<&'a crate::materials::host_data::PropertyIdRegistry>,
 }
 
 /// Per-view draw selection, culling, and sorting inputs.

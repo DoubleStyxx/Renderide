@@ -226,6 +226,25 @@ pub(super) fn create_white(device: &wgpu::Device, kind: TextureBindKind) -> Plac
     create_placeholder(device, kind, PlaceholderTextureColor::White)
 }
 
+/// One-layer `texture_2d_array` view of the white 2D placeholder.
+///
+/// Unset `texture_2d_array` slots cannot bind a 2D view. The 1x1 white texture has a single
+/// array layer, so this view is a valid fallback for every array slot.
+pub(super) fn create_white_2d_array_view(white_2d: &PlaceholderTexture) -> Arc<wgpu::TextureView> {
+    let view = Arc::new(white_2d.texture.create_view(&wgpu::TextureViewDescriptor {
+        label: Some("embedded_default_white_2d_array"),
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        base_array_layer: 0,
+        array_layer_count: Some(1),
+        ..Default::default()
+    }));
+    crate::profiling::note_resource_churn!(
+        TextureView,
+        "materials::embedded_placeholder_texture_view"
+    );
+    view
+}
+
 /// Allocates a 1x1 black texture and a default view for `kind`.
 pub(super) fn create_black(device: &wgpu::Device, kind: TextureBindKind) -> PlaceholderTexture {
     create_placeholder(device, kind, PlaceholderTextureColor::Black)

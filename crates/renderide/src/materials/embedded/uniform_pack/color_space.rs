@@ -55,7 +55,7 @@ impl MaterialUniformValueSpaces {
                 ReflectedUniformScalarKind::Vec4 if srgb_vec4_uniform_field(host_field_name) => {
                     MaterialUniformValueSpace::SrgbColor
                 }
-                ReflectedUniformScalarKind::Unsupported
+                ReflectedUniformScalarKind::Vec4Array | ReflectedUniformScalarKind::Unsupported
                     if srgb_vec4_array_uniform_field(stem, host_field_name) =>
                 {
                     MaterialUniformValueSpace::SrgbColorArray

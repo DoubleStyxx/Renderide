@@ -196,6 +196,95 @@ fn texture_property_binding(
     resolved_texture_binding_from_property(store.get_merged(lookup, property_id))
 }
 
+/// Which resident pool view satisfies a reflected `@group(1)` texture dimension.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SampledTextureSource {
+    /// `texture_2d` from a 2D texture asset.
+    Texture2D,
+    /// `texture_3d` from a 3D texture asset.
+    Texture3D,
+    /// `texture_cube` from a cubemap asset.
+    Cubemap,
+    /// `texture_2d_array` from the cubemap asset's face array view.
+    CubemapArray,
+    /// `texture_2d` from a render texture.
+    RenderTexture,
+    /// `texture_2d` from a video texture.
+    VideoTexture,
+}
+
+/// Maps a reflected view dimension and a host texture property onto one pool view.
+///
+/// `texture_2d` reads 2D, render, and video assets. `texture_cube` reads cubemaps.
+/// `texture_2d_array` reads the cubemap face array. Other pairs do not bind.
+pub(crate) fn sampled_texture_source(
+    view_dimension: wgpu::TextureViewDimension,
+    binding: ResolvedTextureBinding,
+) -> Option<SampledTextureSource> {
+    match (view_dimension, binding) {
+        (_, ResolvedTextureBinding::None) => None,
+        (wgpu::TextureViewDimension::D2, ResolvedTextureBinding::Texture2D { .. }) => {
+            Some(SampledTextureSource::Texture2D)
+        }
+        (wgpu::TextureViewDimension::D3, ResolvedTextureBinding::Texture3D { .. }) => {
+            Some(SampledTextureSource::Texture3D)
+        }
+        (wgpu::TextureViewDimension::Cube, ResolvedTextureBinding::Cubemap { .. }) => {
+            Some(SampledTextureSource::Cubemap)
+        }
+        (wgpu::TextureViewDimension::D2Array, ResolvedTextureBinding::Cubemap { .. }) => {
+            Some(SampledTextureSource::CubemapArray)
+        }
+        (wgpu::TextureViewDimension::D2, ResolvedTextureBinding::RenderTexture { .. }) => {
+            Some(SampledTextureSource::RenderTexture)
+        }
+        (wgpu::TextureViewDimension::D2, ResolvedTextureBinding::VideoTexture { .. }) => {
+            Some(SampledTextureSource::VideoTexture)
+        }
+        _ => None,
+    }
+}
+
+/// Pairs a sampler binding with the texture it samples.
+///
+/// The sampler global `_MainTex_sampler` pairs with the texture global `_MainTex` even when the
+/// bindings are not adjacent. A sampler that does not follow that name falls back to the texture
+/// at `binding - 1`. `None` means the bind uses the default sampler.
+pub(crate) fn paired_texture_binding_for_sampler(
+    reflected: &ReflectedRasterLayout,
+    sampler_binding: u32,
+) -> Option<u32> {
+    if let Some(name) = reflected.material_group1_names.get(&sampler_binding) {
+        let name = shader_writer_unescaped_property_name(name);
+        if let Some(texture_name) = name.strip_suffix("_sampler")
+            && let Some(binding) = texture_binding_named(reflected, texture_name)
+        {
+            return Some(binding);
+        }
+    }
+    let adjacent = sampler_binding.saturating_sub(1);
+    if adjacent != sampler_binding && is_texture_binding(reflected, adjacent) {
+        return Some(adjacent);
+    }
+    None
+}
+
+fn texture_binding_named(reflected: &ReflectedRasterLayout, texture_name: &str) -> Option<u32> {
+    reflected.material_entries.iter().find_map(|entry| {
+        if !matches!(entry.ty, wgpu::BindingType::Texture { .. }) {
+            return None;
+        }
+        let name = reflected.material_group1_names.get(&entry.binding)?;
+        (shader_writer_unescaped_property_name(name) == texture_name).then_some(entry.binding)
+    })
+}
+
+fn is_texture_binding(reflected: &ReflectedRasterLayout, binding: u32) -> bool {
+    reflected.material_entries.iter().any(|entry| {
+        entry.binding == binding && matches!(entry.ty, wgpu::BindingType::Texture { .. })
+    })
+}
+
 /// Resolves resident texture binding for a host property name, with primary-texture fallback for 2D-only slots.
 pub(crate) fn resolved_texture_binding_for_host(
     host_name: &str,
@@ -290,6 +379,117 @@ mod tests {
     /// Packs a host texture id using the same bit layout as `IdPacker<TextureAssetType>`.
     fn pack_host_texture(asset_id: i32, kind: HostTextureAssetKind) -> i32 {
         ((asset_id as u32) | ((kind as u32) << 29)) as i32
+    }
+
+    fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+        wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        }
+    }
+
+    fn reflected_handles(
+        entries: Vec<wgpu::BindGroupLayoutEntry>,
+        names: &[(u32, &str)],
+    ) -> ReflectedRasterLayout {
+        let mut material_group1_names = HashMap::new();
+        for &(binding, name) in names {
+            material_group1_names.insert(binding, name.to_string());
+        }
+        ReflectedRasterLayout {
+            layout_fingerprint: 0,
+            material_entries: entries,
+            per_draw_entries: Vec::new(),
+            material_uniform: None,
+            material_group1_names,
+            vs_vertex_inputs: Vec::new(),
+            vs_max_vertex_location: None,
+            uses_scene_depth_snapshot: false,
+            uses_scene_color_snapshot: false,
+            requires_intersection_pass: false,
+        }
+    }
+
+    #[test]
+    fn sampler_pairs_by_name_then_adjacent_binding() {
+        let reflected = reflected_handles(
+            vec![
+                texture_entry(1),
+                texture_entry(4),
+                sampler_entry(5),
+                sampler_entry(6),
+                sampler_entry(8),
+            ],
+            &[
+                (1, "_MainTex"),
+                (4, "_Cube"),
+                (5, "_Other_sampler"),
+                (6, "_MainTex_sampler"),
+                (8, "_Loose"),
+            ],
+        );
+        assert_eq!(paired_texture_binding_for_sampler(&reflected, 6), Some(1));
+        assert_eq!(paired_texture_binding_for_sampler(&reflected, 5), Some(4));
+        assert_eq!(paired_texture_binding_for_sampler(&reflected, 8), None);
+    }
+
+    #[test]
+    fn sampled_texture_source_maps_2d_cube_and_array() {
+        assert_eq!(
+            sampled_texture_source(
+                wgpu::TextureViewDimension::D2,
+                ResolvedTextureBinding::Texture2D { asset_id: 1 }
+            ),
+            Some(SampledTextureSource::Texture2D)
+        );
+        assert_eq!(
+            sampled_texture_source(
+                wgpu::TextureViewDimension::Cube,
+                ResolvedTextureBinding::Cubemap { asset_id: 2 }
+            ),
+            Some(SampledTextureSource::Cubemap)
+        );
+        assert_eq!(
+            sampled_texture_source(
+                wgpu::TextureViewDimension::D2Array,
+                ResolvedTextureBinding::Cubemap { asset_id: 2 }
+            ),
+            Some(SampledTextureSource::CubemapArray)
+        );
+        assert_eq!(
+            sampled_texture_source(
+                wgpu::TextureViewDimension::D2Array,
+                ResolvedTextureBinding::Texture2D { asset_id: 1 }
+            ),
+            None
+        );
+        assert_eq!(
+            sampled_texture_source(
+                wgpu::TextureViewDimension::D3,
+                ResolvedTextureBinding::Texture3D { asset_id: 3 }
+            ),
+            Some(SampledTextureSource::Texture3D)
+        );
+        assert_eq!(
+            sampled_texture_source(
+                wgpu::TextureViewDimension::D2,
+                ResolvedTextureBinding::RenderTexture { asset_id: 4 }
+            ),
+            Some(SampledTextureSource::RenderTexture)
+        );
+        assert_eq!(
+            sampled_texture_source(
+                wgpu::TextureViewDimension::D2,
+                ResolvedTextureBinding::VideoTexture { asset_id: 5 }
+            ),
+            Some(SampledTextureSource::VideoTexture)
+        );
+        assert_eq!(
+            sampled_texture_source(wgpu::TextureViewDimension::D2, ResolvedTextureBinding::None),
+            None
+        );
     }
 
     #[test]

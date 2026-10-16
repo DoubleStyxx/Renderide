@@ -96,6 +96,7 @@ pub(super) fn reflected_with_f32_fields_for_stem(
                 offset: *field_offset,
                 size: 4,
                 kind: ReflectedUniformScalarKind::F32,
+                array_stride: 0,
             },
         );
         total_size = total_size.max(field_offset.saturating_add(4));
@@ -148,6 +149,7 @@ pub(super) fn reflected_with_uniform_fields_for_stem(
                 offset: *field_offset,
                 size: *field_size,
                 kind: *field_kind,
+                array_stride: 0,
             },
         );
         total_size = total_size.max(field_offset.saturating_add(*field_size));

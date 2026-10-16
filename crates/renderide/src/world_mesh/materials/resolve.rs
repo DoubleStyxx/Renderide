@@ -3,15 +3,19 @@
 use std::sync::Arc;
 
 use crate::materials::ShaderPermutation;
-use crate::materials::host_data::{MaterialDictionary, MaterialPropertyLookupIds};
+use crate::materials::host_data::{
+    MaterialDictionary, MaterialPropertyLookupIds, PropertyIdRegistry,
+};
 use crate::materials::{
     EmbeddedStemQuery, EmbeddedTangentFallbackMode, MaterialBlendMode, MaterialPipelinePropertyIds,
     MaterialRenderState, MaterialRouter, MaterialShaderSpecializationKey, PropertyMapRef,
     RasterFrontFace, RasterPipelineKind, RasterPrimitiveTopology, SceneColorSnapshotMode,
     fallback_render_queue_for_material, first_float_from_maps, first_vec4_from_maps,
     material_blend_mode_from_maps, material_render_queue_from_maps,
-    material_render_state_from_maps, resolve_raster_pipeline,
+    material_render_state_from_maps,
 };
+
+mod shader_select;
 
 use super::FrameMaterialBatchCache;
 use super::key::MaterialDrawBatchKey;
@@ -31,6 +35,8 @@ pub(crate) struct MaterialResolveCtx<'a> {
     pub pipeline_property_ids: &'a MaterialPipelinePropertyIds,
     /// Default vs multiview permutation for embedded materials.
     pub shader_perm: ShaderPermutation,
+    /// Intern table for keyword toggle property names. `None` skips float toggles.
+    pub property_registry: Option<&'a PropertyIdRegistry>,
 }
 
 /// Batch key fields derived from one `(material_asset_id, property_block_id)` pair.
@@ -197,13 +203,14 @@ pub(crate) fn batch_key_for_slot(
     primitive_topology: RasterPrimitiveTopology,
     ctx: MaterialResolveCtx<'_>,
 ) -> (MaterialDrawBatchKey, Option<glam::Vec4>) {
-    let resolved = resolve_material_batch(
+    let resolved = resolve_material_batch_with_registry(
         material_asset_id,
         property_block_id,
         ctx.dict,
         ctx.router,
         ctx.pipeline_property_ids,
         ctx.shader_perm,
+        ctx.property_registry,
     );
     let key = batch_key_from_resolved(
         material_asset_id,
@@ -253,6 +260,7 @@ pub(crate) fn batch_key_for_slot_cached(
 }
 
 /// Computes all batch key fields for one `(material_asset_id, property_block_id)` pair.
+#[cfg(test)]
 pub(crate) fn resolve_material_batch(
     material_asset_id: i32,
     property_block_id: Option<i32>,
@@ -261,18 +269,30 @@ pub(crate) fn resolve_material_batch(
     pipeline_property_ids: &MaterialPipelinePropertyIds,
     shader_perm: ShaderPermutation,
 ) -> ResolvedMaterialBatch {
-    let shader_asset_id = dict
-        .shader_asset_for_material(material_asset_id)
-        .unwrap_or(-1);
-    let pipeline = resolve_raster_pipeline(shader_asset_id, router);
+    resolve_material_batch_with_registry(
+        material_asset_id,
+        property_block_id,
+        dict,
+        router,
+        pipeline_property_ids,
+        shader_perm,
+        None,
+    )
+}
+
+/// [`resolve_material_batch`] plus the property registry used to read keyword toggle floats.
+pub(crate) fn resolve_material_batch_with_registry(
+    material_asset_id: i32,
+    property_block_id: Option<i32>,
+    dict: &MaterialDictionary<'_>,
+    router: &MaterialRouter,
+    pipeline_property_ids: &MaterialPipelinePropertyIds,
+    shader_perm: ShaderPermutation,
+    property_registry: Option<&PropertyIdRegistry>,
+) -> ResolvedMaterialBatch {
+    let (shader_asset_id, pipeline) =
+        shader_select::resolve_material_shader(material_asset_id, dict, router);
     let embedded = embedded_material_features(&pipeline, shader_perm);
-    let shader_specialization = if embedded.uses_renderide_variant_bits {
-        MaterialShaderSpecializationKey::from_optional_variant_bits(
-            router.variant_bits_for_shader_asset(shader_asset_id),
-        )
-    } else {
-        MaterialShaderSpecializationKey::disabled()
-    };
     let lookup_ids = MaterialPropertyLookupIds {
         material_asset_id,
         mesh_property_block_slot0: property_block_id,
@@ -305,6 +325,26 @@ pub(crate) fn resolve_material_batch(
         uses_two_sided_transparency: embedded.uses_two_sided_transparency,
     });
     let ui_rect_clip_local = ui_rect_clip_local_from_maps(mat_map, pb_map, pipeline_property_ids);
+    let host_variant_bits = router.variant_bits_for_shader_asset(shader_asset_id);
+    let shader_specialization = match &pipeline {
+        RasterPipelineKind::EmbeddedStem(stem) => {
+            crate::materials::custom_shader::keyword_specialization_key(
+                stem,
+                host_variant_bits,
+                property_registry,
+                mat_map,
+                pb_map,
+            )
+        }
+        RasterPipelineKind::Null => None,
+    }
+    .unwrap_or_else(|| {
+        if embedded.uses_renderide_variant_bits {
+            MaterialShaderSpecializationKey::from_optional_variant_bits(host_variant_bits)
+        } else {
+            MaterialShaderSpecializationKey::disabled()
+        }
+    });
     ResolvedMaterialBatch {
         shader_asset_id,
         pipeline,
@@ -584,6 +624,7 @@ mod ui_rect_clip_tests {
             router: &router,
             pipeline_property_ids: &ids,
             shader_perm: ShaderPermutation::default(),
+            property_registry: None,
         };
 
         let (key, _) = batch_key_for_slot(

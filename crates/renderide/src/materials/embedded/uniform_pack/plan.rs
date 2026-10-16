@@ -19,7 +19,8 @@ use super::{
     UniformPackTextureContext, WRAP_MODE_BITS_SUFFIX, binding_lod_bias, binding_storage_v_inverted,
     binding_wrap_mode_bits, missing_f32_uniform_default, missing_vec4_uniform_default,
     shader_writer_unescaped_field_name, storage_v_inverted_flag_value, write_f32_array_at,
-    write_f32_at, write_f32x4_array_at, write_f32x4_at, write_srgb_f32x4_array_at, write_u32_at,
+    write_f32_at, write_f32_slice_at, write_f32x4_array_at, write_f32x4_at,
+    write_srgb_f32x4_array_at, write_u32_at,
 };
 
 const KIND_VEC4: u8 = 0;
@@ -30,7 +31,13 @@ const KIND_WRAP_BITS: u8 = 4;
 const KIND_VARIANT_BITS: u8 = 5;
 const KIND_ZERO_U32: u8 = 6;
 const KIND_HOST_ARRAY: u8 = 7;
+const KIND_VEC2: u8 = 8;
+const KIND_VEC3: u8 = 9;
+const KIND_F32_ARRAY: u8 = 10;
+const KIND_VEC4_ARRAY: u8 = 11;
 const FLAG_SRGB: u8 = 1;
+/// Set on an `f32` field whose host value packs as 0 or 1.
+const FLAG_QUANTIZE: u8 = 2;
 const RENDERIDE_VARIANT_BITS_FIELD: &str = "_RenderideVariantBits";
 
 #[derive(Debug)]
@@ -43,6 +50,7 @@ struct PlannedTexture {
 struct PlannedField {
     offset: u32,
     size: u32,
+    array_stride: u32,
     pid: i32,
     /// Default bits, vec4-default index, or planned-texture index. Meaning follows `kind`.
     aux: u32,
@@ -67,6 +75,7 @@ pub(super) struct UniformPlanCacheKey {
     reflected: usize,
     ids: usize,
     defaults: usize,
+    quantize_toggle_floats: bool,
 }
 
 /// Plan cached on the value-space object that was first packed with `key`.
@@ -80,11 +89,13 @@ pub(super) fn uniform_plan_cache_key(
     reflected: &ReflectedRasterLayout,
     ids: &StemEmbeddedPropertyIds,
     defaults: &super::MaterialUniformDefaults,
+    quantize_toggle_floats: bool,
 ) -> UniformPlanCacheKey {
     UniformPlanCacheKey {
         reflected: std::ptr::from_ref(reflected) as usize,
         ids: std::ptr::from_ref(ids) as usize,
         defaults: std::ptr::from_ref(defaults) as usize,
+        quantize_toggle_floats,
     }
 }
 
@@ -174,9 +185,12 @@ impl MaterialUniformPackPlan {
             offset: field.offset,
             size: field.size,
             kind: ReflectedUniformScalarKind::F32,
+            array_stride: field.array_stride,
         };
         match field.kind {
             KIND_VEC4 => self.write_vec4(field, maps, &reflected, out),
+            KIND_VEC2 => write_vec_prefix(field, maps, &reflected, 2, out),
+            KIND_VEC3 => write_vec_prefix(field, maps, &reflected, 3, out),
             KIND_F32 => write_f32_at(out, &reflected, f32_property(field, maps)),
             KIND_LOD_BIAS => write_f32_at(
                 out,
@@ -199,6 +213,12 @@ impl MaterialUniformPackPlan {
             KIND_VARIANT_BITS => write_u32_at(out, &reflected, shader_variant_bits.unwrap_or(0)),
             KIND_ZERO_U32 => write_u32_at(out, &reflected, 0),
             KIND_HOST_ARRAY => write_host_array(field, maps, &reflected, out),
+            KIND_F32_ARRAY => {
+                if let Some(MaterialPropertyValue::FloatArray(values)) = maps.get(field.pid) {
+                    write_f32_array_at(out, &reflected, values);
+                }
+            }
+            KIND_VEC4_ARRAY => write_vec4_array(field, maps, &reflected, out),
             _ => {}
         }
     }
@@ -256,12 +276,56 @@ impl MaterialUniformPackPlan {
     }
 }
 
+fn classify_vec_prefix(mut planned: PlannedField, kind: u8) -> PlannedField {
+    planned.kind = kind;
+    planned
+}
+
+fn classify_host_array(mut planned: PlannedField, kind: u8, srgb: bool) -> PlannedField {
+    planned.kind = kind;
+    if srgb {
+        planned.flags = FLAG_SRGB;
+    }
+    planned
+}
+
+fn write_vec_prefix(
+    field: &PlannedField,
+    maps: &crate::materials::host_data::MergedPropertyMaps<'_>,
+    reflected: &ReflectedUniformField,
+    components: usize,
+    out: &mut [u8],
+) {
+    let values = if let Some(MaterialPropertyValue::Float4(value)) = maps.get(field.pid) {
+        *value
+    } else {
+        [0.0; 4]
+    };
+    write_f32_slice_at(out, reflected, &values[..components]);
+}
+
+fn write_vec4_array(
+    field: &PlannedField,
+    maps: &crate::materials::host_data::MergedPropertyMaps<'_>,
+    reflected: &ReflectedUniformField,
+    out: &mut [u8],
+) {
+    if let Some(MaterialPropertyValue::Float4Array(values)) = maps.get(field.pid) {
+        if field.flags & FLAG_SRGB != 0 {
+            write_srgb_f32x4_array_at(out, reflected, values);
+        } else {
+            write_f32x4_array_at(out, reflected, values);
+        }
+    }
+}
+
 fn f32_property(
     field: &PlannedField,
     maps: &crate::materials::host_data::MergedPropertyMaps<'_>,
 ) -> f32 {
     if let Some(MaterialPropertyValue::Float(value)) = maps.get(field.pid) {
-        *value
+        // The flag records the classify-time name check. `_TOGGLE` only satisfies that helper.
+        super::quantize_toggle_float(field.flags & FLAG_QUANTIZE != 0, "_TOGGLE", *value)
     } else {
         f32::from_bits(field.aux)
     }
@@ -301,6 +365,7 @@ fn classify_field(
     let base = PlannedField {
         offset: field.offset,
         size: field.size,
+        array_stride: field.array_stride,
         pid,
         aux: 0,
         flags: 0,
@@ -308,7 +373,15 @@ fn classify_field(
     };
     match field.kind {
         ReflectedUniformScalarKind::Vec4 => classify_vec4(base, field_name, ctx),
+        ReflectedUniformScalarKind::Vec2 => classify_vec_prefix(base, KIND_VEC2),
+        ReflectedUniformScalarKind::Vec3 => classify_vec_prefix(base, KIND_VEC3),
         ReflectedUniformScalarKind::F32 => classify_f32(base, field_name, ctx),
+        ReflectedUniformScalarKind::F32Array => classify_host_array(base, KIND_F32_ARRAY, false),
+        ReflectedUniformScalarKind::Vec4Array => classify_host_array(
+            base,
+            KIND_VEC4_ARRAY,
+            ctx.metadata.value_spaces.is_srgb_vec4_array(field_name),
+        ),
         ReflectedUniformScalarKind::U32 => classify_u32(base, field_name, ctx),
         ReflectedUniformScalarKind::Unsupported => {
             let mut planned = base;
@@ -353,6 +426,13 @@ fn classify_f32(
     }
     planned.kind = KIND_F32;
     planned.aux = missing_f32_uniform_default(field_name, ctx.metadata.material_defaults).to_bits();
+    if ctx.metadata.quantize_toggle_floats
+        && crate::materials::custom_shader::is_toggle_style_property_name(
+            shader_writer_unescaped_field_name(field_name),
+        )
+    {
+        planned.flags |= FLAG_QUANTIZE;
+    }
     planned
 }
 

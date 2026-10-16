@@ -51,6 +51,11 @@ pub struct ResolvedShaderUpload {
     pub pipeline: RasterPipelineKind,
     /// Shader asset name whose existing routes should adopt [`Self::pipeline`].
     pub retarget_shader_key: Option<String>,
+    /// Per-material assign, clear, or a remove/install that changed those overrides.
+    ///
+    /// The caller bumps material route generation so cached batch keys reread the stem.
+    /// Pipeline and bind caches for that stem stay keyed by `shader_source_generation`.
+    pub material_override_changed: bool,
     /// Malformed custom payload.
     ///
     /// Negative carrier asset ids skip route registration and the upload ack.
@@ -76,6 +81,7 @@ impl From<ShaderRoutePlan> for ResolvedShaderUpload {
             shader_variant_bits: plan.shader_variant_bits,
             pipeline: plan.pipeline,
             retarget_shader_key: None,
+            material_override_changed: false,
             rejected: false,
         }
     }

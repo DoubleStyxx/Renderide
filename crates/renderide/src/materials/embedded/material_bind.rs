@@ -53,8 +53,9 @@ use uniform::{
 };
 use white_texture::{
     PlaceholderTexture, create_black, create_checkerboard_2d, create_flat_normal, create_gray,
-    create_red, create_srgb_gray, create_white, upload_black, upload_checkerboard_2d,
-    upload_flat_normal, upload_gray, upload_red, upload_srgb_gray, upload_white,
+    create_red, create_srgb_gray, create_white, create_white_2d_array_view, upload_black,
+    upload_checkerboard_2d, upload_flat_normal, upload_gray, upload_red, upload_srgb_gray,
+    upload_white,
 };
 
 use resolve::EmbeddedBindInputResolution;
@@ -183,6 +184,8 @@ fn build_material_bind_cache_key_parts(
 pub struct EmbeddedMaterialBindResources {
     device: Arc<wgpu::Device>,
     white_2d: PlaceholderTexture,
+    /// Single-layer array view of `white_2d` for unset `texture_2d_array` slots.
+    white_2d_array: Arc<wgpu::TextureView>,
     black_2d: PlaceholderTexture,
     gray_2d: PlaceholderTexture,
     srgb_gray_2d: PlaceholderTexture,
@@ -237,6 +240,7 @@ impl EmbeddedMaterialBindResources {
         limits: Arc<crate::gpu::GpuLimits>,
     ) -> Result<Self, EmbeddedMaterialBindError> {
         let white_2d = create_white(device.as_ref(), TextureBindKind::Tex2D);
+        let white_2d_array = create_white_2d_array_view(&white_2d);
         let black_2d = create_black(device.as_ref(), TextureBindKind::Tex2D);
         let gray_2d = create_gray(device.as_ref(), TextureBindKind::Tex2D);
         let srgb_gray_2d = create_srgb_gray(device.as_ref(), TextureBindKind::Tex2D);
@@ -259,6 +263,7 @@ impl EmbeddedMaterialBindResources {
         Ok(Self {
             device: device.clone(),
             white_2d,
+            white_2d_array,
             black_2d,
             gray_2d,
             srgb_gray_2d,

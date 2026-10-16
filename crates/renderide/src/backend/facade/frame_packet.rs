@@ -34,6 +34,8 @@ pub(crate) struct ExtractedFrameShared<'a> {
     pub(crate) router: &'a MaterialRouter,
     /// Registry of renderer-side property ids used by the pipeline selector.
     pub(crate) pipeline_property_ids: MaterialPipelinePropertyIds,
+    /// Intern table shared with material property uploads, used for keyword toggle names.
+    pub(crate) property_registry: &'a crate::materials::host_data::PropertyIdRegistry,
     /// Prepared render-world caches for every render context used by this tick's views.
     pub(crate) render_worlds: &'a HashMap<u8, RenderWorld>,
     /// Persistent material batch caches keyed by render context and [`ShaderPermutation`].
