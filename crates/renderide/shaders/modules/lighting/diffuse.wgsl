@@ -27,11 +27,11 @@ fn direct_clustered_diffuse(
         rg::frame.near_clip,
         rg::frame.far_clip,
     );
-    let count = pcls::cluster_light_count_at(cluster_id);
-    let i_max = count;
+    let range = pcls::cluster_light_range_at(cluster_id);
+    let count = range.y;
     var direct = vec3<f32>(0.0);
-    for (var i = 0u; i < i_max; i++) {
-        let li = pcls::cluster_light_index_at(cluster_id, i);
+    for (var i = 0u; i < count; i++) {
+        let li = pcls::cluster_light_index_from_range(range, i);
         if (li >= rg::frame.light_count) {
             continue;
         }

@@ -464,8 +464,9 @@ fn pbs_direct_diffuse_uses_burley_rough_diffuse() -> io::Result<()> {
 
     let lighting_src = module_source("pbs/lighting.wgsl")?;
     for required in [
-        "filtered_roughness,\n                s.roughness,\n                s.metallic,",
-        "filtered_roughness,\n                s.roughness,\n                s.base_color,",
+        "brdf::direct_alpha_from_perceptual_roughness(filtered_roughness);",
+        "f90,\n                s.roughness,\n                s.metallic,",
+        "f90,\n                s.roughness,\n                s.base_color,",
         "brdf::diffuse_only_metallic(light, world_pos, s.normal, view_dir, s.roughness, s.base_color, s.metallic)",
         "brdf::diffuse_only_specular(\n                light,\n                world_pos,\n                s.normal,\n                view_dir,\n                s.roughness,",
     ] {

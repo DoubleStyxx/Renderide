@@ -27,19 +27,22 @@ fn eval_light(light: ft::GpuLight, world_pos: vec3<f32>, world_normal: vec3<f32>
     var out: LightSample;
     if light.light_type == 0u {
         let to_light = light_pos - world_pos;
-        let dist = length(to_light);
-        out.l = normalize(to_light);
+        // `normalize` is `offset / length(offset)`. One sqrt serves both the unit direction and the range term.
+        let dist_sq = dot(to_light, to_light);
+        let dist = sqrt(dist_sq);
+        out.l = to_light / dist;
         out.attenuation = distance_attenuation(dist, light.range);
         out.attenuation = out.attenuation * cookies::multiplier(light, world_pos);
     } else if light.light_type == 1u {
         let dir_len_sq = dot(light_dir, light_dir);
-        out.l = select(vec3<f32>(0.0, 0.0, 1.0), normalize(-light_dir), dir_len_sq > 1e-16);
+        out.l = select(vec3<f32>(0.0, 0.0, 1.0), -light_dir / sqrt(dir_len_sq), dir_len_sq > 1e-16);
         out.attenuation = bl::direct_light_scale();
         out.attenuation = out.attenuation * cookies::multiplier(light, world_pos);
     } else {
         let to_light = light_pos - world_pos;
-        let dist = length(to_light);
-        out.l = normalize(to_light);
+        let dist_sq = dot(to_light, to_light);
+        let dist = sqrt(dist_sq);
+        out.l = to_light / dist;
         let spot_atten = bl::spot_angle_attenuation(light, out.l);
         out.attenuation = spot_atten * distance_attenuation(dist, light.range);
         out.attenuation = out.attenuation * cookies::multiplier(light, world_pos);
