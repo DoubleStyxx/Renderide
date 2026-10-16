@@ -212,7 +212,12 @@ impl<'a> HeadlessDriver<'a> {
             return;
         };
         let cpu_frame_ms = self.control_tick_started.elapsed().as_secs_f64() * 1000.0;
-        crate::control::finish_presented_frame(&session, &self.gpu, cpu_frame_ms);
+        crate::control::finish_presented_frame(
+            &session,
+            &self.gpu,
+            cpu_frame_ms,
+            crate::app::control_capture_readback,
+        );
     }
 
     fn maybe_write_frame_png(&mut self) {

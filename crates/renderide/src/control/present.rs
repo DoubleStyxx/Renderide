@@ -1,11 +1,15 @@
 //! Presented-frame accounting shared by the headless and windowed drivers.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use renderide_control_client::{CpuPhaseMs, FrameStats, MetaInfo};
 
 use crate::build_info::renderer_commit_sha8;
 use crate::gpu::GpuContext;
+
+/// PNG readback of a color texture, injected by the app layer.
+pub(crate) type CaptureReadback = fn(&GpuContext, &wgpu::Texture, &Path) -> Result<(), String>;
 
 use super::probe::{self, FrameProbe};
 use super::session::ControlSession;
@@ -23,11 +27,12 @@ pub(crate) fn finish_presented_frame(
     session: &ControlSession,
     gpu: &GpuContext,
     cpu_frame_ms: f64,
+    readback: CaptureReadback,
 ) {
     let probe = probe::take();
     let stats = stats_from_probe(cpu_frame_ms, probe, gpu_pass_ms(gpu));
     let frame_index = session.note_presented(stats);
-    service_capture(session, gpu, frame_index);
+    service_capture(session, gpu, frame_index, readback);
 }
 
 /// Builds the one-shot `meta` payload from the live device.
@@ -90,24 +95,27 @@ fn gpu_pass_ms(gpu: &GpuContext) -> Option<BTreeMap<String, f64>> {
     Some(passes)
 }
 
-fn service_capture(session: &ControlSession, gpu: &GpuContext, frame_index: u64) {
+fn service_capture(
+    session: &ControlSession,
+    gpu: &GpuContext,
+    frame_index: u64,
+    readback: CaptureReadback,
+) {
     let Some(job) = session.take_capture() else {
         return;
     };
     let result = match gpu.control_color_texture() {
-        Some(texture) => crate::app::headless_readback_png(gpu, texture, job.path())
-            .map(|()| frame_index)
-            .map_err(|err| err.to_string()),
+        Some(texture) => readback(gpu, texture, job.path()).map(|()| frame_index),
         None => Err("color target is not ready".to_owned()),
     };
     job.complete(result);
 }
 
 fn driver_label(driver: &str, driver_info: &str) -> String {
-    if !driver.trim().is_empty() {
-        driver.to_owned()
-    } else {
+    if driver.trim().is_empty() {
         field_or_unreported(driver_info)
+    } else {
+        driver.to_owned()
     }
 }
 

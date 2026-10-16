@@ -618,7 +618,12 @@ impl AppDriver {
             .frame_clock
             .last_frame_start()
             .map_or(0.0, |start| start.elapsed().as_secs_f64() * 1000.0);
-        crate::control::finish_presented_frame(&session, target.gpu(), cpu_frame_ms);
+        crate::control::finish_presented_frame(
+            &session,
+            target.gpu(),
+            cpu_frame_ms,
+            crate::app::control_capture_readback,
+        );
     }
 
     fn drain_driver_thread_error(&self) {

@@ -22,6 +22,7 @@ const ROOT_MODULES: &[&str] = &[
     "color_space",
     "concurrency",
     "config",
+    "control",
     "cpu_parallelism",
     "crash_context",
     "cull_contract",
