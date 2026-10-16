@@ -229,6 +229,15 @@ impl MaterialSystem {
         }
     }
 
+    /// Deferred shader route stored before GPU attach, for upload-routing tests.
+    #[cfg(test)]
+    pub(crate) fn pending_shader_route_for_tests(
+        &self,
+        asset_id: i32,
+    ) -> Option<(RasterPipelineKind, Option<String>, Option<u32>)> {
+        self.pending_shader_routes.get(&asset_id).cloned()
+    }
+
     /// Rebinds routes whose shader asset name matches `shader_key` to the live custom program.
     pub fn retarget_named_shader_routes(&mut self, shader_key: &str) {
         let shader_key = crate::materials::custom_shader::normalize_shader_key(shader_key);
