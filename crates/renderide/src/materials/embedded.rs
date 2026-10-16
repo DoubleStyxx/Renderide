@@ -24,3 +24,10 @@ pub(crate) use stem_metadata::{
     embedded_stem_pipeline_pass_count,
 };
 pub use texture_pools::EmbeddedTexturePools;
+
+#[cfg(feature = "bench-api")]
+mod bench_cpu;
+#[cfg(feature = "bench-api")]
+pub use bench_cpu::{
+    BIND_GROUP_BATCH, BindGroupChurnWorkload, MATERIAL_UNIFORM_BATCH, MaterialUniformUpdateWorkload,
+};

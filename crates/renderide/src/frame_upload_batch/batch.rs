@@ -139,6 +139,26 @@ impl FrameUploadBatch {
             .push_buffer_write(order, buffer, offset, data);
     }
 
+    /// Copies `data` into the frame upload byte arena without a [`wgpu::Buffer`].
+    ///
+    /// [`Self::write_buffer_with_scope_fallback`] also clones a destination buffer. Uniform
+    /// benches call this to measure the payload copy that path always performs.
+    #[cfg(feature = "bench-api")]
+    pub(crate) fn stage_cpu_payload(&self, data: &[u8]) -> usize {
+        self.recorded.lock().push_bytes(data).end
+    }
+
+    /// Drops staged payload bytes so the next sample starts from an empty arena.
+    ///
+    /// Capacity is kept. Production drains the arena once per frame; benches clear it at the
+    /// end of a sample so the byte copy stays bounded.
+    #[cfg(feature = "bench-api")]
+    pub(crate) fn clear_staged_cpu_payload(&self) {
+        let mut recorded = self.recorded.lock();
+        recorded.bytes.clear();
+        recorded.writes.clear();
+    }
+
     /// Returns the next write order, using `fallback_scope` when this thread did not enter it.
     fn next_write_order_with_scope_fallback(
         &self,

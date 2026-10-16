@@ -198,6 +198,15 @@ fn validate_material_default_kind(
     }
 }
 
+/// Resolves `//#mat_default` values for a reflected stem, including installed custom programs.
+#[cfg(feature = "bench-api")]
+pub(crate) fn material_uniform_defaults_for_stem(
+    stem: &str,
+    reflected: &ReflectedRasterLayout,
+) -> Result<MaterialUniformDefaults, String> {
+    material_default_uniform_fields_for_stem(stem, reflected)
+}
+
 /// Reflects packaged WGSL for `stem`, builds the `@group(1)` layout, and interns property ids.
 pub(crate) fn build_stem_material_layout(
     device: &wgpu::Device,

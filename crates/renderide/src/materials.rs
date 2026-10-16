@@ -109,6 +109,10 @@ pub(crate) use cache::{
 
 /// Embedded raster materials: bind groups, texture pools, uniform packing, and stem-metadata queries.
 pub(crate) use embedded::EmbeddedMaterialBindShader;
+#[cfg(feature = "bench-api")]
+pub use embedded::{
+    BIND_GROUP_BATCH, BindGroupChurnWorkload, MATERIAL_UNIFORM_BATCH, MaterialUniformUpdateWorkload,
+};
 pub(crate) use embedded::{
     EmbeddedMaterialBindCacheDiagnosticSnapshot, EmbeddedMaterialBindResources, EmbeddedStemQuery,
     EmbeddedTangentFallbackMode, EmbeddedTexturePools, SceneColorSnapshotMode,

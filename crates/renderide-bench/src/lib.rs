@@ -8,14 +8,16 @@
 //! the default command.
 
 pub use renderide::bench_api::{
-    BUFFER_POOL_SLOTS, BufferPoolWorkload, CULL_BATCH, CullWorkload, TRANSFORM_BATCH,
+    BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload, CULL_BATCH,
+    CullWorkload, MATERIAL_UNIFORM_BATCH, MaterialUniformUpdateWorkload, TRANSFORM_BATCH,
     TransformWorkload, WORLD_MATRIX_NODES, WorldMatrixWorkload,
 };
 
 #[cfg(test)]
 mod tests {
     use super::{
-        BUFFER_POOL_SLOTS, BufferPoolWorkload, CULL_BATCH, CullWorkload, TransformWorkload,
+        BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload,
+        CULL_BATCH, CullWorkload, MaterialUniformUpdateWorkload, TransformWorkload,
         WORLD_MATRIX_NODES, WorldMatrixWorkload,
     };
 
@@ -60,5 +62,30 @@ mod tests {
         let reused_ids = (0..BUFFER_POOL_SLOTS).fold(0_usize, usize::wrapping_add);
         assert_eq!(first, reused_ids);
         assert_eq!(second, reused_ids);
+    }
+
+    #[test]
+    fn material_uniform_repack_tracks_color_changes() {
+        let mut workload = MaterialUniformUpdateWorkload::standard();
+        let error = workload.setup_error().unwrap_or("");
+        assert!(error.is_empty(), "{error}");
+        let first = workload.pack_changed_properties();
+        let second = workload.pack_changed_properties();
+        assert!(first > 0);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn bind_group_cache_hits_are_stable_and_rebuild_after_invalidate() {
+        let workload = BindGroupChurnWorkload::standard();
+        let error = workload.setup_error().unwrap_or("");
+        assert!(error.is_empty(), "{error}");
+        let hits = workload.cache_hits();
+        let again = workload.cache_hits();
+        assert!(hits >= u64::try_from(BIND_GROUP_BATCH).unwrap_or(0));
+        assert_eq!(hits, again);
+        let rebuilt = workload.miss_rebuild();
+        assert!(rebuilt >= u64::try_from(BIND_GROUP_BATCH).unwrap_or(0));
+        assert_eq!(workload.cache_hits(), hits);
     }
 }

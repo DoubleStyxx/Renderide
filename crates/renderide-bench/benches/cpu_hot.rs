@@ -1,4 +1,5 @@
-//! Criterion batches for transform math, frustum culling, world matrices, and buffer-pool reuse.
+//! Criterion batches for transform math, frustum culling, world matrices, buffer-pool reuse,
+//! custom-material uniform updates, and bind-group cache churn.
 //!
 //! `cargo bench -p renderide-bench` runs this file. Pass `--features gpu` to compile the GPU
 //! group as well. That group does not open a device; add adapter benches there when they exist.
@@ -7,7 +8,8 @@ use std::hint::black_box;
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use renderide_bench::{
-    BUFFER_POOL_SLOTS, BufferPoolWorkload, CULL_BATCH, CullWorkload, TRANSFORM_BATCH,
+    BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload, CULL_BATCH,
+    CullWorkload, MATERIAL_UNIFORM_BATCH, MaterialUniformUpdateWorkload, TRANSFORM_BATCH,
     TransformWorkload, WORLD_MATRIX_NODES, WorldMatrixWorkload,
 };
 
@@ -48,6 +50,29 @@ fn world_matrices(c: &mut Criterion) {
     group.finish();
 }
 
+fn material_uniforms(c: &mut Criterion) {
+    let mut workload = MaterialUniformUpdateWorkload::standard();
+    let mut group = c.benchmark_group("material_uniforms");
+    group.throughput(Throughput::Elements(MATERIAL_UNIFORM_BATCH as u64));
+    group.bench_function("property_change_pack", |b| {
+        b.iter(|| black_box(workload.pack_changed_properties()));
+    });
+    group.finish();
+}
+
+fn bind_groups(c: &mut Criterion) {
+    let workload = BindGroupChurnWorkload::standard();
+    let mut group = c.benchmark_group("bind_groups");
+    group.throughput(Throughput::Elements(BIND_GROUP_BATCH as u64));
+    group.bench_function("cache_hit", |b| {
+        b.iter(|| black_box(workload.cache_hits()));
+    });
+    group.bench_function("miss_rebuild", |b| {
+        b.iter(|| black_box(workload.miss_rebuild()));
+    });
+    group.finish();
+}
+
 fn buffer_pool(c: &mut Criterion) {
     let mut workload = BufferPoolWorkload::standard();
     let mut group = c.benchmark_group("buffer_pool");
@@ -64,7 +89,15 @@ fn gpu(_c: &mut Criterion) {
     // and links without requiring an adapter, while the default bench command stays CPU-only.
 }
 
-criterion_group!(cpu, transforms, culling, world_matrices, buffer_pool);
+criterion_group!(
+    cpu,
+    transforms,
+    culling,
+    world_matrices,
+    buffer_pool,
+    material_uniforms,
+    bind_groups
+);
 
 #[cfg(feature = "gpu")]
 criterion_group!(gpu_benches, gpu);
