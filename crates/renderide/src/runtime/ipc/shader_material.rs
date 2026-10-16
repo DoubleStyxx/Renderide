@@ -42,7 +42,11 @@ pub(in crate::runtime) fn on_shader_upload(
     );
     let (tx, rx) = bounded::<ResolvedShaderUpload>(1);
     rayon::spawn(move || {
-        let resolved = resolve_shader_upload(&upload, embedded_default_stem_for_shader_asset_name);
+        let resolved = resolve_shader_upload(
+            &upload,
+            embedded_default_stem_for_shader_asset_name,
+            crate::materials::custom_shader::resolve_custom_shader_payload,
+        );
         let _ = tx.send(resolved);
     });
     pending.push(PendingShaderResolution { asset_id, rx });

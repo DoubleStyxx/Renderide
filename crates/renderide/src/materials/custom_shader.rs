@@ -247,6 +247,49 @@ pub(crate) fn remove(key: &str) -> Option<RemovedCustomShader> {
     Some(RemovedCustomShader { key, base_stem })
 }
 
+/// Installs or removes one custom payload and returns the shader route for it.
+pub(crate) fn resolve_custom_shader_payload(
+    payload: Result<renderide_shared::custom_shader_ipc::CustomShaderPayload, String>,
+    stem_lookup: crate::assets::shader::route::ShaderRouteStemLookup,
+) -> crate::assets::ResolvedShaderUpload {
+    use crate::assets::shader::route::{ResolvedShaderUpload, plan_shader_route};
+    use crate::render_contract::RasterPipelineKind;
+
+    let payload = match payload {
+        Ok(payload) => payload,
+        Err(error) => {
+            logger::warn!("custom shader payload rejected: {error}");
+            return ResolvedShaderUpload {
+                shader_asset_name: None,
+                shader_variant_bits: None,
+                pipeline: RasterPipelineKind::Null,
+                retarget_shader_key: None,
+                rejected: true,
+            };
+        }
+    };
+    if payload.remove {
+        remove(&payload.key);
+        let mut resolved: ResolvedShaderUpload =
+            plan_shader_route(Some(payload.key.clone()), None, stem_lookup).into();
+        resolved.retarget_shader_key = Some(payload.key);
+        return resolved;
+    }
+    match install(&payload.key, &payload.wgsl) {
+        Ok(installed) => ResolvedShaderUpload {
+            shader_asset_name: Some(installed.key.clone()),
+            shader_variant_bits: None,
+            pipeline: RasterPipelineKind::EmbeddedStem(Arc::from(installed.default_stem)),
+            retarget_shader_key: Some(installed.key),
+            rejected: false,
+        },
+        Err(error) => {
+            logger::warn!("custom shader install failed for {}: {error}", payload.key);
+            plan_shader_route(Some(payload.key), None, stem_lookup).into()
+        }
+    }
+}
+
 /// Default embedded stem for a host shader asset name when a custom program is installed.
 pub(crate) fn default_stem_for_asset_name(name: &str) -> Option<Arc<str>> {
     let key = normalize_shader_key(name);
