@@ -457,7 +457,9 @@ mod tests {
         assert_eq!(encoded.float4_bytes.len(), 16);
         let floats: Vec<f32> = encoded
             .float4_bytes
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
         assert_eq!(floats, vec![1.0, 2.0, 3.0, 4.0]);

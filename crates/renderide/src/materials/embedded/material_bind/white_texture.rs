@@ -460,7 +460,7 @@ mod tests {
     #[test]
     fn checkerboard_generation_is_fully_opaque() {
         let bytes = checkerboard_rgba8();
-        assert!(bytes.chunks_exact(4).all(|texel| texel[3] == 255));
+        assert!(bytes.as_chunks::<4>().0.iter().all(|texel| texel[3] == 255));
     }
 
     #[test]

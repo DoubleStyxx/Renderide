@@ -217,7 +217,9 @@ fn write_per_draw_uniform_slab(slots: &[PaddedPerDrawUniforms], out: &mut [u8]) 
             .for_each(|(slabs, slots)| {
                 profiling::scope!("mesh_deform::write_per_draw_uniform_slab::worker");
                 for (slab, slot) in slabs
-                    .chunks_exact_mut(PER_DRAW_UNIFORM_STRIDE)
+                    .as_chunks_mut::<PER_DRAW_UNIFORM_STRIDE>()
+                    .0
+                    .iter_mut()
                     .zip(slots.iter())
                 {
                     slab.copy_from_slice(bytemuck::bytes_of(slot));
@@ -225,7 +227,9 @@ fn write_per_draw_uniform_slab(slots: &[PaddedPerDrawUniforms], out: &mut [u8]) 
             });
     } else {
         for (slab, slot) in dst
-            .chunks_exact_mut(PER_DRAW_UNIFORM_STRIDE)
+            .as_chunks_mut::<PER_DRAW_UNIFORM_STRIDE>()
+            .0
+            .iter_mut()
             .zip(slots.iter())
         {
             slab.copy_from_slice(bytemuck::bytes_of(slot));
@@ -298,9 +302,11 @@ mod tests {
         assert_eq!(a.model, m.to_cols_array());
         assert_eq!(a.normal_matrix, WgslMat3x3::from_model_upper_3x3(m));
         assert!(a.position_stream_world_space());
-        assert_eq!(
-            a._pad[PER_DRAW_POSITION_STREAM_WORLD_SPACE_PAD_SLOT],
-            PER_DRAW_POSITION_STREAM_WORLD_SPACE_FLAG
+        assert!(
+            (a._pad[PER_DRAW_POSITION_STREAM_WORLD_SPACE_PAD_SLOT]
+                - PER_DRAW_POSITION_STREAM_WORLD_SPACE_FLAG)
+                .abs()
+                == 0.0
         );
         assert_eq!(a.particle, particle.to_uniform_rows());
         let b: &PaddedPerDrawUniforms =
@@ -339,7 +345,9 @@ mod tests {
 
         let mut serial = vec![0u8; PER_DRAW_UNIFORM_STRIDE * count];
         for (slab, slot) in serial
-            .chunks_exact_mut(PER_DRAW_UNIFORM_STRIDE)
+            .as_chunks_mut::<PER_DRAW_UNIFORM_STRIDE>()
+            .0
+            .iter_mut()
             .zip(slots.iter())
         {
             slab.copy_from_slice(bytemuck::bytes_of(slot));

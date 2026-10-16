@@ -76,6 +76,16 @@ pub(super) struct BackendDrawPreparation {
     render_worlds: HashMap<u8, RenderWorld>,
     /// Retained arranged draw command lists keyed by visible draw fingerprints.
     command_cache: WorldMeshCommandCache,
+    /// Reused render-world work list. Entries are moved back into [`Self::render_worlds`].
+    render_world_work: Vec<(u8, RenderingContext, RenderWorld)>,
+    /// Reused context keys for [`Self::render_world_work`].
+    render_world_seen: HashSet<u8>,
+    /// Reused material-cache work list. Entries are moved back into [`Self::material_batch_caches`].
+    material_cache_work: Vec<(u8, ShaderPermutation, FrameMaterialBatchCache)>,
+    /// Reused context keys for the default material-cache permutation.
+    material_cache_seen_contexts: HashSet<u8>,
+    /// Reused context and permutation keys for view-specific material caches.
+    material_cache_seen_permutations: HashSet<(u8, ShaderPermutation)>,
 }
 
 impl BackendDrawPreparation {
@@ -86,6 +96,11 @@ impl BackendDrawPreparation {
             material_batch_caches: HashMap::new(),
             render_worlds: HashMap::new(),
             command_cache: WorldMeshCommandCache::default(),
+            render_world_work: Vec::new(),
+            render_world_seen: HashSet::new(),
+            material_cache_work: Vec::new(),
+            material_cache_seen_contexts: HashSet::new(),
+            material_cache_seen_permutations: HashSet::new(),
         }
     }
 
@@ -122,6 +137,11 @@ impl BackendDrawPreparation {
             material_batch_caches,
             render_worlds,
             command_cache,
+            render_world_work,
+            render_world_seen,
+            material_cache_work,
+            material_cache_seen_contexts,
+            material_cache_seen_permutations,
         } = self;
         let (property_store, router, pipeline_property_ids) = {
             profiling::scope!("render::extract_frame_shared::material_inputs");
@@ -136,6 +156,8 @@ impl BackendDrawPreparation {
             profiling::scope!("render::build_frame_prepared_renderables");
             prepare_render_worlds_for_views(
                 render_worlds,
+                render_world_work,
+                render_world_seen,
                 scene,
                 assets.mesh_pool(),
                 assets.point_render_buffers(),
@@ -144,7 +166,12 @@ impl BackendDrawPreparation {
         }
 
         refresh_material_caches(
-            material_batch_caches,
+            &mut MaterialCacheWork {
+                map: material_batch_caches,
+                caches: material_cache_work,
+                seen_contexts: material_cache_seen_contexts,
+                seen_permutations: material_cache_seen_permutations,
+            },
             render_worlds,
             scene,
             property_store,
@@ -198,6 +225,8 @@ pub(super) fn render_context_cache_key(
 /// Refreshes every unique render-context cache required by this frame's views.
 fn prepare_render_worlds_for_views<S>(
     render_worlds: &mut HashMap<u8, RenderWorld>,
+    work: &mut Vec<(u8, RenderingContext, RenderWorld)>,
+    seen_contexts: &mut HashSet<u8>,
     scene: &S,
     mesh_pool: &MeshPool,
     point_render_buffers: &HashMap<i32, crate::particles::PointRenderBufferAsset>,
@@ -206,7 +235,13 @@ fn prepare_render_worlds_for_views<S>(
     S: WorldMeshSceneRead + Sync + ?Sized,
 {
     profiling::scope!("render::prepare_render_worlds_for_views");
-    let mut work = unique_render_context_work(scene, view_draw_preparations, render_worlds);
+    unique_render_context_work(
+        scene,
+        view_draw_preparations,
+        render_worlds,
+        work,
+        seen_contexts,
+    );
     let admission = FrameParallelPolicy::for_current_thread_pool().admit_independent_items(
         FrameCpuWorkload::independent_items(work.len()),
         RENDER_WORLD_PREP_PARALLEL_CHUNK_CONTEXTS,
@@ -231,12 +266,12 @@ fn prepare_render_worlds_for_views<S>(
                 );
             });
     } else {
-        for (_, render_context, render_world) in &mut work {
+        for (_, render_context, render_world) in work.iter_mut() {
             profiling::scope!("render::prepare_render_worlds_for_views::context");
             render_world.prepare_for_frame(scene, mesh_pool, point_render_buffers, *render_context);
         }
     }
-    for (key, _, render_world) in work {
+    for (key, _, render_world) in work.drain(..) {
         render_worlds.insert(key, render_world);
     }
 }
@@ -246,9 +281,11 @@ fn unique_render_context_work(
     scene: &(impl SceneSpaceRead + ?Sized),
     view_draw_preparations: &[(RenderingContext, ShaderPermutation)],
     render_worlds: &mut HashMap<u8, RenderWorld>,
-) -> Vec<(u8, RenderingContext, RenderWorld)> {
-    let mut work = Vec::new();
-    let mut seen_contexts = HashSet::with_capacity(view_draw_preparations.len());
+    work: &mut Vec<(u8, RenderingContext, RenderWorld)>,
+    seen_contexts: &mut HashSet<u8>,
+) {
+    work.clear();
+    seen_contexts.clear();
     for &(render_context, _) in view_draw_preparations {
         let key = render_context_cache_key(scene, render_context);
         if !seen_contexts.insert(key) {
@@ -263,12 +300,23 @@ fn unique_render_context_work(
         });
         work.push((key, render_context, render_world));
     }
-    work
+}
+
+/// Reused material-cache lists for one frame's draw preparation.
+struct MaterialCacheWork<'a> {
+    /// Persistent caches. Workers remove entries into [`Self::caches`] and insert them back.
+    map: &'a mut HashMap<(u8, ShaderPermutation), FrameMaterialBatchCache>,
+    /// Caches removed from [`Self::map`] so workers can refresh them without sharing the map.
+    caches: &'a mut Vec<(u8, ShaderPermutation, FrameMaterialBatchCache)>,
+    /// Context keys already queued at the default shader permutation.
+    seen_contexts: &'a mut HashSet<u8>,
+    /// Context and permutation keys already queued for view-specific caches.
+    seen_permutations: &'a mut HashSet<(u8, ShaderPermutation)>,
 }
 
 /// Refreshes material batch caches for every unique context and shader permutation.
 fn refresh_material_caches(
-    material_batch_caches: &mut HashMap<(u8, ShaderPermutation), FrameMaterialBatchCache>,
+    work: &mut MaterialCacheWork<'_>,
     render_worlds: &HashMap<u8, RenderWorld>,
     scene: &(impl SceneSpaceRead + ?Sized),
     property_store: &MaterialPropertyStore,
@@ -281,20 +329,21 @@ fn refresh_material_caches(
         profiling::scope!("render::build_frame_material_cache::dictionary");
         MaterialDictionary::new(property_store)
     };
-    let mut work = unique_material_cache_work(scene, view_draw_preparations, material_batch_caches);
+    unique_material_cache_work(scene, view_draw_preparations, work);
     let admission = FrameParallelPolicy::for_current_thread_pool().admit_independent_items(
-        FrameCpuWorkload::independent_items(work.len()),
+        FrameCpuWorkload::independent_items(work.caches.len()),
         MATERIAL_CACHE_PREP_PARALLEL_CHUNK_CACHES,
     );
     record_parallel_admission(
         "render_world_material_caches",
-        work.len(),
-        work.len(),
+        work.caches.len(),
+        work.caches.len(),
         admission,
     );
     if admission.is_parallel() {
         profiling::scope!("render::build_frame_material_cache::parallel_caches");
-        work.par_iter_mut()
+        work.caches
+            .par_iter_mut()
             .with_min_len(admission.chunk_size().unwrap_or(1))
             .for_each(|(context_key, shader_perm, cache)| {
                 profiling::scope!("render::build_frame_material_cache::cache_worker");
@@ -309,7 +358,7 @@ fn refresh_material_caches(
                 }
             });
     } else {
-        for (context_key, shader_perm, cache) in &mut work {
+        for (context_key, shader_perm, cache) in work.caches.iter_mut() {
             profiling::scope!("render::build_frame_material_cache::cache");
             if let Some(render_world) = render_worlds.get(context_key) {
                 cache.refresh_for_prepared(
@@ -322,8 +371,8 @@ fn refresh_material_caches(
             }
         }
     }
-    for (context_key, shader_perm, cache) in work {
-        material_batch_caches.insert((context_key, shader_perm), cache);
+    for (context_key, shader_perm, cache) in work.caches.drain(..) {
+        work.map.insert((context_key, shader_perm), cache);
     }
 }
 
@@ -331,28 +380,31 @@ fn refresh_material_caches(
 fn unique_material_cache_work(
     scene: &(impl SceneSpaceRead + ?Sized),
     view_draw_preparations: &[(RenderingContext, ShaderPermutation)],
-    material_batch_caches: &mut HashMap<(u8, ShaderPermutation), FrameMaterialBatchCache>,
-) -> Vec<(u8, ShaderPermutation, FrameMaterialBatchCache)> {
-    let mut work = Vec::new();
-    let mut seen_contexts = HashSet::with_capacity(view_draw_preparations.len());
-    let mut seen_permutations = HashSet::with_capacity(view_draw_preparations.len() * 2);
+    work: &mut MaterialCacheWork<'_>,
+) {
+    work.caches.clear();
+    work.seen_contexts.clear();
+    work.seen_permutations.clear();
     for &(render_context, view_perm) in view_draw_preparations {
         let context_key = render_context_cache_key(scene, render_context);
-        if seen_contexts.insert(context_key) {
+        if work.seen_contexts.insert(context_key) {
             let shader_perm = ShaderPermutation(0);
-            let cache = material_batch_caches
+            let cache = work
+                .map
                 .remove(&(context_key, shader_perm))
                 .unwrap_or_default();
-            work.push((context_key, shader_perm, cache));
+            work.caches.push((context_key, shader_perm, cache));
         }
-        if view_perm != ShaderPermutation(0) && seen_permutations.insert((context_key, view_perm)) {
-            let cache = material_batch_caches
+        if view_perm != ShaderPermutation(0)
+            && work.seen_permutations.insert((context_key, view_perm))
+        {
+            let cache = work
+                .map
                 .remove(&(context_key, view_perm))
                 .unwrap_or_default();
-            work.push((context_key, view_perm, cache));
+            work.caches.push((context_key, view_perm, cache));
         }
     }
-    work
 }
 
 #[cfg(test)]
@@ -374,7 +426,7 @@ mod tests {
             (RenderingContext::Camera, ShaderPermutation(0)),
         ];
 
-        prepare_render_worlds_for_views(
+        prepare_views_for_test(
             &mut render_worlds,
             &scene,
             &mesh_pool,
@@ -421,7 +473,7 @@ mod tests {
             (RenderingContext::Camera, ShaderPermutation(0)),
         ];
 
-        prepare_render_worlds_for_views(
+        prepare_views_for_test(
             &mut render_worlds,
             &scene,
             &mesh_pool,
@@ -436,6 +488,26 @@ mod tests {
                 .get(&render_context_cache_key(&scene, RenderingContext::Camera))
                 .map(|world| world.prepared().render_context()),
             Some(RenderingContext::Camera)
+        );
+    }
+
+    fn prepare_views_for_test(
+        render_worlds: &mut HashMap<u8, RenderWorld>,
+        scene: &SceneCoordinator,
+        mesh_pool: &MeshPool,
+        point_render_buffers: &HashMap<i32, crate::particles::PointRenderBufferAsset>,
+        views: &[(RenderingContext, ShaderPermutation)],
+    ) {
+        let mut work = Vec::new();
+        let mut seen = HashSet::new();
+        prepare_render_worlds_for_views(
+            render_worlds,
+            &mut work,
+            &mut seen,
+            scene,
+            mesh_pool,
+            point_render_buffers,
+            views,
         );
     }
 }

@@ -188,11 +188,22 @@ fn white_layer_bytes_match_atlas_formats() {
 
     let r16 = white_texture_bytes(LightCookieAtlasFormat::R16Float, 8, 4);
     assert_eq!(r16.len(), texels * 2);
-    assert!(r16.chunks_exact(2).all(|bytes| bytes == [0x00, 0x3c]));
+    assert!(
+        r16.as_chunks::<2>()
+            .0
+            .iter()
+            .all(|bytes| *bytes == [0x00, 0x3c])
+    );
 
     let rgba16 = white_texture_bytes(LightCookieAtlasFormat::Rgba16Float, 8, 4);
     assert_eq!(rgba16.len(), texels * 8);
-    assert!(rgba16.chunks_exact(2).all(|bytes| bytes == [0x00, 0x3c]));
+    assert!(
+        rgba16
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .all(|bytes| *bytes == [0x00, 0x3c])
+    );
 }
 
 #[test]

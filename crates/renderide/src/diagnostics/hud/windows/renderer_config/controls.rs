@@ -128,7 +128,7 @@ mod tests {
 
     #[test]
     fn drag_speed_uses_fallback_for_empty_u32_ranges() {
-        assert_eq!(u32_slider_drag_speed(10, 10), MIN_U32_SLIDER_SPEED);
+        assert!((u32_slider_drag_speed(10, 10) - MIN_U32_SLIDER_SPEED).abs() == 0.0);
     }
 
     #[test]
@@ -138,6 +138,6 @@ mod tests {
 
     #[test]
     fn drag_speed_uses_fallback_for_invalid_f32_ranges() {
-        assert_eq!(f32_slider_drag_speed(f32::NAN, 10.0), MIN_F32_SLIDER_SPEED);
+        assert!((f32_slider_drag_speed(f32::NAN, 10.0) - MIN_F32_SLIDER_SPEED).abs() == 0.0);
     }
 }

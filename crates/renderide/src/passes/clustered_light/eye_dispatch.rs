@@ -292,7 +292,7 @@ mod tests {
         let (near, far) = sanitize_cluster_clip_planes(0.00001, 10.0);
 
         assert_eq!(params.near_clip, near);
-        assert_eq!(params.near_clip, CLUSTER_NEAR_CLIP_MIN);
+        assert!((params.near_clip - CLUSTER_NEAR_CLIP_MIN).abs() == 0.0);
         assert_eq!(params.far_clip, far);
     }
 

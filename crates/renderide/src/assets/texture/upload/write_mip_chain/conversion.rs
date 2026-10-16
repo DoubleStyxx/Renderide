@@ -327,8 +327,8 @@ mod tests {
         let sh = 16usize;
         let src = [200u8, 100, 50, 255].repeat(sw * sh);
         let actual = downsample_rgba8_box(&src, sw as u32, sh as u32, 8, 8).expect("downsample");
-        for px in actual.chunks_exact(4) {
-            assert_eq!(px, [200, 100, 50, 255]);
+        for px in actual.as_chunks::<4>().0 {
+            assert_eq!(*px, [200, 100, 50, 255]);
         }
     }
 }

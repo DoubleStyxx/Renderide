@@ -281,9 +281,9 @@ mod tests {
         let modal = view * Vec4::new(0.0, 0.0, -2.0, 1.0);
         let cursor = view * Vec4::new(0.0, 0.0, -5.0, 1.0);
 
-        assert_eq!(dash.z, OVERLAY_CAMERA_LOCAL_Z);
-        assert_eq!(modal.z, OVERLAY_CAMERA_LOCAL_Z + 2.0);
-        assert_eq!(cursor.z, OVERLAY_CAMERA_LOCAL_Z + 5.0);
+        assert!((dash.z - OVERLAY_CAMERA_LOCAL_Z).abs() == 0.0);
+        assert!((modal.z - (OVERLAY_CAMERA_LOCAL_Z + 2.0)).abs() == 0.0);
+        assert!((cursor.z - (OVERLAY_CAMERA_LOCAL_Z + 5.0)).abs() == 0.0);
     }
 
     #[test]

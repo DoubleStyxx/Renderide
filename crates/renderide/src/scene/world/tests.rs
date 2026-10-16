@@ -122,9 +122,7 @@ fn ensure_cache_shapes_resizes_and_clears_computed_on_grow() {
         "growth must mark children adjacency dirty"
     );
 
-    for c in &mut cache.computed {
-        *c = true;
-    }
+    cache.computed.fill(true);
     ensure_cache_shapes(&mut cache, 5, false);
     assert_eq!(cache.world_matrices.len(), 5);
     assert_eq!(cache.degenerate_scales.len(), 5);
@@ -138,9 +136,7 @@ fn ensure_cache_shapes_resizes_and_clears_computed_on_grow() {
 fn ensure_cache_shapes_force_invalidate_clears_computed_without_resize() {
     let mut cache = WorldTransformCache::default();
     ensure_cache_shapes(&mut cache, 2, false);
-    for c in &mut cache.computed {
-        *c = true;
-    }
+    cache.computed.fill(true);
     ensure_cache_shapes(&mut cache, 2, true);
     assert!(cache.computed.iter().all(|c| !*c));
 }

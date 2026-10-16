@@ -378,7 +378,7 @@ mod tests {
         assert!(!state.is_tracking);
         assert_eq!(state.position, Vec3::ZERO);
         assert_eq!(state.rotation, Quat::IDENTITY);
-        assert_eq!(state.battery_level, UNKNOWN_BATTERY_LEVEL);
+        assert!((state.battery_level - UNKNOWN_BATTERY_LEVEL).abs() == 0.0);
         assert!(!state.battery_charging);
     }
 

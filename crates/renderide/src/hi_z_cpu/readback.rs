@@ -63,7 +63,9 @@ pub fn unpack_linear_rows_to_mips(
                 Ok(src_floats) => out.extend_from_slice(src_floats),
                 Err(_) => out.extend(
                     row_bytes
-                        .chunks_exact(4)
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
                         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])),
                 ),
             }

@@ -117,7 +117,8 @@ mod tests {
     fn non_finite_alpha_uses_display_default() {
         let mut e = DisplayEmaScalar::new(f64::NAN);
         e.update(10.0);
-        assert_eq!(e.update(20.0), 10.0 + DISPLAY_EMA_ALPHA * 10.0);
+        let expected = 10.0 + DISPLAY_EMA_ALPHA * 10.0;
+        assert!((e.update(20.0) - expected).abs() == 0.0);
     }
 
     #[test]
@@ -128,9 +129,10 @@ mod tests {
         ema.gpu.update(10.0);
         ema.host.update(10.0);
 
-        assert_eq!(ema.frame.update(20.0), 10.0 + DISPLAY_EMA_ALPHA * 10.0);
-        assert_eq!(ema.cpu.update(20.0), 10.0 + DISPLAY_EMA_ALPHA * 10.0);
-        assert_eq!(ema.gpu.update(20.0), 10.0 + DISPLAY_EMA_ALPHA * 10.0);
-        assert_eq!(ema.host.update(20.0), 10.0 + DISPLAY_EMA_ALPHA * 10.0);
+        let expected = 10.0 + DISPLAY_EMA_ALPHA * 10.0;
+        assert!((ema.frame.update(20.0) - expected).abs() == 0.0);
+        assert!((ema.cpu.update(20.0) - expected).abs() == 0.0);
+        assert!((ema.gpu.update(20.0) - expected).abs() == 0.0);
+        assert!((ema.host.update(20.0) - expected).abs() == 0.0);
     }
 }

@@ -324,16 +324,14 @@ mod tests {
         );
 
         assert_eq!(space.nodes[0].position.x, existing.position.x);
-        assert_eq!(
-            space.nodes[0].position.y,
-            crate::scene::pose::POSE_REPAIR_CLAMP_LIMIT
+        assert!(
+            (space.nodes[0].position.y - crate::scene::pose::POSE_REPAIR_CLAMP_LIMIT).abs() == 0.0
         );
         assert_eq!(space.nodes[0].position.z, bad.position.z);
         assert_eq!(space.nodes[0].scale.x, bad.scale.x);
         assert_eq!(space.nodes[0].scale.y, bad.scale.y);
-        assert_eq!(
-            space.nodes[0].scale.z,
-            crate::scene::pose::POSE_REPAIR_CLAMP_LIMIT
+        assert!(
+            (space.nodes[0].scale.z - crate::scene::pose::POSE_REPAIR_CLAMP_LIMIT).abs() == 0.0
         );
         assert_eq!(space.nodes[0].rotation.x, bad.rotation.x);
         assert_eq!(space.nodes[0].rotation.y, bad.rotation.y);

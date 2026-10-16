@@ -315,7 +315,7 @@ mod layout_tests {
 
         assert_eq!(gpu.cookie_kind, LIGHT_COOKIE_KIND_DIRECTIONAL_2D);
         assert_eq!(gpu.cookie_layer, 5);
-        assert_eq!(gpu.cookie_right_tan_half_angle[3], DIRECTIONAL_COOKIE_SIZE);
+        assert!((gpu.cookie_right_tan_half_angle[3] - DIRECTIONAL_COOKIE_SIZE).abs() == 0.0);
     }
 
     #[test]

@@ -78,7 +78,7 @@ pub(in crate::assets::mesh::gpu_mesh) struct UvVertexUploadSource<'a> {
 
 fn float4_default_stream_bytes(vertex_count: usize, default: [f32; 4]) -> Vec<u8> {
     let mut out = vec![0u8; vertex_count * 16];
-    for chunk in out.chunks_exact_mut(16) {
+    for chunk in out.as_chunks_mut::<16>().0 {
         for (component, value) in default.iter().enumerate() {
             let o = component * 4;
             chunk[o..o + 4].copy_from_slice(&value.to_le_bytes());

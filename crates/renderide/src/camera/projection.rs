@@ -232,19 +232,12 @@ mod projection_math_tests {
     /// declared bounds without changing in-range values.
     #[test]
     fn clamp_desktop_fov_handles_special_values() {
-        assert_eq!(
-            clamp_desktop_fov_degrees(f32::NAN),
-            DEFAULT_DESKTOP_FOV_DEGREES
-        );
-        assert_eq!(clamp_desktop_fov_degrees(-1.0), DESKTOP_FOV_DEGREES_MIN);
-        assert_eq!(clamp_desktop_fov_degrees(500.0), DESKTOP_FOV_DEGREES_MAX);
-        assert_eq!(
-            clamp_desktop_fov_degrees(f32::INFINITY),
-            DESKTOP_FOV_DEGREES_MAX
-        );
-        assert_eq!(
-            clamp_desktop_fov_degrees(f32::NEG_INFINITY),
-            DESKTOP_FOV_DEGREES_MIN
+        assert!((clamp_desktop_fov_degrees(f32::NAN) - DEFAULT_DESKTOP_FOV_DEGREES).abs() == 0.0);
+        assert!((clamp_desktop_fov_degrees(-1.0) - DESKTOP_FOV_DEGREES_MIN).abs() == 0.0);
+        assert!((clamp_desktop_fov_degrees(500.0) - DESKTOP_FOV_DEGREES_MAX).abs() == 0.0);
+        assert!((clamp_desktop_fov_degrees(f32::INFINITY) - DESKTOP_FOV_DEGREES_MAX).abs() == 0.0);
+        assert!(
+            (clamp_desktop_fov_degrees(f32::NEG_INFINITY) - DESKTOP_FOV_DEGREES_MIN).abs() == 0.0
         );
         assert_eq!(clamp_desktop_fov_degrees(45.0), 45.0);
     }

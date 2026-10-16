@@ -66,7 +66,12 @@ fn decode_rgb24_mip_to_rgba8(w: usize, h: usize, raw: &[u8]) -> Option<Vec<u8>> 
     }
     let mut out = vec![0u8; count * 4];
     decode_in_chunks(&raw[..need], 3, &mut out, 4, |src, dst| {
-        for (s, d) in src.chunks_exact(3).zip(dst.chunks_exact_mut(4)) {
+        for (s, d) in src
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .zip(dst.as_chunks_mut::<4>().0)
+        {
             d[0] = s[0];
             d[1] = s[1];
             d[2] = s[2];
@@ -96,7 +101,12 @@ fn decode_argb32_mip_to_rgba8(w: usize, h: usize, raw: &[u8]) -> Option<Vec<u8>>
     }
     let mut out = vec![0u8; need];
     decode_in_chunks(&raw[..need], 4, &mut out, 4, |src, dst| {
-        for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+        for (s, d) in src
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(dst.as_chunks_mut::<4>().0)
+        {
             d[0] = s[1];
             d[1] = s[2];
             d[2] = s[3];
@@ -116,7 +126,12 @@ fn decode_bgra32_mip_to_rgba8(w: usize, h: usize, raw: &[u8]) -> Option<Vec<u8>>
     }
     let mut out = vec![0u8; need];
     decode_in_chunks(&raw[..need], 4, &mut out, 4, |src, dst| {
-        for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+        for (s, d) in src
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(dst.as_chunks_mut::<4>().0)
+        {
             d[0] = s[2];
             d[1] = s[1];
             d[2] = s[0];
@@ -142,14 +157,14 @@ fn decode_r8_or_alpha8_mip_to_rgba8(
     let is_r8 = format == TextureFormat::R8;
     decode_in_chunks(&raw[..count], 1, &mut out, 4, |src, dst| {
         if is_r8 {
-            for (s, d) in src.iter().zip(dst.chunks_exact_mut(4)) {
+            for (s, d) in src.iter().zip(dst.as_chunks_mut::<4>().0) {
                 d[0] = *s;
                 d[1] = *s;
                 d[2] = *s;
                 d[3] = 255;
             }
         } else {
-            for (s, d) in src.iter().zip(dst.chunks_exact_mut(4)) {
+            for (s, d) in src.iter().zip(dst.as_chunks_mut::<4>().0) {
                 d[0] = 255;
                 d[1] = 255;
                 d[2] = 255;
@@ -176,7 +191,12 @@ fn decode_rgb565_family_mip_to_rgba8(
     let mut out = vec![0u8; count * 4];
     let bgr = format == TextureFormat::BGR565;
     decode_in_chunks(&raw[..need], 2, &mut out, 4, |src, dst| {
-        for (s, d) in src.chunks_exact(2).zip(dst.chunks_exact_mut(4)) {
+        for (s, d) in src
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(dst.as_chunks_mut::<4>().0)
+        {
             let v = u16::from_le_bytes([s[0], s[1]]);
             let (r5, g6, b5) = if bgr {
                 ((v) & 0x1f, (v >> 5) & 0x3f, (v >> 11) & 0x1f)
@@ -613,7 +633,7 @@ mod tests {
         ];
         let out = decode_mip_to_rgba8(TextureFormat::BC3, 4, 4, false, &raw).expect("ok");
         assert_eq!(out.len(), 4 * 4 * 4);
-        for px in out.chunks_exact(4) {
+        for px in out.as_chunks::<4>().0 {
             assert_eq!(
                 px[0], 50,
                 "R holds tangent X (was in alpha) after BC3nm swizzle"
@@ -632,7 +652,7 @@ mod tests {
         ];
         let out = decode_mip_to_rgba8(TextureFormat::BC2, 4, 4, false, &raw).expect("ok");
         assert_eq!(out.len(), 4 * 4 * 4);
-        for px in out.chunks_exact(4) {
+        for px in out.as_chunks::<4>().0 {
             assert!(px[0] >= 250, "R~=255");
             assert!(px[1] < 5, "G~=0");
             assert!(px[2] < 5, "B~=0");
@@ -642,7 +662,7 @@ mod tests {
 
     fn ref_rgb24(w: usize, h: usize, raw: &[u8]) -> Vec<u8> {
         let mut out = Vec::with_capacity(w * h * 4);
-        for p in raw.chunks_exact(3) {
+        for p in raw.as_chunks::<3>().0 {
             out.extend_from_slice(&[p[0], p[1], p[2], 255]);
         }
         out
@@ -650,7 +670,7 @@ mod tests {
 
     fn ref_argb32(raw: &[u8]) -> Vec<u8> {
         let mut out = Vec::with_capacity(raw.len());
-        for p in raw.chunks_exact(4) {
+        for p in raw.as_chunks::<4>().0 {
             out.extend_from_slice(&[p[1], p[2], p[3], p[0]]);
         }
         out
@@ -658,7 +678,7 @@ mod tests {
 
     fn ref_bgra32(raw: &[u8]) -> Vec<u8> {
         let mut out = Vec::with_capacity(raw.len());
-        for p in raw.chunks_exact(4) {
+        for p in raw.as_chunks::<4>().0 {
             out.extend_from_slice(&[p[2], p[1], p[0], p[3]]);
         }
         out
@@ -710,7 +730,7 @@ mod tests {
         let raw: Vec<u8> = (0..(w * h)).map(|i| (i as u8).wrapping_mul(3)).collect();
         let out = decode_mip_to_rgba8(TextureFormat::R8, w as u32, h as u32, false, &raw)
             .expect("decode");
-        for (i, px) in out.chunks_exact(4).enumerate() {
+        for (i, px) in out.as_chunks::<4>().0.iter().enumerate() {
             assert_eq!(px[0], raw[i]);
             assert_eq!(px[1], raw[i]);
             assert_eq!(px[2], raw[i]);
@@ -767,7 +787,7 @@ mod tests {
         let out = decode_mip_to_rgba8(TextureFormat::ETC2RGB, 4, 4, false, &raw).expect("ok");
         assert_eq!(out.len(), 4 * 4 * 4);
         // Alpha must be opaque for ETC2 RGB.
-        for px in out.chunks_exact(4) {
+        for px in out.as_chunks::<4>().0 {
             assert_eq!(px[3], 255);
         }
     }

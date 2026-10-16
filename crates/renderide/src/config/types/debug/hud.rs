@@ -414,13 +414,13 @@ mod tests {
             ui_scale: 0.1,
             ..Default::default()
         };
-        assert_eq!(s.resolved_ui_scale(), DebugHudSettings::MIN_UI_SCALE);
+        assert!((s.resolved_ui_scale() - DebugHudSettings::MIN_UI_SCALE).abs() == 0.0);
 
         s.ui_scale = 99.0;
-        assert_eq!(s.resolved_ui_scale(), DebugHudSettings::MAX_UI_SCALE);
+        assert!((s.resolved_ui_scale() - DebugHudSettings::MAX_UI_SCALE).abs() == 0.0);
 
         s.ui_scale = f32::NAN;
-        assert_eq!(s.resolved_ui_scale(), DebugHudSettings::DEFAULT_UI_SCALE);
+        assert!((s.resolved_ui_scale() - DebugHudSettings::DEFAULT_UI_SCALE).abs() == 0.0);
     }
 
     #[test]

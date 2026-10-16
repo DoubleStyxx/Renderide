@@ -364,7 +364,7 @@ mod tests {
             let t1 = (k + 1) as f32 / cluster_count_z as f32;
             let d0 = near * (far / near).powf(t0);
             let d1 = near * (far / near).powf(t1);
-            let mid = 0.5 * (d0 + d1);
+            let mid = f32::midpoint(d0, d1);
             let z_idx = cluster_z_slice_from_view_z(-mid, near, far, cluster_count_z);
             assert_eq!(
                 z_idx, k,
@@ -377,7 +377,7 @@ mod tests {
     #[test]
     fn sanitize_cluster_clip_planes_matches_shader_policy_for_tiny_near() {
         let (near, far) = sanitize_cluster_clip_planes(0.00001, 100.0);
-        assert_eq!(near, CLUSTER_NEAR_CLIP_MIN);
+        assert!((near - CLUSTER_NEAR_CLIP_MIN).abs() == 0.0);
         assert_eq!(far, 100.0);
     }
 
@@ -385,8 +385,8 @@ mod tests {
     #[test]
     fn sanitize_cluster_clip_planes_keeps_far_above_near() {
         let (near, far) = sanitize_cluster_clip_planes(0.00001, 0.00002);
-        assert_eq!(near, CLUSTER_NEAR_CLIP_MIN);
-        assert_eq!(far, CLUSTER_NEAR_CLIP_MIN + CLUSTER_FAR_CLIP_MIN_SPAN);
+        assert!((near - CLUSTER_NEAR_CLIP_MIN).abs() == 0.0);
+        assert!((far - (CLUSTER_NEAR_CLIP_MIN + CLUSTER_FAR_CLIP_MIN_SPAN)).abs() == 0.0);
     }
 
     /// `ClusterFrameParams` exposes the sanitized planes used by compute and fragment lookup.

@@ -138,10 +138,7 @@ pub(super) fn install() -> Result<(), String> {
     }
     // SAFETY: `sigaction` is a plain integer/pointer aggregate; all-zero is a valid bit pattern.
     let mut sa: libc::sigaction = unsafe { core::mem::zeroed() };
-    #[expect(
-        clippy::fn_to_numeric_cast_any,
-        reason = "libc::sigaction::sa_sigaction is typed as usize but stores a function pointer"
-    )]
+    // libc::sigaction::sa_sigaction is typed as usize but stores a function pointer.
     let handler_addr = capture_signal_handler as *const () as usize;
     sa.sa_sigaction = handler_addr;
     sa.sa_flags = libc::SA_SIGINFO | libc::SA_RESTART;

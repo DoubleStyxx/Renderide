@@ -216,10 +216,13 @@ fn append_draws_with_cull_geometry(
     draws: &[FramePreparedDraw],
     cull_geometry: Option<MeshCullGeometry>,
 ) {
-    out.extend(draws.iter().cloned().map(|mut draw| {
-        draw.cull_geometry = cull_geometry;
-        draw
-    }));
+    let start = out.len();
+    out.extend_from_slice(draws);
+    if let Some(cull_geometry) = cull_geometry {
+        for draw in &mut out[start..] {
+            draw.cull_geometry = Some(cull_geometry);
+        }
+    }
 }
 
 fn append_renderer_draw_range(

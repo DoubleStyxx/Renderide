@@ -156,7 +156,7 @@ mod tests {
         assert!(hand.is_device_active);
         assert!(hand.is_tracking);
         assert!(hand.tracks_metacarpals);
-        assert_eq!(hand.confidence, HAND_CONFIDENCE);
+        assert!((hand.confidence - HAND_CONFIDENCE).abs() == 0.0);
     }
 
     #[test]

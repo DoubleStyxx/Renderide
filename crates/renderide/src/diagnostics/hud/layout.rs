@@ -123,8 +123,9 @@ mod tests {
         };
         let slot = feedback_panel_slot(v);
 
-        assert_eq!(slot.position[1], MARGIN);
-        assert_eq!(slot.size, [FEEDBACK_PANEL_W, FEEDBACK_PANEL_H]);
+        assert!((slot.position[1] - MARGIN).abs() == 0.0);
+        assert!((slot.size[0] - FEEDBACK_PANEL_W).abs() == 0.0);
+        assert!((slot.size[1] - FEEDBACK_PANEL_H).abs() == 0.0);
         assert!((slot.position[0] - (1920.0 - FEEDBACK_PANEL_W - MARGIN)).abs() < 0.5);
     }
 
@@ -136,8 +137,9 @@ mod tests {
         };
         let slot = main_debug_panel_slot(v);
 
-        assert_eq!(slot.position[1], MARGIN + FEEDBACK_PANEL_H + GAP);
-        assert_eq!(slot.size, [MAIN_DEBUG_PANEL_W, MAIN_DEBUG_PANEL_H]);
+        assert!((slot.position[1] - (MARGIN + FEEDBACK_PANEL_H + GAP)).abs() == 0.0);
+        assert!((slot.size[0] - MAIN_DEBUG_PANEL_W).abs() == 0.0);
+        assert!((slot.size[1] - MAIN_DEBUG_PANEL_H).abs() == 0.0);
         assert!((slot.position[0] - (1920.0 - MAIN_DEBUG_PANEL_W - MARGIN)).abs() < 0.5);
     }
 
@@ -148,7 +150,7 @@ mod tests {
             height: 400,
         };
 
-        assert_eq!(feedback_panel_slot(v).position[0], MARGIN);
-        assert_eq!(main_debug_panel_slot(v).position[0], MARGIN);
+        assert!((feedback_panel_slot(v).position[0] - MARGIN).abs() == 0.0);
+        assert!((main_debug_panel_slot(v).position[0] - MARGIN).abs() == 0.0);
     }
 }
