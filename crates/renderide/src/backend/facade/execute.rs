@@ -75,6 +75,9 @@ impl RenderBackend {
         let Some(mut graph) = self.graph_state.frame_graph_cache.take_graph() else {
             return Err(GraphExecuteError::NoFrameGraph);
         };
+        // Material binds during graph recording sample dynamic uniform offsets. Retire those
+        // offsets only after this frame's submit completes.
+        self.materials.begin_uniform_arena_frame();
         let res = {
             let mut backend_access = self.graph_access();
             graph.execute_multi_view(

@@ -16,7 +16,7 @@ use super::super::texture_resolve::{
     resolved_texture_binding_for_host, sampled_texture_source, texture_bind_signature,
     texture_property_ids_for_binding,
 };
-use super::cache::EmbeddedSamplerCacheKey;
+use super::cache::{EmbeddedSamplerCacheKey, SamplerLifetime};
 use super::uniform::MaterialUniformCacheKey;
 use crate::embedded_shaders::EmbeddedTextureDefaultKind;
 use crate::frame_contract::OffscreenWriteTarget;
@@ -83,6 +83,8 @@ impl EmbeddedMaterialBindResources {
             renderer_property_block_id: lookup.mesh_renderer_property_block_id,
             texture_2d_asset_id,
             shader_variant_bits,
+            shader_source_generation,
+            texture_residency_generation: texture_bind_signature,
         };
         Ok(EmbeddedBindInputResolution {
             layout,
@@ -176,7 +178,13 @@ impl EmbeddedMaterialBindResources {
                         })
                         .transpose()?
                         .unwrap_or(ResolvedTextureBinding::None);
-                    let sampler = self.resolve_sampler(pools, resolved, offscreen_write_target);
+                    let sampler = self.resolve_sampler(
+                        pools,
+                        resolved,
+                        offscreen_write_target,
+                        layout.stem_hash,
+                        layout.shader_source_generation,
+                    );
                     samplers.push(sampler);
                 }
                 _ => {
@@ -335,91 +343,196 @@ impl EmbeddedMaterialBindResources {
         pools: &EmbeddedTexturePools<'_>,
         binding: ResolvedTextureBinding,
         offscreen_write_target: OffscreenWriteTarget,
+        stem_hash: u64,
+        shader_source_generation: u64,
     ) -> Arc<wgpu::Sampler> {
-        let sampled: Option<Arc<wgpu::Sampler>> = match binding {
+        let sampled = match binding {
             ResolvedTextureBinding::None => None,
             ResolvedTextureBinding::Texture2D { asset_id } => {
-                if asset_id < 0 {
-                    None
-                } else {
-                    pools.texture.get(asset_id).map(|tex| {
-                        let key = EmbeddedSamplerCacheKey::texture2d(
-                            &tex.sampler,
-                            tex.mip_levels_resident,
-                        );
-                        self.cached_sampler(key, || {
-                            create_sampler(
-                                &self.device,
-                                &tex.sampler,
-                                TextureBindKind::Tex2D,
-                                tex.mip_levels_resident,
-                            )
-                        })
-                    })
-                }
+                self.texture2d_sampler(pools, asset_id, stem_hash, shader_source_generation)
             }
             ResolvedTextureBinding::Texture3D { asset_id } => {
-                if asset_id < 0 {
-                    None
-                } else {
-                    pools.texture3d.get(asset_id).map(|tex| {
-                        let key = EmbeddedSamplerCacheKey::texture3d(
-                            &tex.sampler,
-                            tex.mip_levels_resident,
-                        );
-                        self.cached_sampler(key, || {
-                            create_sampler(
-                                &self.device,
-                                &tex.sampler,
-                                TextureBindKind::Tex3D,
-                                tex.mip_levels_resident,
-                            )
-                        })
-                    })
-                }
+                self.texture3d_sampler(pools, asset_id, stem_hash, shader_source_generation)
             }
             ResolvedTextureBinding::Cubemap { asset_id } => {
-                if asset_id < 0 {
-                    None
-                } else {
-                    pools.cubemap.get(asset_id).map(|tex| {
-                        let key =
-                            EmbeddedSamplerCacheKey::cubemap(&tex.sampler, tex.mip_levels_resident);
-                        self.cached_sampler(key, || {
-                            create_sampler(
-                                &self.device,
-                                &tex.sampler,
-                                TextureBindKind::Cube,
-                                tex.mip_levels_resident,
-                            )
-                        })
-                    })
-                }
+                self.cubemap_sampler(pools, asset_id, stem_hash, shader_source_generation)
             }
-            ResolvedTextureBinding::RenderTexture { asset_id } => {
-                if asset_id < 0
-                    || offscreen_write_target.suppresses_render_texture_sampling(asset_id)
-                {
-                    None
-                } else {
-                    pools.render_texture.get(asset_id).map(|tex| {
-                        let key = EmbeddedSamplerCacheKey::texture2d(&tex.sampler, 1);
-                        self.cached_sampler(key, || {
-                            create_sampler(&self.device, &tex.sampler, TextureBindKind::Tex2D, 1)
-                        })
-                    })
-                }
-            }
+            ResolvedTextureBinding::RenderTexture { asset_id } => self.render_texture_sampler(
+                pools,
+                asset_id,
+                offscreen_write_target,
+                stem_hash,
+                shader_source_generation,
+            ),
             ResolvedTextureBinding::VideoTexture { asset_id } => {
-                pools.video_texture.get(asset_id).map(|tex| {
-                    let key = EmbeddedSamplerCacheKey::texture2d(&tex.sampler, 1);
-                    self.cached_sampler(key, || {
-                        create_sampler(&self.device, &tex.sampler, TextureBindKind::Tex2D, 1)
-                    })
-                })
+                self.video_sampler(pools, asset_id, stem_hash, shader_source_generation)
             }
         };
         sampled.unwrap_or_else(|| self.default_sampler.clone())
+    }
+
+    fn texture2d_sampler(
+        &self,
+        pools: &EmbeddedTexturePools<'_>,
+        asset_id: i32,
+        stem_hash: u64,
+        shader_source_generation: u64,
+    ) -> Option<Arc<wgpu::Sampler>> {
+        if asset_id < 0 {
+            return None;
+        }
+        pools.texture.get(asset_id).map(|tex| {
+            self.cached_lifetime_sampler(
+                EmbeddedSamplerCacheKey::texture2d_with_lifetime(
+                    &tex.sampler,
+                    tex.mip_levels_resident,
+                    sampler_lifetime(
+                        stem_hash,
+                        shader_source_generation,
+                        tex.view_generation,
+                        tex.content_generation,
+                    ),
+                ),
+                &tex.sampler,
+                TextureBindKind::Tex2D,
+                tex.mip_levels_resident,
+            )
+        })
+    }
+
+    fn texture3d_sampler(
+        &self,
+        pools: &EmbeddedTexturePools<'_>,
+        asset_id: i32,
+        stem_hash: u64,
+        shader_source_generation: u64,
+    ) -> Option<Arc<wgpu::Sampler>> {
+        if asset_id < 0 {
+            return None;
+        }
+        pools.texture3d.get(asset_id).map(|tex| {
+            self.cached_lifetime_sampler(
+                EmbeddedSamplerCacheKey::texture3d_with_lifetime(
+                    &tex.sampler,
+                    tex.mip_levels_resident,
+                    sampler_lifetime(
+                        stem_hash,
+                        shader_source_generation,
+                        tex.view_generation,
+                        tex.content_generation,
+                    ),
+                ),
+                &tex.sampler,
+                TextureBindKind::Tex3D,
+                tex.mip_levels_resident,
+            )
+        })
+    }
+
+    fn cubemap_sampler(
+        &self,
+        pools: &EmbeddedTexturePools<'_>,
+        asset_id: i32,
+        stem_hash: u64,
+        shader_source_generation: u64,
+    ) -> Option<Arc<wgpu::Sampler>> {
+        if asset_id < 0 {
+            return None;
+        }
+        pools.cubemap.get(asset_id).map(|tex| {
+            self.cached_lifetime_sampler(
+                EmbeddedSamplerCacheKey::cubemap_with_lifetime(
+                    &tex.sampler,
+                    tex.mip_levels_resident,
+                    sampler_lifetime(
+                        stem_hash,
+                        shader_source_generation,
+                        tex.allocation_generation,
+                        tex.content_generation,
+                    ),
+                ),
+                &tex.sampler,
+                TextureBindKind::Cube,
+                tex.mip_levels_resident,
+            )
+        })
+    }
+
+    fn render_texture_sampler(
+        &self,
+        pools: &EmbeddedTexturePools<'_>,
+        asset_id: i32,
+        offscreen_write_target: OffscreenWriteTarget,
+        stem_hash: u64,
+        shader_source_generation: u64,
+    ) -> Option<Arc<wgpu::Sampler>> {
+        if asset_id < 0 || offscreen_write_target.suppresses_render_texture_sampling(asset_id) {
+            return None;
+        }
+        pools.render_texture.get(asset_id).map(|tex| {
+            self.cached_lifetime_sampler(
+                EmbeddedSamplerCacheKey::texture2d_with_lifetime(
+                    &tex.sampler,
+                    1,
+                    sampler_lifetime(
+                        stem_hash,
+                        shader_source_generation,
+                        tex.color_view_generation,
+                        0,
+                    ),
+                ),
+                &tex.sampler,
+                TextureBindKind::Tex2D,
+                1,
+            )
+        })
+    }
+
+    fn video_sampler(
+        &self,
+        pools: &EmbeddedTexturePools<'_>,
+        asset_id: i32,
+        stem_hash: u64,
+        shader_source_generation: u64,
+    ) -> Option<Arc<wgpu::Sampler>> {
+        pools.video_texture.get(asset_id).map(|tex| {
+            self.cached_lifetime_sampler(
+                EmbeddedSamplerCacheKey::texture2d_with_lifetime(
+                    &tex.sampler,
+                    1,
+                    sampler_lifetime(stem_hash, shader_source_generation, tex.view_generation, 0),
+                ),
+                &tex.sampler,
+                TextureBindKind::Tex2D,
+                1,
+            )
+        })
+    }
+
+    fn cached_lifetime_sampler(
+        &self,
+        key: EmbeddedSamplerCacheKey,
+        state: &crate::gpu_pools::SamplerState,
+        kind: TextureBindKind,
+        mip_levels_resident: u32,
+    ) -> Arc<wgpu::Sampler> {
+        self.cached_sampler(key, || {
+            create_sampler(&self.device, state, kind, mip_levels_resident)
+        })
+    }
+}
+
+fn sampler_lifetime(
+    stem_hash: u64,
+    shader_source_generation: u64,
+    texture_generation: u64,
+    content_generation: u64,
+) -> SamplerLifetime {
+    SamplerLifetime {
+        stem_hash,
+        shader_source_generation,
+        texture_generation,
+        content_generation,
     }
 }
 

@@ -777,11 +777,13 @@ impl StatsSection for MaterialsSection {
                 ui,
                 "Material bind cache",
                 &format!(
-                    "{} entries / {} hits / {} misses / {} evictions",
+                    "{} entries / {} hits / {} misses / {} evictions / {} uniform evictions / {} sampler evictions",
                     r.embedded_material_bind_cache.entries,
                     r.embedded_material_bind_cache.hits,
                     r.embedded_material_bind_cache.misses,
-                    r.embedded_material_bind_cache.evictions
+                    r.embedded_material_bind_cache.evictions,
+                    r.embedded_material_bind_cache.uniform_evictions,
+                    r.embedded_material_bind_cache.sampler_evictions
                 ),
             );
             kv(

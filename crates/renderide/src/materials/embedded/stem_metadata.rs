@@ -306,8 +306,36 @@ fn embedded_stem_metadata(base_stem: &str, permutation: ShaderPermutation) -> Em
         uses_renderide_variant_bits: reflection.uses_renderide_variant_bits,
         depth_prepass_pass,
     };
+    guard.retain(|existing, _metadata| {
+        existing.base_stem != key.base_stem
+            || existing.permutation != key.permutation
+            || existing.custom_generation == key.custom_generation
+    });
     guard.insert(key, metadata.clone());
     metadata
+}
+
+/// Drops reflected metadata for every generation of `stem`.
+pub(in crate::materials) fn evict_stem_metadata(stem: &str) {
+    let mut guard = embedded_stem_metadata_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    guard.retain(|key, _metadata| !stem_metadata_key_matches_stem(key, stem));
+}
+
+/// Drops reflected metadata for one custom-shader generation of `stem`.
+pub(in crate::materials) fn evict_stem_generation(stem: &str, custom_generation: u64) {
+    let mut guard = embedded_stem_metadata_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    guard.retain(|key, _metadata| {
+        !stem_metadata_key_matches_stem(key, stem) || key.custom_generation != custom_generation
+    });
+}
+
+fn stem_metadata_key_matches_stem(key: &EmbeddedStemMetadataKey, stem: &str) -> bool {
+    key.base_stem == stem
+        || embedded_composed_stem_for_permutation(&key.base_stem, key.permutation) == stem
 }
 
 /// Derives the refresh policy for scene-color snapshots from reflection and shader-family stem.

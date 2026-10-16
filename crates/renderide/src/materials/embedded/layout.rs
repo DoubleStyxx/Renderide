@@ -29,6 +29,10 @@ pub(crate) struct StemMaterialLayout {
     /// Classified uniform fields. `None` when the stem has no material uniform block.
     pub(crate) uniform_pack_plan: Option<MaterialUniformPackPlan>,
     pub(crate) texture_default_by_binding: HashMap<u32, EmbeddedTextureDefaultKind>,
+    /// Hash of the composed stem. Bind and sampler caches evict by this value.
+    pub(crate) stem_hash: u64,
+    /// Custom-shader source generation this layout was reflected from. Packaged stems stay at zero.
+    pub(crate) shader_source_generation: u64,
 }
 
 /// Per-stem stable property ids from WGSL reflection (uniform members and `@group(1)` texture globals), built once when the stem layout loads.
@@ -217,6 +221,7 @@ pub(crate) fn build_stem_material_layout(
     device: &wgpu::Device,
     stem: &str,
     property_registry: &PropertyIdRegistry,
+    shader_source_generation: u64,
 ) -> Result<Arc<StemMaterialLayout>, String> {
     let wgsl = embedded_shaders::embedded_target_wgsl(stem)
         .ok_or_else(|| format!("shader package WGSL missing for stem {stem}"))?;
@@ -256,6 +261,8 @@ pub(crate) fn build_stem_material_layout(
         uniform_default_by_field,
         uniform_pack_plan,
         texture_default_by_binding,
+        stem_hash: stem_hash(stem),
+        shader_source_generation,
     }))
 }
 

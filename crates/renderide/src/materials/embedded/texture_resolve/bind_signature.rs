@@ -20,6 +20,25 @@ use super::lookup::{
     ResolvedTextureBinding, resolved_texture_binding_for_host, texture_property_ids_for_binding,
 };
 
+/// Hashes residency and the generations that identify the bound `wgpu::TextureView`.
+///
+/// `view_generation` is the allocation/view id (`view_generation` or cubemap
+/// `allocation_generation`). `content_generation` bumps on texel reupload into that
+/// allocation. A bind-group key that omits either can reuse a group whose view or
+/// sampler LOD clamp no longer matches the pool.
+pub(crate) fn hash_texture_residency_generation(
+    hasher: &mut impl Hasher,
+    resident: bool,
+    view_generation: u64,
+    content_generation: u64,
+    mip_levels_resident: u32,
+) {
+    resident.hash(hasher);
+    view_generation.hash(hasher);
+    content_generation.hash(hasher);
+    mip_levels_resident.hash(hasher);
+}
+
 /// Hashes the mode-affecting fields of a unified [`SamplerState`] for bind-cache invalidation.
 pub(crate) fn hash_sampler_state(state: &SamplerState, h: &mut impl Hasher) {
     (state.filter_mode as i32).hash(h);
@@ -95,10 +114,13 @@ pub(crate) fn hash_texture_entry_signature_contribution(
         ResolvedTextureBinding::None => false.hash(hasher),
         ResolvedTextureBinding::Texture2D { asset_id } => {
             if let Some(t) = pools.texture.get(asset_id) {
-                let resident = t.mip_levels_resident > 0;
-                resident.hash(hasher);
-                t.view_generation.hash(hasher);
-                t.mip_levels_resident.hash(hasher);
+                hash_texture_residency_generation(
+                    hasher,
+                    t.mip_levels_resident > 0,
+                    t.view_generation,
+                    t.content_generation,
+                    t.mip_levels_resident,
+                );
                 t.storage_v_inverted.hash(hasher);
                 hash_sampler_state(&t.sampler, hasher);
             } else {
@@ -107,10 +129,13 @@ pub(crate) fn hash_texture_entry_signature_contribution(
         }
         ResolvedTextureBinding::Texture3D { asset_id } => {
             if let Some(t) = pools.texture3d.get(asset_id) {
-                let resident = t.mip_levels_resident > 0;
-                resident.hash(hasher);
-                t.view_generation.hash(hasher);
-                t.mip_levels_resident.hash(hasher);
+                hash_texture_residency_generation(
+                    hasher,
+                    t.mip_levels_resident > 0,
+                    t.view_generation,
+                    t.content_generation,
+                    t.mip_levels_resident,
+                );
                 hash_sampler_state(&t.sampler, hasher);
             } else {
                 false.hash(hasher);
@@ -118,10 +143,13 @@ pub(crate) fn hash_texture_entry_signature_contribution(
         }
         ResolvedTextureBinding::Cubemap { asset_id } => {
             if let Some(t) = pools.cubemap.get(asset_id) {
-                let resident = t.mip_levels_resident > 0;
-                resident.hash(hasher);
-                t.allocation_generation.hash(hasher);
-                t.mip_levels_resident.hash(hasher);
+                hash_texture_residency_generation(
+                    hasher,
+                    t.mip_levels_resident > 0,
+                    t.allocation_generation,
+                    t.content_generation,
+                    t.mip_levels_resident,
+                );
                 t.storage_v_inverted.hash(hasher);
                 hash_sampler_state(&t.sampler, hasher);
             } else {
@@ -186,6 +214,27 @@ mod tests {
             sampler_signature_for(&repeat),
             sampler_signature_for(&clamp)
         );
+    }
+
+    fn residency_generation_hash(view_generation: u64, content_generation: u64, mips: u32) -> u64 {
+        let mut hasher = AHasher::default();
+        hash_texture_residency_generation(
+            &mut hasher,
+            true,
+            view_generation,
+            content_generation,
+            mips,
+        );
+        hasher.finish()
+    }
+
+    /// View reallocation, texel reupload, and mip residency each change the bind signature.
+    #[test]
+    fn residency_generation_hash_tracks_reupload_and_mip_residency() {
+        let base = residency_generation_hash(4, 1, 6);
+        assert_ne!(base, residency_generation_hash(5, 1, 6));
+        assert_ne!(base, residency_generation_hash(4, 2, 6));
+        assert_ne!(base, residency_generation_hash(4, 1, 5));
     }
 
     /// Changing V wrap changes the sampler portion of the material bind signature.

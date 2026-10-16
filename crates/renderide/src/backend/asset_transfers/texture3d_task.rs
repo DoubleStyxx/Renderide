@@ -133,6 +133,7 @@ impl Texture3dUploadTask {
             t.mip_levels_resident = t
                 .mip_levels_resident
                 .max(uploaded_mips.min(t.mip_levels_total));
+            t.mark_content_uploaded();
         }
         send_background_result(
             ipc,

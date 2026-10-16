@@ -184,6 +184,12 @@ fn collect_submit_callbacks(
         collect_hi_z_submit_callbacks(mv_ctx, per_view_occlusion_info)
     };
     callbacks.extend(upload_callback);
+    callbacks.extend(
+        mv_ctx
+            .backend
+            .materials()
+            .uniform_arena_submission_callback(),
+    );
     callbacks
 }
 
