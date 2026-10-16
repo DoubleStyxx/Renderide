@@ -219,8 +219,11 @@ impl<'a> MemoryPacker<'a> {
         let count = list.map_or(0, <[T]>::len) as i32;
         self.write(&count);
         if let Some(list) = list {
-            for item in list {
-                self.write(item);
+            // One bounds check + one memcpy for the whole list instead of a reservation per
+            // element; byte output is identical (POD rows written back-to-back, unaligned).
+            let bytes: &[u8] = bytemuck::cast_slice(list);
+            if let Some(dst) = self.reserve_bytes(bytes.len(), short_type_name::<T>()) {
+                dst.copy_from_slice(bytes);
             }
         }
     }
