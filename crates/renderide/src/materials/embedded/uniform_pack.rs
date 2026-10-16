@@ -76,20 +76,33 @@ fn array_element_stride(field: &ReflectedUniformField) -> usize {
     if stride >= 4 { stride } else { 16 }
 }
 
-/// Writes a host `float4[]` material property into a reflected uniform array field.
+/// `array<vec4<f32>, N>` is a uniform array, so each element occupies 16 bytes.
+fn vec4_array_stride(field: &ReflectedUniformField) -> usize {
+    let stride = field.array_stride as usize;
+    if stride >= 16 { stride } else { 16 }
+}
+
+fn write_f32x4_bytes(buf: &mut [u8], offset: usize, value: &[f32; 4]) {
+    for (component, v) in value.iter().enumerate() {
+        let component_off = offset + component * 4;
+        buf[component_off..component_off + 4].copy_from_slice(&v.to_le_bytes());
+    }
+}
+
+/// Writes a host `float4[]` into `array<vec4<f32>, N>`.
+///
+/// Extra host elements are dropped. Slots past the host array are zero.
 fn write_f32x4_array_at(buf: &mut [u8], field: &ReflectedUniformField, values: &[[f32; 4]]) {
     let off = field.offset as usize;
-    let stride = array_element_stride(field);
+    let stride = vec4_array_stride(field);
     let max_values = (field.size as usize) / stride;
-    for (i, value) in values.iter().take(max_values).enumerate() {
+    for i in 0..max_values {
         let elem_off = off + i * stride;
         if elem_off + 16 > buf.len() {
             return;
         }
-        for (component, v) in value.iter().enumerate() {
-            let component_off = elem_off + component * 4;
-            buf[component_off..component_off + 4].copy_from_slice(&v.to_le_bytes());
-        }
+        let value = values.get(i).copied().unwrap_or([0.0; 4]);
+        write_f32x4_bytes(buf, elem_off, &value);
     }
 }
 
@@ -109,17 +122,19 @@ fn write_f32_array_at(buf: &mut [u8], field: &ReflectedUniformField, values: &[f
 
 fn write_srgb_f32x4_array_at(buf: &mut [u8], field: &ReflectedUniformField, values: &[[f32; 4]]) {
     let off = field.offset as usize;
-    let stride = array_element_stride(field);
+    let stride = vec4_array_stride(field);
     let max_values = (field.size as usize) / stride;
-    for (i, value) in values.iter().take(max_values).enumerate() {
+    for i in 0..max_values {
         let elem_off = off + i * stride;
         if elem_off + 16 > buf.len() {
             return;
         }
-        for (component, v) in srgb_vec4_rgb_to_linear(*value).iter().enumerate() {
-            let component_off = elem_off + component * 4;
-            buf[component_off..component_off + 4].copy_from_slice(&v.to_le_bytes());
-        }
+        let value = values
+            .get(i)
+            .copied()
+            .map(srgb_vec4_rgb_to_linear)
+            .unwrap_or([0.0; 4]);
+        write_f32x4_bytes(buf, elem_off, &value);
     }
 }
 

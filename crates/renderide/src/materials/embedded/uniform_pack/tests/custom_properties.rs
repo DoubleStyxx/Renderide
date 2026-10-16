@@ -764,6 +764,49 @@ fn fs_main(_in: VertexOutput) -> @location(0) vec4<f32> {
 "#;
 
 #[test]
+fn float4_array_truncates_and_zero_pads_to_n_on_16_byte_stride() {
+    let _guard = RemoveKey::prepare("prop-f4-array");
+    let installed = install_key("prop-f4-array", LAYOUT_WGSL);
+    let loaded = load_material(&installed);
+    let tints = field(&loaded, "_Tints");
+    assert_eq!(tints.kind, ReflectedUniformScalarKind::Vec4Array);
+    assert_eq!(tints.array_stride, 16);
+    assert_eq!(tints.size, 64);
+
+    let mut store = MaterialPropertyStore::new();
+    let material_id = 44;
+    store.set_material(
+        material_id,
+        property_id(&loaded, "_Tints"),
+        MaterialPropertyValue::Float4Array(vec![
+            [1.0, 2.0, 3.0, 4.0],
+            [5.0, 6.0, 7.0, 8.0],
+            [9.0, 10.0, 11.0, 12.0],
+            [13.0, 14.0, 15.0, 16.0],
+            [99.0, 99.0, 99.0, 99.0],
+        ]),
+    );
+    let truncated = pack(&loaded, &store, material_id);
+    let base = tints.offset as usize;
+    assert_eq!(read_f32x4(&truncated, base), [1.0, 2.0, 3.0, 4.0]);
+    assert_eq!(read_f32x4(&truncated, base + 16), [5.0, 6.0, 7.0, 8.0]);
+    assert_eq!(read_f32x4(&truncated, base + 32), [9.0, 10.0, 11.0, 12.0]);
+    assert_eq!(read_f32x4(&truncated, base + 48), [13.0, 14.0, 15.0, 16.0]);
+    assert_eq!(truncated.len(), base + 64);
+
+    store.set_material(
+        material_id,
+        property_id(&loaded, "_Tints"),
+        MaterialPropertyValue::Float4Array(vec![[1.0, 0.0, 0.0, 1.0]]),
+    );
+    let padded = pack(&loaded, &store, material_id);
+    assert_eq!(read_f32x4(&padded, base), [1.0, 0.0, 0.0, 1.0]);
+    assert_eq!(read_f32x4(&padded, base + 16), [0.0, 0.0, 0.0, 0.0]);
+    assert_eq!(read_f32x4(&padded, base + 32), [0.0, 0.0, 0.0, 0.0]);
+    assert_eq!(read_f32x4(&padded, base + 48), [0.0, 0.0, 0.0, 0.0]);
+}
+
+#[test]
 fn packs_f32_array_elements_on_16_byte_stride() {
     let mut fields = HashMap::new();
     fields.insert(

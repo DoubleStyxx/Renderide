@@ -65,7 +65,7 @@ The source uses the same directives as `crates/renderide/shaders/materials`:
 - Put each texture at `@group(1)`. `texture_2d`, `texture_cube`, and `texture_2d_array` map to the host texture property of the same name. `texture_2d` reads 2D, render, and video assets. `texture_cube` reads a cubemap. `texture_2d_array` reads that cubemap's face array.
 - Pair a sampler with its texture by name (`_MainTex` and `_MainTex_sampler`). A sampler whose name does not match a texture uses the texture on the previous binding, then the default sampler.
 - A declared `*_ST` `vec4<f32>` is that texture's tiling and offset. Unset, it is `(1, 1, 0, 0)`.
-- Supported uniform members are `f32`, `vec2<f32>`, `vec3<f32>`, `vec4<f32>`, `u32`, and `array<vec4<f32>, N>`. `array<f32, N>` is not a uniform type: its stride is 4, and uniform arrays require a stride of 16. `//#mat_default` is `float` for `f32` and `vec4` for `vec4<f32>`.
+- Supported uniform members are `f32`, `vec2<f32>`, `vec3<f32>`, `vec4<f32>`, `u32`, and `array<vec4<f32>, N>`. A host `float4` array writes into that member at a 16-byte stride, dropping elements past `N` and zeroing slots the host did not set. `array<f32, N>` is not a uniform type: its stride is 4, and uniform arrays require a stride of 16. `//#mat_default` is `float` for `f32` and `vec4` for `vec4<f32>`.
 - Put `//#pass type=forward` immediately above the `@fragment` entry. The vertex entry defaults to `vs_main`.
 - Wrap `@builtin(view_index)` in `#ifdef MULTIVIEW`. The renderer composes a desktop target and a stereo target.
 
