@@ -1,8 +1,7 @@
 # Tag release pipeline.
 #
-# Pushing a v* tag builds the same platform bundles as nightly.yml, builds
-# RenderideMod.dll when the proprietary Resonite references are present,
-# writes SHA256SUMS, attests provenance, and opens a draft GitHub release.
+# Pushing a v* tag builds the same platform bundles as nightly.yml, writes
+# SHA256SUMS, attests provenance, and opens a draft GitHub release.
 # A person publishes the draft. This workflow does not.
 name: Release
 
@@ -265,97 +264,9 @@ jobs:
           path: dist/renderide-${{ matrix.platform }}-${{ github.ref_name }}.zip
           if-no-files-found: error
 
-  mod:
-    name: RenderideMod.dll
-    needs: version
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
-      DOTNET_NOLOGO: "1"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      # RenderideMod.csproj references proprietary Resonite assemblies that are
-      # not in this repository:
-      #   $(ResonitePath)FrooxEngine.dll
-      #   $(ResonitePath)Renderite.Shared.dll
-      # Hosted runners do not have a Resonite install. The build step below
-      # runs only when both files are found. This job does not synthesize
-      # stub assemblies.
-      - name: Locate Resonite reference assemblies
-        id: refs
-        shell: bash
-        env:
-          RESONITE_REF_DIR: ${{ vars.RESONITE_REF_DIR }}
-        run: |
-          set -euo pipefail
-          search=()
-          if [ -n "${RESONITE_REF_DIR:-}" ]; then
-            search+=("${RESONITE_REF_DIR}")
-          fi
-          search+=("RenderideMod/Resonite")
-          search+=("${HOME}/.steam/steam/steamapps/common/Resonite")
-          found=""
-          for dir in "${search[@]}"; do
-            if [ -f "${dir}/FrooxEngine.dll" ] && [ -f "${dir}/Renderite.Shared.dll" ]; then
-              found="${dir}"
-              break
-            fi
-          done
-          if [ -n "${found}" ]; then
-            echo "available=true" >> "${GITHUB_OUTPUT}"
-            echo "path=${found}" >> "${GITHUB_OUTPUT}"
-            echo "Using Resonite references in ${found}"
-          else
-            echo "available=false" >> "${GITHUB_OUTPUT}"
-            {
-              echo "FrooxEngine.dll and Renderite.Shared.dll were not found."
-              echo "RenderideMod.csproj references those proprietary Resonite assemblies via HintPath."
-              echo "They are not in this repository. This job does not build a stand-in DLL."
-              echo "Checked RESONITE_REF_DIR, RenderideMod/Resonite, and the default Steam path from the csproj."
-            } | tee -a "${GITHUB_STEP_SUMMARY}"
-          fi
-
-      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
-        if: steps.refs.outputs.available == 'true'
-        with:
-          dotnet-version: "10.0"
-
-      - name: Build RenderideMod
-        if: steps.refs.outputs.available == 'true'
-        shell: bash
-        env:
-          RESONITE_REF_PATH: ${{ steps.refs.outputs.path }}
-        run: |
-          set -euo pipefail
-          ref="${RESONITE_REF_PATH}"
-          case "${ref}" in
-            */) ;;
-            *) ref="${ref}/" ;;
-          esac
-          dotnet build RenderideMod/RenderideMod.csproj -c Release -p:ResonitePath="${ref}" -p:CopyToMods=false
-
-      - name: Refuse build without proprietary references
-        if: steps.refs.outputs.available != 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "RenderideMod.dll was not built." >&2
-          echo "FrooxEngine.dll and Renderite.Shared.dll are proprietary Resonite assemblies and are not in this repository." >&2
-          echo "Provide both files via RESONITE_REF_DIR or RenderideMod/Resonite/. Refusing to upload a stand-in." >&2
-          exit 1
-
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: steps.refs.outputs.available == 'true'
-        with:
-          name: RenderideMod
-          path: RenderideMod/bin/Release/net10.0/RenderideMod.dll
-          if-no-files-found: error
-
   publish:
     name: Publish draft release
-    needs: [version, build, mod]
+    needs: [version, build]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
