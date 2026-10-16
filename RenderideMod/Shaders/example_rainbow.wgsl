@@ -1,9 +1,11 @@
-//! Rainbow custom material. `CustomShaders.Install` sends this text to the renderer.
+//! Rainbow custom material. `CustomShaders.ExampleRainbowWgsl` is this file.
 //!
-//! Host `_Color` tints the result, `_MainTex` is sampled and multiplied, and `_Speed`
-//! scales the hue cycle. Time comes from `rg::frame.frame_time.x`. Hue comes from world x.
-//! Those names are the material properties FrooxEngine already uploads.
+//! `_Color` tints the sample. `_MainTex` is sampled with `_MainTex_ST` tiling and offset.
+//! `_Speed` (default 0.2) scales the hue cycle. Time is `rg::frame.frame_time.x`.
+//! Hue is world x plus that scaled time.
+//! `//#keyword RAINBOW` off writes `_MainTex * _Color`. On multiplies that by the hue cycle.
 
+//#keyword RAINBOW
 //#render_queue Geometry
 //#mat_default _Color vec4 1.0 1.0 1.0 1.0
 //#mat_default _Speed float 0.2
@@ -14,6 +16,7 @@
 
 struct Material {
     _Color: vec4<f32>,
+    _MainTex_ST: vec4<f32>,
     _Speed: f32,
 }
 
@@ -62,8 +65,14 @@ fn rainbow(hue: f32) -> vec3<f32> {
 //#pass type=forward
 @fragment
 fn fs_main(vtx: VertexOutput) -> @location(0) vec4<f32> {
+    let uv = vtx.uv * mat._MainTex_ST.xy + mat._MainTex_ST.zw;
+    let tex = textureSample(_MainTex, _MainTex_sampler, uv);
+    let tinted = tex * mat._Color;
+#ifdef RAINBOW
     let hue = vtx.world_x + rg::frame.frame_time.x * mat._Speed;
-    let tex = textureSample(_MainTex, _MainTex_sampler, vtx.uv);
-    let color = vec4<f32>(rainbow(hue), 1.0) * mat._Color * tex;
+    let color = vec4<f32>(rainbow(hue), tinted.a) * tinted;
+#else
+    let color = tinted;
+#endif
     return rg::retain_globals_additive(color);
 }

@@ -16,7 +16,7 @@ CustomShaders.Install("Unlit", CustomShaders.ExampleSolidWgsl);
 
 `ExampleSolidWgsl` is `Shaders/example_solid.wgsl`, embedded in RenderideMod.dll. Your own file works the same way: `CustomShaders.Install("Unlit", File.ReadAllText(path))`.
 
-`ExampleRainbowWgsl` is `Shaders/example_rainbow.wgsl`. It tints with `_Color`, samples `_MainTex`, and cycles hue with `_Speed` (default 0.2).
+`ExampleRainbowWgsl` is `Shaders/example_rainbow.wgsl`. It tints with `_Color`, samples `_MainTex` with `_MainTex_ST`, and cycles hue from `rg::frame.frame_time.x` scaled by `_Speed` (default 0.2) when `//#keyword RAINBOW` is on. Off, the fragment is `_MainTex * _Color`.
 
 `Unlit` is the Unity shader filename without `.shader`. The renderer normalizes it the same way it normalizes AssetBundle names (`Unlit.shader` and `unlit` are the same key; spaces become dashes). Materials whose shader asset resolves to that name start drawing with the custom program, including shaders the host uploads after the install. `CustomShaders.Remove("Unlit")` restores the packaged Unlit stem.
 

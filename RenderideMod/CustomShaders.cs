@@ -36,9 +36,9 @@ public static class CustomShaders
     /// Text of <c>Shaders/example_rainbow.wgsl</c>, embedded in the mod assembly.
     /// </summary>
     /// <remarks>
-    /// Samples <c>_MainTex</c>, multiplies by <c>_Color</c>, and cycles hue with <c>_Speed</c>
-    /// (default 0.2). FrooxEngine already uploads those values on the material batch; this mod
-    /// does not open a second property channel.
+    /// Samples <c>_MainTex</c> with <c>_MainTex_ST</c>, multiplies by <c>_Color</c>, and cycles
+    /// hue with <c>_Speed</c> (default 0.2) when <c>//#keyword RAINBOW</c> is on. Off writes
+    /// <c>_MainTex * _Color</c>. FrooxEngine already uploads those values on the material batch.
     /// </remarks>
     public static string ExampleRainbowWgsl => ReadEmbeddedShader("example_rainbow.wgsl");
 

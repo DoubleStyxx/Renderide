@@ -710,6 +710,43 @@ mod tests {
     }
 
     #[test]
+    fn example_rainbow_keyword_gates_the_hue_cycle() {
+        let wgsl = include_str!("../../../../RenderideMod/Shaders/example_rainbow.wgsl");
+        let installed = install("example-rainbow-src", wgsl).expect("install rainbow");
+        let names = keyword_names(&installed.default_stem).expect("keyword");
+        assert_eq!(names.as_ref(), ["RAINBOW".to_string()]);
+        let defaults = material_uniform_defaults(&installed.default_stem).expect("defaults");
+        let speed = defaults
+            .iter()
+            .find(|default| default.property.as_ref() == "_Speed")
+            .expect("_Speed");
+        assert_eq!(speed.value.values[0], 0.2);
+        let reflected = reflect_raster_material_wgsl(
+            target_wgsl(&installed.default_stem)
+                .expect("mask 0")
+                .as_ref(),
+        )
+        .expect("reflect");
+        let fields = &reflected.material_uniform.expect("uniform").fields;
+        assert!(fields.contains_key("_MainTex_ST"));
+        assert!(fields.contains_key("_Color"));
+        assert!(fields.contains_key("_Speed"));
+        let plain = target_wgsl(&installed.default_stem).expect("mask 0");
+        assert!(
+            !plain.contains("frame_time.x"),
+            "RAINBOW off should not sample the hue cycle"
+        );
+        let rainbow = variant_wgsl(&installed.default_stem, 1)
+            .expect("compose")
+            .expect("mask 1");
+        assert!(
+            rainbow.contains("frame_time.x"),
+            "RAINBOW on should sample the hue cycle"
+        );
+        remove("example-rainbow-src").expect("remove");
+    }
+
+    #[test]
     fn example_solid_compiles_with_wgpu_when_an_adapter_exists() {
         let installed = install("wgpu-example-solid", EXAMPLE_SOLID).expect("install");
         let wgsl = target_wgsl(&installed.default_stem).expect("wgsl");
