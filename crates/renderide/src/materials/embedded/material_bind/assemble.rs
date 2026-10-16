@@ -73,9 +73,3 @@ pub(super) fn build_embedded_bind_group_entries<'a>(
     }
     Ok(entries)
 }
-
-/// Pairs a sampler binding to its preceding texture binding (sampler at `N+1` follows texture at `N`).
-#[inline]
-pub(super) fn sampler_pairs_texture_binding(sampler_binding: u32) -> u32 {
-    sampler_binding.saturating_sub(1)
-}

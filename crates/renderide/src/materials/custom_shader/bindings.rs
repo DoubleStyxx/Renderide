@@ -28,8 +28,6 @@ pub(super) fn validate_custom_material_bindings(
         .material_uniform
         .as_ref()
         .map(|uniform| uniform.binding);
-    let mut texture_bindings = Vec::new();
-    let mut sampler_bindings = Vec::new();
     for entry in &reflected.material_entries {
         match entry.ty {
             wgpu::BindingType::Buffer {
@@ -43,31 +41,28 @@ pub(super) fn validate_custom_material_bindings(
                     )));
                 }
             }
-            wgpu::BindingType::Texture { .. } => texture_bindings.push(entry.binding),
-            wgpu::BindingType::Sampler(_) => sampler_bindings.push(entry.binding),
+            wgpu::BindingType::Texture { view_dimension, .. } => {
+                if !matches!(
+                    view_dimension,
+                    wgpu::TextureViewDimension::D2
+                        | wgpu::TextureViewDimension::D2Array
+                        | wgpu::TextureViewDimension::D3
+                        | wgpu::TextureViewDimension::Cube
+                ) {
+                    let name = binding_name(reflected, entry.binding);
+                    return Err(binding_rejected(format!(
+                        "texture `{name}` @binding({}) has an unsupported dimension",
+                        entry.binding
+                    )));
+                }
+            }
+            wgpu::BindingType::Sampler(_) => {}
             _ => {
                 return Err(binding_rejected(format!(
                     "unsupported @group(1) @binding({})",
                     entry.binding
                 )));
             }
-        }
-    }
-    for binding in &texture_bindings {
-        let sampler = binding.saturating_add(1);
-        if !sampler_bindings.contains(&sampler) {
-            let name = binding_name(reflected, *binding);
-            return Err(binding_rejected(format!(
-                "texture `{name}` @binding({binding}) has no sampler at @binding({sampler})"
-            )));
-        }
-    }
-    for binding in &sampler_bindings {
-        if *binding == 0 || !texture_bindings.contains(&binding.saturating_sub(1)) {
-            let name = binding_name(reflected, *binding);
-            return Err(binding_rejected(format!(
-                "sampler `{name}` @binding({binding}) is not paired with a texture"
-            )));
         }
     }
     if let Some(uniform) = reflected.material_uniform.as_ref() {

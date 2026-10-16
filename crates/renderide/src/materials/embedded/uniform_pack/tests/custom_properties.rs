@@ -11,7 +11,8 @@ use crate::materials::embedded::layout::StemEmbeddedPropertyIds;
 use crate::materials::embedded::texture_pools::EmbeddedTexturePools;
 use crate::materials::embedded::texture_resolve::{
     DefaultTextureColor, ResolvedTextureBinding, default_2d_texture_color_for_host,
-    resolved_texture_binding_for_host, texture_property_ids_for_binding,
+    paired_texture_binding_for_sampler, resolved_texture_binding_for_host,
+    texture_property_ids_for_binding,
 };
 use crate::materials::host_data::{
     MaterialPropertyLookupIds, MaterialPropertyStore, MaterialPropertyValue, PropertyIdRegistry,
@@ -533,8 +534,146 @@ fn property_update_changes_uniform_bytes_without_shader_generation_change() {
     );
 }
 
+const TEXTURE_KINDS_WGSL: &str = r#"
+#import renderide::frame::globals as rg
+#import renderide::draw::per_draw as pd
+#import renderide::mesh::vertex as mv
+
+struct Material {
+    _MainTex_ST: vec4<f32>,
+}
+
+@group(1) @binding(0) var<uniform> mat: Material;
+@group(1) @binding(1) var _MainTex: texture_2d<f32>;
+@group(1) @binding(3) var _Cube: texture_cube<f32>;
+@group(1) @binding(4) var _Faces: texture_2d_array<f32>;
+@group(1) @binding(6) var _MainTex_sampler: sampler;
+@group(1) @binding(7) var _Cube_sampler: sampler;
+@group(1) @binding(8) var _Loose: sampler;
+
+struct VertexOutput {
+    @builtin(position) clip_pos: vec4<f32>,
+}
+
+@vertex
+fn vs_main(
+    @builtin(instance_index) instance_index: u32,
+#ifdef MULTIVIEW
+    @builtin(view_index) view_idx: u32,
+#endif
+    @location(0) pos: vec4<f32>,
+    @location(1) _n: vec4<f32>,
+) -> VertexOutput {
+    let d = pd::get_draw(instance_index);
+    let world_p = mv::world_position(d, pos);
+#ifdef MULTIVIEW
+    let vp = mv::select_view_proj(d, view_idx);
+#else
+    let vp = mv::select_view_proj(d, 0u);
+#endif
+    var out: VertexOutput;
+    out.clip_pos = vp * world_p;
+    return out;
+}
+
+//#pass type=forward
+@fragment
+fn fs_main(_in: VertexOutput) -> @location(0) vec4<f32> {
+    let uv = mat._MainTex_ST.xy + mat._MainTex_ST.zw;
+    let tex = textureSample(_MainTex, _MainTex_sampler, uv);
+    let cube = textureSample(_Cube, _Cube_sampler, vec3<f32>(uv, 1.0));
+    let face = textureSample(_Faces, _Loose, uv, 0i);
+    return rg::retain_globals_additive(tex + cube + face);
+}
+"#;
+
+fn binding_named(loaded: &LoadedMaterial, name: &str) -> u32 {
+    loaded
+        .reflected
+        .material_group1_names
+        .iter()
+        .find(|(_, binding_name)| unescape_property_name(binding_name) == name)
+        .map(|(&binding, _)| binding)
+        .unwrap_or_else(|| panic!("missing binding {name}"))
+}
+
+fn texture_view_dimension(loaded: &LoadedMaterial, name: &str) -> wgpu::TextureViewDimension {
+    let binding = binding_named(loaded, name);
+    let entry = loaded
+        .reflected
+        .material_entries
+        .iter()
+        .find(|entry| entry.binding == binding)
+        .unwrap_or_else(|| panic!("missing entry {name}"));
+    match entry.ty {
+        wgpu::BindingType::Texture { view_dimension, .. } => view_dimension,
+        _ => panic!("{name} is not a texture"),
+    }
+}
+
 #[test]
-fn rejects_unsupported_types_mismatched_defaults_and_unpaired_textures() {
+fn texture_kinds_pair_samplers_by_name_and_pack_declared_st() {
+    let _guard = RemoveKey::prepare("prop-tex-kinds");
+    let installed = install_key("prop-tex-kinds", TEXTURE_KINDS_WGSL);
+    let loaded = load_material(&installed);
+
+    assert_eq!(
+        texture_view_dimension(&loaded, "_MainTex"),
+        wgpu::TextureViewDimension::D2
+    );
+    assert_eq!(
+        texture_view_dimension(&loaded, "_Cube"),
+        wgpu::TextureViewDimension::Cube
+    );
+    assert_eq!(
+        texture_view_dimension(&loaded, "_Faces"),
+        wgpu::TextureViewDimension::D2Array
+    );
+
+    let main = binding_named(&loaded, "_MainTex");
+    let cube = binding_named(&loaded, "_Cube");
+    let main_sampler = binding_named(&loaded, "_MainTex_sampler");
+    let loose = binding_named(&loaded, "_Loose");
+    assert_ne!(main_sampler, main + 1);
+    assert_eq!(
+        paired_texture_binding_for_sampler(&loaded.reflected, main_sampler),
+        Some(main)
+    );
+    assert_eq!(
+        paired_texture_binding_for_sampler(
+            &loaded.reflected,
+            binding_named(&loaded, "_Cube_sampler")
+        ),
+        Some(cube)
+    );
+    assert_eq!(
+        paired_texture_binding_for_sampler(&loaded.reflected, loose),
+        None
+    );
+
+    let unset = pack(&loaded, &MaterialPropertyStore::new(), 21);
+    assert_eq!(
+        read_f32x4(&unset, field(&loaded, "_MainTex_ST").offset as usize),
+        [1.0, 1.0, 0.0, 0.0]
+    );
+    let mut store = MaterialPropertyStore::new();
+    store.set_material(
+        21,
+        property_id(&loaded, "_MainTex_ST"),
+        MaterialPropertyValue::Float4([2.0, 3.0, 0.25, 0.5]),
+    );
+    let set = pack(&loaded, &store, 21);
+    assert_eq!(
+        read_f32x4(&set, field(&loaded, "_MainTex_ST").offset as usize),
+        [2.0, 3.0, 0.25, 0.5]
+    );
+
+    let _unpaired = RemoveKey::prepare("prop-unpaired");
+    install_key("prop-unpaired", UNPAIRED_TEXTURE_WGSL);
+}
+
+#[test]
+fn rejects_unsupported_types_and_mismatched_defaults() {
     let _keep = RemoveKey::prepare("prop-keep");
     let kept = install_key("prop-keep", RAINBOW_WGSL);
     let generation = custom_shader::source_generation(&kept.default_stem);
@@ -557,13 +696,6 @@ fn rejects_unsupported_types_mismatched_defaults_and_unpaired_textures() {
         "float default on vec4 should be rejected: {mismatched}"
     );
     assert!(custom_shader::default_stem_for_asset_name("prop-mismatch").is_none());
-
-    let unpaired =
-        custom_shader::install("prop-unpaired", UNPAIRED_TEXTURE_WGSL).expect_err("sampler");
-    assert!(
-        unpaired.contains("sampler"),
-        "texture without sampler should be rejected: {unpaired}"
-    );
 
     let resolved = custom_shader::resolve_custom_shader_payload(
         Ok(renderide_shared::custom_shader_ipc::CustomShaderPayload {

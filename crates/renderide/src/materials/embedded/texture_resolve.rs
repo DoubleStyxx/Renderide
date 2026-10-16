@@ -8,9 +8,10 @@ pub(crate) use bind_signature::{
     hash_texture_entry_signature_contribution, texture_bind_signature,
 };
 pub(crate) use lookup::{
-    DefaultTextureColor, ResolvedTextureBinding, default_2d_texture_color_for_host,
+    DefaultTextureColor, ResolvedTextureBinding, SampledTextureSource,
+    default_2d_texture_color_for_host, paired_texture_binding_for_sampler,
     primary_texture_2d_asset_id, resolved_texture_binding_for_host,
-    resolved_texture_binding_from_property, should_fallback_to_primary_texture,
-    texture_property_ids_for_binding,
+    resolved_texture_binding_from_property, sampled_texture_source,
+    should_fallback_to_primary_texture, texture_property_ids_for_binding,
 };
 pub(crate) use sampler::{create_sampler, default_embedded_sampler};

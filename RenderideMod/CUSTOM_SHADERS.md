@@ -62,7 +62,9 @@ The source uses the same directives as `crates/renderide/shaders/materials`:
 - `#import renderide::frame::globals`, `renderide::draw::per_draw`, and `renderide::mesh::vertex`.
 - Call `rg::retain_globals_additive` from the fragment shader so the fixed frame bind group stays intact.
 - Declare `@group(1) @binding(0)` for material uniforms. Property names such as `_Color`, `_MainTex`, and `_Speed` match the host material. Add `//#mat_default _Color vec4 1 1 1 1` for the fallback value.
-- Put each `texture_2d` at `@group(1)` and its sampler on the next binding (`_MainTex` then `_MainTex_sampler`).
+- Put each texture at `@group(1)`. `texture_2d`, `texture_cube`, and `texture_2d_array` map to the host texture property of the same name. `texture_2d` reads 2D, render, and video assets. `texture_cube` reads a cubemap. `texture_2d_array` reads that cubemap's face array.
+- Pair a sampler with its texture by name (`_MainTex` and `_MainTex_sampler`). A sampler whose name does not match a texture uses the texture on the previous binding, then the default sampler.
+- A declared `*_ST` `vec4<f32>` is that texture's tiling and offset. Unset, it is `(1, 1, 0, 0)`.
 - Supported uniform members are `f32`, `vec2<f32>`, `vec3<f32>`, `vec4<f32>`, `u32`, and `array<vec4<f32>, N>`. `array<f32, N>` is not a uniform type: its stride is 4, and uniform arrays require a stride of 16. `//#mat_default` is `float` for `f32` and `vec4` for `vec4<f32>`.
 - Put `//#pass type=forward` immediately above the `@fragment` entry. The vertex entry defaults to `vs_main`.
 - Wrap `@builtin(view_index)` in `#ifdef MULTIVIEW`. The renderer composes a desktop target and a stereo target.
@@ -73,7 +75,7 @@ FrooxEngine already uploads the material property block on `MaterialsUpdateBatch
 
 The renderer reflects `@group(1)` with naga, maps each uniform member and texture name to those property names, and packs a per-material uniform buffer in WGSL uniform (std140) layout. A later property write updates that buffer, or the texture bind group, without rebuilding the pipeline. The bind-group cache and the stem layout stay keyed by `shader_source_generation`, so a new shader source still misses the old layout.
 
-An unset float or vector uses its `//#mat_default`, then zero. An unset texture binds white. A reflected type the host cannot supply (`i32`, `mat4x4`, a default whose kind does not match the field, a texture without its sampler) fails the install. Asset ids `>= 0` get `ShaderUploadResult`. Carrier ids below zero still get no ack. A rejected replace leaves the previous program in place.
+An unset float or vector uses its `//#mat_default`, then zero. An unset texture binds white (`texture_2d_array` uses a one-layer white array). A reflected type the host cannot supply (`i32`, `mat4x4`, a default whose kind does not match the field) fails the install. Asset ids `>= 0` get `ShaderUploadResult`. Carrier ids below zero still get no ack. A rejected replace leaves the previous program in place.
 
 A failed compile is logged (`custom shader install failed`) and the shader asset keeps its packaged route. The next successful `Install` for that key replaces it.
 

@@ -10,9 +10,11 @@ use super::super::embedded_material_bind_error::EmbeddedMaterialBindError;
 use super::super::layout::{StemMaterialLayout, stem_hash};
 use super::super::texture_pools::EmbeddedTexturePools;
 use super::super::texture_resolve::{
-    DefaultTextureColor, ResolvedTextureBinding, create_sampler, default_2d_texture_color_for_host,
-    hash_texture_entry_signature_contribution, primary_texture_2d_asset_id,
-    resolved_texture_binding_for_host, texture_bind_signature, texture_property_ids_for_binding,
+    DefaultTextureColor, ResolvedTextureBinding, SampledTextureSource, create_sampler,
+    default_2d_texture_color_for_host, hash_texture_entry_signature_contribution,
+    paired_texture_binding_for_sampler, primary_texture_2d_asset_id,
+    resolved_texture_binding_for_host, sampled_texture_source, texture_bind_signature,
+    texture_property_ids_for_binding,
 };
 use super::cache::EmbeddedSamplerCacheKey;
 use super::uniform::MaterialUniformCacheKey;
@@ -162,29 +164,18 @@ impl EmbeddedMaterialBindResources {
                     views.push(tex_view);
                 }
                 wgpu::BindingType::Sampler(_) => {
-                    let tex_binding = super::assemble::sampler_pairs_texture_binding(b);
-                    let host_name = layout
-                        .reflected
-                        .material_group1_names
-                        .get(&tex_binding)
-                        .map(String::as_str)
-                        .ok_or_else(|| {
-                            format!("reflection: no texture global for sampler @binding({b})")
-                        })?;
-                    let tex_pids =
-                        texture_property_ids_for_binding(layout.ids.as_ref(), tex_binding);
-                    if tex_pids.is_empty() {
-                        return Err(EmbeddedMaterialBindError::from(format!(
-                            "reflection: missing property id for texture @binding({tex_binding})"
-                        )));
-                    }
-                    let resolved = resolved_texture_binding_for_host(
-                        host_name,
-                        tex_pids,
-                        texture_2d_asset_id,
-                        store,
-                        lookup,
-                    );
+                    let resolved = paired_texture_binding_for_sampler(&layout.reflected, b)
+                        .map(|tex_binding| {
+                            resolved_sampler_texture(
+                                layout,
+                                tex_binding,
+                                texture_2d_asset_id,
+                                store,
+                                lookup,
+                            )
+                        })
+                        .transpose()?
+                        .unwrap_or(ResolvedTextureBinding::None);
                     let sampler = self.resolve_sampler(pools, resolved, offscreen_write_target);
                     samplers.push(sampler);
                 }
@@ -239,6 +230,9 @@ impl EmbeddedMaterialBindResources {
         kind: EmbeddedTextureDefaultKind,
         view_dimension: wgpu::TextureViewDimension,
     ) -> Arc<wgpu::TextureView> {
+        if view_dimension == wgpu::TextureViewDimension::D2Array {
+            return self.white_2d_array.clone();
+        }
         match texture_default_placeholder(kind, view_dimension) {
             TextureDefaultPlaceholder::White => match view_dimension {
                 wgpu::TextureViewDimension::D3 => self.white_3d.view.clone(),
@@ -278,6 +272,8 @@ impl EmbeddedMaterialBindResources {
             wgpu::TextureViewDimension::D3 => self.white_3d.view.clone(),
             // wgpu rejects a 2D placeholder texture for texture_cube bindings.
             wgpu::TextureViewDimension::Cube => self.white_cube.view.clone(),
+            // wgpu rejects a 2D placeholder texture for texture_2d_array bindings.
+            wgpu::TextureViewDimension::D2Array => self.white_2d_array.clone(),
             _ => match default_2d_texture_color_for_host(host_name) {
                 DefaultTextureColor::White => self.white_2d.view.clone(),
                 DefaultTextureColor::Black => self.black_2d.view.clone(),
@@ -292,45 +288,33 @@ impl EmbeddedMaterialBindResources {
         binding: ResolvedTextureBinding,
         offscreen_write_target: OffscreenWriteTarget,
     ) -> Option<Arc<wgpu::TextureView>> {
-        match (view_dimension, binding) {
-            (_, ResolvedTextureBinding::None) => None,
-            (wgpu::TextureViewDimension::D2, ResolvedTextureBinding::Texture2D { asset_id }) => {
-                if asset_id < 0 {
-                    return None;
-                }
-                pools
-                    .texture
-                    .get(asset_id)
-                    .filter(|t| t.mip_levels_resident > 0)
-                    .map(|t| t.view.clone())
-            }
-            (wgpu::TextureViewDimension::D3, ResolvedTextureBinding::Texture3D { asset_id }) => {
-                if asset_id < 0 {
-                    return None;
-                }
-                pools
-                    .texture3d
-                    .get(asset_id)
-                    .filter(|t| t.mip_levels_resident > 0)
-                    .map(|t| t.view.clone())
-            }
-            (wgpu::TextureViewDimension::Cube, ResolvedTextureBinding::Cubemap { asset_id }) => {
-                if asset_id < 0 {
-                    return None;
-                }
-                pools
-                    .cubemap
-                    .get(asset_id)
-                    .filter(|t| t.mip_levels_resident > 0)
-                    .map(|t| t.view.clone())
-            }
-            (
-                wgpu::TextureViewDimension::D2,
-                ResolvedTextureBinding::RenderTexture { asset_id },
-            ) => {
-                if asset_id < 0 {
-                    return None;
-                }
+        let source = sampled_texture_source(view_dimension, binding)?;
+        let asset_id = resolved_binding_asset_id(binding)?;
+        if asset_id < 0 {
+            return None;
+        }
+        match source {
+            SampledTextureSource::Texture2D => pools
+                .texture
+                .get(asset_id)
+                .filter(|t| t.mip_levels_resident > 0)
+                .map(|t| t.view.clone()),
+            SampledTextureSource::Texture3D => pools
+                .texture3d
+                .get(asset_id)
+                .filter(|t| t.mip_levels_resident > 0)
+                .map(|t| t.view.clone()),
+            SampledTextureSource::Cubemap => pools
+                .cubemap
+                .get(asset_id)
+                .filter(|t| t.mip_levels_resident > 0)
+                .map(|t| t.view.clone()),
+            SampledTextureSource::CubemapArray => pools
+                .cubemap
+                .get(asset_id)
+                .filter(|t| t.mip_levels_resident > 0)
+                .map(|t| t.array_view.clone()),
+            SampledTextureSource::RenderTexture => {
                 if offscreen_write_target.suppresses_render_texture_sampling(asset_id) {
                     return None;
                 }
@@ -340,13 +324,9 @@ impl EmbeddedMaterialBindResources {
                     .filter(|t| t.is_sampleable())
                     .map(|t| t.color_view.clone())
             }
-            (wgpu::TextureViewDimension::D2, ResolvedTextureBinding::VideoTexture { asset_id }) => {
-                if asset_id < 0 {
-                    return None;
-                }
+            SampledTextureSource::VideoTexture => {
                 pools.video_texture.get(asset_id).map(|t| t.view.clone())
             }
-            _ => None,
         }
     }
 
@@ -440,6 +420,48 @@ impl EmbeddedMaterialBindResources {
             }
         };
         sampled.unwrap_or_else(|| self.default_sampler.clone())
+    }
+}
+
+/// Resolves the host texture a paired sampler binding reads.
+fn resolved_sampler_texture(
+    layout: &StemMaterialLayout,
+    tex_binding: u32,
+    texture_2d_asset_id: i32,
+    store: &MaterialPropertyStore,
+    lookup: MaterialPropertyLookupIds,
+) -> Result<ResolvedTextureBinding, EmbeddedMaterialBindError> {
+    let host_name = layout
+        .reflected
+        .material_group1_names
+        .get(&tex_binding)
+        .map(String::as_str)
+        .ok_or_else(|| {
+            format!("reflection: no texture global for sampler paired at @binding({tex_binding})")
+        })?;
+    let tex_pids = texture_property_ids_for_binding(layout.ids.as_ref(), tex_binding);
+    if tex_pids.is_empty() {
+        return Err(EmbeddedMaterialBindError::from(format!(
+            "reflection: missing property id for texture @binding({tex_binding})"
+        )));
+    }
+    Ok(resolved_texture_binding_for_host(
+        host_name,
+        tex_pids,
+        texture_2d_asset_id,
+        store,
+        lookup,
+    ))
+}
+
+fn resolved_binding_asset_id(binding: ResolvedTextureBinding) -> Option<i32> {
+    match binding {
+        ResolvedTextureBinding::None => None,
+        ResolvedTextureBinding::Texture2D { asset_id }
+        | ResolvedTextureBinding::Texture3D { asset_id }
+        | ResolvedTextureBinding::Cubemap { asset_id }
+        | ResolvedTextureBinding::RenderTexture { asset_id }
+        | ResolvedTextureBinding::VideoTexture { asset_id } => Some(asset_id),
     }
 }
 
