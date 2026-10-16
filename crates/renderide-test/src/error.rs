@@ -1,6 +1,7 @@
 //! Error types for the renderide-test harness.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use thiserror::Error;
 
@@ -20,17 +21,17 @@ pub enum HarnessError {
     QueueOptions(String),
     /// The handshake never completed within the configured timeout.
     #[error("handshake timed out after {0:?}")]
-    HandshakeTimeout(std::time::Duration),
+    HandshakeTimeout(Duration),
     /// An asset upload acknowledgement never arrived.
     #[error("asset ack timed out after {0:?} ({1})")]
-    AssetAckTimeout(std::time::Duration, &'static str),
+    AssetAckTimeout(Duration, &'static str),
     /// PNG output never appeared / never refreshed within the configured wait.
     #[error("expected fresh PNG output at {path} within {wait:?}")]
     PngOutputMissing {
         /// Output PNG path the renderer was instructed to write.
         path: PathBuf,
         /// Maximum wall-clock wait before giving up.
-        wait: std::time::Duration,
+        wait: Duration,
     },
     /// Reading or decoding the PNG output failed.
     #[error("read png {path}: {source}")]
@@ -92,6 +93,19 @@ pub enum HarnessError {
     /// A requested named scene case does not exist in the suite registry.
     #[error("unknown integration case `{0}`")]
     UnknownCase(String),
+    /// The frame benchmark did not write a complete report before the deadline.
+    #[error("frame bench report missing at {path} after {wait:?} (renderer: {renderer_state})")]
+    BenchReportMissing {
+        /// Report path the renderer was asked to write.
+        path: PathBuf,
+        /// How long the harness waited.
+        wait: Duration,
+        /// Child process state when the wait ended.
+        renderer_state: String,
+    },
+    /// Unknown frame-benchmark scenario name.
+    #[error("unknown frame bench scenario `{0}`")]
+    UnknownBenchScenario(String),
     /// One or more cases in the headless suite failed.
     #[error(
         "headless suite failed: {failed}/{total} cases failed; report written to {report_path}"

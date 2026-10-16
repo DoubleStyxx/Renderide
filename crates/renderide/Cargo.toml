@@ -60,7 +60,7 @@ bench-api = []
 ## Dev-only drone control API. Off by default so the Resonite IPC wire and the
 ## default renderer build do not include the TCP server. Enable with
 ## `--features control-api` and pass `--control-port <port>` to bind `127.0.0.1`.
-control-api = ["dep:renderide-control-client", "dep:serde_json"]
+control-api = ["dep:renderide-control-client"]
 
 [package.metadata.cargo-machete]
 ignored = ["tracing", "tracy-client"]
@@ -86,6 +86,8 @@ thiserror = "2.0"
 ## glam transitively, listed here as a direct dep since renderide CPU code calls it.
 wide = "1.4"
 serde = { version = "1.0", features = ["derive"] }
+## Frame-bench reports. The control API uses the same crate when `control-api` is on.
+serde_json = "1.0"
 toml = "1.1"
 toml_edit = "0.25"
 figment = { version = "0.10", features = ["toml", "env"] }
@@ -130,8 +132,6 @@ gstreamer-video = { version = "0.25", optional = true }
 directories = "6.0"
 mimalloc = "0.1"
 url = "2.5"
-## JSON-RPC codec for the dev-only control API. Compiled only with `control-api`.
-serde_json = { version = "1.0", optional = true }
 renderide-control-client = { path = "../renderide-control-client", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]

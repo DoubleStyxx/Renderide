@@ -5,6 +5,11 @@ use crate::crash_context::{self, TickPhase};
 use super::RendererRuntime;
 
 impl RendererRuntime {
+    /// Stops the frame loop after the frame benchmark has written its report.
+    pub(crate) fn request_bench_shutdown(&mut self) {
+        self.frontend.set_shutdown_requested(true);
+    }
+
     /// Starts nonblocking teardown for runtime-owned resources that can outlive the frame loop.
     pub(crate) fn begin_graceful_shutdown(&mut self) {
         profiling::scope!("runtime::begin_graceful_shutdown");

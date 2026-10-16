@@ -7,7 +7,7 @@ impl DebugHudMetricInterest {
     /// Converts the HUD metric interests into per-view capture switches.
     pub(crate) fn per_view_hud_config(self) -> PerViewHudConfig {
         PerViewHudConfig {
-            capture_world_mesh_draw_stats: self.wants_stats(),
+            capture_world_mesh_draw_stats: self.wants_stats() || crate::app::frame_bench::active(),
             capture_world_mesh_view_stats: self.wants_visibility(),
             capture_world_mesh_draw_state_rows: self.wants_draw_state(),
             capture_current_view_texture_2d_asset_ids: self.textures,

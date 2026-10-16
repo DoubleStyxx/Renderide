@@ -199,6 +199,38 @@ The suite measures transform matrix conversion, homogeneous-clip AABB culling, w
 cargo bench -p renderide-bench --features gpu
 ```
 
+### Frame benchmarks
+
+[`renderide-framebench`](crates/renderide-framebench) records CPU frame time for fixed scenes. It is separate from the Criterion suite above. Headless mode is the default. `--windowed` opens a winit window, but that path does not pin the window size.
+
+```bash
+cargo build --release -p renderide -p renderide-framebench
+cargo run --release -p renderide-framebench -- run \
+  --release --resolution 256x256 --warmup 8 --frames 32 --runs 1 \
+  --output results/framebench.json
+```
+
+`--runs` (default 1 here, 5 in CI) repeats each scenario in a fresh process. The published p50/p95/p99 is the median of those per-run percentiles.
+
+Desktop GPU runs, for example an RTX 5080, use [`scripts/bench.sh`](scripts/bench.sh). It builds the release binaries and writes JSON under `results/framebench`. It does not force a software Vulkan driver. `THREADS` sets `RAYON_NUM_THREADS` and pins the process with `taskset`.
+
+```bash
+./scripts/bench.sh
+```
+
+Compare two reports. The default gate is relative `cpu_frame_ms.p95`. The command exits 1 when the candidate is more than `--threshold` percent slower (default 10). A delta equal to the threshold passes. Absolute milliseconds are not a gate and are not comparable across machines, adapters, or lavapipe versus a discrete GPU.
+
+```bash
+cargo run --release -p renderide-framebench -- compare \
+  --baseline results/master.json \
+  --candidate results/head.json \
+  --threshold 10
+```
+
+`.github/workflows/frame-bench.yml` is `workflow_dispatch` only. The job `frame-bench-lavapipe` installs `mesa-vulkan-drivers`, forces lavapipe with `VK_ICD_FILENAMES` and `VK_DRIVER_FILES` pointed at the `lvp_icd` JSON, and measures the baseline ref and the candidate ref on the same runner. Resolution, thread count, and run count are fixed for that job. GPU timestamp queries are optional; null pass times are accepted.
+
+Each scenario records a script of `camera.set_pose`, `frames.wait`, and `stats.query`. Those names match a dev-only localhost TCP JSON-RPC control API. This crate does not open that socket. The runner applies the pose and the frame counts in process, and `stats.query` is the report file.
+
 ## Configuration
 
 Renderide reads its settings from a TOML file discovered (or created) at startup. Set `RENDERIDE_CONFIG` to point at a specific file; otherwise Renderide uses the current user's platform config directory and writes `Renderide/config.toml` there on first launch when possible.

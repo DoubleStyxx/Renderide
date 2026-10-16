@@ -1,0 +1,205 @@
+# Manual lavapipe frame benchmark. Does not run on push or pull_request.
+# The job builds master and the selected head on one runner and gates only on
+# relative regression of cpu_frame_ms.p95 (default: fail when delta > 10%).
+# Absolute milliseconds are not a gate.
+name: Frame bench
+
+"on":
+  workflow_dispatch:
+    inputs:
+      base_ref:
+        description: Baseline git ref (built and measured on this runner)
+        default: master
+        required: false
+        type: string
+      head_ref:
+        description: Candidate git ref. Empty uses the ref that dispatched the workflow.
+        default: ""
+        required: false
+        type: string
+      runs:
+        description: Measured runs per scenario. The gate uses the median of each run's percentile.
+        default: "5"
+        required: false
+        type: string
+      threshold:
+        description: Fail when gated relative delta is strictly greater than this percent.
+        default: "10"
+        required: false
+        type: string
+      warmup:
+        description: Warmup frames discarded before measurement.
+        default: "10"
+        required: false
+        type: string
+      frames:
+        description: Measured frames per run.
+        default: "20"
+        required: false
+        type: string
+      resolution:
+        description: Fixed headless framebuffer size.
+        default: "256x256"
+        required: false
+        type: string
+      threads:
+        description: RAYON_NUM_THREADS and taskset CPU count.
+        default: "2"
+        required: false
+        type: string
+
+concurrency:
+  group: frame-bench-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  frame-bench-lavapipe:
+    name: frame-bench-lavapipe
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.head_ref != '' && inputs.head_ref || github.ref }}
+          path: head
+
+      - name: Checkout baseline
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.base_ref }}
+          path: base
+
+      - name: Install mesa Vulkan (lavapipe)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers vulkan-tools
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Pin lavapipe and thread count
+        run: |
+          set -euo pipefail
+          icd=""
+          shopt -s nullglob
+          for candidate in /usr/share/vulkan/icd.d/lvp_icd*.json /etc/vulkan/icd.d/lvp_icd*.json; do
+            if [[ -f "$candidate" ]]; then
+              icd="$candidate"
+              break
+            fi
+          done
+          if [[ -z "$icd" ]]; then
+            echo "lvp_icd json not found after installing mesa-vulkan-drivers" >&2
+            find /usr /etc -name 'lvp_icd*.json' >&2 || true
+            exit 1
+          fi
+          echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
+          echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
+          echo "WGPU_BACKEND=vulkan" >> "$GITHUB_ENV"
+          echo "RAYON_NUM_THREADS=${{ inputs.threads }}" >> "$GITHUB_ENV"
+          echo "RENDERIDE_LOG_TEE_TERMINAL=0" >> "$GITHUB_ENV"
+          VK_ICD_FILENAMES="$icd" VK_DRIVER_FILES="$icd" vulkaninfo --summary | tee /tmp/vulkaninfo.txt
+          if ! grep -Eq 'llvmpipe|lavapipe' /tmp/vulkaninfo.txt; then
+            echo "Vulkan loader did not select lavapipe/llvmpipe" >&2
+            exit 1
+          fi
+
+      - name: Measure and compare
+        run: |
+          set -euo pipefail
+          threads="${{ inputs.threads }}"
+          runs="${{ inputs.runs }}"
+          threshold="${{ inputs.threshold }}"
+          warmup="${{ inputs.warmup }}"
+          frames="${{ inputs.frames }}"
+          resolution="${{ inputs.resolution }}"
+          if ! [[ "$threads" =~ ^[1-9][0-9]*$ ]]; then
+            echo "threads must be a positive integer" >&2
+            exit 1
+          fi
+          last=$((threads - 1))
+          if [[ "$threads" -eq 1 ]]; then
+            cpuset="0"
+          else
+            cpuset="0-${last}"
+          fi
+
+          mkdir -p "$RUNNER_TEMP/framebench"
+          summary="$RUNNER_TEMP/framebench/compare.md"
+
+          build_tree() {
+            local tree="$1"
+            local target="$2"
+            if [[ ! -f "$tree/crates/renderide-framebench/Cargo.toml" ]]; then
+              return 2
+            fi
+            CARGO_TARGET_DIR="$target" cargo build --locked --release \
+              -p renderide -p renderide-framebench --manifest-path "$tree/Cargo.toml" \
+              || return 1
+          }
+
+          run_tree() {
+            local tree="$1"
+            local target="$2"
+            local out="$3"
+            taskset -c "$cpuset" \
+              "$target/release/renderide-framebench" run \
+              --renderer "$target/release/renderide-renderer" \
+              --resolution "$resolution" \
+              --warmup "$warmup" \
+              --frames "$frames" \
+              --runs "$runs" \
+              --timeout-seconds 600 \
+              --output "$out"
+          }
+
+          if ! build_tree "head" "$RUNNER_TEMP/target-head"; then
+            echo "candidate tree failed to build" >&2
+            exit 1
+          fi
+          run_tree "head" "$RUNNER_TEMP/target-head" "$RUNNER_TEMP/framebench/head.json"
+
+          set +e
+          build_tree "base" "$RUNNER_TEMP/target-base"
+          base_status=$?
+          set -e
+          if [[ "$base_status" -eq 2 ]]; then
+            {
+              echo "# frame-bench-lavapipe"
+              echo
+              echo "Base ref \`${{ inputs.base_ref }}\` has no \`crates/renderide-framebench\` crate."
+              echo "Relative gate skipped. Absolute milliseconds are not a gate."
+              echo
+              echo "result: pass"
+            } | tee "$summary"
+            cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [[ "$base_status" -ne 0 ]]; then
+            echo "baseline tree failed to build" >&2
+            exit 1
+          fi
+          run_tree "base" "$RUNNER_TEMP/target-base" "$RUNNER_TEMP/framebench/base.json"
+
+          set +e
+          taskset -c "$cpuset" \
+            "$RUNNER_TEMP/target-head/release/renderide-framebench" compare \
+            --baseline "$RUNNER_TEMP/framebench/base.json" \
+            --candidate "$RUNNER_TEMP/framebench/head.json" \
+            --threshold "$threshold" \
+            | tee "$summary"
+          compare_status=${PIPESTATUS[0]}
+          set -e
+          {
+            echo "# frame-bench-lavapipe"
+            echo
+            echo "lavapipe via VK_ICD_FILENAMES=$VK_ICD_FILENAMES"
+            echo "resolution=$resolution threads=$threads runs=$runs (median of per-run percentiles)"
+            echo "GPU timestamps are optional under lavapipe; null pass times are accepted."
+            echo
+            cat "$summary"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$compare_status"

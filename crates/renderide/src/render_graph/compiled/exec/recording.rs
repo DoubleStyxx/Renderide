@@ -245,15 +245,24 @@ fn record_compute_pass(
             .map_err(GraphExecuteError::Pass)?
     };
     if should_record {
+        let label = pass.profiling_label();
         let pass_query = ctx
             .profiler
-            .map(|p| p.begin_query(pass.profiling_label(), ctx.encoder));
+            .map(|p| p.begin_query(label.as_ref(), ctx.encoder));
+        let bench_scope = if pass_query.is_none() {
+            crate::gpu::frame_bench_queries::begin_encoder_scope(ctx.encoder, label.as_ref())
+        } else {
+            None
+        };
         {
             profiling::scope!("graph::record_compute::pass_record");
             pass.record_compute(&mut ctx)
                 .map_err(GraphExecuteError::Pass)?;
         }
         update_command_stats(ctx.blackboard, GraphCommandStats::record_compute_pass);
+        if let Some(scope) = bench_scope {
+            crate::gpu::frame_bench_queries::end_encoder_scope(ctx.encoder, scope);
+        }
         if let (Some(p), Some(q)) = (ctx.profiler, pass_query) {
             p.end_query(ctx.encoder, q);
         }
@@ -273,15 +282,24 @@ fn record_encoder_pass(
             .map_err(GraphExecuteError::Pass)?
     };
     if should_record {
+        let label = pass.profiling_label();
         let pass_query = ctx
             .profiler
-            .map(|p| p.begin_query(pass.profiling_label(), ctx.encoder));
+            .map(|p| p.begin_query(label.as_ref(), ctx.encoder));
+        let bench_scope = if pass_query.is_none() {
+            crate::gpu::frame_bench_queries::begin_encoder_scope(ctx.encoder, label.as_ref())
+        } else {
+            None
+        };
         {
             profiling::scope!("graph::record_encoder::pass_record");
             pass.record_encoder(&mut ctx)
                 .map_err(GraphExecuteError::Pass)?;
         }
         update_command_stats(ctx.blackboard, GraphCommandStats::record_encoder_pass);
+        if let Some(scope) = bench_scope {
+            crate::gpu::frame_bench_queries::end_encoder_scope(ctx.encoder, scope);
+        }
         if let (Some(p), Some(q)) = (ctx.profiler, pass_query) {
             p.end_query(ctx.encoder, q);
         }

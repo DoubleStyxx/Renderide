@@ -118,6 +118,11 @@ impl RenderBackend {
         self.diagnostics.last_world_mesh_draw_stats()
     }
 
+    /// Upload traffic from the latest frame drain.
+    pub(crate) fn latest_frame_upload_traffic(&self) -> crate::upload_stats::UploadTrafficStats {
+        self.graph_state.latest_upload_stats().traffic
+    }
+
     pub(crate) fn last_world_mesh_view_stats(&self) -> Vec<WorldMeshViewHudStats> {
         self.diagnostics.last_world_mesh_view_stats()
     }

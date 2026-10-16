@@ -237,6 +237,12 @@ impl AppDriver {
         self.sync_log_level_from_settings();
         self.runtime.tick_frame_wall_clock_begin(frame_start);
         if let Some(target) = self.target.as_mut() {
+            if crate::app::frame_bench::active() {
+                crate::gpu::frame_bench_queries::install(
+                    target.gpu().device(),
+                    target.gpu().queue(),
+                );
+            }
             let gpu = target.gpu_mut();
             gpu.begin_frame_timing(frame_start);
             if let Ok(settings) = self.runtime.settings().read() {
@@ -590,6 +596,9 @@ impl AppDriver {
         self.drain_driver_thread_error();
         if outcome.records_frame_timing() {
             self.end_frame_timing_and_hud_capture();
+            self.observe_frame_bench();
+        } else if crate::app::frame_bench::active() {
+            crate::gpu::frame_bench_queries::discard_slots();
         }
         let gpu_render_time_seconds = self
             .target
@@ -658,6 +667,16 @@ impl AppDriver {
         gpu.end_frame_timing();
         gpu.end_gpu_profiler_frame();
         self.runtime.capture_debug_hud_after_frame_end(gpu);
+    }
+
+    fn observe_frame_bench(&mut self) {
+        if !crate::app::frame_bench::active() {
+            return;
+        }
+        let Some(target) = self.target.as_ref() else {
+            return;
+        };
+        crate::app::frame_bench::observe(target.gpu(), &mut self.runtime);
     }
 }
 

@@ -3676,6 +3676,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "renderide-framebench"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "renderide-test",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "renderide-shared"
 version = "0.1.0"
 dependencies = [

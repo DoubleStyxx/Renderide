@@ -32,9 +32,12 @@ use super::handshake::{DEFAULT_HANDSHAKE_TIMEOUT, run_handshake};
 use super::ipc_setup::{DEFAULT_QUEUE_CAPACITY_BYTES, connect_session};
 use super::lockstep::{FrameSubmitScalars, LockstepDriver};
 
+mod bench_drive;
 mod config;
 mod consts;
 mod custom_property;
+
+pub use bench_drive::{BenchDriveConfig, drive_bench};
 pub mod png_readback;
 mod scene_state;
 mod shutdown;
