@@ -42,6 +42,60 @@ public static class CustomShaders
     /// </remarks>
     public static string ExampleRainbowWgsl => ReadEmbeddedShader("example_rainbow.wgsl");
 
+    /// <summary>
+    /// Text of <c>Shaders/example_poincare.wgsl</c>. Poincare-disk {p,q} tiling.
+    /// </summary>
+    /// <remarks>
+    /// <c>_Schlafli.xy</c> is {p,q} (default 7,3). <c>_Speed</c> rotates the disk.
+    /// <c>//#keyword TILE</c> off writes <c>_MainTex * _Color</c>.
+    /// </remarks>
+    public static string ExamplePoincareWgsl => ReadEmbeddedShader("example_poincare.wgsl");
+
+    /// <summary>
+    /// Text of <c>Shaders/example_gyroid.wgsl</c>. Object-space raymarched gyroid SDF.
+    /// </summary>
+    /// <remarks>
+    /// <c>_Frequency</c> scales the field. <c>_Speed</c> scrolls the phase.
+    /// <c>//#keyword GYROID</c> off writes <c>_MainTex * _Color</c>.
+    /// </remarks>
+    public static string ExampleGyroidWgsl => ReadEmbeddedShader("example_gyroid.wgsl");
+
+    /// <summary>
+    /// Text of <c>Shaders/example_hologram.wgsl</c>. Fresnel tint plus scanlines.
+    /// </summary>
+    /// <remarks>
+    /// <c>_Scan.x</c> is line density, <c>_Scan.y</c> is contrast, <c>_Fresnel</c> is the power.
+    /// <c>_Speed</c> scrolls the lines. <c>//#keyword HOLO</c> off writes <c>_MainTex * _Color</c>.
+    /// </remarks>
+    public static string ExampleHologramWgsl => ReadEmbeddedShader("example_hologram.wgsl");
+
+    /// <summary>
+    /// Text of <c>Shaders/example_hieroglyph.wgsl</c>. Procedural gold glyph grid.
+    /// </summary>
+    /// <remarks>
+    /// <c>_Grid.xy</c> is the cell count. <c>_Emission</c> scales the pulse. <c>_Speed</c> drives it.
+    /// <c>//#keyword EMIT</c> off writes <c>_MainTex * _Color</c>.
+    /// </remarks>
+    public static string ExampleHieroglyphWgsl => ReadEmbeddedShader("example_hieroglyph.wgsl");
+
+    /// <summary>
+    /// Text of <c>Shaders/example_nebula.wgsl</c>. Domain-warped fbm nebula.
+    /// </summary>
+    /// <remarks>
+    /// <c>_Warp.x</c> is the warp amount and <c>_Warp.y</c> is the pattern scale.
+    /// <c>_Speed</c> scrolls the domain. <c>//#keyword NEBULA</c> off writes <c>_MainTex * _Color</c>.
+    /// </remarks>
+    public static string ExampleNebulaWgsl => ReadEmbeddedShader("example_nebula.wgsl");
+
+    /// <summary>
+    /// Text of <c>Shaders/example_dispersion.wgsl</c>. Per-channel refraction offset.
+    /// </summary>
+    /// <remarks>
+    /// <c>_Spread</c> is the red/blue UV offset. <c>_Speed</c> rotates the offset axis.
+    /// <c>//#keyword SPLIT</c> off writes one <c>_MainTex * _Color</c> sample.
+    /// </remarks>
+    public static string ExampleDispersionWgsl => ReadEmbeddedShader("example_dispersion.wgsl");
+
     /// <summary>Reads an embedded WGSL file shipped under <c>Shaders/</c>.</summary>
     /// <param name="fileName">File name, for example <c>example_solid.wgsl</c>.</param>
     public static string ReadEmbeddedShader(string fileName)

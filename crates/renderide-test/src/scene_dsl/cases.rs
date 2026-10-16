@@ -64,6 +64,8 @@ pub enum CaseTemplate {
     /// Custom rainbow material rendered twice. `actual.png` is the frame after `_Color` and
     /// `RAINBOW` change. `plain.png` is the frame before that update.
     CustomShaderPropertyUpdate,
+    /// Poincare-disk tiling and a raymarched gyroid, each with `_Speed` 0.
+    ExoticShaderPair,
 }
 
 /// Default golden directory, relative to the workspace root: `crates/renderide-test/goldens/`.
@@ -183,6 +185,28 @@ pub fn custom_shader_property_update() -> IntegrationCase {
     }
 }
 
+/// Poincare disk on the left and a gyroid SDF on the right. Both materials keep `_Speed` at 0.
+pub fn exotic_shader_pair() -> IntegrationCase {
+    IntegrationCase {
+        name: "exotic_shader_pair".to_string(),
+        description:
+            "Poincare-disk tiling and a raymarched gyroid on two quads. TILE and GYROID are on. _Speed is 0 on both."
+                .to_string(),
+        golden_path: default_goldens_dir().join("exotic_shader_pair.png"),
+        resolution: (320, 320),
+        tolerance: Tolerance {
+            ssim_min: Some(0.75),
+            max_abs_diff: Some(64),
+            max_failing_pixel_fraction: Some(0.28),
+            min_luma_range: Some(24),
+            min_unique_colors: Some(16),
+            min_non_background_pixel_fraction: Some(0.15),
+            combine: Combine::Or,
+        },
+        template: CaseTemplate::ExoticShaderPair,
+    }
+}
+
 /// Optional GLB fixture case. The registry includes it only when the fixture file is present,
 /// so the suite remains useful before a commit-safe model has been added.
 pub fn gltf_textured_static_mesh(path: PathBuf) -> IntegrationCase {
@@ -206,6 +230,7 @@ pub fn registry() -> Vec<IntegrationCase> {
         pbs_lit_material_matrix(),
         alpha_cutout_masked_quads(),
         custom_shader_property_update(),
+        exotic_shader_pair(),
     ];
     let gltf_fixture = default_fixture_path();
     if gltf_fixture.is_file() {
