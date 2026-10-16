@@ -7,13 +7,18 @@
 
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::RecvTimeoutError;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use openxr as xr;
 
 use super::XrSessionState;
 use crate::gpu::driver_thread::wait_for_finalize;
 use crate::gpu::flight_recorder::{GpuFlightCallResult, GpuFlightOpenXrCall, GpuFlightRecorder};
+use crate::log_throttle::LogThrottle;
+use crate::xr::frame_loop_policy::session_idle_poll_slice;
+
+/// Throttle for `xrPollEvent` failures while waiting for `xrBeginSession`.
+static SESSION_IDLE_POLL_FAILURE_LOG: LogThrottle = LogThrottle::new();
 
 impl XrSessionState {
     /// Blocks until the next frame, begins the frame stream. Returns `None` if not ready or idle.
@@ -46,14 +51,65 @@ impl XrSessionState {
             );
             return Err(err);
         }
-        if !self.session_running {
-            std::thread::sleep(Duration::from_millis(10));
+        // `xrPollEvent` does not block and `session_running` only flips on this thread,
+        // so a condvar cannot replace the idle park. Poll inside a 1ms..10ms budget
+        // that resets when the session runs. A `READY` seen inside the budget begins
+        // this tick instead of after a fixed 10ms sleep and another frame.
+        if self.session_running {
+            self.session_idle_wait.reset();
+        } else if !self.wait_for_session_running() {
             return Ok(None);
         }
         let state = self.wait_openxr_frame(flight_recorder)?;
         self.begin_openxr_frame(gpu_queue_access_gate, flight_recorder, state)?;
         self.frame_open.store(true, Ordering::Release);
         Ok(Some(state))
+    }
+
+    /// Polls OpenXR until the session is running or this tick's idle budget expires.
+    ///
+    /// Returns `true` when [`Self::session_running`] became true inside the budget so
+    /// the caller can `xrWaitFrame` on this tick. The budget starts at 1ms and doubles
+    /// up to 10ms. Each slice re-enters [`Self::poll_events`], which sets
+    /// `session_running` on `READY`.
+    fn wait_for_session_running(&mut self) -> bool {
+        profiling::scope!("xr::session_idle_wait");
+        let deadline = Instant::now() + self.session_idle_wait.budget();
+        loop {
+            if self.exit_requested {
+                self.session_idle_wait.reset();
+                return false;
+            }
+            match self.poll_events() {
+                Ok(false) => {
+                    self.session_idle_wait.reset();
+                    return false;
+                }
+                Ok(true) => {}
+                Err(error) => {
+                    if let Some(occurrence) = SESSION_IDLE_POLL_FAILURE_LOG.should_log(4, 64) {
+                        logger::warn!(
+                            "xr: idle poll_events failed: {error:?} occurrence={occurrence}"
+                        );
+                    }
+                }
+            }
+            if self.session_running {
+                self.session_idle_wait.reset();
+                return true;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                self.session_idle_wait.note_still_idle();
+                return false;
+            }
+            let slice = session_idle_poll_slice(deadline.saturating_duration_since(now));
+            if slice.is_zero() {
+                self.session_idle_wait.note_still_idle();
+                return false;
+            }
+            std::thread::sleep(slice);
+        }
     }
 
     /// Waits for the previous driver-thread finalize signal when one is pending.
