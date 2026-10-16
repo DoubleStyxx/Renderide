@@ -8,7 +8,7 @@ use crate::particles::ParticleDrawParams;
 use crate::scene::{RenderSpaceId, SceneSpaceRead};
 #[cfg(test)]
 use crate::shared::ShadowCastMode;
-use crate::world_mesh::culling::{WorldMeshCullInput, world_aabb_visible_for_cull};
+use crate::world_mesh::culling::{PreparedSpaceCull, WorldMeshCullInput};
 
 use super::super::bitset::DenseBitSet;
 use super::super::item::WorldMeshVisibilityStats;
@@ -245,46 +245,31 @@ impl PreparedSpatialSpace {
         out.visibility.indexed_runs += self.indexed_run_count;
         out.visibility.fallback_runs += self.fallback_run_count;
         out.visibility.linear_fallback_runs += self.linear.len();
-        let cull_context = PreparedSpatialCullContext {
-            space_id,
-            scene,
-            culling,
-        };
+        // One view inversion for every node and leaf in this space. Overlay runs are not indexed,
+        // so the broadphase frustum is always the non-overlay clip volume.
+        let prepared =
+            culling.map(|culling| PreparedSpaceCull::frustum(scene, space_id, false, culling));
         {
             profiling::scope!("mesh::prepared_renderables::spatial_query_linear");
             for entry in &self.linear {
-                query_linear_run(
-                    cull_context.space_id,
-                    cull_context.scene,
-                    cull_context.culling,
-                    entry,
-                    out,
-                );
+                query_linear_run(prepared.as_ref(), entry, out);
             }
         }
         if let Some(root) = self.root {
             profiling::scope!("mesh::prepared_renderables::spatial_query_bvh");
-            self.query_node(root, &cull_context, out);
+            self.query_node(root, prepared.as_ref(), out);
         }
     }
 
-    fn query_node<S>(
+    fn query_node(
         &self,
         node_index: usize,
-        cull_context: &PreparedSpatialCullContext<'_, '_, '_, S>,
+        prepared: Option<&PreparedSpaceCull<'_>>,
         out: &mut PreparedSpatialQueryOutput<'_>,
-    ) where
-        S: SceneSpaceRead + ?Sized,
-    {
+    ) {
         let node = self.nodes[node_index];
-        if let Some(culling) = cull_context.culling
-            && !spatial_aabb_visible(
-                cull_context.scene,
-                cull_context.space_id,
-                culling,
-                node.aabb_min,
-                node.aabb_max,
-            )
+        if let Some(prepared) = prepared
+            && !prepared.aabb_visible(Vec3::from(node.aabb_min), Vec3::from(node.aabb_max))
         {
             record_spatial_frustum_reject(
                 out.cull_stats,
@@ -297,17 +282,11 @@ impl PreparedSpatialSpace {
         if node.count > 0 {
             for &entry_index in &self.order[node.start..node.start + node.count] {
                 let entry = self.indexed[entry_index];
-                query_indexed_run(
-                    cull_context.space_id,
-                    cull_context.scene,
-                    cull_context.culling,
-                    entry,
-                    out,
-                );
+                query_indexed_run(prepared, entry, out);
             }
         } else {
-            self.query_node(node.left, cull_context, out);
-            self.query_node(node.right, cull_context, out);
+            self.query_node(node.left, prepared, out);
+            self.query_node(node.right, prepared, out);
         }
     }
 
@@ -375,19 +354,6 @@ fn refit_indexed_bounds(
 fn conservative_visible_bounds() -> (Vec3A, Vec3A) {
     let extent = f32::MAX * 0.25;
     (Vec3A::splat(-extent), Vec3A::splat(extent))
-}
-
-/// Shared cull state for one prepared-space spatial query.
-struct PreparedSpatialCullContext<'scene, 'cull_ref, 'cull_data, S>
-where
-    S: SceneSpaceRead + ?Sized,
-{
-    /// Render space currently being queried.
-    space_id: RenderSpaceId,
-    /// Scene graph used to resolve world bounds.
-    scene: &'scene S,
-    /// Optional CPU frustum and Hi-Z culling input.
-    culling: Option<&'cull_ref WorldMeshCullInput<'cull_data>>,
 }
 
 /// Mutable query output shared across spatial traversal helpers.
@@ -491,14 +457,12 @@ struct PreparedBvhNode {
 }
 
 fn query_linear_run(
-    space_id: RenderSpaceId,
-    scene: &(impl SceneSpaceRead + ?Sized),
-    culling: Option<&WorldMeshCullInput<'_>>,
+    prepared: Option<&PreparedSpaceCull<'_>>,
     entry: &LinearPreparedRun,
     out: &mut PreparedSpatialQueryOutput<'_>,
 ) {
-    if let (Some(culling), Some((aabb_min, aabb_max))) = (culling, entry.bounds)
-        && !spatial_aabb_visible(scene, space_id, culling, aabb_min, aabb_max)
+    if let (Some(prepared), Some((aabb_min, aabb_max))) = (prepared, entry.bounds)
+        && !prepared.aabb_visible(Vec3::from(aabb_min), Vec3::from(aabb_max))
     {
         record_spatial_frustum_reject(out.cull_stats, out.visibility, 1, entry.slot_count);
         return;
@@ -507,14 +471,12 @@ fn query_linear_run(
 }
 
 fn query_indexed_run(
-    space_id: RenderSpaceId,
-    scene: &(impl SceneSpaceRead + ?Sized),
-    culling: Option<&WorldMeshCullInput<'_>>,
+    prepared: Option<&PreparedSpaceCull<'_>>,
     entry: IndexedPreparedRun,
     out: &mut PreparedSpatialQueryOutput<'_>,
 ) {
-    if let Some(culling) = culling
-        && !spatial_aabb_visible(scene, space_id, culling, entry.aabb_min, entry.aabb_max)
+    if let Some(prepared) = prepared
+        && !prepared.aabb_visible(Vec3::from(entry.aabb_min), Vec3::from(entry.aabb_max))
     {
         record_spatial_frustum_reject(out.cull_stats, out.visibility, 1, entry.slot_count);
         return;
@@ -534,23 +496,6 @@ fn record_spatial_frustum_reject(
     visibility.broadphase_culled_draws = visibility
         .broadphase_culled_draws
         .saturating_add(slot_count);
-}
-
-fn spatial_aabb_visible(
-    scene: &(impl SceneSpaceRead + ?Sized),
-    space_id: RenderSpaceId,
-    culling: &WorldMeshCullInput<'_>,
-    aabb_min: Vec3A,
-    aabb_max: Vec3A,
-) -> bool {
-    world_aabb_visible_for_cull(
-        scene,
-        space_id,
-        false,
-        culling,
-        Vec3::from(aabb_min),
-        Vec3::from(aabb_max),
-    )
 }
 
 fn indexable_run_bounds(first: &FramePreparedDraw) -> Option<(Vec3A, Vec3A)> {

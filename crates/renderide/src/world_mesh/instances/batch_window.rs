@@ -7,7 +7,7 @@
 use std::ops::Range;
 
 use crate::world_mesh::draw_prep::WorldMeshDrawItem;
-use crate::world_mesh::phase_classification::classify_world_mesh_batch;
+use crate::world_mesh::phase_classification::{WorldMeshBatchPhase, classify_world_mesh_batch};
 
 use super::{DrawGroup, WorldMeshPhase};
 
@@ -28,31 +28,41 @@ pub(super) fn next_batch_window(
     start: usize,
     supports_base_instance: bool,
 ) -> BatchWindow {
-    let key = &draws[start].batch_key;
-    let mut end = start + 1;
+    let key_hash = draws[start].batch_key_hash;
     let shadow_cast_mode = draws[start].shadow_cast_mode;
-    while end < draws.len()
-        && &draws[end].batch_key == key
-        && draws[end].shadow_cast_mode == shadow_cast_mode
-    {
+    let mut end = start + 1;
+    while end < draws.len() {
+        let candidate = &draws[end];
+        // Hash mismatch implies a different batch key when the hash was refreshed with the key.
+        // A matching hash still compares the key so collisions do not merge distinct materials.
+        if candidate.batch_key_hash != key_hash
+            || candidate.shadow_cast_mode != shadow_cast_mode
+            || candidate.batch_key != draws[start].batch_key
+        {
+            break;
+        }
         end += 1;
     }
 
-    let classification = classify_world_mesh_batch(key);
+    let classification = classify_world_mesh_batch(&draws[start].batch_key);
 
     BatchWindow {
         range: start..end,
         phase: classification.phase,
-        singleton: draw_requires_singleton(&draws[start], supports_base_instance),
+        singleton: draw_requires_singleton_for_classification(
+            &draws[start],
+            supports_base_instance,
+            classification,
+        ),
     }
 }
 
 /// Returns whether a draw must remain a singleton under the instancing policy.
-pub(super) fn draw_requires_singleton(
+pub(super) fn draw_requires_singleton_for_classification(
     item: &WorldMeshDrawItem,
     supports_base_instance: bool,
+    classification: WorldMeshBatchPhase,
 ) -> bool {
-    let classification = classify_world_mesh_batch(&item.batch_key);
     let order_dependent = !item.batch_key.transparent_class.allows_relaxed_batching();
     !supports_base_instance
         || item.skinned
