@@ -147,7 +147,7 @@ fn write_srgb_f32x4_array_at(buf: &mut [u8], field: &ReflectedUniformField, valu
 fn quantize_toggle_float(enabled: bool, field_name: &str, value: f32) -> f32 {
     let name = shader_writer_unescaped_field_name(field_name);
     if enabled && crate::materials::custom_shader::is_toggle_style_property_name(name) {
-        if value != 0.0 { 1.0 } else { 0.0 }
+        if value == 0.0 { 0.0 } else { 1.0 }
     } else {
         value
     }
