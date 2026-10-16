@@ -22,6 +22,7 @@ use lifecycle::is_visible_tracked;
 use crate::gpu::driver_thread::{
     XrFinalizeErrorSlot, XrFinalizeReceiver, XrProjectionDepthFinalize,
 };
+use crate::xr::frame_loop_policy::SessionIdleWait;
 
 /// Owns OpenXR session objects (constructed in [`super::super::bootstrap::init_wgpu_openxr`]).
 pub struct XrSessionState {
@@ -37,6 +38,8 @@ pub struct XrSessionState {
     pub(super) session: xr::Session<xr::Vulkan>,
     /// Whether `xrBeginSession` has been called and `xrEndSession` has not.
     pub(super) session_running: bool,
+    /// Backoff streak for ticks that observe `!session_running`. Reset when the session runs.
+    pub(super) session_idle_wait: SessionIdleWait,
     /// Latest [`xr::SessionState`] observed via `SessionStateChanged`.
     pub(super) last_session_state: TrackedSessionState,
     /// `true` between a successful `frame_stream.begin()` and the matching `frame_stream.end()`;
@@ -118,6 +121,7 @@ impl XrSessionState {
             environment_blend_mode: desc.environment_blend_mode,
             session: desc.session,
             session_running: false,
+            session_idle_wait: SessionIdleWait::new(),
             last_session_state: TrackedSessionState::Unknown,
             frame_open: Arc::new(AtomicBool::new(false)),
             exit_requested: false,

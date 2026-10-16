@@ -6,6 +6,11 @@
 //!
 //! On Windows, the named mapping backend does not read `.qu` paths from disk; [`QueueOptions::path`]
 //! is still set to the same default for consistency with [`interprocess`].
+//!
+//! Production code in this module is safe. Tests opt into `unsafe` only to mutate
+//! the process environment under `lock_interprocess_env`.
+
+#![deny(unsafe_code)]
 
 use std::path::{Path, PathBuf};
 
@@ -115,6 +120,10 @@ pub(crate) fn open_bootstrap_queues_with_host_endpoints(
 }
 
 #[cfg(test)]
+#[expect(
+    unsafe_code,
+    reason = "edition 2024 env mutation in tests; serialized by lock_interprocess_env"
+)]
 mod tests {
     use super::*;
     use crate::test_env::lock_interprocess_env;

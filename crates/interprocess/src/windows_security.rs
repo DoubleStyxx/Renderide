@@ -1,5 +1,10 @@
 //! Windows security attributes for named IPC objects.
 
+#![expect(
+    unsafe_code,
+    reason = "Win32 security-descriptor FFI for the queue mapping DACL"
+)]
+
 #[cfg(windows)]
 use std::io;
 

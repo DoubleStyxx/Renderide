@@ -15,39 +15,291 @@ use super::frustum::world_aabb_visible_in_homogeneous_clip;
 use super::geometry::MeshCullGeometry;
 #[cfg(test)]
 use super::geometry::{MeshCullTarget, mesh_world_geometry_for_cull};
-use super::{HiZTemporalState, WorldMeshCullInput, WorldMeshCullProjParams};
+use super::{HiZTemporalState, WorldMeshCullInput};
 use crate::camera::{overlay_camera_view_matrix, view_matrix_for_world_mesh_render_space};
 use crate::hi_z_cpu::HiZCullData;
-use crate::hi_z_cpu::hi_z_view_proj_matrices;
-use crate::hi_z_cpu::mesh_fully_occluded_in_hiz;
-use crate::hi_z_cpu::stereo_hiz_keeps_draw;
+use crate::hi_z_cpu::snapshot::HiZCpuSnapshot;
+use crate::hi_z_cpu::{hi_z_view_proj_matrices, mesh_fully_occluded_in_hiz, stereo_hiz_keeps_draw};
 
-/// Frustum acceptance for one world AABB using the same stereo / overlay rules as the forward pass.
-fn cpu_cull_frustum_visible(
-    proj: &WorldMeshCullProjParams,
-    is_overlay: bool,
-    view: Mat4,
-    wmin: Vec3,
-    wmax: Vec3,
-) -> bool {
-    if is_overlay {
-        let vp = proj.overlay_proj * overlay_camera_view_matrix();
-        return world_aabb_visible_in_homogeneous_clip(vp, wmin, wmax);
+/// Clip matrices for one render space, built once and reused across every AABB in that space.
+///
+/// The one-shot frustum helper used to invert the space view transform and multiply the
+/// projection on every box. Spatial queries and per-renderer fine culls test thousands of boxes
+/// against one view, so the matrix work is hoisted here. The accept/reject result matches the
+/// per-call path, including "missing space stays visible" and stereo OR.
+#[derive(Clone, Copy)]
+pub(crate) struct PreparedSpaceCull<'a> {
+    /// Frustum half-spaces for this space.
+    frustum: SpaceFrustum,
+    /// Previous-frame Hi-Z test, when the temporal snapshot applies to this space.
+    hi_z: Option<PreparedSpaceHiZ<'a>>,
+}
+
+/// Precomputed homogeneous clip matrices for one space.
+#[derive(Clone, Copy)]
+enum SpaceFrustum {
+    /// No render space: keep the draw, matching the historical early accept.
+    AcceptAll,
+    /// Single view-projection (desktop world camera or overlay camera).
+    Mono(Mat4),
+    /// VR: visible when either eye's clip volume contains the box.
+    Stereo(Mat4, Mat4),
+}
+
+/// Previous-frame Hi-Z matrices and pyramid borrows for one space.
+#[derive(Clone, Copy)]
+enum PreparedSpaceHiZ<'a> {
+    /// Desktop pyramid tested with the previous mono view-projection.
+    Desktop {
+        /// Pyramid sampled by the occlusion test.
+        snapshot: &'a HiZCpuSnapshot,
+        /// Previous-frame clip matrix.
+        view_proj: Mat4,
+    },
+    /// Both eyes must occlude the box before it is rejected.
+    Stereo {
+        /// Left-eye pyramid.
+        left: &'a HiZCpuSnapshot,
+        /// Right-eye pyramid.
+        right: &'a HiZCpuSnapshot,
+        /// Left-eye clip matrix from the frame that built the pyramid.
+        left_vp: Mat4,
+        /// Right-eye clip matrix from the frame that built the pyramid.
+        right_vp: Mat4,
+    },
+}
+
+impl<'a> PreparedSpaceCull<'a> {
+    /// Builds the frustum for `space_id` without preparing Hi-Z.
+    ///
+    /// Broadphase queries (mesh runs, light volumes) only need the clip test. Skipping Hi-Z
+    /// avoids the temporal lookup on paths that never occlusion-cull.
+    pub(crate) fn frustum<S>(
+        scene: &S,
+        space_id: RenderSpaceId,
+        is_overlay: bool,
+        culling: &'a WorldMeshCullInput<'_>,
+    ) -> Self
+    where
+        S: SceneSpaceRead + ?Sized,
+    {
+        Self {
+            frustum: space_frustum(scene, space_id, is_overlay, culling),
+            hi_z: None,
+        }
     }
-    if let Some((sl, sr)) = proj.vr_stereo {
-        world_aabb_visible_in_homogeneous_clip(sl, wmin, wmax)
-            || world_aabb_visible_in_homogeneous_clip(sr, wmin, wmax)
-    } else {
-        let vp = proj.world_proj * view;
-        world_aabb_visible_in_homogeneous_clip(vp, wmin, wmax)
+
+    /// Builds the frustum and the reusable Hi-Z test for one fine-cull space.
+    pub(crate) fn with_hi_z<S>(
+        scene: &S,
+        space_id: RenderSpaceId,
+        is_overlay: bool,
+        culling: &'a WorldMeshCullInput<'_>,
+    ) -> Self
+    where
+        S: SceneSpaceRead + ?Sized,
+    {
+        Self {
+            frustum: space_frustum(scene, space_id, is_overlay, culling),
+            hi_z: if is_overlay {
+                None
+            } else {
+                prepare_space_hi_z(space_id, culling)
+            },
+        }
+    }
+
+    /// Returns whether `wmin`/`wmax` intersects this space's clip volume.
+    #[inline]
+    pub(crate) fn aabb_visible(&self, wmin: Vec3, wmax: Vec3) -> bool {
+        match self.frustum {
+            SpaceFrustum::AcceptAll => true,
+            SpaceFrustum::Mono(view_proj) => {
+                world_aabb_visible_in_homogeneous_clip(view_proj, wmin, wmax)
+            }
+            SpaceFrustum::Stereo(left, right) => {
+                world_aabb_visible_in_homogeneous_clip(left, wmin, wmax)
+                    || world_aabb_visible_in_homogeneous_clip(right, wmin, wmax)
+            }
+        }
+    }
+
+    /// Returns whether Hi-Z fully occludes the box. `false` when this space has no usable pyramid.
+    #[inline]
+    pub(crate) fn hi_z_occludes(&self, wmin: Vec3, wmax: Vec3) -> bool {
+        match self.hi_z {
+            None => false,
+            Some(PreparedSpaceHiZ::Desktop {
+                snapshot,
+                view_proj,
+            }) => mesh_fully_occluded_in_hiz(snapshot, view_proj, wmin, wmax),
+            Some(PreparedSpaceHiZ::Stereo {
+                left,
+                right,
+                left_vp,
+                right_vp,
+            }) => {
+                let occluded_left = mesh_fully_occluded_in_hiz(left, left_vp, wmin, wmax);
+                let occluded_right = mesh_fully_occluded_in_hiz(right, right_vp, wmin, wmax);
+                !stereo_hiz_keeps_draw(occluded_left, occluded_right)
+            }
+        }
+    }
+}
+
+/// Reuses one [`PreparedSpaceCull`] across the renderer runs in a collection chunk.
+///
+/// A chunk usually stays inside one or two render spaces. The cache keeps the inverted view
+/// matrix and the Hi-Z clip matrix for those spaces instead of rebuilding them per renderer.
+pub(crate) struct SpaceCullCache<'a> {
+    /// Prepared cull state in first-seen `(space, overlay)` order.
+    slots: Vec<SpaceCullSlot<'a>>,
+}
+
+/// One cached space inside [`SpaceCullCache`].
+struct SpaceCullSlot<'a> {
+    /// Render space this slot was prepared for.
+    space_id: RenderSpaceId,
+    /// Overlay flag used while preparing the slot. The same space can be visited both ways.
+    is_overlay: bool,
+    /// Frustum and Hi-Z state for [`Self::space_id`].
+    prepared: PreparedSpaceCull<'a>,
+}
+
+impl<'a> SpaceCullCache<'a> {
+    /// Builds an empty cache. Slots are filled on the first draw from each space.
+    pub(crate) fn new() -> Self {
+        Self { slots: Vec::new() }
+    }
+
+    /// Runs frustum and Hi-Z culling for `geom`, reusing a prepared space when one exists.
+    pub(crate) fn cull_geometry<S>(
+        &mut self,
+        geom: MeshCullGeometry,
+        scene: &S,
+        space_id: RenderSpaceId,
+        is_overlay: bool,
+        culling: &'a WorldMeshCullInput<'_>,
+        ui_rect_clip_local: Option<Vec4>,
+    ) -> Result<Option<Mat4>, CpuCullFailure>
+    where
+        S: SceneSpaceRead + ?Sized,
+    {
+        let slot = self.slot_index(scene, space_id, is_overlay, culling);
+        mesh_cpu_cull_with_prepared(
+            geom,
+            is_overlay,
+            &self.slots[slot].prepared,
+            ui_rect_clip_local,
+        )
+    }
+
+    /// Returns the slot for `(space_id, is_overlay)`, preparing it on first use.
+    fn slot_index<S>(
+        &mut self,
+        scene: &S,
+        space_id: RenderSpaceId,
+        is_overlay: bool,
+        culling: &'a WorldMeshCullInput<'_>,
+    ) -> usize
+    where
+        S: SceneSpaceRead + ?Sized,
+    {
+        if let Some(index) = self
+            .slots
+            .iter()
+            .position(|slot| slot.space_id == space_id && slot.is_overlay == is_overlay)
+        {
+            return index;
+        }
+        self.slots.push(SpaceCullSlot {
+            space_id,
+            is_overlay,
+            prepared: PreparedSpaceCull::with_hi_z(scene, space_id, is_overlay, culling),
+        });
+        self.slots.len() - 1
+    }
+}
+
+/// Clip matrices for one space.
+///
+/// Overlay draws use the fixed overlay camera. A missing render space accepts every box. Stereo
+/// keeps a box when either eye can see it and does not multiply by the space view. Desktop mono
+/// uses `world_proj * view`, with an explicit camera view winning over the space view.
+fn space_frustum<S>(
+    scene: &S,
+    space_id: RenderSpaceId,
+    is_overlay: bool,
+    culling: &WorldMeshCullInput<'_>,
+) -> SpaceFrustum
+where
+    S: SceneSpaceRead + ?Sized,
+{
+    if is_overlay {
+        return SpaceFrustum::Mono(culling.proj.overlay_proj * overlay_camera_view_matrix());
+    }
+    if scene.space(space_id).is_none() {
+        return SpaceFrustum::AcceptAll;
+    }
+    if let Some((left, right)) = culling.proj.vr_stereo {
+        return SpaceFrustum::Stereo(left, right);
+    }
+    let Some(space) = scene.space(space_id) else {
+        return SpaceFrustum::AcceptAll;
+    };
+    let view = culling
+        .host_camera
+        .explicit_world_to_view()
+        .unwrap_or_else(|| view_matrix_for_world_mesh_render_space(scene, space));
+    SpaceFrustum::Mono(culling.proj.world_proj * view)
+}
+
+/// Hoists the per-draw Hi-Z matrix multiply and pyramid lookup for one space.
+///
+/// [`hi_z_view_proj_matrices`] allocates, and the old fine cull called it for every surviving
+/// draw. The matrices only depend on the space and the temporal snapshot, so one call serves
+/// every box in that space. An empty matrix list or a stereo/desktop mismatch keeps the draw.
+fn prepare_space_hi_z<'a>(
+    space_id: RenderSpaceId,
+    culling: &'a WorldMeshCullInput<'_>,
+) -> Option<PreparedSpaceHiZ<'a>> {
+    let hi_z = culling.hi_z.as_ref()?;
+    let temporal = culling.hi_z_temporal.as_ref()?;
+    if !hi_z_snapshot_matches_temporal(hi_z, temporal) {
+        return None;
+    }
+    // Stereo tests do not multiply by this view, but a missing entry still disables Hi-Z.
+    let prev_view = temporal.prev_view_by_space.get(&space_id).copied()?;
+    match hi_z {
+        HiZCullData::Desktop(snapshot) => {
+            if temporal.prev_cull.vr_stereo.is_some() {
+                return None;
+            }
+            let view_proj = hi_z_view_proj_matrices(&temporal.prev_cull, prev_view, false)
+                .first()
+                .copied()?;
+            Some(PreparedSpaceHiZ::Desktop {
+                snapshot,
+                view_proj,
+            })
+        }
+        HiZCullData::Stereo { left, right } => {
+            let (left_vp, right_vp) = temporal.prev_cull.vr_stereo?;
+            Some(PreparedSpaceHiZ::Stereo {
+                left,
+                right,
+                left_vp,
+                right_vp,
+            })
+        }
     }
 }
 
 /// Returns whether a world-space AABB is visible to the culling frustum for one render space.
 ///
-/// This is the frustum-only portion of [`mesh_cpu_cull_with_geometry`], exposed so CPU spatial
-/// indices can reject whole renderer candidate groups before per-renderer material slots are
-/// expanded.
+/// This is the frustum-only portion of [`mesh_cpu_cull_with_geometry`]. Production spatial
+/// queries build a [`PreparedSpaceCull`] once and call [`PreparedSpaceCull::aabb_visible`].
+#[cfg(test)]
 pub(crate) fn world_aabb_visible_for_cull<S>(
     scene: &S,
     space_id: RenderSpaceId,
@@ -59,65 +311,11 @@ pub(crate) fn world_aabb_visible_for_cull<S>(
 where
     S: SceneSpaceRead + ?Sized,
 {
-    if is_overlay {
-        return cpu_cull_frustum_visible(&culling.proj, true, Mat4::IDENTITY, wmin, wmax);
-    }
-    let Some(space) = scene.space(space_id) else {
-        return true;
-    };
-    let view = culling
-        .host_camera
-        .explicit_world_to_view()
-        .unwrap_or_else(|| view_matrix_for_world_mesh_render_space(scene, space));
-    cpu_cull_frustum_visible(&culling.proj, is_overlay, view, wmin, wmax)
-}
-
-/// Returns `true` when the draw should be **culled** by Hi-Z (fully occluded).
-fn cpu_cull_hi_z_should_cull(
-    space_id: RenderSpaceId,
-    wmin: Vec3,
-    wmax: Vec3,
-    culling: &WorldMeshCullInput<'_>,
-) -> bool {
-    let Some(hi) = &culling.hi_z else {
-        return false;
-    };
-    let Some(temporal) = &culling.hi_z_temporal else {
-        return false;
-    };
-    if !hi_z_snapshot_matches_temporal(hi, temporal) {
-        return false;
-    }
-    let Some(prev_view) = temporal.prev_view_by_space.get(&space_id).copied() else {
-        return false;
-    };
-
-    let passes_hiz = match hi {
-        HiZCullData::Desktop(snap) => {
-            if temporal.prev_cull.vr_stereo.is_some() {
-                true
-            } else {
-                let vps = hi_z_view_proj_matrices(&temporal.prev_cull, prev_view, false);
-                match vps.first().copied() {
-                    None => true,
-                    Some(vp) => !mesh_fully_occluded_in_hiz(snap, vp, wmin, wmax),
-                }
-            }
-        }
-        HiZCullData::Stereo { left, right } => match temporal.prev_cull.vr_stereo {
-            None => true,
-            Some((sl, sr)) => {
-                let oc_l = mesh_fully_occluded_in_hiz(left, sl, wmin, wmax);
-                let oc_r = mesh_fully_occluded_in_hiz(right, sr, wmin, wmax);
-                stereo_hiz_keeps_draw(oc_l, oc_r)
-            }
-        },
-    };
-
-    !passes_hiz
+    PreparedSpaceCull::frustum(scene, space_id, is_overlay, culling).aabb_visible(wmin, wmax)
 }
 
 /// Which CPU cull stage rejected the draw (for diagnostics counters).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CpuCullFailure {
     Frustum,
     HiZ,
@@ -157,12 +355,11 @@ where
 }
 
 /// Like [`mesh_draw_passes_cpu_cull`] but skips the [`mesh_world_geometry_for_cull`] call when
-/// the caller already has a frame-time precomputed [`MeshCullGeometry`] (typical for non-overlay
-/// draws cached on [`crate::world_mesh::draw_prep::FramePreparedRenderables`]).
+/// the caller already has a frame-time precomputed [`MeshCullGeometry`].
 ///
-/// Frustum + Hi-Z tests stay per-view; only the matrix and AABB derivation is amortized. Returns
-/// the same `Result<Option<Mat4>, CpuCullFailure>` as [`mesh_draw_passes_cpu_cull`]. The new
-/// `ui_rect_clip_local` arg behaves the same as in [`mesh_draw_passes_cpu_cull`].
+/// Production collection reuses one [`PreparedSpaceCull`] per space through [`SpaceCullCache`].
+/// This wrapper stays for tests that compare the one-shot path with that cache.
+#[cfg(test)]
 pub(crate) fn mesh_cpu_cull_with_geometry<S>(
     geom: MeshCullGeometry,
     scene: &S,
@@ -174,17 +371,28 @@ pub(crate) fn mesh_cpu_cull_with_geometry<S>(
 where
     S: SceneSpaceRead + ?Sized,
 {
+    let prepared = PreparedSpaceCull::with_hi_z(scene, space_id, is_overlay, culling);
+    mesh_cpu_cull_with_prepared(geom, is_overlay, &prepared, ui_rect_clip_local)
+}
+
+/// Frustum, Hi-Z, and overlay rect tests against a space cull plan built once for many draws.
+fn mesh_cpu_cull_with_prepared(
+    geom: MeshCullGeometry,
+    is_overlay: bool,
+    prepared: &PreparedSpaceCull<'_>,
+    ui_rect_clip_local: Option<Vec4>,
+) -> Result<Option<Mat4>, CpuCullFailure> {
     if is_overlay {
-        return cull_overlay_draw(scene, space_id, culling, ui_rect_clip_local, &geom);
+        return cull_overlay_draw(ui_rect_clip_local, &geom, prepared);
     }
 
     let Some((wmin, wmax)) = geom.world_aabb else {
         return Ok(geom.rigid_world_matrix);
     };
-    if !world_aabb_visible_for_cull(scene, space_id, is_overlay, culling, wmin, wmax) {
+    if !prepared.aabb_visible(wmin, wmax) {
         return Err(CpuCullFailure::Frustum);
     }
-    if cpu_cull_hi_z_should_cull(space_id, wmin, wmax, culling) {
+    if prepared.hi_z_occludes(wmin, wmax) {
         return Err(CpuCullFailure::HiZ);
     }
     Ok(geom.rigid_world_matrix)
@@ -195,20 +403,22 @@ where
 /// Overlay draws bypass the world-space frustum and Hi-Z stages by design -- their model matrix
 /// already encodes screen-space position via
 /// [`crate::scene::SceneCoordinator::overlay_layer_model_matrix_for_context`].
-fn cull_overlay_draw<S>(
-    scene: &S,
-    space_id: RenderSpaceId,
-    culling: &WorldMeshCullInput<'_>,
+fn cull_overlay_draw(
     ui_rect_clip_local: Option<Vec4>,
     geom: &MeshCullGeometry,
-) -> Result<Option<Mat4>, CpuCullFailure>
-where
-    S: SceneSpaceRead + ?Sized,
-{
-    if let (Some(rect), Some(model)) = (ui_rect_clip_local, geom.rigid_world_matrix)
-        && !overlay_rect_clip_visible(scene, space_id, culling, rect, model)
-    {
-        return Err(CpuCullFailure::UiRectMask);
+    prepared: &PreparedSpaceCull<'_>,
+) -> Result<Option<Mat4>, CpuCullFailure> {
+    if let (Some(rect), Some(model)) = (ui_rect_clip_local, geom.rigid_world_matrix) {
+        let corners = [
+            model.transform_point3(Vec3::new(rect.x, rect.y, 0.0)),
+            model.transform_point3(Vec3::new(rect.z, rect.y, 0.0)),
+            model.transform_point3(Vec3::new(rect.z, rect.w, 0.0)),
+            model.transform_point3(Vec3::new(rect.x, rect.w, 0.0)),
+        ];
+        let (wmin, wmax) = aabb_from_points(&corners);
+        if !prepared.aabb_visible(wmin, wmax) {
+            return Err(CpuCullFailure::UiRectMask);
+        }
     }
     Ok(geom.rigid_world_matrix)
 }
@@ -453,5 +663,174 @@ mod overlay_cull_tests {
         let res =
             mesh_cpu_cull_with_geometry(geom, &scene, RenderSpaceId(999), true, &culling, None);
         assert!(matches!(res, Ok(Some(m)) if m == model));
+    }
+}
+
+#[cfg(test)]
+mod prepared_space_cull_tests {
+    use glam::{Mat4, Vec3};
+
+    use super::{
+        PreparedSpaceCull, SpaceCullCache, mesh_cpu_cull_with_geometry, world_aabb_visible_for_cull,
+    };
+    use crate::camera::{HostCameraFrame, reverse_z_perspective};
+    use crate::camera::{overlay_camera_view_matrix, view_matrix_for_world_mesh_render_space};
+    use crate::scene::{RenderSpaceId, SceneCoordinator};
+    use crate::shared::RenderTransform;
+    use crate::world_mesh::culling::frustum::world_aabb_visible_in_homogeneous_clip;
+    use crate::world_mesh::culling::{
+        MeshCullGeometry, WorldMeshCullInput, WorldMeshCullProjParams,
+    };
+
+    fn seeded_scene(space_id: RenderSpaceId) -> SceneCoordinator {
+        let mut scene = SceneCoordinator::new();
+        scene.test_seed_space_identity_worlds(space_id, vec![RenderTransform::default()], vec![-1]);
+        scene
+    }
+
+    fn mono_culling(host_camera: &HostCameraFrame) -> WorldMeshCullInput<'_> {
+        let proj = reverse_z_perspective(16.0 / 9.0, 60f32.to_radians(), 0.1, 100.0);
+        WorldMeshCullInput {
+            proj: WorldMeshCullProjParams {
+                world_proj: proj,
+                overlay_proj: Mat4::IDENTITY,
+                vr_stereo: None,
+            },
+            host_camera,
+            hi_z: None,
+            hi_z_temporal: None,
+        }
+    }
+
+    #[test]
+    fn prepared_frustum_matches_direct_view_projection() {
+        let space_id = RenderSpaceId(3);
+        let scene = seeded_scene(space_id);
+        let host_camera = HostCameraFrame::default();
+        let culling = mono_culling(&host_camera);
+        let space = scene.space(space_id).expect("seeded space");
+        let view_proj =
+            culling.proj.world_proj * view_matrix_for_world_mesh_render_space(&scene, space);
+        let prepared = PreparedSpaceCull::frustum(&scene, space_id, false, &culling);
+
+        let boxes = [
+            (Vec3::new(-0.5, -0.5, -0.5), Vec3::new(0.5, 0.5, 0.5)),
+            (Vec3::new(40.0, 0.0, 0.0), Vec3::new(41.0, 1.0, 1.0)),
+            (Vec3::new(-2.0, -2.0, -8.0), Vec3::new(2.0, 2.0, -1.0)),
+            (Vec3::splat(-100.0), Vec3::splat(-99.0)),
+        ];
+        for (min, max) in boxes {
+            let direct = world_aabb_visible_in_homogeneous_clip(view_proj, min, max);
+            assert_eq!(prepared.aabb_visible(min, max), direct, "{min:?} {max:?}");
+            assert_eq!(
+                world_aabb_visible_for_cull(&scene, space_id, false, &culling, min, max),
+                direct,
+                "{min:?} {max:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_space_stays_visible_before_hi_z() {
+        let scene = SceneCoordinator::new();
+        let host_camera = HostCameraFrame::default();
+        let culling = mono_culling(&host_camera);
+        let min = Vec3::splat(10_000.0);
+        let max = Vec3::splat(10_001.0);
+        let prepared = PreparedSpaceCull::frustum(&scene, RenderSpaceId(404), false, &culling);
+
+        assert!(prepared.aabb_visible(min, max));
+        assert!(world_aabb_visible_for_cull(
+            &scene,
+            RenderSpaceId(404),
+            false,
+            &culling,
+            min,
+            max
+        ));
+    }
+
+    #[test]
+    fn space_cull_cache_matches_per_call_geometry_cull() {
+        let space_id = RenderSpaceId(8);
+        let scene = seeded_scene(space_id);
+        let host_camera = HostCameraFrame::default();
+        let culling = mono_culling(&host_camera);
+        let mut cache = SpaceCullCache::new();
+        let boxes = [
+            (Vec3::new(-0.25, -0.25, -0.25), Vec3::new(0.25, 0.25, 0.25)),
+            (Vec3::new(30.0, 30.0, 30.0), Vec3::new(31.0, 31.0, 31.0)),
+        ];
+        for (min, max) in boxes {
+            let geom = MeshCullGeometry {
+                world_aabb: Some((min, max)),
+                rigid_world_matrix: Some(Mat4::IDENTITY),
+                front_face_world_matrix: Some(Mat4::IDENTITY),
+            };
+            let cached = cache.cull_geometry(geom, &scene, space_id, false, &culling, None);
+            let direct = mesh_cpu_cull_with_geometry(geom, &scene, space_id, false, &culling, None);
+            assert_eq!(cached, direct);
+        }
+    }
+
+    #[test]
+    fn prepared_overlay_frustum_matches_overlay_camera_view_projection() {
+        let scene = SceneCoordinator::new();
+        let host_camera = HostCameraFrame::default();
+        let culling = mono_culling(&host_camera);
+        let view_proj = culling.proj.overlay_proj * overlay_camera_view_matrix();
+        let prepared = PreparedSpaceCull::frustum(&scene, RenderSpaceId(1), true, &culling);
+        let min = Vec3::new(-0.2, -0.2, 0.0);
+        let max = Vec3::new(0.2, 0.2, 0.0);
+
+        assert_eq!(
+            prepared.aabb_visible(min, max),
+            world_aabb_visible_in_homogeneous_clip(view_proj, min, max)
+        );
+    }
+
+    /// Compares one-shot frustum preparation with a reused plan.
+    ///
+    /// Run with `cargo test -p renderide --lib prepared_frustum_reuse_throughput -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "prints a local throughput comparison; run with --ignored --nocapture"]
+    fn prepared_frustum_reuse_throughput() {
+        use std::time::Instant;
+
+        let space_id = RenderSpaceId(3);
+        let scene = seeded_scene(space_id);
+        let host_camera = HostCameraFrame::default();
+        let culling = mono_culling(&host_camera);
+        let boxes: Vec<(Vec3, Vec3)> = (0..20_000)
+            .map(|index| {
+                let x = (index as f32 * 0.37) - 100.0;
+                (Vec3::new(x, -0.5, -2.0), Vec3::new(x + 0.8, 0.5, 2.0))
+            })
+            .collect();
+
+        let once = Instant::now();
+        let mut once_visible = 0usize;
+        for &(min, max) in &boxes {
+            if world_aabb_visible_for_cull(&scene, space_id, false, &culling, min, max) {
+                once_visible += 1;
+            }
+        }
+        let once_elapsed = once.elapsed();
+
+        let reused_start = Instant::now();
+        let prepared = PreparedSpaceCull::frustum(&scene, space_id, false, &culling);
+        let mut reused_visible = 0usize;
+        for &(min, max) in &boxes {
+            if prepared.aabb_visible(min, max) {
+                reused_visible += 1;
+            }
+        }
+        let reused_elapsed = reused_start.elapsed();
+
+        assert_eq!(once_visible, reused_visible);
+        eprintln!(
+            "frustum boxes={} once={once_elapsed:?} reused={reused_elapsed:?} visible={once_visible}",
+            boxes.len()
+        );
     }
 }

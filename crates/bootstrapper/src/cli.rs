@@ -361,8 +361,17 @@ mod tests {
         // SAFETY: env mutation in test; serialized via the process env test lock.
         unsafe {
             env::remove_var(vr_prompt::ENV_SKIP_VR_DIALOG);
+        }
+        // SAFETY: env mutation in test; serialized via the process env test lock.
+        unsafe {
             env::remove_var("CI");
+        }
+        // SAFETY: env mutation in test; serialized via the process env test lock.
+        unsafe {
             env::set_var("DISPLAY", ":0");
+        }
+        // SAFETY: env mutation in test; serialized via the process env test lock.
+        unsafe {
             env::remove_var("WAYLAND_DISPLAY");
         }
         let result = resolve_vr_choice(vec!["-Invisible".to_string()], || None);
@@ -378,8 +387,17 @@ mod tests {
         // SAFETY: env mutation in test; serialized via the process env test lock.
         unsafe {
             env::remove_var(vr_prompt::ENV_SKIP_VR_DIALOG);
+        }
+        // SAFETY: env mutation in test; serialized via the process env test lock.
+        unsafe {
             env::remove_var("CI");
+        }
+        // SAFETY: env mutation in test; serialized via the process env test lock.
+        unsafe {
             env::set_var("DISPLAY", ":0");
+        }
+        // SAFETY: env mutation in test; serialized via the process env test lock.
+        unsafe {
             env::remove_var("WAYLAND_DISPLAY");
         }
         let out = resolve_vr_choice(vec!["-Invisible".to_string()], || Some(true))

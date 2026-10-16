@@ -121,9 +121,9 @@ impl SceneCoordinator {
                 if slot.work_units >= MIN_APPLY_PARALLEL_WORK_UNITS {
                     profiling::scope!("scene::apply::mutate::space_split_slot");
                     apply_work_slot_mutation(slot);
-                } else {
-                    apply_work_slot_mutation(slot);
+                    continue;
                 }
+                apply_work_slot_mutation(slot);
             }
             self.reinsert_applied_work_slots(&mut work);
             self.apply_scratch.work = work;

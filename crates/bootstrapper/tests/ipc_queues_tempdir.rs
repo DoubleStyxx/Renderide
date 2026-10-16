@@ -1,5 +1,8 @@
 //! Integration: [`bootstrapper::ipc::BootstrapQueues`] open/dispose against an isolated backing directory.
 
+#![deny(unsafe_code)]
+#![deny(clippy::multiple_unsafe_ops_per_block)]
+
 use std::sync::Mutex;
 
 use bootstrapper::ipc::{
@@ -11,6 +14,10 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 /// Opens the bootstrapper queue pair with `RENDERIDE_INTERPROCESS_DIR` set to a temp folder, then
 /// drops the handles so `destroy_on_dispose` removes backing storage where applicable.
 #[test]
+#[expect(
+    unsafe_code,
+    reason = "edition 2024 env mutation in tests; serialized by ENV_LOCK"
+)]
 fn bootstrap_queues_open_drop_succeeds_with_env_override() {
     let _guard = ENV_LOCK.lock().expect("env lock");
 
@@ -72,6 +79,10 @@ fn queue_base_names_match_expected_suffixes() {
 
 /// `incoming` and `outgoing` are different queue names; still verify the publisher accepts a write.
 #[test]
+#[expect(
+    unsafe_code,
+    reason = "edition 2024 env mutation in tests; serialized by ENV_LOCK"
+)]
 fn outgoing_try_enqueue_succeeds_on_open_pair() {
     let _guard = ENV_LOCK.lock().expect("env lock");
 

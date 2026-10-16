@@ -220,6 +220,10 @@ impl QueueOptions {
 }
 
 #[cfg(test)]
+#[expect(
+    unsafe_code,
+    reason = "edition 2024 env mutation in tests; serialized by ENV_MUTEX"
+)]
 mod tests {
     use std::sync::Mutex;
 

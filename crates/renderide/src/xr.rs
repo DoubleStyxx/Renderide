@@ -25,6 +25,7 @@
 mod app_integration;
 mod bootstrap;
 mod debug_utils;
+mod frame_loop_policy;
 mod host_camera_sync;
 mod input;
 mod openxr_loader_paths;

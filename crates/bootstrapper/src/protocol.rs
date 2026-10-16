@@ -1,4 +1,9 @@
 //! Host-to-bootstrapper queue messages: heartbeat, clipboard, renderer spawn.
+//!
+//! Production code in this module is safe. Queue-loop tests opt into `unsafe` only
+//! to mutate the process environment under `lock_interprocess_env`.
+
+#![deny(unsafe_code)]
 
 mod command;
 mod queue;
@@ -97,6 +102,10 @@ mod tests {
 }
 
 #[cfg(test)]
+#[expect(
+    unsafe_code,
+    reason = "edition 2024 env mutation in tests; serialized by lock_interprocess_env"
+)]
 mod queue_loop_tests {
     use std::sync::Mutex;
     use std::sync::atomic::AtomicBool;

@@ -81,6 +81,11 @@ pub(crate) fn reject_flat_image(img: &RgbaImage, path: &Path) -> Result<(), Harn
     Ok(())
 }
 
+/// Whether `img` is nearly uniform per channel (clear-only / no draws landed yet).
+pub(crate) fn is_flat_image(img: &RgbaImage) -> bool {
+    flat_sample_rgba_if_nearly_uniform(img).is_some()
+}
+
 /// If the image is nearly uniform per channel, returns a representative RGBA; otherwise [`None`].
 fn flat_sample_rgba_if_nearly_uniform(img: &RgbaImage) -> Option<[u8; 4]> {
     let (w, h) = img.dimensions();

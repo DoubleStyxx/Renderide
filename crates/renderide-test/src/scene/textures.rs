@@ -49,7 +49,7 @@ pub fn alpha_rings_rgba(width: u32, height: u32) -> RgbaImage {
         for x in 0..width {
             let dx = x as f32 + 0.5 - cx;
             let dy = y as f32 + 0.5 - cy;
-            let r = (dx * dx + dy * dy).sqrt() / max_radius;
+            let r = dx.hypot(dy) / max_radius;
             let ring = (r * 8.0).floor() as u32;
             let alpha = if r < 0.95 && ring.is_multiple_of(2) {
                 255

@@ -171,7 +171,7 @@ fn bloom_pipelines() -> &'static BloomPipelineCache {
 /// Bloom pyramid mip count: `max(2, log2(max_mip_dim)) - 1`.
 /// Returns at least 1 so the first downsample always has somewhere to write.
 fn bloom_mip_count(max_mip_dim: u32) -> u32 {
-    let log2 = u32::BITS - max_mip_dim.max(1).leading_zeros() - 1;
+    let log2 = max_mip_dim.max(1).bit_width() - 1;
     log2.max(2) - 1
 }
 

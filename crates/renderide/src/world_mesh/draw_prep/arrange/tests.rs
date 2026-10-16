@@ -111,6 +111,125 @@ fn arranged_signature(items: &[WorldMeshDrawItem]) -> Vec<(usize, i32, i32, bool
         .collect()
 }
 
+/// Reference batch ids from sorting draw indexes by hash, then by the full batch key.
+fn reference_batch_ids(items: &[WorldMeshDrawItem]) -> Vec<u32> {
+    let mut indices: Vec<usize> = (0..items.len()).collect();
+    indices.sort_unstable_by(|&left, &right| {
+        items[left]
+            .batch_key_hash
+            .cmp(&items[right].batch_key_hash)
+            .then_with(|| items[left].batch_key.cmp(&items[right].batch_key))
+    });
+    let mut ids = vec![u32::MAX; items.len()];
+    let mut previous = None::<usize>;
+    let mut batch_id = 0u32;
+    for &index in &indices {
+        if let Some(previous_index) = previous
+            && (items[previous_index].batch_key_hash != items[index].batch_key_hash
+                || items[previous_index].batch_key != items[index].batch_key)
+        {
+            batch_id = batch_id.saturating_add(1);
+        }
+        ids[index] = batch_id;
+        previous = Some(index);
+    }
+    ids
+}
+
+/// Batch ids assigned by the production compact-key sort.
+fn production_batch_ids(items: &[WorldMeshDrawItem]) -> Vec<u32> {
+    let table = super::BatchIdTable::build_from_items(items, false);
+    (0..items.len())
+        .map(|index| table.id_for_index(index))
+        .collect()
+}
+
+#[test]
+fn compact_batch_ids_match_full_item_sort() {
+    let items: Vec<_> = (0..96)
+        .map(|index| opaque((index % 7) as i32, (index % 11) as i32, index))
+        .collect();
+    assert_eq!(production_batch_ids(&items), reference_batch_ids(&items));
+}
+
+/// Compares compact batch-key sorting with the previous index sort over full draw items.
+///
+/// Run with `cargo test -p renderide --lib compact_batch_key_sort_throughput -- --ignored --nocapture`.
+#[test]
+#[ignore = "prints a local throughput comparison; run with --ignored --nocapture"]
+fn compact_batch_key_sort_throughput() {
+    use std::time::Instant;
+
+    let items: Vec<_> = (0..8_192)
+        .map(|index| opaque(index as i32, index as i32, index))
+        .collect();
+    let repeats = 12usize;
+    assert_eq!(production_batch_ids(&items), reference_batch_ids(&items));
+
+    let reference_start = Instant::now();
+    for _ in 0..repeats {
+        std::hint::black_box(reference_batch_ids(&items));
+    }
+    let reference_elapsed = reference_start.elapsed();
+
+    let compact_start = Instant::now();
+    for _ in 0..repeats {
+        std::hint::black_box(production_batch_ids(&items));
+    }
+    let compact_elapsed = compact_start.elapsed();
+
+    eprintln!(
+        "batch-id sort draws={} repeats={repeats} item_size={} reference={reference_elapsed:?} compact={compact_elapsed:?}",
+        items.len(),
+        size_of::<WorldMeshDrawItem>(),
+    );
+}
+
+#[test]
+fn in_place_draw_order_matches_gather_and_keeps_every_item() {
+    let items: Vec<_> = (0..12)
+        .map(|index| opaque((index % 4) as i32, (index % 3) as i32, index))
+        .collect();
+    let order = vec![3, 1, 8, 0, 11, 2, 5, 4, 9, 7, 6, 10];
+    let gathered = super::gather_arranged_draw_order(items.clone(), &order);
+    let mut in_place = items.clone();
+    assert!(super::apply_arranged_draw_order_in_place(
+        &mut in_place,
+        &order
+    ));
+
+    let gathered_ids: Vec<_> = gathered.iter().map(|item| item.collect_order).collect();
+    let in_place_ids: Vec<_> = in_place.iter().map(|item| item.collect_order).collect();
+    assert_eq!(in_place_ids, gathered_ids);
+    assert_eq!(in_place_ids, order);
+
+    let mut unchanged = items;
+    let before: Vec<_> = unchanged.iter().map(|item| item.collect_order).collect();
+    assert!(!super::apply_arranged_draw_order_in_place(
+        &mut unchanged,
+        &[0, 0]
+    ));
+    let after: Vec<_> = unchanged.iter().map(|item| item.collect_order).collect();
+    assert_eq!(after, before);
+}
+
+#[test]
+fn shuffled_opaque_materials_follow_batch_identity_order() {
+    let mut draws: Vec<_> = (0..48)
+        .rev()
+        .map(|index| opaque(index, index, index as usize))
+        .collect();
+    arrange_draws_by_phase_bins(&mut draws, false);
+
+    for pair in draws.windows(2) {
+        let order = pair[0]
+            .batch_key_hash
+            .cmp(&pair[1].batch_key_hash)
+            .then_with(|| pair[0].batch_key.cmp(&pair[1].batch_key));
+        assert_ne!(order, Ordering::Greater);
+    }
+}
+
 #[test]
 fn opaque_bins_keep_same_material_contiguous_without_full_item_sort() {
     let mut repeated_mesh = opaque(10, 1, 0);

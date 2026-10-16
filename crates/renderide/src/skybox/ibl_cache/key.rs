@@ -119,7 +119,7 @@ fn hash_float4(values: &[f32; 4]) -> u64 {
 
 /// Returns the full mip count for a cube face edge.
 pub(crate) fn mip_levels_for_edge(edge: u32) -> u32 {
-    u32::BITS - edge.max(1).leading_zeros()
+    edge.max(1).bit_width()
 }
 
 /// Returns the dispatch group count along one 8x8 compute dimension.

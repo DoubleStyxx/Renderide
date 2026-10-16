@@ -1,5 +1,7 @@
 //! File-first logging for the Renderide workspace (bootstrapper, captured host output, renderer,
 //! and renderer-test harness).
+
+#![cfg_attr(not(test), forbid(unsafe_code))]
 //!
 //! ## API split
 //!

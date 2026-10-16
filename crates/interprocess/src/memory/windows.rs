@@ -1,5 +1,10 @@
 //! Named file mapping on Windows (`CT_IP_{name}`).
 
+#![expect(
+    unsafe_code,
+    reason = "CreateFileMapping / MapViewOfFile / OpenFileMapping FFI for the named queue section"
+)]
+
 use std::ffi::OsStr;
 use std::io;
 use std::os::windows::ffi::OsStrExt;

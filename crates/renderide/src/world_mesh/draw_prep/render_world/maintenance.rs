@@ -291,49 +291,48 @@ impl RenderWorld {
     ) -> Vec<RenderWorldRendererDirty> {
         let node_count = cached.node_index.len();
         let policy = FrameParallelPolicy::for_current_thread_pool();
-        match transform_root_node_scan_admission(policy, node_count).chunk_size() {
-            Some(chunk_size) => {
-                profiling::scope!("mesh::render_world::expand_transform_roots::node_scan_parallel");
-                let entries = cached.node_index.iter().collect::<Vec<_>>();
-                entries
-                    .par_chunks(chunk_size)
-                    .with_min_len(1)
-                    .map(|chunk| {
-                        profiling::scope!(
-                            "mesh::render_world::expand_transform_roots::node_scan_worker"
-                        );
-                        let mut renderers = Vec::new();
-                        for &(node_id, refs) in chunk {
-                            push_transform_node_renderer_dirties(
-                                &mut renderers,
-                                dirty.space_id,
-                                *node_id,
-                                refs,
-                                parents,
-                                &dirty.root_node_ids,
-                            );
-                        }
-                        renderers
-                    })
-                    .reduce(Vec::new, |mut left, mut right| {
-                        left.append(&mut right);
-                        left
-                    })
-            }
-            None => {
-                let mut renderers = Vec::new();
-                for (&node_id, refs) in &cached.node_index {
-                    push_transform_node_renderer_dirties(
-                        &mut renderers,
-                        dirty.space_id,
-                        node_id,
-                        refs,
-                        parents,
-                        &dirty.root_node_ids,
+        if let Some(chunk_size) =
+            transform_root_node_scan_admission(policy, node_count).chunk_size()
+        {
+            profiling::scope!("mesh::render_world::expand_transform_roots::node_scan_parallel");
+            let entries = cached.node_index.iter().collect::<Vec<_>>();
+            entries
+                .par_chunks(chunk_size)
+                .with_min_len(1)
+                .map(|chunk| {
+                    profiling::scope!(
+                        "mesh::render_world::expand_transform_roots::node_scan_worker"
                     );
-                }
-                renderers
+                    let mut renderers = Vec::new();
+                    for &(node_id, refs) in chunk {
+                        push_transform_node_renderer_dirties(
+                            &mut renderers,
+                            dirty.space_id,
+                            *node_id,
+                            refs,
+                            parents,
+                            &dirty.root_node_ids,
+                        );
+                    }
+                    renderers
+                })
+                .reduce(Vec::new, |mut left, mut right| {
+                    left.append(&mut right);
+                    left
+                })
+        } else {
+            let mut renderers = Vec::new();
+            for (&node_id, refs) in &cached.node_index {
+                push_transform_node_renderer_dirties(
+                    &mut renderers,
+                    dirty.space_id,
+                    node_id,
+                    refs,
+                    parents,
+                    &dirty.root_node_ids,
+                );
             }
+            renderers
         }
     }
 

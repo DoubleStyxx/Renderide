@@ -135,6 +135,18 @@ impl PngStabilityState {
         self.stable_since = Some(now);
         PngStabilityVerdict::Pending
     }
+
+    /// Rejects the current stable candidate so only a strictly newer PNG write can become
+    /// `Stable`. Used when the candidate is a flat clear-only frame rendered before async
+    /// material pipelines finished compiling.
+    pub fn reject_candidate(&mut self) {
+        self.stable_since = None;
+    }
+}
+
+/// Whether the PNG at `path` decodes to a flat single-color image.
+fn png_is_flat(path: &Path) -> bool {
+    crate::image_io::load_rgba(path).is_ok_and(|img| crate::golden::is_flat_image(&img))
 }
 
 /// Reads the current observation of `output_path`. Maps any I/O failure to
@@ -165,6 +177,7 @@ pub(super) fn run_lockstep_until_png_stable(
     let deadline_floor = state.min_wall_after_submit() + timing::PNG_DEADLINE_SLACK;
     let deadline = Instant::now() + wait_timing.overall_timeout.max(deadline_floor);
     let mut last_log_at = Instant::now();
+    let mut flat_candidate_seen = false;
 
     while Instant::now() < deadline {
         let _ = lockstep.tick(queues);
@@ -185,6 +198,20 @@ pub(super) fn run_lockstep_until_png_stable(
             state.observe(now, read_png_observation(output_path)),
             PngStabilityVerdict::Stable
         ) {
+            // Pipelines compile asynchronously; draws whose pipeline is still pending are
+            // skipped (materials/registry.rs), so an early frame can be clear-only. Keep
+            // pumping for a later write instead of capturing it.
+            if png_is_flat(output_path) {
+                if !flat_candidate_seen {
+                    logger::info!(
+                        "Session: stable PNG is flat; waiting for a later frame (pipelines may still be compiling)"
+                    );
+                }
+                flat_candidate_seen = true;
+                state.reject_candidate();
+                std::thread::sleep(timing::POLL_INTERVAL);
+                continue;
+            }
             logger::info!(
                 "Session: fresh PNG stabilized at {} after {:?}",
                 output_path.display(),
@@ -206,6 +233,14 @@ pub(super) fn run_lockstep_until_png_stable(
             last_log_at = now;
         }
         std::thread::sleep(timing::POLL_INTERVAL);
+    }
+
+    if flat_candidate_seen {
+        // Never rendered anything but a flat frame: hand it to the golden check so the
+        // failure is reported as "flat single color" rather than "missing PNG".
+        return Ok(SceneSessionOutcome {
+            png_path: output_path.to_path_buf(),
+        });
     }
 
     Err(HarnessError::PngOutputMissing {

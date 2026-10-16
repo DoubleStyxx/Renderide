@@ -1,4 +1,6 @@
-//! Authority-side IPC setup: opens the four Cloudtoid queues with an explicit per-session
+//! Authority-side IPC setup for the harness.
+//!
+//! Opens the four Cloudtoid queues with an explicit per-session
 //! tempdir and generates unique `-QueueName` / `shared_memory_prefix` strings so multiple
 //! harness runs in the same process (e.g. `cargo test` parallel threads) do not collide on
 //! `/dev/shm/.cloudtoid/...` files. The renderer child process is given the matching tempdir

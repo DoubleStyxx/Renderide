@@ -8,7 +8,9 @@ use glam::{Vec2, Vec3};
 
 use super::mesh::{Mesh, Vertex};
 
-/// Generates a torus with `major_segments` divisions around the large circle and
+/// Generates a torus mesh.
+///
+/// Uses `major_segments` divisions around the large circle and
 /// `minor_segments` divisions around the tube cross-section. `major_radius` is the distance
 /// from the torus center to the tube center; `minor_radius` is the tube cross-section radius.
 ///

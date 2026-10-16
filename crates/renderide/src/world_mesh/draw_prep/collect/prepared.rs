@@ -9,8 +9,7 @@ use crate::scene::{RenderSpaceId, SkinnedMeshRenderer};
 use crate::shared::LayerType;
 
 use crate::world_mesh::culling::{
-    CpuCullFailure, MeshCullTarget, mesh_cpu_cull_with_geometry,
-    mesh_world_geometry_for_cull_with_head,
+    CpuCullFailure, MeshCullTarget, SpaceCullCache, mesh_world_geometry_for_cull_with_head,
 };
 use crate::world_mesh::materials::FrameMaterialBatchCache;
 
@@ -114,13 +113,14 @@ fn prepared_run_skinned_renderer<'a>(
 }
 
 /// Builds shared view-local state for one prepared renderer run and reports draw-slot cull stats.
-fn prepared_run_view_state(
+fn prepared_run_view_state<'a>(
     run: &[FramePreparedDraw],
     first: &FramePreparedDraw,
     is_overlay: bool,
     mesh: &crate::assets::mesh::GpuMesh,
     skinning: &PreparedRunSkinning<'_>,
-    ctx: &DrawCollectionInputs<'_>,
+    ctx: &DrawCollectionInputs<'a>,
+    cull_cache: &mut SpaceCullCache<'a>,
 ) -> (Option<PreparedRunViewState>, (usize, usize, usize)) {
     let mut cull_stats = (0usize, 0usize, 0usize);
     let mut rigid_world_matrix = None;
@@ -157,7 +157,7 @@ fn prepared_run_view_state(
         deformed_front_face_world_matrix = geom.front_face_world_matrix;
         if let Some(c) = ctx.view.culling {
             cull_stats.0 += run.len();
-            match mesh_cpu_cull_with_geometry(
+            match cull_cache.cull_geometry(
                 geom,
                 ctx.scene_assets.scene,
                 first.space_id,
@@ -257,10 +257,11 @@ fn append_prepared_run_draws(
 }
 
 /// Collects one prepared renderer run after frame-global slot expansion.
-fn collect_prepared_renderer_run(
+fn collect_prepared_renderer_run<'a>(
     run: &[FramePreparedDraw],
-    ctx: &DrawCollectionInputs<'_>,
+    ctx: &DrawCollectionInputs<'a>,
     state: CollectState<'_>,
+    cull_cache: &mut SpaceCullCache<'a>,
     out: &mut Vec<WorldMeshDrawItem>,
 ) -> (usize, usize, usize) {
     let Some(first) = run.first() else {
@@ -301,7 +302,7 @@ fn collect_prepared_renderer_run(
         return (0, 0, 0);
     }
     let (view_state, cull_stats) =
-        prepared_run_view_state(run, first, is_overlay, mesh, &skinning, ctx);
+        prepared_run_view_state(run, first, is_overlay, mesh, &skinning, ctx, cull_cache);
     if let Some(view_state) = view_state {
         append_prepared_run_draws(run, ctx, state.cache, mesh, is_overlay, view_state, out);
     }
@@ -315,10 +316,10 @@ fn collect_prepared_renderer_run(
 /// (material override, submesh index range, overlay flag, skin deform flag). This per-view pass
 /// only applies filters and per-view CPU culling per renderer, then builds [`WorldMeshDrawItem`]s
 /// for each material slot.
-pub(super) fn collect_prepared_chunk(
+pub(super) fn collect_prepared_chunk<'a>(
     draws: &[FramePreparedDraw],
     runs: &[FramePreparedRun],
-    ctx: &DrawCollectionInputs<'_>,
+    ctx: &DrawCollectionInputs<'a>,
     state: CollectState<'_>,
 ) -> (Vec<WorldMeshDrawItem>, (usize, usize, usize)) {
     profiling::scope!("mesh::collect_prepared::chunk");
@@ -330,6 +331,7 @@ pub(super) fn collect_prepared_chunk(
     };
     let mut out: Vec<WorldMeshDrawItem> = Vec::with_capacity(chunk_draws);
     let mut cull_stats = (0usize, 0usize, 0usize);
+    let mut cull_cache = SpaceCullCache::<'a>::new();
 
     {
         profiling::scope!("mesh::collect_prepared::renderer_runs");
@@ -337,7 +339,8 @@ pub(super) fn collect_prepared_chunk(
             let start = prepared_run.start as usize;
             let end = prepared_run.end as usize;
             let run = &draws[start..end];
-            let run_stats = collect_prepared_renderer_run(run, ctx, state, &mut out);
+            let run_stats =
+                collect_prepared_renderer_run(run, ctx, state, &mut cull_cache, &mut out);
             cull_stats.0 += run_stats.0;
             cull_stats.1 += run_stats.1;
             cull_stats.2 += run_stats.2;
