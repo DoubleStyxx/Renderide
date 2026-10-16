@@ -325,13 +325,42 @@ impl GtaoMainPipelineCache {
 
 // ---- depth prefilter pipeline cache ---------------------------------------
 
+/// Identity key for the combined depth-prefilter bind group. All members are Arc-backed wgpu
+/// handles compared by identity; the destination mip views come from the per-texture view cache,
+/// so the key is stable frame-to-frame until the transient pool hands out a new allocation.
+#[derive(Clone, Eq, Hash, PartialEq)]
+pub(super) struct GtaoPrefilterBindGroupKey {
+    pub depth_texture: wgpu::Texture,
+    pub layer_count: u32,
+    pub multiview_stereo: bool,
+    pub frame_uniforms: wgpu::Buffer,
+    pub params: wgpu::Buffer,
+    pub outputs: [wgpu::TextureView; 5],
+}
+
+/// Upper bound on cached prefilter bind groups (views x pool generations).
+const MAX_CACHED_PREFILTER_BIND_GROUPS: usize = 16;
+
 /// Compute pipelines and layouts for the combined GTAO view-space depth prefilter.
-#[derive(Default)]
 pub(super) struct GtaoDepthPrefilterPipelineCache {
     bind_group_layout_mono: OnceGpu<wgpu::BindGroupLayout>,
     bind_group_layout_stereo: OnceGpu<wgpu::BindGroupLayout>,
     pipeline_mono: OnceGpu<Arc<wgpu::ComputePipeline>>,
     pipeline_stereo: OnceGpu<Arc<wgpu::ComputePipeline>>,
+    /// Cached combined bind groups; avoids one depth view + one bind group per view per frame.
+    pub(super) bind_groups: BindGroupMap<GtaoPrefilterBindGroupKey>,
+}
+
+impl Default for GtaoDepthPrefilterPipelineCache {
+    fn default() -> Self {
+        Self {
+            bind_group_layout_mono: OnceGpu::default(),
+            bind_group_layout_stereo: OnceGpu::default(),
+            pipeline_mono: OnceGpu::default(),
+            pipeline_stereo: OnceGpu::default(),
+            bind_groups: BindGroupMap::with_max_entries(MAX_CACHED_PREFILTER_BIND_GROUPS),
+        }
+    }
 }
 
 impl GtaoDepthPrefilterPipelineCache {

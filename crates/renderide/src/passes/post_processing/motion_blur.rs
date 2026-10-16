@@ -30,7 +30,7 @@ use crate::passes::post_processing::settings_slots::{
 use crate::render_graph::builder::GraphBuilder;
 use crate::render_graph::context::{PassFrameContext, RasterPassCtx};
 use crate::render_graph::error::{RenderPassError, SetupError};
-use crate::render_graph::gpu_cache::{create_d2_array_view, raster_stereo_mask_override};
+use crate::render_graph::gpu_cache::raster_stereo_mask_override;
 use crate::render_graph::pass::{PassBuilder, RasterPass, RenderPassTemplate};
 use crate::render_graph::post_process_chain::{
     EffectPasses, PostProcessEffect, PostProcessEffectId,
@@ -210,7 +210,7 @@ impl RasterPass for MotionVectorsPass {
             output_format,
             frame.view.multiview_stereo,
         );
-        let bind_group = self.pipelines.motion_vectors_bind_group(
+        let bind_group = self.pipelines.cached_motion_vectors_bind_group(
             ctx.device,
             depth_view,
             &state.motion_vector_params_buffer,
@@ -309,16 +309,6 @@ impl RasterPass for MotionBlurResolvePass {
         let state = self.state_cache.ensure(ctx.device, frame.view.view_id);
         ctx.write_buffer(&state.blur_params_buffer, 0, bytemuck::bytes_of(&params));
 
-        let input_view = create_d2_array_view(
-            &input.texture,
-            "motion_blur_scene_color",
-            frame.view.multiview_stereo,
-        );
-        let velocity_view = create_d2_array_view(
-            &velocity.texture,
-            "motion_blur_velocity",
-            frame.view.multiview_stereo,
-        );
         let output_format =
             transient_output_format_or(self.output, ctx.graph_resources, DEFAULT_OUTPUT_FORMAT);
         let pipeline = self.pipelines.pipeline(
@@ -327,11 +317,12 @@ impl RasterPass for MotionBlurResolvePass {
             output_format,
             frame.view.multiview_stereo,
         );
-        let bind_group = self.pipelines.blur_bind_group(
+        let bind_group = self.pipelines.cached_blur_bind_group(
             ctx.device,
-            &input_view,
-            &velocity_view,
+            &input.texture,
+            &velocity.texture,
             &state.blur_params_buffer,
+            frame.view.multiview_stereo,
         );
         rpass.set_pipeline(pipeline.as_ref());
         rpass.set_bind_group(1, &bind_group, &[]);
