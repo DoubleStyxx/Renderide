@@ -4,6 +4,7 @@ mod properties;
 mod property_registry;
 mod update_batch;
 
+pub(crate) use properties::MergedPropertyMaps;
 pub use properties::{
     MaterialDictionary, MaterialPropertyLookupIds, MaterialPropertyStore, MaterialPropertyValue,
 };

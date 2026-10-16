@@ -1,10 +1,13 @@
 //! Explicit material uniform value-space metadata.
 
+use std::sync::OnceLock;
+
 use hashbrown::HashMap;
 
 use crate::materials::{ReflectedRasterLayout, ReflectedUniformScalarKind};
 
 use super::helpers::shader_writer_unescaped_field_name;
+use super::plan::CachedUniformPlan;
 
 /// Host value space expected for a reflected material uniform field.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -15,9 +18,28 @@ enum MaterialUniformValueSpace {
 }
 
 /// Per-stem material uniform value-space overrides.
-#[derive(Clone, Debug, Default)]
+///
+/// `cached_plan` remembers the first pack of this value-space set. A later pack with a
+/// different layout compiles a fresh plan and leaves the cache alone.
+#[derive(Debug, Default)]
 pub(crate) struct MaterialUniformValueSpaces {
     fields: HashMap<String, MaterialUniformValueSpace>,
+    cached_plan: OnceLock<CachedUniformPlan>,
+}
+
+impl Clone for MaterialUniformValueSpaces {
+    fn clone(&self) -> Self {
+        Self {
+            fields: self.fields.clone(),
+            cached_plan: OnceLock::new(),
+        }
+    }
+}
+
+impl MaterialUniformValueSpaces {
+    pub(super) fn cached_plan(&self) -> &OnceLock<CachedUniformPlan> {
+        &self.cached_plan
+    }
 }
 
 impl MaterialUniformValueSpaces {
@@ -44,7 +66,10 @@ impl MaterialUniformValueSpaces {
                 fields.insert(field_name.clone(), value_space);
             }
         }
-        Self { fields }
+        Self {
+            fields,
+            cached_plan: OnceLock::new(),
+        }
     }
 
     /// Returns whether the reflected `vec4<f32>` field should be converted from sRGB to linear RGB.
