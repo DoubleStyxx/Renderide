@@ -14,7 +14,7 @@ internal static class CustomIpcDispatcher
     /// <summary>
     /// Invoked from the <see cref="Patches.RenderSystemSubmitFramePatch"/>
     /// postfix, after FrooxEngine has finished sending its own frame data.
-    /// Flushes custom shader uploads queued by <see cref="RenderideMod.CustomShaders"/>.
+    /// Flushes property-id requests and custom shader uploads.
     /// </summary>
     /// <param name="renderSystem">The engine's active render system.</param>
     internal static void DispatchAfterFrameSubmit(RenderSystem renderSystem)
@@ -26,6 +26,7 @@ internal static class CustomIpcDispatcher
             return;
         }
 
+        MaterialPropertyIds.Flush(messagingHost);
         CustomShaderQueue.Flush(messagingHost);
     }
 }
