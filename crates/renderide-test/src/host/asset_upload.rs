@@ -16,7 +16,7 @@ pub(super) use material::{
     pack_texture2d_handle, request_property_ids,
 };
 pub(super) use mesh::{MeshUploadRequest, UploadedMesh, upload_mesh};
-pub(super) use shader::upload_shader;
+pub(super) use shader::{upload_shader, upload_shader_file};
 pub(super) use texture::{Texture2DUploadRequest, upload_texture2d_rgba8};
 
 /// Default deadline for receiving an asset acknowledgement after sending upload data.

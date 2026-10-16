@@ -61,6 +61,9 @@ pub enum CaseTemplate {
         /// Fixture path loaded by the runner.
         path: PathBuf,
     },
+    /// Custom rainbow material rendered twice. `actual.png` is the frame after `_Color` and
+    /// `RAINBOW` change. `plain.png` is the frame before that update.
+    CustomShaderPropertyUpdate,
 }
 
 /// Default golden directory, relative to the workspace root: `crates/renderide-test/goldens/`.
@@ -157,6 +160,29 @@ pub fn alpha_cutout_masked_quads() -> IntegrationCase {
     }
 }
 
+/// Custom rainbow shader assigned to one material. The first frame samples `_MainTex * _Color`
+/// with `RAINBOW` off. The second frame changes `_Color` and turns `RAINBOW` on. `_Speed` is 0.
+pub fn custom_shader_property_update() -> IntegrationCase {
+    IntegrationCase {
+        name: "custom_shader_property_update".to_string(),
+        description:
+            "Rainbow custom shader on one material. The pre-update frame is _MainTex * _Color with RAINBOW off. The compared frame changes _Color and turns RAINBOW on. _Speed stays 0."
+                .to_string(),
+        golden_path: default_goldens_dir().join("custom_shader_property_update.png"),
+        resolution: (320, 320),
+        tolerance: Tolerance {
+            ssim_min: Some(0.72),
+            max_abs_diff: Some(56),
+            max_failing_pixel_fraction: Some(0.22),
+            min_luma_range: Some(20),
+            min_unique_colors: Some(8),
+            min_non_background_pixel_fraction: Some(0.12),
+            combine: Combine::And,
+        },
+        template: CaseTemplate::CustomShaderPropertyUpdate,
+    }
+}
+
 /// Optional GLB fixture case. The registry includes it only when the fixture file is present,
 /// so the suite remains useful before a commit-safe model has been added.
 pub fn gltf_textured_static_mesh(path: PathBuf) -> IntegrationCase {
@@ -179,6 +205,7 @@ pub fn registry() -> Vec<IntegrationCase> {
         multi_primitive_unlit_grid(),
         pbs_lit_material_matrix(),
         alpha_cutout_masked_quads(),
+        custom_shader_property_update(),
     ];
     let gltf_fixture = default_fixture_path();
     if gltf_fixture.is_file() {
@@ -190,6 +217,22 @@ pub fn registry() -> Vec<IntegrationCase> {
 /// Looks up a case by [`IntegrationCase::name`].
 pub fn lookup(name: &str) -> Option<IntegrationCase> {
     registry().into_iter().find(|c| c.name == name)
+}
+
+impl IntegrationCase {
+    /// Golden for the pre-update capture, when this case records two frames.
+    pub fn plain_capture_golden(&self) -> Option<PathBuf> {
+        match self.template {
+            CaseTemplate::CustomShaderPropertyUpdate => Some(plain_png_path(&self.golden_path)),
+            _ => None,
+        }
+    }
+}
+
+fn plain_png_path(golden: &std::path::Path) -> PathBuf {
+    let mut name = golden.file_stem().unwrap_or_default().to_os_string();
+    name.push("_plain.png");
+    golden.with_file_name(name)
 }
 
 fn visual_tolerance(
@@ -269,6 +312,26 @@ mod tests {
                 case.name,
                 case.golden_path.display()
             );
+            if let Some(plain) = case.plain_capture_golden() {
+                assert!(
+                    plain.is_file(),
+                    "{} plain golden missing at {}",
+                    case.name,
+                    plain.display()
+                );
+            }
         }
+    }
+
+    #[test]
+    fn custom_shader_property_update_has_a_plain_golden() {
+        let case = lookup("custom_shader_property_update").expect("registered");
+        assert_eq!(
+            case.plain_capture_golden()
+                .and_then(|path| path.file_name().map(|name| name.to_os_string())),
+            Some(std::ffi::OsString::from(
+                "custom_shader_property_update_plain.png"
+            ))
+        );
     }
 }

@@ -213,6 +213,9 @@ fn prepare_template(
                 },
             })
         }
+        CaseTemplate::CustomShaderPropertyUpdate => Ok(PreparedTemplate {
+            session_template: SessionTemplate::CustomShaderPropertyUpdate,
+        }),
         CaseTemplate::GltfTexturedStaticMesh { path } => {
             let imported = load_static_textured_mesh(path)?;
             let texture_size = imported.texture_size;
@@ -287,7 +290,14 @@ fn evaluate_and_finalize(
                     layout.diff_png.display()
                 );
             }
-            let report = report_from_evaluation(case, eval);
+            let mut report = report_from_evaluation(case, eval);
+            if let Err(message) = plain_capture_failure(case, &layout) {
+                report.passed = false;
+                report.error = Some(match report.error.take() {
+                    Some(existing) => format!("{existing}; {message}"),
+                    None => message,
+                });
+            }
             write_report(&layout, &report)
                 .map_err(|e| HarnessError::QueueOptions(format!("write report: {e}")))?;
             Ok(CaseRunOutcome { layout, report })
@@ -298,6 +308,49 @@ fn evaluate_and_finalize(
             Ok(CaseRunOutcome { layout, report })
         }
     }
+}
+
+/// Compares the pre-update `plain.png` when this case records two frames.
+///
+/// Returns `Ok(())` when the case has no companion capture or the companion matches.
+/// Returns `Err(message)` when the companion is missing or outside tolerance.
+fn plain_capture_failure(case: &IntegrationCase, layout: &CaseOutputLayout) -> Result<(), String> {
+    let Some(golden_path) = case.plain_capture_golden() else {
+        return Ok(());
+    };
+    let actual_path = layout.actual_png.with_file_name("plain.png");
+    if !actual_path.is_file() {
+        return Err(format!(
+            "plain capture missing at {}",
+            actual_path.display()
+        ));
+    }
+    if !golden_path.is_file() {
+        return Err(format!(
+            "plain golden missing at {}; run `renderide-test update-suite --case {}`",
+            golden_path.display(),
+            case.name
+        ));
+    }
+    let actual = load_rgba(&actual_path).map_err(|err| err.to_string())?;
+    let golden = load_rgba(&golden_path).map_err(|err| err.to_string())?;
+    crate::golden::reject_flat_image(&actual, &actual_path).map_err(|err| err.to_string())?;
+    crate::golden::reject_flat_image(&golden, &golden_path).map_err(|err| err.to_string())?;
+    let eval = case.tolerance.evaluate(&actual, &golden)?;
+    if eval.passed {
+        return Ok(());
+    }
+    let diff_path = layout.root.join("plain_diff.png");
+    if let Err(err) = write_diff_image(&actual, &golden, &diff_path) {
+        logger::warn!(
+            "runner: failed to write plain diff PNG at {}: {err}",
+            diff_path.display()
+        );
+    }
+    Err(format!(
+        "plain capture failed tolerance (ssim={:?}, failing_fraction={:?})",
+        eval.ssim, eval.failing_pixel_fraction
+    ))
 }
 
 #[cfg(test)]
