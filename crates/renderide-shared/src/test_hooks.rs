@@ -1,4 +1,6 @@
-//! Test-only hooks shared between the harness and renderer. These do not affect production
+//! Test-only hooks shared between the harness and renderer.
+//!
+//! These do not affect production
 //! behavior -- the production host never produces the prefix below, so the renderer's
 //! AssetBundle resolution path is unchanged when running attached to a real host.
 //!

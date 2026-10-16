@@ -58,7 +58,7 @@ pub(crate) const RENDER_TIME_UNAVAILABLE: f32 = -1.0;
 ///
 /// `last_frame_render_time_seconds` should be the value returned by
 /// [`crate::gpu::GpuContext::last_completed_gpu_render_time_seconds`] mapped through
-/// `unwrap_or(`[`RENDER_TIME_UNAVAILABLE`]`)`.
+/// `unwrap_or(RENDER_TIME_UNAVAILABLE)` (see [`RENDER_TIME_UNAVAILABLE`]).
 ///
 /// `windowed_fps` is the most recently computed value from the count-based [`FPS_WINDOW`] window,
 /// or `0.0` before the first window has completed.

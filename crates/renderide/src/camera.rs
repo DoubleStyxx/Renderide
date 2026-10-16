@@ -59,6 +59,7 @@ pub(crate) use view_id::SecondaryCameraId;
 pub use view_id::ViewId;
 
 #[cfg(test)]
+#[expect(clippy::float_cmp, reason = "tests compare exact constructed values")]
 mod tests {
     use glam::{Mat4, Quat, Vec3};
     use openxr::Fovf;

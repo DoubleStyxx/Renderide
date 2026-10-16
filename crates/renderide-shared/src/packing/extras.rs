@@ -1,5 +1,6 @@
-//! Supplementary [`super::memory_packable::MemoryPackable`] impls for generated
-//! [`crate::shared`] structs the generator's Pod classifier skipped (non-primitive composites
+//! Supplementary [`super::memory_packable::MemoryPackable`] impls for generated structs.
+//!
+//! Covers [`crate::shared`] structs the generator's Pod classifier skipped (non-primitive composites
 //! whose serialization plumbing would otherwise have to be hand-rolled at every call site).
 //!
 //! Byte layout must match the host's `StructLayout.Sequential` records field-for-field.

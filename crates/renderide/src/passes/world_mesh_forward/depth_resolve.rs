@@ -64,7 +64,6 @@ pub(super) fn encode_msaa_depth_resolve_for_frame(
                 limits,
                 profiler,
             );
-            true
         }
         MsaaDepthResolveViews::Mono {
             msaa_depth_view,
@@ -83,7 +82,7 @@ pub(super) fn encode_msaa_depth_resolve_for_frame(
                 limits,
                 profiler,
             );
-            true
         }
     }
+    true
 }

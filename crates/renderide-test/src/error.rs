@@ -152,7 +152,7 @@ mod tests {
         let s = e.to_string();
         assert!(s.contains("headless.png"));
         assert!(s.contains("expected fresh PNG output"));
-        assert!(s.contains("7"));
+        assert!(s.contains('7'));
     }
 
     #[test]

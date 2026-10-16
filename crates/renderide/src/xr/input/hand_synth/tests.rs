@@ -1,3 +1,5 @@
+#![expect(clippy::float_cmp, reason = "tests compare exact constructed values")]
+
 use super::*;
 use crate::shared::{BodyNode, TouchControllerModel, TouchControllerState};
 

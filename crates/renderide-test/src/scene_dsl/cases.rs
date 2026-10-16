@@ -83,8 +83,10 @@ pub fn unlit_sphere() -> IntegrationCase {
     }
 }
 
-/// Procedural torus rendered with an embedded unlit shader (`Unlit.shader` resolved through
-/// the test-only `RENDERIDE_TEST_STEM:` sentinel with the `_TEXTURE` variant bit) and the
+/// Procedural torus rendered with an embedded unlit shader.
+///
+/// `Unlit.shader` is resolved through
+/// the test-only `RENDERIDE_TEST_STEM:` sentinel with the `_TEXTURE` variant bit, with the
 /// CPU-generated Perlin noise bound to the material's `_Tex` slot via the IPC upload chain.
 pub fn torus_unlit_perlin() -> IntegrationCase {
     IntegrationCase {
