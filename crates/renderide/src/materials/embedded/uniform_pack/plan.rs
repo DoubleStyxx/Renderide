@@ -36,6 +36,8 @@ const KIND_VEC3: u8 = 9;
 const KIND_F32_ARRAY: u8 = 10;
 const KIND_VEC4_ARRAY: u8 = 11;
 const FLAG_SRGB: u8 = 1;
+/// Set on an `f32` field whose host value packs as 0 or 1.
+const FLAG_QUANTIZE: u8 = 2;
 const RENDERIDE_VARIANT_BITS_FIELD: &str = "_RenderideVariantBits";
 
 #[derive(Debug)]
@@ -73,6 +75,7 @@ pub(super) struct UniformPlanCacheKey {
     reflected: usize,
     ids: usize,
     defaults: usize,
+    quantize_toggle_floats: bool,
 }
 
 /// Plan cached on the value-space object that was first packed with `key`.
@@ -86,11 +89,13 @@ pub(super) fn uniform_plan_cache_key(
     reflected: &ReflectedRasterLayout,
     ids: &StemEmbeddedPropertyIds,
     defaults: &super::MaterialUniformDefaults,
+    quantize_toggle_floats: bool,
 ) -> UniformPlanCacheKey {
     UniformPlanCacheKey {
         reflected: std::ptr::from_ref(reflected) as usize,
         ids: std::ptr::from_ref(ids) as usize,
         defaults: std::ptr::from_ref(defaults) as usize,
+        quantize_toggle_floats,
     }
 }
 
@@ -319,7 +324,8 @@ fn f32_property(
     maps: &crate::materials::host_data::MergedPropertyMaps<'_>,
 ) -> f32 {
     if let Some(MaterialPropertyValue::Float(value)) = maps.get(field.pid) {
-        *value
+        // The flag records the classify-time name check. `_TOGGLE` only satisfies that helper.
+        super::quantize_toggle_float(field.flags & FLAG_QUANTIZE != 0, "_TOGGLE", *value)
     } else {
         f32::from_bits(field.aux)
     }
@@ -420,6 +426,13 @@ fn classify_f32(
     }
     planned.kind = KIND_F32;
     planned.aux = missing_f32_uniform_default(field_name, ctx.metadata.material_defaults).to_bits();
+    if ctx.metadata.quantize_toggle_floats
+        && crate::materials::custom_shader::is_toggle_style_property_name(
+            shader_writer_unescaped_field_name(field_name),
+        )
+    {
+        planned.flags |= FLAG_QUANTIZE;
+    }
     planned
 }
 

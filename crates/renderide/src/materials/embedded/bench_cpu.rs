@@ -330,6 +330,7 @@ impl UniformInner {
             &MaterialUniformPackMetadata {
                 value_spaces: &self.value_spaces,
                 material_defaults: &self.defaults,
+                quantize_toggle_floats: false,
             },
             &self.store,
             lookup,

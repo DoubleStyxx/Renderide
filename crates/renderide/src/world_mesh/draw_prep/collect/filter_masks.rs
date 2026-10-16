@@ -133,6 +133,7 @@ mod tests {
                 router: &router,
                 pipeline_property_ids: &property_ids,
                 shader_perm: Default::default(),
+                property_registry: Some(&registry),
             },
             view: DrawCollectionViewInputs {
                 render_context: RenderingContext::UserView,

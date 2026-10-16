@@ -641,7 +641,14 @@ impl MaterialPipelineCache {
                 if let Some(source) = wgsl_override.as_ref() {
                     source.clone()
                 } else {
-                    Arc::from(build_embedded_wgsl(stem, permutation)?.into_boxed_str())
+                    Arc::from(
+                        build_embedded_wgsl(
+                            stem,
+                            permutation,
+                            shader_specialization.static_variant_bits(),
+                        )?
+                        .into_boxed_str(),
+                    )
                 }
             }
             RasterPipelineKind::Null => {

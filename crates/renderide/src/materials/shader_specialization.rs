@@ -48,6 +48,15 @@ impl MaterialShaderSpecializationKey {
         self.static_variant_bits_mode == STATIC_VARIANT_BITS_ENABLED
     }
 
+    /// Static variant bits when specialization is enabled, otherwise zero.
+    pub(crate) const fn static_variant_bits(self) -> u32 {
+        if self.is_enabled() {
+            self.static_variant_bits
+        } else {
+            0
+        }
+    }
+
     /// Disables the key unless the actual WGSL source declares the specialization override.
     pub(crate) fn for_wgsl_source(self, wgsl_source: &str) -> Self {
         if self.is_enabled() && override_names_for_wgsl_source(wgsl_source).is_some() {

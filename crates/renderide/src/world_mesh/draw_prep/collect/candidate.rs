@@ -93,6 +93,7 @@ pub(super) fn evaluate_draw_candidate(
             router: ctx.materials.router,
             pipeline_property_ids: ctx.materials.pipeline_property_ids,
             shader_perm: ctx.materials.shader_perm,
+            property_registry: ctx.materials.property_registry,
         },
     );
     apply_render_buffer_mesh_pipeline_override(
@@ -248,6 +249,7 @@ mod tests {
                 router,
                 pipeline_property_ids: property_ids,
                 shader_perm: ShaderPermutation::default(),
+                property_registry: None,
             },
             view: DrawCollectionViewInputs {
                 render_context: RenderingContext::UserView,

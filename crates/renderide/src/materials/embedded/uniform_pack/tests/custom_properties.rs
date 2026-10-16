@@ -317,6 +317,7 @@ fn pack(loaded: &LoadedMaterial, store: &MaterialPropertyStore, material_id: i32
         &MaterialUniformPackMetadata {
             value_spaces: &MaterialUniformValueSpaces::default(),
             material_defaults: &loaded.defaults,
+            quantize_toggle_floats: true,
         },
         store,
         lookup(material_id),
@@ -762,6 +763,100 @@ fn fs_main(_in: VertexOutput) -> @location(0) vec4<f32> {
     return rg::retain_globals_additive(vec4<f32>(weight, 0.0, 0.0, 1.0));
 }
 "#;
+
+const TOGGLE_WGSL: &str = r#"
+//#mat_default _Speed float 0.2
+
+#import renderide::frame::globals as rg
+#import renderide::draw::per_draw as pd
+#import renderide::mesh::vertex as mv
+
+struct Material {
+    _EMISSION: f32,
+    _Speed: f32,
+}
+
+@group(1) @binding(0) var<uniform> mat: Material;
+
+struct VertexOutput {
+    @builtin(position) clip_pos: vec4<f32>,
+}
+
+@vertex
+fn vs_main(
+    @builtin(instance_index) instance_index: u32,
+#ifdef MULTIVIEW
+    @builtin(view_index) view_idx: u32,
+#endif
+    @location(0) pos: vec4<f32>,
+    @location(1) _n: vec4<f32>,
+) -> VertexOutput {
+    let d = pd::get_draw(instance_index);
+    let world_p = mv::world_position(d, pos);
+#ifdef MULTIVIEW
+    let vp = mv::select_view_proj(d, view_idx);
+#else
+    let vp = mv::select_view_proj(d, 0u);
+#endif
+    var out: VertexOutput;
+    out.clip_pos = vp * world_p;
+    return out;
+}
+
+//#pass type=forward
+@fragment
+fn fs_main(_in: VertexOutput) -> @location(0) vec4<f32> {
+    return rg::retain_globals_additive(vec4<f32>(mat._EMISSION, mat._Speed, 0.0, 1.0));
+}
+"#;
+
+#[test]
+fn toggle_float_without_keyword_packs_zero_or_one() {
+    let _guard = RemoveKey::prepare("prop-toggle");
+    let installed = install_key("prop-toggle", TOGGLE_WGSL);
+    let loaded = load_material(&installed);
+    let unset = pack(&loaded, &MaterialPropertyStore::new(), 31);
+    assert_eq!(
+        read_f32_at(&unset, field(&loaded, "_EMISSION").offset as usize),
+        0.0
+    );
+    assert_eq!(
+        read_f32_at(&unset, field(&loaded, "_Speed").offset as usize),
+        0.2
+    );
+
+    let mut store = MaterialPropertyStore::new();
+    store.set_material(
+        31,
+        property_id(&loaded, "_EMISSION"),
+        MaterialPropertyValue::Float(0.4),
+    );
+    store.set_material(
+        31,
+        property_id(&loaded, "_Speed"),
+        MaterialPropertyValue::Float(0.4),
+    );
+    let packed = pack(&loaded, &store, 31);
+    assert_eq!(
+        read_f32_at(&packed, field(&loaded, "_EMISSION").offset as usize),
+        1.0
+    );
+    assert_eq!(
+        read_f32_at(&packed, field(&loaded, "_Speed").offset as usize),
+        0.4
+    );
+
+    store.set_material(
+        31,
+        property_id(&loaded, "_EMISSION"),
+        MaterialPropertyValue::Float(0.0),
+    );
+    let off = pack(&loaded, &store, 31);
+    assert_eq!(
+        read_f32_at(&off, field(&loaded, "_EMISSION").offset as usize),
+        0.0
+    );
+}
 
 #[test]
 fn float4_array_truncates_and_zero_pads_to_n_on_16_byte_stride() {

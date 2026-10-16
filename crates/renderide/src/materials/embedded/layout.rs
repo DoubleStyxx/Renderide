@@ -241,6 +241,8 @@ pub(crate) fn build_stem_material_layout(
         &MaterialUniformPackMetadata {
             value_spaces: &uniform_value_spaces,
             material_defaults: &uniform_default_by_field,
+            quantize_toggle_floats: stem
+                .starts_with(crate::materials::custom_shader::CUSTOM_STEM_PREFIX),
         },
     );
     let pack_plan_ready = compiled_pack_plan.is_ready();

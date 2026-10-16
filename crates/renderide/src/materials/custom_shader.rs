@@ -7,6 +7,7 @@
 
 mod bindings;
 mod compose;
+mod keywords;
 mod passes;
 
 use std::sync::Arc;
@@ -21,6 +22,8 @@ use crate::materials::shader_package::reflect_authored_material;
 
 use self::compose::compose_custom_material;
 use self::passes::OwnedMaterialPass;
+
+pub(crate) use keywords::is_toggle_style_property_name;
 
 /// Stem prefix for every installed custom material. Host routes store the `_default` stem.
 pub(crate) const CUSTOM_STEM_PREFIX: &str = "renderide_custom_";
@@ -50,10 +53,14 @@ pub(crate) struct RemovedCustomShader {
 struct InstalledTarget {
     generation: u64,
     wgsl: Arc<str>,
+    source: Arc<str>,
+    keywords: Arc<[String]>,
+    multiview: bool,
     passes: Arc<[MaterialPassDesc]>,
     reflection: crate::embedded_shaders::EmbeddedShaderReflection,
     default_render_queue: i32,
     material_defaults: Arc<[EmbeddedMaterialDefault]>,
+    variants: keywords::KeywordVariantCache,
 }
 
 struct InstalledKey {
@@ -95,7 +102,9 @@ pub(crate) fn install(key: &str, wgsl: &str) -> Result<InstalledCustomShader, St
     if key.is_empty() {
         return Err("custom shader key is empty".to_string());
     }
-    let composed = compose_custom_material(wgsl, &format!("custom:{key}")).map_err(|error| {
+    let label = format!("custom:{key}");
+    let parsed_keywords = keywords::parse_keywords(wgsl, &label)?;
+    let composed = compose_custom_material(wgsl, &label).map_err(|error| {
         // `array<f32, N>` fails naga uniform validation (stride 4) before reflection.
         // That is a binding rejection, not a packaged-shader fallback.
         if error.contains("address space Uniform") {
@@ -107,9 +116,15 @@ pub(crate) fn install(key: &str, wgsl: &str) -> Result<InstalledCustomShader, St
     let base_stem = format!("{CUSTOM_STEM_PREFIX}{key}");
     let default_stem = format!("{base_stem}_default");
     let multiview_stem = format!("{base_stem}_multiview");
-    if let Some(installed) =
-        unchanged_install(&key, &base_stem, &default_stem, &multiview_stem, &composed)
-    {
+    if let Some(installed) = unchanged_install(
+        &key,
+        &base_stem,
+        &default_stem,
+        &multiview_stem,
+        wgsl,
+        &parsed_keywords,
+        &composed,
+    ) {
         return Ok(installed);
     }
 
@@ -122,6 +137,8 @@ pub(crate) fn install(key: &str, wgsl: &str) -> Result<InstalledCustomShader, St
     let default_passes = owned_passes(composed.default_passes);
     let multiview_passes = owned_passes(composed.multiview_passes);
     let material_defaults = owned_material_defaults(composed.material_defaults);
+    let source = Arc::<str>::from(wgsl);
+    let keywords = Arc::<[String]>::from(parsed_keywords);
 
     {
         let mut registry = registry().write();
@@ -145,10 +162,14 @@ pub(crate) fn install(key: &str, wgsl: &str) -> Result<InstalledCustomShader, St
         InstalledTarget {
             generation,
             wgsl: default_wgsl,
+            source: Arc::clone(&source),
+            keywords: Arc::clone(&keywords),
+            multiview: false,
             passes: default_passes,
             reflection: default_reflection,
             default_render_queue: composed.default_render_queue,
             material_defaults: material_defaults.clone(),
+            variants: keywords::KeywordVariantCache::default(),
         },
     );
     registry.targets.insert(
@@ -156,10 +177,14 @@ pub(crate) fn install(key: &str, wgsl: &str) -> Result<InstalledCustomShader, St
         InstalledTarget {
             generation,
             wgsl: multiview_wgsl,
+            source,
+            keywords,
+            multiview: true,
             passes: multiview_passes,
             reflection: multiview_reflection,
             default_render_queue: composed.default_render_queue,
             material_defaults,
+            variants: keywords::KeywordVariantCache::default(),
         },
     );
     registry.keys.insert(
@@ -185,6 +210,8 @@ fn unchanged_install(
     base_stem: &str,
     default_stem: &str,
     multiview_stem: &str,
+    source: &str,
+    keywords: &[String],
     composed: &compose::ComposedCustomShader,
 ) -> Option<InstalledCustomShader> {
     let unchanged = {
@@ -193,16 +220,23 @@ fn unchanged_install(
             registry.targets.get(default_stem),
             registry.targets.get(multiview_stem),
         ) {
-            (Some(previous), Some(multiview)) => {
-                Some((Arc::clone(&previous.wgsl), Arc::clone(&multiview.wgsl)))
-            }
+            (Some(previous), Some(multiview)) => Some((
+                Arc::clone(&previous.wgsl),
+                Arc::clone(&multiview.wgsl),
+                Arc::clone(&previous.source),
+                Arc::clone(&previous.keywords),
+            )),
             _ => None,
         };
         drop(registry);
-        copied.is_some_and(|(default_wgsl, multiview_wgsl)| {
-            default_wgsl.as_ref() == composed.default_wgsl
-                && multiview_wgsl.as_ref() == composed.multiview_wgsl
-        })
+        copied.is_some_and(
+            |(default_wgsl, multiview_wgsl, previous_source, previous_keywords)| {
+                previous_source.as_ref() == source
+                    && previous_keywords.as_ref() == keywords
+                    && default_wgsl.as_ref() == composed.default_wgsl
+                    && multiview_wgsl.as_ref() == composed.multiview_wgsl
+            },
+        )
     };
     if !unchanged {
         return None;
@@ -337,6 +371,129 @@ pub(crate) fn target_wgsl(stem: &str) -> Option<Arc<str>> {
         .targets
         .get(stem)
         .map(|target| target.wgsl.clone())
+}
+
+/// Specialization key for a custom stem's keyword mask, or `None` when the stem has no keywords.
+pub(crate) fn keyword_specialization_key(
+    stem: &str,
+    variant_bits: Option<u32>,
+    property_registry: Option<&crate::materials::host_data::PropertyIdRegistry>,
+    material_map: crate::materials::PropertyMapRef<'_>,
+    property_block_map: crate::materials::PropertyMapRef<'_>,
+) -> Option<crate::materials::MaterialShaderSpecializationKey> {
+    let mask = keyword_mask(stem, variant_bits, |name| {
+        let registry = property_registry?;
+        let property_id = registry.intern(name);
+        crate::materials::first_float_from_maps(material_map, property_block_map, &[property_id])
+    })?;
+    Some(crate::materials::MaterialShaderSpecializationKey::from_variant_bits(mask))
+}
+
+/// Keyword names in declaration order, or `None` when `stem` has no `//#keyword` directives.
+pub(crate) fn keyword_names(stem: &str) -> Option<Arc<[String]>> {
+    let registry = registry().read();
+    let keywords = registry
+        .targets
+        .get(stem)
+        .and_then(|target| (!target.keywords.is_empty()).then(|| Arc::clone(&target.keywords)));
+    drop(registry);
+    keywords
+}
+
+/// Variant mask for a custom stem.
+///
+/// Returns `None` when `stem` has no keywords, so packaged specialization stays on pipeline
+/// constants. Bit `i` is set when host `variant_bits` has that bit or `float_for_name` for
+/// keyword `i` is nonzero.
+pub(crate) fn keyword_mask(
+    stem: &str,
+    variant_bits: Option<u32>,
+    mut float_for_name: impl FnMut(&str) -> Option<f32>,
+) -> Option<u32> {
+    let keywords = keyword_names(stem)?;
+    let mut mask = 0u32;
+    for (index, name) in keywords.iter().enumerate() {
+        let bit = 1u32 << index;
+        let from_bits = variant_bits.is_some_and(|bits| bits & bit != 0);
+        let from_float = float_for_name(name).is_some_and(|value| value != 0.0);
+        if from_bits || from_float {
+            mask |= bit;
+        }
+    }
+    Some(mask)
+}
+
+/// Composed WGSL for `mask`.
+///
+/// `Ok(None)` means `stem` is not a keyword-bearing custom shader, so the caller keeps the
+/// packaged or mask-zero source. A nonzero mask on a keyword stem composes `#ifdef` defs and
+/// stores the result in a per-stem cache of [`keywords::MAX_CUSTOM_KEYWORD_VARIANTS`].
+enum VariantProbe {
+    Missing,
+    Hit(Arc<str>),
+    Compose {
+        source: Arc<str>,
+        keywords: Arc<[String]>,
+        multiview: bool,
+    },
+}
+
+pub(crate) fn variant_wgsl(stem: &str, mask: u32) -> Result<Option<Arc<str>>, String> {
+    if mask == 0 || !stem.starts_with(CUSTOM_STEM_PREFIX) {
+        return Ok(None);
+    }
+    let probe = {
+        let mut registry = registry().write();
+        let probe = match registry.targets.get_mut(stem) {
+            None => VariantProbe::Missing,
+            Some(target) if target.keywords.is_empty() => VariantProbe::Missing,
+            Some(target) => {
+                if let Some(cached) = target.variants.get(mask) {
+                    VariantProbe::Hit(cached)
+                } else {
+                    VariantProbe::Compose {
+                        source: Arc::clone(&target.source),
+                        keywords: Arc::clone(&target.keywords),
+                        multiview: target.multiview,
+                    }
+                }
+            }
+        };
+        drop(registry);
+        probe
+    };
+    let (source, keywords, multiview) = match probe {
+        VariantProbe::Hit(wgsl) => return Ok(Some(wgsl)),
+        VariantProbe::Missing => return Ok(None),
+        VariantProbe::Compose {
+            source,
+            keywords,
+            multiview,
+        } => (source, keywords, multiview),
+    };
+    let wgsl = keywords::compose_variant_wgsl(source.as_ref(), stem, multiview, &keywords, mask)?;
+    let mut registry = registry().write();
+    let stored = registry.targets.get_mut(stem).map(|target| {
+        if let Some(cached) = target.variants.get(mask) {
+            cached
+        } else {
+            target.variants.insert(mask, Arc::clone(&wgsl));
+            wgsl
+        }
+    });
+    drop(registry);
+    Ok(stored)
+}
+
+/// Number of cached keyword variants for `stem`.
+#[cfg(test)]
+pub(crate) fn keyword_variant_cache_len(stem: &str) -> usize {
+    registry()
+        .read()
+        .targets
+        .get(stem)
+        .map(|target| target.variants.len())
+        .unwrap_or(0)
 }
 
 pub(crate) fn material_passes(stem: &str) -> Option<Arc<[MaterialPassDesc]>> {

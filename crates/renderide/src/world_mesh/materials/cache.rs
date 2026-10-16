@@ -17,7 +17,9 @@ use crate::materials::host_data::MaterialDictionary;
 use crate::materials::{MaterialPipelinePropertyIds, MaterialRouter};
 use crate::world_mesh::FramePreparedRenderables;
 
-use super::resolve::{MaterialResolveCtx, ResolvedMaterialBatch, resolve_material_batch};
+use super::resolve::{
+    MaterialResolveCtx, ResolvedMaterialBatch, resolve_material_batch_with_registry,
+};
 
 /// Material keys assigned to one parallel material-resolution worker.
 const MATERIAL_RESOLVE_PARALLEL_CHUNK_KEYS: usize = RELEVANCE_PACKET_MIN_ITEMS;
@@ -137,13 +139,14 @@ impl PendingMaterialResolve {
         router_gen: u64,
         current_frame: u64,
     ) -> ResolvedMaterialCacheUpdate {
-        let batch = resolve_material_batch(
+        let batch = resolve_material_batch_with_registry(
             self.material_asset_id,
             self.property_block_id,
             ctx.dict,
             ctx.router,
             ctx.pipeline_property_ids,
             ctx.shader_perm,
+            ctx.property_registry,
         );
         ResolvedMaterialCacheUpdate {
             material_asset_id: self.material_asset_id,
@@ -296,6 +299,7 @@ impl FrameMaterialBatchCache {
         router: &MaterialRouter,
         pipeline_property_ids: &MaterialPipelinePropertyIds,
         shader_perm: ShaderPermutation,
+        property_registry: Option<&crate::materials::host_data::PropertyIdRegistry>,
     ) {
         profiling::scope!("mesh::material_batch_cache_refresh_for_prepared");
         self.frame_counter = self.frame_counter.wrapping_add(1);
@@ -325,6 +329,7 @@ impl FrameMaterialBatchCache {
             router,
             pipeline_property_ids,
             shader_perm,
+            property_registry,
         };
         let (mut touch_stats, pending_resolves) = {
             profiling::scope!("mesh::material_batch_cache::prepared_classify");
@@ -588,13 +593,14 @@ impl FrameMaterialBatchCache {
             }
             Some(entry) => {
                 profiling::scope!("mesh::material_batch_cache::touch_stale");
-                let batch = resolve_material_batch(
+                let batch = resolve_material_batch_with_registry(
                     material_asset_id,
                     property_block_id,
                     ctx.dict,
                     ctx.router,
                     ctx.pipeline_property_ids,
                     ctx.shader_perm,
+                    ctx.property_registry,
                 );
                 entry.refresh(
                     batch,
@@ -608,13 +614,14 @@ impl FrameMaterialBatchCache {
             }
             None => {
                 profiling::scope!("mesh::material_batch_cache::touch_miss");
-                let batch = resolve_material_batch(
+                let batch = resolve_material_batch_with_registry(
                     material_asset_id,
                     property_block_id,
                     ctx.dict,
                     ctx.router,
                     ctx.pipeline_property_ids,
                     ctx.shader_perm,
+                    ctx.property_registry,
                 );
                 self.entries.insert(
                     key,

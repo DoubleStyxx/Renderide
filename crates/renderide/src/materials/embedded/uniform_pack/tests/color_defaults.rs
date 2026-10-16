@@ -93,6 +93,7 @@ fn srgb_material_color_vec4_defaults_pack_raw() {
     let metadata = MaterialUniformPackMetadata {
         value_spaces: &value_spaces,
         material_defaults: &defaults,
+        quantize_toggle_floats: false,
     };
 
     let bytes = build_embedded_uniform_bytes_with_material_defaults(
@@ -404,6 +405,7 @@ fn material_scalar_defaults_pack_when_host_property_is_missing() {
     let metadata = MaterialUniformPackMetadata {
         value_spaces: &value_spaces,
         material_defaults: &defaults,
+        quantize_toggle_floats: false,
     };
 
     let bytes = build_embedded_uniform_bytes_with_material_defaults(
@@ -451,6 +453,7 @@ fn explicit_host_scalar_overrides_material_default() {
     let metadata = MaterialUniformPackMetadata {
         value_spaces: &value_spaces,
         material_defaults: &defaults,
+        quantize_toggle_floats: false,
     };
 
     let bytes = build_embedded_uniform_bytes_with_material_defaults(
@@ -492,6 +495,7 @@ fn material_vec4_defaults_pack_before_texture_transform_identity() {
     let metadata = MaterialUniformPackMetadata {
         value_spaces: &value_spaces,
         material_defaults: &defaults,
+        quantize_toggle_floats: false,
     };
 
     let bytes = build_embedded_uniform_bytes_with_material_defaults(

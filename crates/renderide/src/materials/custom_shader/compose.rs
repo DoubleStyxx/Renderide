@@ -45,8 +45,8 @@ pub(super) fn compose_custom_material(
     let default_render_queue = super::passes::parse_render_queue(source, label)?;
     let material_defaults = super::passes::parse_material_defaults(source, label)?;
 
-    let default_module = compose_variant(modules, source, label, false)?;
-    let multiview_module = compose_variant(modules, source, label, true)?;
+    let default_module = compose_variant(modules, source, label, false, &[])?;
+    let multiview_module = compose_variant(modules, source, label, true, &[])?;
     let default_wgsl = module_to_wgsl(&default_module, label)?;
     let multiview_wgsl = module_to_wgsl(&multiview_module, &format!("{label} multiview"))?;
     if default_wgsl != multiview_wgsl {
@@ -78,11 +78,23 @@ pub(super) fn compose_custom_material(
     })
 }
 
+pub(super) fn compose_keyword_variant_wgsl(
+    source: &str,
+    label: &str,
+    multiview: bool,
+    enabled_keywords: &[String],
+) -> Result<String, String> {
+    let modules = shader_modules()?;
+    let module = compose_variant(modules, source, label, multiview, enabled_keywords)?;
+    module_to_wgsl(&module, label)
+}
+
 fn compose_variant(
     modules: &[(String, String)],
     source: &str,
     label: &str,
     multiview: bool,
+    enabled_keywords: &[String],
 ) -> Result<naga::Module, String> {
     let mut composer = Composer::default().with_capabilities(Capabilities::all());
     for (file_path, module_source) in modules {
@@ -101,6 +113,9 @@ fn compose_variant(
     let mut shader_defs = std::collections::HashMap::new();
     if multiview {
         shader_defs.insert("MULTIVIEW".to_string(), ShaderDefValue::Bool(true));
+    }
+    for keyword in enabled_keywords {
+        shader_defs.insert(keyword.clone(), ShaderDefValue::Bool(true));
     }
     match composer.make_naga_module(NagaModuleDescriptor {
         source,

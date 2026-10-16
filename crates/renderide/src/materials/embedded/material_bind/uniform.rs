@@ -389,6 +389,8 @@ impl EmbeddedMaterialBindResources {
             arena.resolve_binding(*uniform_key, uniform_size, mutation_gen, texture_state_sig)?;
         if needs_write {
             profiling::scope!("materials::embedded_uniform_arena_write");
+            let quantize_toggle_floats =
+                stem.starts_with(crate::materials::custom_shader::CUSTOM_STEM_PREFIX);
             if let Some(plan) = layout.uniform_pack_plan.as_ref() {
                 if !plan.pack_into(
                     store,
@@ -413,6 +415,7 @@ impl EmbeddedMaterialBindResources {
                     &MaterialUniformPackMetadata {
                         value_spaces: &layout.uniform_value_spaces,
                         material_defaults: &layout.uniform_default_by_field,
+                        quantize_toggle_floats,
                     },
                     store,
                     lookup,

@@ -57,6 +57,7 @@ fn test_draw_context<'a>(
             router: resources.router,
             pipeline_property_ids: resources.property_ids,
             shader_perm: ShaderPermutation::default(),
+            property_registry: None,
         },
         view: DrawCollectionViewInputs {
             render_context: RenderingContext::UserView,

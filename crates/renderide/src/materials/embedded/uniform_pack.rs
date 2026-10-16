@@ -30,6 +30,8 @@ pub(crate) struct MaterialUniformPackMetadata<'a> {
     pub(crate) value_spaces: &'a MaterialUniformValueSpaces,
     /// Per-field fallback values declared by shader source metadata.
     pub(crate) material_defaults: &'a MaterialUniformDefaults,
+    /// When set, toggle-style `f32` uniforms (`_EMISSION`) pack as 0 or 1.
+    pub(crate) quantize_toggle_floats: bool,
 }
 
 /// Suffix convention that opts a uniform field in to host `mipmap_bias` population.
@@ -138,6 +140,19 @@ fn write_srgb_f32x4_array_at(buf: &mut [u8], field: &ReflectedUniformField, valu
     }
 }
 
+/// Maps a toggle-style float (`_EMISSION`) to 0 or 1. Other floats stay as uploaded.
+///
+/// A missing property keeps its `//#mat_default` or zero. A name that is also a `//#keyword`
+/// still packs 0 or 1 when the uniform exists; the keyword mask selects the shader variant.
+fn quantize_toggle_float(enabled: bool, field_name: &str, value: f32) -> f32 {
+    let name = shader_writer_unescaped_field_name(field_name);
+    if enabled && crate::materials::custom_shader::is_toggle_style_property_name(name) {
+        if value != 0.0 { 1.0 } else { 0.0 }
+    } else {
+        value
+    }
+}
+
 /// Returns the reflected `vec4<f32>` fallback value for a missing host property.
 fn missing_vec4_uniform_default(
     field_name: &str,
@@ -226,6 +241,7 @@ pub(crate) fn build_embedded_uniform_bytes_with_value_spaces(
         &MaterialUniformPackMetadata {
             value_spaces,
             material_defaults: &MaterialUniformDefaults::default(),
+            quantize_toggle_floats: false,
         },
         store,
         lookup,
@@ -245,7 +261,12 @@ pub(crate) fn build_embedded_uniform_bytes_with_material_defaults(
     shader_variant_bits: Option<u32>,
 ) -> Option<Vec<u8>> {
     profiling::scope!("materials::embedded_uniform_pack");
-    let key = plan::uniform_plan_cache_key(reflected, ids, metadata.material_defaults);
+    let key = plan::uniform_plan_cache_key(
+        reflected,
+        ids,
+        metadata.material_defaults,
+        metadata.quantize_toggle_floats,
+    );
     if let Some(cached) = metadata.value_spaces.cached_plan().get()
         && cached.key == key
     {
