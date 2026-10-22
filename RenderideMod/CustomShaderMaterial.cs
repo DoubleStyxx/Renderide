@@ -247,7 +247,7 @@ public partial class CustomShaderMaterial : SingleShaderMaterialProvider
     /// <summary>
     /// Hash of this material's property names and their settled ids.
     /// Another component's results do not change it.
-    /// The sorted name list is rebuilt only after the sync lists change.
+    /// The sorted name list is rebuilt after sync-list changes and after a dynvar rebind.
     /// </summary>
     private int NameResolutionState()
     {

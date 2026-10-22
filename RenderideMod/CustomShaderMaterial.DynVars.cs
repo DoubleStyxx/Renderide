@@ -75,6 +75,7 @@ public partial class CustomShaderMaterial
             _dynBindings.Clear();
             _dynBindings.AddRange(next);
             RebuildDynVarNames();
+            InvalidateResolutionNames();
             PruneTextureTokens();
             _dynPrefix = prefix;
             QueueDynVarPropertyIds();
