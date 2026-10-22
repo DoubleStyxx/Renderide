@@ -410,6 +410,19 @@ public partial class CustomShaderMaterial
             Ipc.MaterialPropertyIds.Request(binding.Property);
     }
 
+    /// <summary>
+    /// Adds dynvar property names to this material's settled-id hash.
+    /// A result for one of these names dirties this material. Another material's result does not.
+    /// </summary>
+    private void CollectDynVarPropertyNames(List<string> names)
+    {
+        foreach (var name in _dynVarNames)
+        {
+            if (name.Length > 0)
+                names.Add(name);
+        }
+    }
+
     private bool DynVarOverrides(string property) => _dynVarNames.Contains(property);
 
     private void PushDynVars(ref MaterialUpdateWriter writer)

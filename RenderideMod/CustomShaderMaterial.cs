@@ -277,6 +277,7 @@ public partial class CustomShaderMaterial : SingleShaderMaterialProvider
             AddPropertyName(names, entry.PropertyName);
         foreach (var entry in Keywords)
             AddPropertyName(names, entry.PropertyName);
+        CollectDynVarPropertyNames(names);
     }
 
     private static void AddPropertyName(List<string> names, Sync<string> name)

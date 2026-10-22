@@ -258,13 +258,15 @@ Example programs on `shaders/exotic-dynvars` (`7997b084`) use the names below wi
 
 Other types are ignored. A dynvar property replaces a `Floats`, `Colors`, or `Textures` row of the same name. The value still uses `MaterialPropertyIdRequest` and `MaterialUpdateWriter`. `ShaderUpload` is unchanged: it only installs or removes WGSL, and only when `ShaderKey` or the source changes.
 
+Dynvar property names go through the same `MaterialPropertyIds.Request` path as list rows, including the unanswered-request retry. They are part of this material's settled-id hash. `OnCommonUpdate` marks the material dirty when that hash changes, which is when one of this material's names gains a stored id. It does not resample dynvar values and it does not watch a process-wide generation counter. A result stored for another material's names does not dirty this one.
+
 The component subscribes to space, slot, and variable change events and calls `MarkChangeDirty` only when the mapped value or the mapped set changes. It does not poll variable values from `OnCommonUpdate`. Parent changes and active changes on the material slot and on the watched ancestors rebind the same way. Leaving a value alone does not dirty the material again.
 
 There is no public `DynamicVariableSpace.SpaceLookup`. The private variable handler is not read. `ShaderDynVarSelect` is the parent walk: a name that contains `/` binds to the first live ancestor space with that name, and any other name binds to the first live ancestor space whose `OnlyDirectBinding` is false. That is the same split as `DynamicVariableHelper.ParsePath`. `ProcessName` still normalizes space names before the walk. The selector trims whitespace only, so `Shader/_Speed` writes `_Speed`.
 
 Nearest ancestor space wins when two variables map to one property. Inside one space, the first live variable in slot hierarchy order wins. A disabled variable or an inactive slot does not override.
 
-`ShaderDynVarSelect` lives in `RenderideMod/DynVars` and is compiled into `RenderideMod.dll`. It does not reference FrooxEngine. `dotnet test RenderideMod.DynVarCore.Tests` covers the walk, the prefix, padding, and the smoke hierarchy. The component file still needs the Resonite assemblies. This reader is the dynvar half of `CustomShaderMaterial` (#32). It does not change shader upload or the property-id queue.
+`ShaderDynVarSelect` lives in `RenderideMod/DynVars` and is compiled into `RenderideMod.dll`. It does not reference FrooxEngine. `dotnet test RenderideMod.DynVarCore.Tests` covers the walk, the prefix, padding, and the smoke hierarchy. The component file still needs the Resonite assemblies. This reader is the dynvar half of `CustomShaderMaterial` (#32). It does not change shader upload or the property-id retry schedule. It only adds this material's dynvar names to that schedule and to the per-material settled-id hash.
 
 ## Smoke checklist: dynamic variables
 
