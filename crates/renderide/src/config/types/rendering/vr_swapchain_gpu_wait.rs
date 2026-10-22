@@ -235,4 +235,32 @@ mod tests {
             "serialized TOML was: {toml}"
         );
     }
+
+    #[test]
+    fn mode_aliases_parse_and_an_unknown_token_does_not() {
+        for token in ["on", "true", "1", "enabled", "ON", " Always "] {
+            assert_eq!(
+                VrSwapchainGpuWait::parse_persist(token),
+                Some(VrSwapchainGpuWait::Always),
+                "{token}"
+            );
+        }
+        for token in ["off", "false", "0", "disabled", "FALSE"] {
+            assert_eq!(
+                VrSwapchainGpuWait::parse_persist(token),
+                Some(VrSwapchainGpuWait::Never),
+                "{token}"
+            );
+        }
+        assert_eq!(
+            VrSwapchainGpuWait::parse_persist("auto"),
+            Some(VrSwapchainGpuWait::Auto)
+        );
+        assert_eq!(VrSwapchainGpuWait::parse_persist("sometimes"), None);
+
+        let err = toml::from_str::<RendererSettings>(
+            "[rendering]\nvr_swapchain_gpu_wait = \"sometimes\"\n",
+        );
+        assert!(err.is_err(), "invalid mode must fail to deserialize");
+    }
 }

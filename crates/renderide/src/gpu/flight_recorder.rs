@@ -290,9 +290,9 @@ pub(crate) enum GpuFlightEventKind {
         image_index: u32,
         /// Command buffers in the batch that was supposed to write the image.
         command_buffers: usize,
-        /// Configured wait bound, in milliseconds.
+        /// Elapsed time spent in the wait before it gave up, in milliseconds.
         waited_ms: u32,
-        /// Poll error or unfinished status.
+        /// Why the wait gave up.
         detail: String,
     },
     /// Render-graph submit summary.

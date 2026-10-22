@@ -4,8 +4,8 @@
 //! [`XrFinalizeWork`] and attaches it to the trailing [`super::SubmitBatch`] of the VR
 //! tick. Same-queue barriers and signals already cover earlier submissions, and the
 //! specs do not require a CPU wait. When this session enabled the WiVRn/Monado on RADV
-//! workaround, the driver still polls that batch's [`wgpu::SubmissionIndex`] before
-//! release. See [`super::swapchain_handoff`]. `never` releases without the poll.
+//! workaround, the driver waits for work already submitted on that queue before
+//! release. See [`super::swapchain_handoff`]. `never` releases without the wait.
 //!
 //! The driver then releases and ends the frame, and signals back via
 //! [`XrFinalizeSignal`] so the next tick's `wait_frame` can synchronise with `xrBeginFrame`.
@@ -233,10 +233,13 @@ pub fn wait_for_finalize(rx: XrFinalizeReceiver) -> Result<(), RecvTimeoutError>
 /// `Queue::submit` returns.
 ///
 /// For [`XrFinalizeKind::Projection`]: when the session wait is enabled and the batch
-/// contained command buffers, polls until `submission` is GPU-visible. Then drops the
-/// per-frame wgpu image wrapper, takes the queue access gate, releases the swapchain
-/// image, drops the gate, takes the gate again, calls `xrEndFrame` with a stereo
-/// projection layer, drops the gate, clears the `frame_open` flag, and signals.
+/// contained command buffers, waits until work submitted before the wait is GPU-visible.
+/// Then drops the per-frame wgpu image wrapper, takes the queue access gate, releases
+/// the swapchain image, drops the gate, takes the gate again, calls `xrEndFrame` with a
+/// stereo projection layer, drops the gate, clears the `frame_open` flag, and signals.
+/// That release is the driver-thread success path. Import and `xrWaitSwapchainImage`
+/// failures release the image directly from `xr/app_integration/submit.rs` and never
+/// enter this function.
 /// For [`XrFinalizeKind::Empty`]: takes the gate, calls `xrEndFrame` with no layers, drops the
 /// gate, clears the flag, and signals. Empty frames did not write a swapchain image, so they
 /// do not wait.
@@ -246,8 +249,8 @@ pub fn wait_for_finalize(rx: XrFinalizeReceiver) -> Result<(), RecvTimeoutError>
 pub(super) fn run_xr_finalize(
     gate: &GpuQueueAccessGate,
     device: &wgpu::Device,
+    queue: &wgpu::Queue,
     device_health: &GpuDeviceHealth,
-    submission: &wgpu::SubmissionIndex,
     work: XrFinalizeWork,
     flight_recorder: Arc<GpuFlightRecorder>,
 ) -> Result<(), xr::sys::Result> {
@@ -263,8 +266,8 @@ pub(super) fn run_xr_finalize(
         XrFinalizeKind::Projection(payload) => run_projection_finalize(
             gate,
             device,
+            queue,
             device_health,
-            submission,
             payload,
             submit_context,
             &flight_recorder,
@@ -306,8 +309,8 @@ pub(super) fn run_xr_finalize(
 fn run_projection_finalize(
     gate: &GpuQueueAccessGate,
     device: &wgpu::Device,
+    queue: &wgpu::Queue,
     device_health: &GpuDeviceHealth,
-    submission: &wgpu::SubmissionIndex,
     mut payload: Box<XrProjectionFinalize>,
     submit_context: XrFinalizeSubmitContext,
     flight_recorder: &Arc<GpuFlightRecorder>,
@@ -321,16 +324,17 @@ fn run_projection_finalize(
         submit_context.command_buffers,
         submit_context.frame_seq,
         payload.image_index,
+        payload.wait_for_gpu_writes,
     );
-    // The queue gate stays released across this poll. `Device::poll` does not submit.
+    // The queue gate stays released across this wait. The wait does not submit.
     // `Queue::write_texture` takes the gate on the main thread; `Queue::write_buffer`
     // does not. Holding the gate here would stall texture uploads and the OpenXR queue
-    // calls for the whole wait. The poll still holds wgpu-core's snatch and fence read
-    // locks; that bounded stall is documented on `wait_for_projection_writes`.
+    // calls for the whole wait. Each non-blocking poll holds wgpu-core's snatch and
+    // fence read locks only for that maintain. See `wait_for_projection_writes`.
     let release_permit = wait_for_projection_writes(&ProjectionGpuWaitRequest {
         device,
+        queue,
         device_health,
-        submission,
         command_buffers: submit_context.command_buffers,
         frame_seq: submit_context.frame_seq,
         image_index: payload.image_index,
@@ -424,8 +428,9 @@ fn record_release_image_started(
 
 /// Releases a projection swapchain image with a timeout hook.
 ///
-/// `release_permit` is the value returned by the GPU-wait decision. Release cannot
-/// be called without it.
+/// `release_permit` is the GPU-wait decision for this driver-thread success path.
+/// This helper cannot run without it. Acquire, import, and `xrWaitSwapchainImage`
+/// failures in `xr/app_integration/submit.rs` release the image directly.
 fn release_image_with_watchdog(
     release_permit: &super::swapchain_handoff::SwapchainReleasePermit,
     gate: &GpuQueueAccessGate,
@@ -468,6 +473,9 @@ fn record_release_depth_image_started(
 }
 
 /// Releases a projection depth swapchain image with a timeout hook.
+///
+/// Same permit rule as [`release_image_with_watchdog`]: this success-path helper
+/// borrows the wait permit. The direct failure-path releases do not.
 fn release_depth_image_with_watchdog(
     release_permit: &super::swapchain_handoff::SwapchainReleasePermit,
     gate: &GpuQueueAccessGate,

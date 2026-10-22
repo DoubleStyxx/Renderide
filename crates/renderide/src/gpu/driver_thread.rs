@@ -121,9 +121,9 @@ pub struct DriverThread {
 impl DriverThread {
     /// Spawns the driver thread. The thread owns its own clone of the wgpu [`wgpu::Device`]
     /// and [`wgpu::Queue`]; the main thread keeps the ones inside [`crate::gpu::GpuContext`]
-    /// for `queue.write_buffer` / `queue.write_texture` use during encoding. The device
-    /// clone is used to poll a projection submission to GPU completion before
-    /// `xrReleaseSwapchainImage`.
+    /// for `queue.write_buffer` / `queue.write_texture` use during encoding. The queue
+    /// clone registers `on_submitted_work_done` before `xrReleaseSwapchainImage`, and the
+    /// device clone polls so that callback can run.
     ///
     /// `gpu_queue_access_gate` is cloned from [`crate::gpu::GpuContext`]; the driver
     /// loop acquires it around every `Queue::submit` so submits cannot overlap with

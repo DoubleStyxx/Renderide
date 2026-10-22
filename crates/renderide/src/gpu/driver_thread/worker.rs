@@ -35,7 +35,7 @@ struct ConsumerLivenessGuard<'a> {
 /// Shared handles used while processing one driver-thread batch.
 #[derive(Clone, Copy)]
 struct DriverLoopContext<'a> {
-    /// Device used to wait for a projection submission before OpenXR release.
+    /// Device polled so projection completion callbacks can run.
     device: &'a wgpu::Device,
     /// Device-loss flag checked before the swapchain GPU wait polls.
     device_health: &'a GpuDeviceHealth,
@@ -154,7 +154,7 @@ fn process_batch(ctx: DriverLoopContext<'_>, ring_depth: usize, batch: SubmitBat
         has_xr_finalize: xr_finalize.is_some(),
     };
 
-    let submission = submit_commands(ctx, summary, command_buffers);
+    submit_commands(ctx, summary, command_buffers);
 
     if let Some(track) = frame_timing {
         // Capture the post-submit instant on this thread for the `submit_latency_ms`
@@ -168,7 +168,7 @@ fn process_batch(ctx: DriverLoopContext<'_>, ring_depth: usize, batch: SubmitBat
         ctx.queue.on_submitted_work_done(cb);
     }
 
-    finalize_xr_if_present(ctx, summary, &submission, xr_finalize);
+    finalize_xr_if_present(ctx, summary, xr_finalize);
     present_surface_if_present(ctx, summary, surface_texture);
 
     if let Some(wait) = wait {
@@ -202,7 +202,8 @@ fn submit_commands(
     };
     // Bumped immediately after the submit returns and the gate is dropped so the backlog
     // plot reflects "in-flight on driver" without waiting on `present` or `xr_finalize`.
-    // The OpenXR projection path waits for `submission` later, outside this gate.
+    // The OpenXR projection path waits for this submit later, outside this gate, by
+    // registering `on_submitted_work_done` on the same queue.
     ctx.submit_counters.note_submit_done();
     record_driver_event(
         ctx,
@@ -217,16 +218,16 @@ fn submit_commands(
 fn finalize_xr_if_present(
     ctx: DriverLoopContext<'_>,
     summary: DriverBatchSummary,
-    submission: &wgpu::SubmissionIndex,
     xr_finalize: Option<super::XrFinalizeWork>,
 ) {
     let Some(finalize) = xr_finalize else {
         return;
     };
     // Deferred OpenXR `xrReleaseSwapchainImage` + `xrEndFrame` for the VR HMD path.
-    // When the session enabled the swapchain GPU wait, projection finalizes poll
-    // `submission` before release. `never` releases without that poll. The next
-    // tick's `wait_frame` gates on the matching finalize signal before `xrBeginFrame`.
+    // When the session enabled the swapchain GPU wait, projection finalizes wait for
+    // work already submitted on `ctx.queue` before release. `never` releases without
+    // that wait. The next tick's `wait_frame` gates on the matching finalize signal
+    // before `xrBeginFrame`.
     record_driver_event(
         ctx,
         summary,
@@ -236,8 +237,8 @@ fn finalize_xr_if_present(
     let result = run_xr_finalize(
         ctx.gpu_queue_access_gate,
         ctx.device,
+        ctx.queue,
         ctx.device_health,
-        submission,
         finalize,
         Arc::clone(ctx.flight_recorder),
     );

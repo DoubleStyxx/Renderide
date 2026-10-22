@@ -6,17 +6,20 @@
 //! `xrReleaseSwapchainImage`.
 //!
 //! WiVRn and Monado on RADV still composite a stale or black image in that handoff
-//! (upstream issue 673). The projection path therefore polls the writing submission
-//! to completion before release when the session resolved
+//! (upstream issue 673). The projection path therefore waits until the queue's
+//! already-submitted work is done before release when the session resolved
 //! [`crate::config::VrSwapchainGpuWait`] to on. `never`, and `auto` when the runtime
-//! or adapter does not match, release without that poll and keep the old pipelining.
+//! or adapter does not match, release without that wait and keep the old pipelining.
 //! A timed-out wait still releases the image: leaving it acquired would wedge the
 //! next `xrBeginFrame`. That one frame may flash, and the timeout is logged.
 //!
 //! [`wait_for_projection_writes`] is the only constructor of [`SwapchainReleasePermit`].
-//! Both swapchain releases borrow the permit, so neither call can be moved above the
-//! wait.
+//! On the driver-thread success path, color and depth release borrow that permit, so
+//! those two calls cannot move above the wait. Acquire, import, and
+//! `xrWaitSwapchainImage` failures in `xr/app_integration/submit.rs` release the image
+//! directly. Those paths run before a projection finalize is queued.
 
+use std::sync::mpsc::{RecvTimeoutError, sync_channel};
 use std::time::{Duration, Instant};
 
 use crate::gpu::flight_recorder::{GpuFlightEventKind, GpuFlightRecorder};
@@ -27,11 +30,19 @@ use crate::profiling::plot_vr_swapchain_gpu_wait_ms;
 /// How long the driver waits for the swapchain-writing submission to retire.
 ///
 /// A healthy VR frame finishes well inside this. On timeout the image is still
-/// released so a stuck GPU cannot block the session. This is also the bound on the
-/// wgpu lock stall documented on [`wait_for_projection_writes`].
+/// released so a stuck GPU cannot block the session.
 pub(super) const SWAPCHAIN_GPU_VISIBILITY_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// How long one wait iteration sleeps when the completion callback has not fired.
+///
+/// The callback runs on the thread that polls, so the receive cannot observe GPU
+/// completion by itself. This only yields between non-blocking polls. It is the
+/// extra latency after the GPU finishes, so it stays well under a millisecond.
+/// The overall budget is still [`SWAPCHAIN_GPU_VISIBILITY_TIMEOUT`].
+const SWAPCHAIN_GPU_POLL_SLICE: Duration = Duration::from_micros(50);
+
 static SWAPCHAIN_GPU_WAIT_LOG: LogThrottle = LogThrottle::new();
+static SWAPCHAIN_GPU_LOST_LOG: LogThrottle = LogThrottle::new();
 static EMPTY_PROJECTION_FINALIZE_LOG: LogThrottle = LogThrottle::new();
 
 /// Result of deciding whether the projection batch's GPU writes are visible.
@@ -39,20 +50,21 @@ static EMPTY_PROJECTION_FINALIZE_LOG: LogThrottle = LogThrottle::new();
 pub(super) enum ProjectionGpuWait {
     /// This batch submitted no command buffers, so no image write is in flight.
     NotRequired,
-    /// `Device::poll` reported the requested submission finished.
+    /// `Queue::on_submitted_work_done` ran inside a non-blocking poll.
     Visible,
-    /// The wait timed out or the poll failed. Release still has to run.
+    /// The wait timed out or a non-fatal poll failed. Release still has to run.
     TimedOut,
     /// The session's wait mode is off, so the image is released without polling.
     Skipped,
-    /// The device was already lost. The poll is skipped so wgpu does not abort.
+    /// The device was lost before the next poll. That poll is skipped.
     DeviceLost,
 }
 
 /// Proof that [`wait_for_projection_writes`] has run for this projection finalize.
 ///
-/// The field is private and this module has no other constructor. Release functions
-/// borrow the permit, so they cannot run before the wait decision.
+/// The field is private and this module has no other constructor. The driver-thread
+/// success path borrows the permit, so those releases cannot run before the wait
+/// decision. Failure-path releases before a finalize is queued do not.
 pub(super) struct SwapchainReleasePermit {
     outcome: ProjectionGpuWait,
 }
@@ -66,16 +78,19 @@ impl SwapchainReleasePermit {
 
 /// Inputs for [`wait_for_projection_writes`].
 pub(super) struct ProjectionGpuWaitRequest<'a> {
-    /// Device whose fence backs [`Self::submission`].
+    /// Device polled so `on_submitted_work_done` callbacks can run.
     pub(super) device: &'a wgpu::Device,
+    /// Queue that submitted this projection batch.
+    ///
+    /// The wait registers [`wgpu::Queue::on_submitted_work_done`] here, after this
+    /// batch's submit has returned and before the driver thread submits anything else.
+    pub(super) queue: &'a wgpu::Queue,
     /// Device-loss generation observed by the renderer.
     ///
-    /// Checked before `Device::poll`. wgpu-core 29.0.3 turns a lost-device wait into
-    /// a fatal error instead of [`wgpu::PollError`].
+    /// Checked before every `Device::poll`. A loss reported here skips the poll.
+    /// See [`wait_for_projection_writes`] for the loss that still aborts inside one poll.
     pub(super) device_health: &'a GpuDeviceHealth,
-    /// Submission that contains the eye copy (and optional depth transfer).
-    pub(super) submission: &'a wgpu::SubmissionIndex,
-    /// Command buffers in that submission.
+    /// Command buffers in the batch that carried this finalize.
     pub(super) command_buffers: usize,
     /// Frame sequence recorded on the finalize payload, for logs and the flight recorder.
     pub(super) frame_seq: u64,
@@ -96,20 +111,23 @@ pub(super) const fn projection_finalize_requires_gpu_wait(command_buffers: usize
     command_buffers > 0
 }
 
-/// Debug-asserts and, in release, warns once when a projection finalize submitted nothing.
+/// Debug-asserts and, in release, warns once when a waited projection finalize submitted nothing.
 ///
 /// The eye copy is supposed to share this batch. An empty batch skips the GPU wait
 /// ([`ProjectionGpuWait::NotRequired`]) because there is no submission to retire.
+/// The assert and the warning run only when the wait would have run. A disabled wait
+/// does not inspect this batch.
 pub(super) fn note_empty_projection_finalize(
     command_buffers: usize,
     frame_seq: u64,
     image_index: u32,
+    wait_enabled: bool,
 ) {
     debug_assert!(
-        command_buffers > 0,
-        "projection finalize submitted 0 command buffers; the eye copy should share this batch"
+        !wait_enabled || command_buffers > 0,
+        "projection finalize submitted 0 command buffers while the GPU wait is enabled; the eye copy should share this batch"
     );
-    if command_buffers > 0 {
+    if !wait_enabled || command_buffers > 0 {
         return;
     }
     let Some(occurrence) = EMPTY_PROJECTION_FINALIZE_LOG.should_log(1, 0) else {
@@ -120,34 +138,52 @@ pub(super) fn note_empty_projection_finalize(
     );
 }
 
-/// Blocks until `request.submission` is GPU-visible, when this session and batch require it.
+/// Waits until work submitted before this call is GPU-visible, when this session and batch require it.
 ///
-/// Returns the permit that [`super::xr_finalize`] must pass to `xrReleaseSwapchainImage`.
+/// Returns the permit that the driver-thread success path in [`super::xr_finalize`]
+/// passes to `xrReleaseSwapchainImage`. Failure-path releases in
+/// `xr/app_integration/submit.rs` do not use this permit.
 ///
-/// # wgpu-core 29.0.3 locks held across the wait
+/// # Why this is not `Device::poll(Wait)`
 ///
-/// `Device::poll(Wait)` reaches `poll_and_return_closures`, which takes the device
-/// snatch lock for reading and the fence lock for reading, then calls `maintain`.
-/// `maintain` calls `hal::Device::wait` before dropping either guard. Both locks are
-/// held for the whole wait, bounded by [`SWAPCHAIN_GPU_VISIBILITY_TIMEOUT`].
+/// wgpu-core 29.0.3 `CoreDevice::poll` calls `handle_error_fatal` when
+/// `WaitIdleError::to_poll_error()` returns `None`. `WaitIdleError::Device`
+/// (lost, out of memory, unexpected) is that case. Vulkan `hal::Device::wait`
+/// maps `VK_ERROR_DEVICE_LOST` from `vkWaitSemaphores` to `DeviceError::Lost`,
+/// and `handle_hal_error` calls `Device::lose` before the public `poll` aborts.
+/// A device lost during `PollType::Wait` therefore never returns to the
+/// `DeviceLost` arm. With `always` as the default, a hang that loses the device
+/// inside that wait would kill the driver thread instead of taking the recovery
+/// path.
 ///
-/// While they are held:
-/// - `Buffer::destroy` and `Texture::destroy` take the snatch lock for writing, so a
-///   main-thread `destroy()` stalls until the wait returns.
-/// - `Queue::write_buffer` and `Queue::write_texture` take the snatch lock for
-///   reading. They share that lock with the poll. They stall when a snatch writer
-///   is already queued, because parking_lot blocks new readers for a waiting writer.
-/// - `Queue::submit` takes the snatch lock for reading and then the fence lock for
-///   writing, so a submit stalls until the poll drops its fence read guard.
+/// This function registers [`wgpu::Queue::on_submitted_work_done`] and drives it
+/// with [`wgpu::PollType::Poll`] plus [`std::sync::mpsc::Receiver::recv_timeout`].
+/// `Poll` does not call `hal::Device::wait`. The callback runs on this thread
+/// before `poll` returns, and it only sends on a channel.
+///
+/// A loss that [`GpuDeviceHealth::is_lost`] already reports, including one that
+/// arrives between polls, skips the next poll and returns
+/// [`ProjectionGpuWait::DeviceLost`]. A hang that does not lose the device ends
+/// as [`ProjectionGpuWait::TimedOut`] when the channel times out.
+///
+/// `Poll` still calls `get_fence_value` (`vkGetSemaphoreCounterValue` on the
+/// timeline semaphore). That query uses the same lost-device mapping, so one
+/// non-blocking poll can still reach `handle_error_fatal`. That is a single
+/// query, not a 500 ms wait inside `vkWaitSemaphores`.
+///
+/// # Locks held by each poll
+///
+/// `poll_and_return_closures` takes the device snatch lock for reading and the
+/// fence lock for reading across `maintain`. For `PollType::Poll`, `maintain`
+/// does not call `hal::Device::wait`. Both guards drop before the completion
+/// callback runs and before `poll` returns. `Buffer::destroy`, `Texture::destroy`,
+/// `Queue::write_buffer`, `Queue::write_texture`, and `Queue::submit` can stall
+/// on those locks only for that brief maintain, not for
+/// [`SWAPCHAIN_GPU_VISIBILITY_TIMEOUT`].
 ///
 /// This function does not take [`crate::gpu::GpuQueueAccessGate`]. That gate
 /// serializes `Queue::write_texture`, `Queue::submit`, surface present, and the
-/// OpenXR queue calls. `Queue::write_buffer` is not on that gate. The stall above
-/// is the wgpu snatch and fence locks, not the queue gate.
-///
-/// A device that [`GpuDeviceHealth::is_lost`] already reports is not polled. wgpu's
-/// public `poll` treats device-loss as fatal (`WaitIdleError::Device` is not a
-/// [`wgpu::PollError`]) and would abort the driver thread.
+/// OpenXR queue calls. `Queue::write_buffer` is not on that gate.
 pub(super) fn wait_for_projection_writes(
     request: &ProjectionGpuWaitRequest<'_>,
 ) -> SwapchainReleasePermit {
@@ -186,31 +222,51 @@ fn resolve_projection_gpu_wait(
     }
 
     profiling::scope!("driver::xr_wait_gpu_visible");
-    let poll_type = wgpu::PollType::Wait {
-        submission_index: Some(request.submission.clone()),
-        timeout: Some(SWAPCHAIN_GPU_VISIBILITY_TIMEOUT),
-    };
-    match request.device.poll(poll_type) {
-        Ok(status) if status.wait_finished() => (ProjectionGpuWait::Visible, None),
-        Ok(status) => {
-            let detail = poll_status_label(status).to_owned();
-            log_swapchain_gpu_wait_timeout(request, &detail);
-            (ProjectionGpuWait::TimedOut, Some(detail))
-        }
-        Err(error) => {
-            let detail = error.to_string();
-            log_swapchain_gpu_wait_timeout(request, &detail);
-            (ProjectionGpuWait::TimedOut, Some(detail))
-        }
-    }
+    pump_until_submitted_work_done(request)
 }
 
-/// Stable label for a poll result that did not report the wait as finished.
-fn poll_status_label(status: wgpu::PollStatus) -> &'static str {
-    match status {
-        wgpu::PollStatus::QueueEmpty => "queue_empty",
-        wgpu::PollStatus::WaitSucceeded => "wait_succeeded",
-        wgpu::PollStatus::Poll => "poll",
+/// Polls until the completion callback fires, the device is lost, or the budget expires.
+fn pump_until_submitted_work_done(
+    request: &ProjectionGpuWaitRequest<'_>,
+) -> (ProjectionGpuWait, Option<String>) {
+    let (sender, receiver) = sync_channel(1);
+    request.queue.on_submitted_work_done(move || {
+        let _ = sender.send(());
+    });
+
+    let deadline = Instant::now() + SWAPCHAIN_GPU_VISIBILITY_TIMEOUT;
+    loop {
+        if request.device_health.is_lost() {
+            log_swapchain_gpu_wait_device_lost(request);
+            return (ProjectionGpuWait::DeviceLost, None);
+        }
+        if Instant::now() >= deadline {
+            let detail = "on_submitted_work_done exceeded the wait budget";
+            log_swapchain_gpu_wait_timeout(request, detail);
+            return (ProjectionGpuWait::TimedOut, Some(detail.to_owned()));
+        }
+
+        if let Err(error) = request.device.poll(wgpu::PollType::Poll) {
+            let detail = error.to_string();
+            log_swapchain_gpu_wait_timeout(request, &detail);
+            return (ProjectionGpuWait::TimedOut, Some(detail));
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let slice = remaining.min(SWAPCHAIN_GPU_POLL_SLICE);
+        match receiver.recv_timeout(slice) {
+            Ok(()) => return (ProjectionGpuWait::Visible, None),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                if request.device_health.is_lost() {
+                    log_swapchain_gpu_wait_device_lost(request);
+                    return (ProjectionGpuWait::DeviceLost, None);
+                }
+                let detail = "on_submitted_work_done channel disconnected";
+                log_swapchain_gpu_wait_timeout(request, detail);
+                return (ProjectionGpuWait::TimedOut, Some(detail.to_owned()));
+            }
+        }
     }
 }
 
@@ -228,9 +284,15 @@ fn log_swapchain_gpu_wait_timeout(request: &ProjectionGpuWaitRequest<'_>, detail
 }
 
 /// Logs device-loss separately from a timeout. The image is still released.
+///
+/// The first four losses log, then every 64th. A lost device otherwise emits this
+/// once per frame for the rest of the session.
 fn log_swapchain_gpu_wait_device_lost(request: &ProjectionGpuWaitRequest<'_>) {
+    let Some(occurrence) = SWAPCHAIN_GPU_LOST_LOG.should_log(4, 64) else {
+        return;
+    };
     logger::error!(
-        "OpenXR swapchain GPU wait skipped because the wgpu device is already lost; releasing without polling. generation={} frame_seq={} command_buffers={} image_index={}",
+        "OpenXR swapchain GPU wait skipped because the wgpu device is lost; releasing without polling. occurrence={occurrence} generation={} frame_seq={} command_buffers={} image_index={}",
         request.device_health.lost_generation(),
         request.frame_seq,
         request.command_buffers,
@@ -354,12 +416,12 @@ mod tests {
         };
         let recorder = GpuFlightRecorder::new();
         let health = GpuDeviceHealth::new();
-        let submission = submit_clear(&gpu);
+        submit_clear(&gpu);
 
         let not_required = wait_for_projection_writes(&ProjectionGpuWaitRequest {
             device: &gpu.device,
+            queue: &gpu.queue,
             device_health: &health,
-            submission: &submission,
             command_buffers: 0,
             frame_seq: 1,
             image_index: 0,
@@ -370,8 +432,8 @@ mod tests {
 
         let skipped = wait_for_projection_writes(&ProjectionGpuWaitRequest {
             device: &gpu.device,
+            queue: &gpu.queue,
             device_health: &health,
-            submission: &submission,
             command_buffers: 1,
             frame_seq: 2,
             image_index: 1,
@@ -387,8 +449,8 @@ mod tests {
         });
         let visible = wait_for_projection_writes(&ProjectionGpuWaitRequest {
             device: &gpu.device,
+            queue: &gpu.queue,
             device_health: &health,
-            submission: &submission,
             command_buffers: 1,
             frame_seq: 3,
             image_index: 2,
@@ -403,7 +465,7 @@ mod tests {
 
         let lost_health = GpuDeviceHealth::new();
         lost_health.mark_lost("lavapipe test");
-        let lost_submission = submit_clear(&gpu);
+        submit_clear(&gpu);
         let lost_fired = Arc::new(AtomicBool::new(false));
         let lost_flag = Arc::clone(&lost_fired);
         gpu.queue.on_submitted_work_done(move || {
@@ -411,8 +473,8 @@ mod tests {
         });
         let lost = wait_for_projection_writes(&ProjectionGpuWaitRequest {
             device: &gpu.device,
+            queue: &gpu.queue,
             device_health: &lost_health,
-            submission: &lost_submission,
             command_buffers: 1,
             frame_seq: 4,
             image_index: 3,
@@ -424,7 +486,20 @@ mod tests {
             !lost_fired.load(Ordering::Acquire),
             "device-lost must not poll, so the new callback stays pending"
         );
+    }
 
+    /// Prints nearest-rank p50/p95 for the handoff on lavapipe.
+    ///
+    /// Not part of the default suite. Run with `--ignored` when refreshing the
+    /// headless numbers in the pull request.
+    #[test]
+    #[ignore = "prints lavapipe handoff percentiles"]
+    fn lavapipe_handoff_percentiles() {
+        let Some(gpu) = lavapipe_device() else {
+            logger::info!("lavapipe handoff percentiles skipped: no lavapipe adapter");
+            return;
+        };
+        let recorder = GpuFlightRecorder::new();
         let mut always_wait_ms = Vec::new();
         let mut always_cpu_ms = Vec::new();
         let mut never_wait_ms = Vec::new();
@@ -459,12 +534,12 @@ mod tests {
     ) -> (f64, f64) {
         let health = GpuDeviceHealth::new();
         let started = Instant::now();
-        let submission = submit_clear(gpu);
+        submit_clear(gpu);
         let wait_started = Instant::now();
         let permit = wait_for_projection_writes(&ProjectionGpuWaitRequest {
             device: &gpu.device,
+            queue: &gpu.queue,
             device_health: &health,
-            submission: &submission,
             command_buffers: 1,
             frame_seq: 0,
             image_index: 0,
