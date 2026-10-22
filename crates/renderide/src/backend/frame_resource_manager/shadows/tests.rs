@@ -199,7 +199,7 @@ fn spot_shadow_depth_is_wgpu_zero_to_one() {
         position + direction * near,
         position + direction * far,
     );
-    let mid = position + direction * ((near + far) * 0.5);
+    let mid = position + direction * f32::midpoint(near, far);
     let mid_z = ndc_z(view_proj, mid);
     assert!(
         mid_z > 0.0 && mid_z < 1.0,
@@ -230,7 +230,7 @@ fn point_shadow_depth_is_wgpu_zero_to_one() {
     }
     let (direction, _) = super::point_faces::basis(0);
     let view_proj = point_shadow_projection(&light, position, 0);
-    let mid = position + direction * ((near + far) * 0.5);
+    let mid = position + direction * f32::midpoint(near, far);
     assert!(super::world_aabb_visible_in_homogeneous_clip(
         view_proj,
         mid - Vec3::splat(0.02),

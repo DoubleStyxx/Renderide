@@ -16,18 +16,17 @@ pub(super) struct ReflectionProbeSpecularBindGroupResources<'a> {
     pub metadata_buffer: &'a wgpu::Buffer,
 }
 
+type ReflectionProbeSpecularFallback = (
+    Arc<wgpu::Texture>,
+    Arc<wgpu::TextureView>,
+    Arc<wgpu::Sampler>,
+    Arc<wgpu::Buffer>,
+);
+
 /// Allocates black fallback reflection-probe bindings.
 pub(super) fn create_reflection_probe_specular_fallback(
     device: &wgpu::Device,
-) -> Result<
-    (
-        Arc<wgpu::Texture>,
-        Arc<wgpu::TextureView>,
-        Arc<wgpu::Sampler>,
-        Arc<wgpu::Buffer>,
-    ),
-    FrameGpuInitError,
-> {
+) -> Result<ReflectionProbeSpecularFallback, FrameGpuInitError> {
     let texture = Arc::new(device.create_texture(&wgpu::TextureDescriptor {
         label: Some("frame_reflection_probe_black_array"),
         size: wgpu::Extent3d {
