@@ -22,6 +22,9 @@ impl PlatformGroup {
     pub(super) const fn register_spawned(&self, _child: &Child) -> io::Result<()> {
         Ok(())
     }
+
+    /// No tracked pids to forget. Parent death is `PR_SET_PDEATHSIG`, armed in [`Self::prepare_command`].
+    pub(super) const fn disarm(&self) {}
 }
 
 fn apply_parent_death_signal(cmd: &mut Command) {

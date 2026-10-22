@@ -180,13 +180,12 @@ pub fn spawn_renderer_delegate(args: &[String]) -> io::Result<ExitStatus> {
         return Err(error);
     }
     let status = child.wait()?;
-    // macOS `Drop` signals every registered pid and then sleeps through the grace periods.
-    // The renderer has already been waited on, so that shutdown would only delay its exit
-    // code. Forgetting the group skips that post-exit shutdown. Parent-death during `wait`
-    // is unchanged: the group is alive until then, Linux already armed `PR_SET_PDEATHSIG`,
-    // and Windows closes the job handle when this process is killed.
-    #[cfg(target_os = "macos")]
-    std::mem::forget(lifetime);
+    // macOS `Drop` signals every still-tracked pid and then sleeps through the grace periods.
+    // The renderer has already been waited on, so leave the list empty and let `Drop` return
+    // immediately. Linux parent-death is `PR_SET_PDEATHSIG` from `prepare_command`. Windows
+    // kill-on-close stays armed until this function returns and drops the job handle; a kill
+    // during `wait` still closes that handle with the process.
+    lifetime.disarm();
     Ok(status)
 }
 
