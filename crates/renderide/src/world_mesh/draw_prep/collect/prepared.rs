@@ -19,7 +19,10 @@ use super::candidate::{DrawCandidate, evaluate_draw_candidate};
 use super::transform_chain_has_degenerate_scale;
 use super::world_matrix::{front_face_for_draw_matrices, world_matrix_for_local_vertex_stream};
 use super::{CollectState, DrawCollectionInputs};
-use super::{effective_overlay_in_view, special_layer_visible_in_view, transform_filter_for_space};
+use super::{
+    effective_overlay_in_view, render_space_visible_in_view, special_layer_visible_in_view,
+    transform_filter_for_space,
+};
 
 /// Returns true when two prepared slot entries came from the same source renderer.
 #[inline]
@@ -267,7 +270,10 @@ fn collect_prepared_renderer_run<'a>(
     let Some(first) = run.first() else {
         return (0, 0, 0);
     };
-    if !ctx.view.render_space_scope.includes(first.space_id) {
+    // Shadow passes and other uncullled walks visit every prepared run. The filtered space-id
+    // list is not consulted here, and LOD treats a missing space as visible, so private UI has
+    // to be rejected by the same predicate as the color query.
+    if !render_space_visible_in_view(ctx, first.space_id) {
         return (0, 0, 0);
     }
     if !prepared_run_passes_filter(first, ctx, state.filter_masks) {
@@ -293,6 +299,9 @@ fn collect_prepared_renderer_run<'a>(
     if transform_chain_has_degenerate_scale(ctx, first.space_id, first.node_id) {
         return (0, 0, 0);
     }
+    // Recorded before mesh lookup so unit tests can see admission without a resident `GpuMesh`.
+    #[cfg(test)]
+    prepared_admission::note(first.space_id);
     let is_overlay = effective_overlay_in_view(ctx, source_is_overlay);
     let Some(mesh) = ctx.scene_assets.mesh_pool.get(first.mesh_asset_id) else {
         return (0, 0, 0);
@@ -348,4 +357,34 @@ pub(super) fn collect_prepared_chunk<'a>(
     }
 
     (out, cull_stats)
+}
+
+/// Spaces admitted by prepared collection after private-UI and layer gates.
+///
+/// Production builds omit this. Tests use it because a missing mesh yields no draw items for
+/// both filtered and leaked runs, so draw length cannot show whether private UI was rejected.
+#[cfg(test)]
+pub(super) mod prepared_admission {
+    use std::cell::RefCell;
+
+    use crate::scene::RenderSpaceId;
+
+    thread_local! {
+        static ADMITTED: RefCell<Vec<RenderSpaceId>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Clears admissions recorded on this thread.
+    pub(super) fn reset() {
+        ADMITTED.with(|admitted| admitted.borrow_mut().clear());
+    }
+
+    /// Records one renderer run that passed view visibility gates.
+    pub(super) fn note(space_id: RenderSpaceId) {
+        ADMITTED.with(|admitted| admitted.borrow_mut().push(space_id));
+    }
+
+    /// Takes the admissions recorded on this thread.
+    pub(super) fn take() -> Vec<RenderSpaceId> {
+        ADMITTED.with(|admitted| admitted.replace(Vec::new()))
+    }
 }

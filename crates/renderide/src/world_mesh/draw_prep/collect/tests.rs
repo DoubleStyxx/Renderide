@@ -3,6 +3,7 @@
 use glam::{Mat4, Quat, Vec3};
 use hashbrown::HashSet;
 
+use super::FramePreparedRenderables;
 use super::world_matrix::front_face_for_draw_matrices;
 use super::*;
 use crate::cpu_parallelism::{ParallelAdmission, RENDER_COMMAND_CHUNK_DRAWS};
@@ -14,6 +15,7 @@ use crate::materials::{
 use crate::scene::{MeshRendererInstanceId, RenderSpaceId, SceneCoordinator};
 use crate::shared::{LayerType, RenderTransform, RenderingContext, ShadowCastMode};
 use crate::world_mesh::CameraTransformDrawFilter;
+use crate::world_mesh::materials::FrameMaterialBatchCache;
 
 /// Builds a unit-scale transform for draw-prep tests.
 fn identity_transform() -> RenderTransform {
@@ -525,4 +527,148 @@ fn prepared_collect_parallelism_requires_draw_heavy_work_and_multiple_tasks() {
         prepared_collect_admission(2, threshold, 1),
         ParallelAdmission::Serial
     );
+}
+
+const PUBLIC_WORLD_SPACE: RenderSpaceId = RenderSpaceId(50);
+const PRIVATE_USERSPACE: RenderSpaceId = RenderSpaceId(51);
+
+/// Seeds one public world space and one private userspace, each with a unit-scale root.
+fn seed_world_and_private_userspace() -> SceneCoordinator {
+    let mut scene = SceneCoordinator::new();
+    scene.test_seed_space_identity_worlds(PUBLIC_WORLD_SPACE, vec![identity_transform()], vec![-1]);
+    scene.test_seed_space_identity_worlds(PRIVATE_USERSPACE, vec![identity_transform()], vec![-1]);
+    scene.test_set_space_private(PRIVATE_USERSPACE, true);
+    scene
+}
+
+/// Builds a prepared snapshot with one non-resident draw in each seeded space.
+fn prepared_world_and_userspace(scene: &SceneCoordinator) -> FramePreparedRenderables {
+    let mut prepared = FramePreparedRenderables::empty(RenderingContext::UserView);
+    prepared.begin_cached_rebuild(RenderingContext::UserView);
+    prepared.push_cached_space(PUBLIC_WORLD_SPACE);
+    prepared.extend_cached_draws(&[prepared_draw(PUBLIC_WORLD_SPACE)]);
+    prepared.push_cached_space(PRIVATE_USERSPACE);
+    let mut private_draw = prepared_draw(PRIVATE_USERSPACE);
+    private_draw.instance_id = MeshRendererInstanceId(12);
+    prepared.extend_cached_draws(&[private_draw]);
+    prepared.finish_cached_rebuild(scene);
+    prepared
+}
+
+/// Runs uncullled prepared collection and returns spaces admitted before mesh lookup.
+fn admitted_prepared_spaces(
+    layer_policy: ViewLayerPolicy,
+    filter: Option<&CameraTransformDrawFilter>,
+    filter_space: Option<RenderSpaceId>,
+) -> Vec<RenderSpaceId> {
+    let scene = seed_world_and_private_userspace();
+    let prepared = prepared_world_and_userspace(&scene);
+    let material_cache = FrameMaterialBatchCache::new();
+    let mesh_pool = MeshPool::default_pool();
+    let store = MaterialPropertyStore::new();
+    let material_dict = MaterialDictionary::new(&store);
+    let router = MaterialRouter::new(RasterPipelineKind::Null);
+    let registry = PropertyIdRegistry::new();
+    let property_ids = MaterialPipelinePropertyIds::new(&registry);
+    let mut ctx = test_draw_context(
+        TestDrawContextResources {
+            scene: &scene,
+            mesh_pool: &mesh_pool,
+            material_dict: &material_dict,
+            router: &router,
+            property_ids: &property_ids,
+        },
+        filter,
+        ViewRenderSpaceScope::AllActive,
+        layer_policy,
+    );
+    ctx.view.transform_filter_space = filter_space;
+    ctx.caches.material_cache = Some(&material_cache);
+    ctx.caches.prepared = Some(&prepared);
+    super::prepared::prepared_admission::reset();
+    let _queued = queue_draws_with_parallelism(
+        &ctx,
+        WorldMeshDrawCollectParallelism::SerialInnerForNestedBatch,
+    );
+    super::prepared::prepared_admission::take()
+}
+
+/// Selective list used by dashboard-style cameras in these tests.
+fn selective_root_filter() -> CameraTransformDrawFilter {
+    CameraTransformDrawFilter {
+        only: Some(HashSet::from_iter([0])),
+        exclude: HashSet::new(),
+    }
+}
+
+#[test]
+fn uncullled_prepared_collection_honors_render_private_ui() {
+    let hidden = admitted_prepared_spaces(ViewLayerPolicy::camera(false), None, None);
+    let shown = admitted_prepared_spaces(ViewLayerPolicy::camera(true), None, None);
+
+    assert_eq!(hidden, vec![PUBLIC_WORLD_SPACE]);
+    assert_eq!(shown, vec![PUBLIC_WORLD_SPACE, PRIVATE_USERSPACE]);
+}
+
+#[test]
+fn uncullled_prepared_collection_keeps_private_ui_in_the_main_view() {
+    let admitted = admitted_prepared_spaces(ViewLayerPolicy::MainView, None, None);
+
+    assert_eq!(admitted, vec![PUBLIC_WORLD_SPACE, PRIVATE_USERSPACE]);
+}
+
+#[test]
+fn selective_filter_does_not_reveal_private_ui_outside_its_space() {
+    let selective = selective_root_filter();
+    let admitted = admitted_prepared_spaces(
+        ViewLayerPolicy::camera(false),
+        Some(&selective),
+        Some(PUBLIC_WORLD_SPACE),
+    );
+
+    assert_eq!(admitted, vec![PUBLIC_WORLD_SPACE]);
+}
+
+#[test]
+fn selective_dashboard_camera_still_admits_its_private_space() {
+    let selective = selective_root_filter();
+    let admitted = admitted_prepared_spaces(
+        ViewLayerPolicy::camera(false),
+        Some(&selective),
+        Some(PRIVATE_USERSPACE),
+    );
+
+    assert!(admitted.contains(&PUBLIC_WORLD_SPACE));
+    assert!(admitted.contains(&PRIVATE_USERSPACE));
+}
+
+#[test]
+fn selective_roots_do_not_expose_private_spaces_outside_the_filter() {
+    let scene = seed_world_and_private_userspace();
+    let mesh_pool = MeshPool::default_pool();
+    let store = MaterialPropertyStore::new();
+    let material_dict = MaterialDictionary::new(&store);
+    let router = MaterialRouter::new(RasterPipelineKind::Null);
+    let registry = PropertyIdRegistry::new();
+    let property_ids = MaterialPipelinePropertyIds::new(&registry);
+    let selective = selective_root_filter();
+    let mut ctx = test_draw_context(
+        TestDrawContextResources {
+            scene: &scene,
+            mesh_pool: &mesh_pool,
+            material_dict: &material_dict,
+            router: &router,
+            property_ids: &property_ids,
+        },
+        Some(&selective),
+        ViewRenderSpaceScope::AllActive,
+        ViewLayerPolicy::camera(false),
+    );
+    ctx.view.transform_filter_space = Some(PUBLIC_WORLD_SPACE);
+
+    assert!(render_space_visible_in_view(&ctx, PUBLIC_WORLD_SPACE));
+    assert!(!render_space_visible_in_view(&ctx, PRIVATE_USERSPACE));
+
+    ctx.view.transform_filter_space = Some(PRIVATE_USERSPACE);
+    assert!(render_space_visible_in_view(&ctx, PRIVATE_USERSPACE));
 }
