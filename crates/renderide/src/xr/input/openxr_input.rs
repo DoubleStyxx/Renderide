@@ -265,6 +265,19 @@ impl OpenxrInput {
         }
     }
 
+    /// Maps the runtime's current interaction profile onto the pose profile used for grip→raw.
+    ///
+    /// Touch Pro (`/interaction_profiles/facebook/touch_controller_pro`) and Touch Plus
+    /// (`/interaction_profiles/meta/touch_controller_plus`) both map to [`ActiveControllerProfile::Touch`].
+    /// On a native runtime such as WiVRn, a picked-up Quest 3 reports Touch Plus (WiVRn issue 408),
+    /// so it receives the Quest 2 Facebook grip component and the host-space 45° correction. That
+    /// assumes Plus and Pro grips match the Quest 2 component. Not headset-verified.
+    ///
+    /// Pico 4 and Pico Neo 3 stay on their own profiles. Native OpenXR uses
+    /// `/interaction_profiles/bytedance/pico4_controller` and `.../pico_neo3_controller`
+    /// (`XR_BD_controller_interaction`). Those profiles pass the OpenXR grip through as the raw
+    /// node and use the Windows MR bound-hand offset. WiVRn can also emulate Touch for a Pico 4
+    /// (WiVRn issue 580); this mapping does not. Index and Pico are untested on a headset.
     fn detect_profile(
         &self,
         session: &xr::Session<xr::Vulkan>,
@@ -443,12 +456,11 @@ impl OpenxrInput {
         let right_profile = self.active_profile(session, self.right_user_path, Chirality::Right);
         log_profile_transition(Chirality::Left, left_profile);
         log_profile_transition(Chirality::Right, right_profile);
-        // Aim spaces are not sampled. Every shipped profile binds grip, and the host pose is
-        // recovered from that grip. `None` keeps the aim fallback available to the resolver.
-        let left_frame =
-            resolve_controller_frame(left_profile, Chirality::Left, left_grip_pose, None);
+        // Only the grip space is located. An untracked grip yields no controller frame, including
+        // when a palm pose would still be valid. Aim spaces are not created.
+        let left_frame = resolve_controller_frame(left_profile, Chirality::Left, left_grip_pose);
         let right_frame =
-            resolve_controller_frame(right_profile, Chirality::Right, right_grip_pose, None);
+            resolve_controller_frame(right_profile, Chirality::Right, right_grip_pose);
         let mut controllers = Vec::with_capacity(2);
         if let Some(left_host_profile) = self.host_profile_for_sample(Chirality::Left, left_profile)
         {

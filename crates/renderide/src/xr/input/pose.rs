@@ -1,4 +1,4 @@
-//! Controller grip/aim pose math and OpenXR [`openxr::SpaceLocation`] conversion.
+//! Controller grip pose math and OpenXR [`openxr::SpaceLocation`] conversion.
 //!
 //! Values follow the host-side pose convention expected by the `SteamVRDriver`-shaped
 //! controller data path. The host (`VR_Manager`) writes the received `position` / `rotation`
@@ -25,7 +25,22 @@ pub(super) fn unity_euler_deg(x: f32, y: f32, z: f32) -> Quat {
         * Quat::from_rotation_z(z.to_radians())
 }
 
-/// Local OpenXR-space transform from standardized grip pose to SteamVR-style raw controller pose.
+/// SteamVR rendermodel `component_local` of the grip, expressed in the raw device frame.
+///
+/// The name `grip_from_raw` is that component: `grip = raw * grip_from_raw`. `rotation` /
+/// `translation` are `rotate_xyz` / `origin` from the rendermodel JSON (`origin` is the grip's
+/// position in the raw frame). [`RawFromGripTransform`] stores the inverse, which maps a tracked
+/// grip pose back onto the raw frame.
+#[derive(Clone, Copy)]
+struct GripInRaw {
+    rotation: Quat,
+    translation: Vec3,
+}
+
+/// Local OpenXR-space transform from a standardized grip pose back to the SteamVR raw pose.
+///
+/// This is the inverse of [`GripInRaw`]. `apply` does `position + rotation * translation` and
+/// `rotation * rotation`, i.e. `raw = grip * raw_from_grip`.
 #[derive(Clone, Copy)]
 pub(super) struct RawFromGripTransform {
     rotation: Quat,
@@ -40,12 +55,12 @@ impl RawFromGripTransform {
         }
     }
 
-    fn from_grip_from_raw(rotation: Quat, translation: Vec3) -> Self {
-        let rotation = rotation.normalize();
+    fn from_grip_in_raw(grip_in_raw: GripInRaw) -> Self {
+        let rotation = grip_in_raw.rotation.normalize();
         let raw_from_grip_rotation = rotation.inverse();
         Self {
             rotation: raw_from_grip_rotation,
-            translation: raw_from_grip_rotation * -translation,
+            translation: raw_from_grip_rotation * -grip_in_raw.translation,
         }
     }
 
@@ -57,46 +72,91 @@ impl RawFromGripTransform {
     }
 }
 
+/// Host-space pitch from the in-repo port of decompiled `SteamVRDriver.UpdateController`.
+///
+/// A public Valve or Resonite source for this angle was not found. It is not the 39.4° aim
+/// component below. Applied only for [`ActiveControllerProfile::Touch`], after grip→raw and the
+/// host basis change, as a post-multiply `rotation * RotX(pitch)`.
+const TOUCH_UPDATE_CONTROLLER_PITCH_DEG: f32 = 45.0;
+
+/// Quest 2 `openxr_grip` pitch, degrees, from the component Facebook gave Valve.
+///
+/// Valve quoted it in <https://steamcommunity.com/app/250820/discussions/8/3041607080045210902/>:
+/// `rotate_xyz: [20.6, 0, 0]`, `origin: [0.007, -0.00182941, 0.1019482]`, next to aim
+/// `rotate_xyz: [-39.4, 0, 0]`. Y and Z are zero, so Euler order does not change this pitch.
+const TOUCH_GRIP_PITCH_DEG: f32 = 20.6;
+
+/// Published Quest 2 grip-origin X. The Steam post shows one component, `x = +0.007`, not a
+/// left/right pair. Left keeps that sign. Right negates it. The same post says Quest 2 aim and
+/// grip share X ("no difference in the x-axis from grip"), and a measurement there has grip-in-aim
+/// X = 0 on both hands, which holds when aim is mirrored with the grip. This code does not apply
+/// an aim transform.
+const TOUCH_GRIP_ORIGIN_X: f32 = 0.007;
+
+/// Index `openxr_grip` `rotate_xyz` degrees for the left controller. Right negates Y and Z.
+/// Origin for both hands is `(0, -0.015, 0.13)`.
+///
+/// These numbers have been in this repo since `34a0ae1c`. A public SteamVR rendermodel JSON
+/// containing 15.392 / ∓2.071 / ±0.303 was not found; do not treat them as a cited Valve file.
+///
+/// `rotate_xyz` is applied as glam [`EulerRot::XYZ`], intrinsic X then Y then Z
+/// (`Rx * Ry * Rz`). The OpenVR render-model reference describes `rotate_xyz` as the rotation
+/// from the raw frame to the component and does not give a composition order
+/// (<https://github.com/ValveSoftware/openvr/wiki/Render-Model-Reference>). Joe Ludwig, on OpenVR
+/// issue 1446, says the API only needs the matrix and Euler order is the application's choice
+/// (<https://github.com/ValveSoftware/openvr/issues/1446>). For Index, another order can move the
+/// pose by about half a degree. That difference is not resolved here.
+const INDEX_GRIP_ROTATE_XYZ_LEFT_DEG: (f32, f32, f32) = (15.392, -2.071, 0.303);
+
+fn index_grip_in_raw(side: Chirality) -> GripInRaw {
+    let (pitch, yaw, roll) = INDEX_GRIP_ROTATE_XYZ_LEFT_DEG;
+    let (yaw, roll) = match side {
+        Chirality::Left => (yaw, roll),
+        Chirality::Right => (-yaw, -roll),
+    };
+    GripInRaw {
+        rotation: Quat::from_euler(
+            EulerRot::XYZ,
+            pitch.to_radians(),
+            yaw.to_radians(),
+            roll.to_radians(),
+        ),
+        translation: Vec3::new(0.0, -0.015, 0.13),
+    }
+}
+
+fn touch_grip_in_raw(side: Chirality) -> GripInRaw {
+    let origin_x = match side {
+        Chirality::Left => TOUCH_GRIP_ORIGIN_X,
+        Chirality::Right => -TOUCH_GRIP_ORIGIN_X,
+    };
+    GripInRaw {
+        rotation: Quat::from_euler(EulerRot::XYZ, TOUCH_GRIP_PITCH_DEG.to_radians(), 0.0, 0.0),
+        translation: Vec3::new(origin_x, -0.001_829_41, 0.101_948_2),
+    }
+}
+
+/// Grip component in the raw frame, or `None` when the OpenXR grip is already the node we report.
+///
+/// Vive Focus 3 is `None` on purpose. No Focus 3 `openxr_grip` component was found, so it does not
+/// reuse the Quest 2 origin / 20.6° pitch. The 45° [`touch_pose_correction`] stays Touch-only, and
+/// the Focus 3 bound-hand offset stays identity so the wrist sits on that grip.
+fn grip_in_raw(profile: ActiveControllerProfile, side: Chirality) -> Option<GripInRaw> {
+    match profile {
+        ActiveControllerProfile::Index => Some(index_grip_in_raw(side)),
+        ActiveControllerProfile::Touch => Some(touch_grip_in_raw(side)),
+        _ => None,
+    }
+}
+
 /// Returns the local OpenXR-space transform from grip pose to SteamVR raw controller pose.
 pub(super) fn steamvr_raw_from_openxr_grip(
     profile: ActiveControllerProfile,
     side: Chirality,
 ) -> RawFromGripTransform {
-    let (grip_from_raw_rotation, grip_from_raw_translation) = match (profile, side) {
-        (ActiveControllerProfile::Index, Chirality::Left) => (
-            Quat::from_euler(
-                EulerRot::XYZ,
-                15.392_f32.to_radians(),
-                -2.071_f32.to_radians(),
-                0.303_f32.to_radians(),
-            ),
-            Vec3::new(0.0, -0.015, 0.13),
-        ),
-        (ActiveControllerProfile::Index, Chirality::Right) => (
-            Quat::from_euler(
-                EulerRot::XYZ,
-                15.392_f32.to_radians(),
-                2.071_f32.to_radians(),
-                -0.303_f32.to_radians(),
-            ),
-            Vec3::new(0.0, -0.015, 0.13),
-        ),
-        (ActiveControllerProfile::Touch | ActiveControllerProfile::ViveFocus3, Chirality::Left) => {
-            (
-                Quat::from_euler(EulerRot::XYZ, 20.6_f32.to_radians(), 0.0, 0.0),
-                Vec3::new(0.007, -0.001_829_41, 0.101_948_2),
-            )
-        }
-        (
-            ActiveControllerProfile::Touch | ActiveControllerProfile::ViveFocus3,
-            Chirality::Right,
-        ) => (
-            Quat::from_euler(EulerRot::XYZ, 20.6_f32.to_radians(), 0.0, 0.0),
-            Vec3::new(-0.007, -0.001_829_41, 0.101_948_2),
-        ),
-        _ => return RawFromGripTransform::identity(),
-    };
-    RawFromGripTransform::from_grip_from_raw(grip_from_raw_rotation, grip_from_raw_translation)
+    grip_in_raw(profile, side).map_or_else(RawFromGripTransform::identity, |grip| {
+        RawFromGripTransform::from_grip_in_raw(grip)
+    })
 }
 
 /// Converts an OpenXR grip pose into the SteamVR raw controller pose expected by host IPC.
@@ -119,26 +179,35 @@ pub(super) fn openxr_grip_to_steamvr_raw(
     openxr_tracking_pose_to_host(raw_position, raw_rotation)
 }
 
+/// Host-local nudge from the same `UpdateController` port as [`TOUCH_UPDATE_CONTROLLER_PITCH_DEG`].
+///
+/// A public citation for `(±0.01, 0.04, 0.03)` was not found. Left X is `-0.01`, right X is
+/// `+0.01`. It is subtracted after the pitch (`position - rotation * nudge`), so the nudge is in
+/// the already-pitched node frame, not the pre-pitch raw frame.
+fn touch_update_controller_nudge(side: Chirality) -> Vec3 {
+    match side {
+        Chirality::Left => Vec3::new(-0.01, 0.04, 0.03),
+        Chirality::Right => Vec3::new(0.01, 0.04, 0.03),
+    }
+}
+
 /// Touch-only correction from `SteamVRDriver.UpdateController`, applied after the OpenXR grip has
-/// already been converted to the SteamVR raw device pose.
+/// already been converted to the SteamVR raw device pose and into the host basis.
 ///
-/// The raw Oculus Touch pose is tilted and shifted relative to the hand anchor that driver forwards
-/// to the host. Unity pitches the raw rotation up by 45° about local X and nudges the position.
-/// Other controllers apply no extra correction in that driver, and none is applied here either.
+/// Order, in host space: post-multiply [`TOUCH_UPDATE_CONTROLLER_PITCH_DEG`] about local X, then
+/// subtract [`touch_update_controller_nudge`] in that pitched frame. Other profiles get neither.
 ///
-/// The 45° pitch is not the grip-to-raw conversion. That conversion is
-/// [`steamvr_raw_from_openxr_grip`]. On Touch, the raw pose itself sits about 39° above the OpenXR
-/// aim pose (the "sword" orientation: up and away from the grip).
+/// This pitch is not the grip-to-raw conversion ([`steamvr_raw_from_openxr_grip`]). On Touch the
+/// raw pose itself sits 39.4° above a level OpenXR aim (Facebook's aim `rotate_xyz` of `-39.4`
+/// about X, same Steam post as [`TOUCH_GRIP_PITCH_DEG`]). After this 45° pitch the node is 5.6°
+/// below that aim.
 pub(super) fn touch_pose_correction(
     side: Chirality,
     position: Vec3,
     rotation: Quat,
 ) -> (Vec3, Quat) {
-    let rotation = rotation * Quat::from_rotation_x(45.0_f32.to_radians());
-    let offset = match side {
-        Chirality::Left => Vec3::new(-0.01, 0.04, 0.03),
-        Chirality::Right => Vec3::new(0.01, 0.04, 0.03),
-    };
+    let rotation = rotation * Quat::from_rotation_x(TOUCH_UPDATE_CONTROLLER_PITCH_DEG.to_radians());
+    let offset = touch_update_controller_nudge(side);
     (position - rotation * offset, rotation)
 }
 
@@ -155,8 +224,17 @@ pub(super) fn touch_pose_correction(
 ///
 /// `hasBoundHand` is returned `true` for every profile. The host can otherwise prefer skeletal
 /// hand tracking for some profiles, but the renderer has no skeletal hand tracking, so the
-/// bound-hand defaults are always surfaced; Index / Cosmos / ViveFocus3 return identity so the
-/// hand visual sits at the grip rather than at a wrist offset that was never calibrated for them.
+/// bound-hand defaults are always surfaced.
+///
+/// Index `InitHandData` in the `ce613392` port is identity relative to the grip, and no public
+/// dump with a non-zero Index palm-to-wrist was found, so there is no extra palm-to-wrist term.
+/// The IPC node is now the raw pose (~13 cm ahead of the grip), so the Index offset is the
+/// grip-in-raw component converted into the host basis. The synthetic wrist
+/// (`controller.position + controller.rotation * hand_position`) then lands on the grip.
+///
+/// Vive Focus 3 has no sourced grip component (see [`grip_in_raw`]), so its node is the OpenXR
+/// grip and the identity wrist stays on that grip. Vive Cosmos is the same: no grip component,
+/// identity wrist. Neither is a calibrated palm-to-wrist.
 pub(super) fn bound_hand_pose_defaults(
     profile: ActiveControllerProfile,
     side: Chirality,
@@ -209,28 +287,21 @@ pub(super) fn bound_hand_pose_defaults(
             Vec3::new(0.028, 0.0, -0.18),
             unity_euler_deg(30.0, -5.0, -100.0),
         ),
-        (
-            ActiveControllerProfile::Index
-            | ActiveControllerProfile::ViveCosmos
-            | ActiveControllerProfile::ViveFocus3,
-            _,
-        ) => (Vec3::ZERO, Quat::IDENTITY),
+        (ActiveControllerProfile::Index, side) => {
+            let grip = index_grip_in_raw(side);
+            openxr_tracking_pose_to_host(grip.translation, grip.rotation)
+        }
+        (ActiveControllerProfile::ViveCosmos | ActiveControllerProfile::ViveFocus3, _) => {
+            (Vec3::ZERO, Quat::IDENTITY)
+        }
     };
     (true, position, rotation)
 }
 
-/// Derives a controller grip-style pose from an OpenXR aim pose by stepping back along the
-/// OpenXR forward axis to the approximate grip origin.
-pub(super) fn controller_pose_from_aim(position: Vec3, rotation: Quat) -> (Vec3, Quat) {
-    let rotation = rotation.normalize();
-    let tip_offset = Vec3::new(0.0, 0.0, -0.075);
-    (position - rotation * tip_offset, rotation)
-}
-
 /// Converts an [`xr::SpaceLocation`] into OpenXR tracking-space `(position, rotation)`.
 ///
-/// Returns `None` when either position or orientation is invalid, so callers can fall back to
-/// aim-derived poses or keep the previous frame's state.
+/// Returns `None` when either position or orientation is invalid. Callers then report no
+/// controller frame for that hand.
 pub(super) fn pose_from_location(location: &xr::SpaceLocation) -> Option<(Vec3, Quat)> {
     let tracked = location
         .location_flags
@@ -304,64 +375,46 @@ mod tests {
         2.0 * rotation.normalize().w.abs().clamp(-1.0, 1.0).acos()
     }
 
+    /// Right Index, identity OpenXR grip. Expected pose is intrinsic XYZ
+    /// (`Rx * Ry * Rz`) of `(15.392°, +2.071°, -0.303°)`, inverted, then the host map
+    /// `(x, y, z) -> (x, y, -z)` and `(qx, qy, qz, qw) -> (-qx, -qy, qz, qw)`.
+    ///
+    /// The literals were computed outside this crate. They are not the result of calling
+    /// [`openxr_grip_to_steamvr_raw`] or [`Quat::from_euler`] with the grip constants.
+    /// Another Euler order moves this quaternion by about half a degree. The OpenVR wiki does not
+    /// specify `rotate_xyz` composition; this golden assumes intrinsic XYZ.
     #[test]
-    fn calibrated_raw_from_grip_transforms_match_profile_table() {
-        for (profile, side, grip_from_raw_rotation, grip_from_raw_translation) in [
-            (
-                ActiveControllerProfile::Index,
-                Chirality::Left,
-                Quat::from_euler(
-                    EulerRot::XYZ,
-                    15.392_f32.to_radians(),
-                    -2.071_f32.to_radians(),
-                    0.303_f32.to_radians(),
-                ),
-                Vec3::new(0.0, -0.015, 0.13),
-            ),
-            (
-                ActiveControllerProfile::Index,
-                Chirality::Right,
-                Quat::from_euler(
-                    EulerRot::XYZ,
-                    15.392_f32.to_radians(),
-                    2.071_f32.to_radians(),
-                    -0.303_f32.to_radians(),
-                ),
-                Vec3::new(0.0, -0.015, 0.13),
-            ),
-            (
-                ActiveControllerProfile::Touch,
-                Chirality::Left,
-                Quat::from_euler(EulerRot::XYZ, 20.6_f32.to_radians(), 0.0, 0.0),
-                Vec3::new(0.007, -0.001_829_41, 0.101_948_2),
-            ),
-            (
-                ActiveControllerProfile::Touch,
-                Chirality::Right,
-                Quat::from_euler(EulerRot::XYZ, 20.6_f32.to_radians(), 0.0, 0.0),
-                Vec3::new(-0.007, -0.001_829_41, 0.101_948_2),
-            ),
-            (
-                ActiveControllerProfile::ViveFocus3,
-                Chirality::Left,
-                Quat::from_euler(EulerRot::XYZ, 20.6_f32.to_radians(), 0.0, 0.0),
-                Vec3::new(0.007, -0.001_829_41, 0.101_948_2),
-            ),
-            (
-                ActiveControllerProfile::ViveFocus3,
-                Chirality::Right,
-                Quat::from_euler(EulerRot::XYZ, 20.6_f32.to_radians(), 0.0, 0.0),
-                Vec3::new(-0.007, -0.001_829_41, 0.101_948_2),
-            ),
-        ] {
-            let actual = steamvr_raw_from_openxr_grip(profile, side);
-            let expected = RawFromGripTransform::from_grip_from_raw(
-                grip_from_raw_rotation,
-                grip_from_raw_translation,
-            );
-            assert_vec3_near(actual.translation, expected.translation);
-            assert_quat_near(actual.rotation, expected.rotation);
-        }
+    fn index_right_identity_grip_matches_host_space_rotation_golden() {
+        let (position, rotation) = openxr_grip_to_steamvr_raw(
+            ActiveControllerProfile::Index,
+            Chirality::Right,
+            Vec3::ZERO,
+            Quat::IDENTITY,
+        );
+        assert_vec3_near(
+            position,
+            Vec3::new(0.004_779_23, -0.020_017_81, 0.129_234_07),
+        );
+        assert_quat_near(
+            rotation,
+            Quat::from_xyzw(0.133_847_3, 0.018_263_1, 0.000_199_8, 0.990_833_7),
+        );
+        assert_vec3_near(
+            rotation * Vec3::Z,
+            Vec3::new(0.036_244_87, -0.265_233_5, 0.963_502_7),
+        );
+
+        let (_, hand_position, hand_rotation) =
+            bound_hand_pose_defaults(ActiveControllerProfile::Index, Chirality::Right);
+        assert_vec3_near(hand_position, Vec3::new(0.0, -0.015, -0.13));
+        assert_quat_near(
+            hand_rotation,
+            Quat::from_xyzw(-0.133_847_3, -0.018_263_1, -0.000_199_8, 0.990_833_7),
+        );
+        let wrist_position = position + rotation * hand_position;
+        let wrist_rotation = (rotation * hand_rotation).normalize();
+        assert_vec3_near(wrist_position, Vec3::ZERO);
+        assert_quat_near(wrist_rotation, Quat::IDENTITY);
     }
 
     #[test]
@@ -376,6 +429,7 @@ mod tests {
             ActiveControllerProfile::Pico4,
             ActiveControllerProfile::PicoNeo3,
             ActiveControllerProfile::ViveCosmos,
+            ActiveControllerProfile::ViveFocus3,
             ActiveControllerProfile::Generic,
             ActiveControllerProfile::Simple,
         ] {
@@ -408,22 +462,25 @@ mod tests {
 
     #[test]
     fn raw_pose_offset_magnitudes_match_supported_profiles() {
-        for (profile, expected_translation, angle_min, angle_max) in [
-            (ActiveControllerProfile::Index, 0.130_86, 0.26, 0.28),
-            (ActiveControllerProfile::Touch, 0.102_2, 0.35, 0.37),
-            (ActiveControllerProfile::ViveFocus3, 0.102_2, 0.35, 0.37),
+        // Lengths are |raw_from_grip * -origin|. Touch's angle is the published 20.6° (Y and Z
+        // are 0). Index's angle is the magnitude of intrinsic XYZ (15.392, ∓2.071, ±0.303),
+        // which is 15.527°, not 15.392°, because the axes are not aligned.
+        for (profile, expected_translation, expected_degrees) in [
+            (ActiveControllerProfile::Index, 0.130_862_52, 15.527_38),
+            (ActiveControllerProfile::Touch, 0.102_204_61, 20.6),
         ] {
             for side in [Chirality::Left, Chirality::Right] {
                 let (position, rotation) =
                     steamvr_raw_from_openxr_grip(profile, side).apply(Vec3::ZERO, Quat::IDENTITY);
+                let length_delta = (position.length() - expected_translation).abs();
                 assert!(
-                    (position.length() - expected_translation).abs() < 1e-4,
-                    "{profile:?} {side:?}: position offset {position:?}",
+                    length_delta < 1e-5,
+                    "{profile:?} {side:?}: position offset {position:?} (delta {length_delta})",
                 );
-                let angle = rotation_angle_from_identity(rotation);
+                let angle_degrees = rotation_angle_from_identity(rotation).to_degrees();
                 assert!(
-                    (angle_min..=angle_max).contains(&angle),
-                    "{profile:?} {side:?}: rotation angle {angle}",
+                    (angle_degrees - expected_degrees).abs() < 0.01,
+                    "{profile:?} {side:?}: rotation angle {angle_degrees}°, expected {expected_degrees}°",
                 );
             }
         }
@@ -434,7 +491,6 @@ mod tests {
         for profile in [
             ActiveControllerProfile::Index,
             ActiveControllerProfile::Touch,
-            ActiveControllerProfile::ViveFocus3,
         ] {
             let (left_position, left_rotation) =
                 steamvr_raw_from_openxr_grip(profile, Chirality::Left)
@@ -554,12 +610,13 @@ mod tests {
         }
     }
 
-    /// Profiles without calibrated hand offsets (Index, ViveCosmos, ViveFocus3) return identity
-    /// pose so the hand visual sits at the grip origin instead of at a wrong wrist offset.
+    /// Cosmos and Focus 3 have no sourced grip component, so the node is the OpenXR grip and the
+    /// wrist offset stays identity. Index is not in this list: its node is the raw pose, and the
+    /// wrist offset is the host-space grip component (see
+    /// `index_right_identity_grip_matches_host_space_rotation_golden`).
     #[test]
     fn identity_profiles_have_zero_offset_and_identity_rotation() {
         for profile in [
-            ActiveControllerProfile::Index,
             ActiveControllerProfile::ViveCosmos,
             ActiveControllerProfile::ViveFocus3,
         ] {
@@ -612,44 +669,5 @@ mod tests {
                 );
             }
         }
-    }
-
-    /// SteamVR's published Touch aim component sits 39.4° below the raw device pose.
-    ///
-    /// That is the sword orientation from issue 704: OpenVR raw is the aim pose pitched up by
-    /// roughly 45°, facing up and away from the grip. The separate `UpdateController` 45° pitch is
-    /// applied later, in host space, and is not part of this recovery.
-    #[test]
-    fn touch_openvr_raw_is_aim_pitched_up_by_about_forty_degrees() {
-        let grip_from_raw_rotation =
-            Quat::from_euler(EulerRot::XYZ, 20.6_f32.to_radians(), 0.0, 0.0);
-        let grip_from_raw_translation = Vec3::new(0.007, -0.001_829_41, 0.101_948_2);
-        let aim_from_raw_rotation =
-            Quat::from_euler(EulerRot::XYZ, -39.4_f32.to_radians(), 0.0, 0.0);
-        let raw_rotation = Quat::from_rotation_y(0.4).normalize();
-        let raw_position = Vec3::new(0.2, 1.4, -0.3);
-        let grip_pose = (
-            raw_position + raw_rotation * grip_from_raw_translation,
-            (raw_rotation * grip_from_raw_rotation).normalize(),
-        );
-        let aim_rotation = (raw_rotation * aim_from_raw_rotation).normalize();
-
-        let (recovered_position, recovered_rotation) =
-            steamvr_raw_from_openxr_grip(ActiveControllerProfile::Touch, Chirality::Left)
-                .apply(grip_pose.0, grip_pose.1);
-
-        assert_vec3_near(recovered_position, raw_position);
-        assert_quat_near(recovered_rotation, raw_rotation);
-        let pitch_up_from_aim =
-            rotation_angle_from_identity(recovered_rotation * aim_rotation.inverse());
-        let pitch_degrees = pitch_up_from_aim.to_degrees();
-        assert!(
-            (pitch_degrees - 39.4).abs() < 0.05,
-            "raw should sit 39.4° from Touch aim, got {pitch_degrees}"
-        );
-        assert!(
-            (pitch_degrees - 45.0).abs() < 8.0,
-            "raw-vs-aim pitch {pitch_degrees} should be the roughly-45° sword offset"
-        );
     }
 }
