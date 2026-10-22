@@ -1,9 +1,9 @@
 //! A tablet pad's `group` event must not abort winit event-loop startup.
 
 #![cfg(target_os = "linux")]
+#![forbid(unsafe_code)]
 
 use std::io::{ErrorKind, Result as IoResult};
-use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -13,6 +13,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use wayland_protocols::wp::tablet::zv2::server::zwp_tablet_manager_v2::{self, ZwpTabletManagerV2};
 use wayland_protocols::wp::tablet::zv2::server::zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2;
 use wayland_protocols::wp::tablet::zv2::server::zwp_tablet_pad_ring_v2::{
@@ -261,37 +262,19 @@ fn wait_for_socket(
     timeout: Duration,
 ) -> IoResult<bool> {
     let mut fds = [
-        libc::pollfd {
-            fd: display.as_fd().as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        },
-        libc::pollfd {
-            fd: listening.as_fd().as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        },
-        libc::pollfd {
-            fd: shutdown.as_fd().as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        },
+        PollFd::new(display, PollFlags::IN),
+        PollFd::new(listening, PollFlags::IN),
+        PollFd::new(shutdown, PollFlags::IN),
     ];
-    let timeout_ms = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
-    // SAFETY: `fds` is a stack array of three initialized `pollfd` values. The
-    // descriptors belong to `display`, `listening`, and `shutdown`, all borrowed
-    // for this call, so they stay open until `poll` returns. `nfds` is 3.
-    // `poll` does not retain the pointer.
-    let ready = unsafe { libc::poll(fds.as_mut_ptr(), 3, timeout_ms) };
-    if ready < 0 {
-        let err = std::io::Error::last_os_error();
-        if err.kind() == ErrorKind::Interrupted {
-            return Ok(false);
+    let timeout = Timespec::try_from(timeout).map_err(io_error)?;
+    match poll(&mut fds, Some(&timeout)) {
+        Ok(_) => {
+            let hung_up = PollFlags::HUP | PollFlags::ERR | PollFlags::NVAL;
+            Ok(!fds[2].revents().is_empty() || fds[0].revents().intersects(hung_up))
         }
-        return Err(err);
+        Err(rustix::io::Errno::INTR) => Ok(false),
+        Err(err) => Err(std::io::Error::from(err)),
     }
-    let hung_up = libc::POLLHUP | libc::POLLERR | libc::POLLNVAL;
-    Ok(fds[2].revents != 0 || (fds[0].revents & hung_up) != 0)
 }
 
 fn accept_clients(listening: &ListeningSocket, display: &Display<Compositor>) -> IoResult<()> {
