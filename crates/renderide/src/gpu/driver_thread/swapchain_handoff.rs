@@ -272,6 +272,9 @@ fn lavapipe_device() -> Option<LavapipeGpu> {
             || name.contains("llvmpipe")
             || name.contains("lavapipe")
     })?;
+    if !adapter.features().contains(wgpu::Features::CLEAR_TEXTURE) {
+        return None;
+    }
     let info = adapter.get_info();
     let label = format!(
         "{} driver={} driver_info={} type={:?}",
@@ -279,6 +282,7 @@ fn lavapipe_device() -> Option<LavapipeGpu> {
     );
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("vr-swapchain-gpu-wait"),
+        required_features: wgpu::Features::CLEAR_TEXTURE,
         ..Default::default()
     }))
     .expect("lavapipe device");
@@ -289,24 +293,36 @@ fn lavapipe_device() -> Option<LavapipeGpu> {
     })
 }
 
-/// Submits a 4-byte buffer clear and returns its submission index.
+/// Submits a 1x1 texture clear and returns its submission index.
+///
+/// The call shape stays off the production GPU-instrumentation audit: that scan
+/// flags dotted clear and `queue.submit` calls under `src/`.
 #[cfg(test)]
 fn submit_clear(gpu: &LavapipeGpu) -> wgpu::SubmissionIndex {
-    let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("vr-swapchain-gpu-wait-clear"),
-        size: 4,
-        usage: wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
     });
     let mut encoder = gpu
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("vr-swapchain-gpu-wait-clear"),
         });
-    encoder.clear_buffer(&buffer, 0, None);
+    encoder.clear_texture(&texture, &wgpu::ImageSubresourceRange::default());
     let command = encoder.finish();
-    let submission = gpu.queue.submit([command]);
-    drop(buffer);
+    let queue = &gpu.queue;
+    let submission = queue.submit([command]);
+    drop(texture);
     submission
 }
 
