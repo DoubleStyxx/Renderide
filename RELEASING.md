@@ -2,6 +2,21 @@
 
 Tag releases are draft GitHub releases created by `.github/workflows/release.yml` on a `v*` tag. Nightly zips stay on `.github/workflows/nightly.yml`. Do not publish, merge, or tag from a pull request that only updates this document.
 
+## Signing keys
+
+Official bundles include `renderide-release.json` and a detached Ed25519 signature, `renderide-release.json.sig`. The launcher embeds the public key at compile time (`RENDERIDE_RELEASE_PUBLIC_KEY_HEX`) and rejects a bundle whose signature does not verify. This repository does not generate, commit, or store the key pair. The maintainer configures it on GitHub.
+
+| Name | GitHub setting | Value |
+| --- | --- | --- |
+| `RENDERIDE_RELEASE_PUBLIC_KEY_HEX` | Repository variable | 64 hex characters. Ed25519 public key (32 bytes). |
+| `RENDERIDE_RELEASE_PRIVATE_KEY_HEX` | Repository secret | 64 hex characters. Ed25519 private key seed (32 bytes). Must be the seed for the public key above. |
+
+No other repository secrets are required for these workflows. `GITHUB_TOKEN` is provided by Actions. The private key must not be committed, and it must not be placed in a variable.
+
+`.github/workflows/nightly.yml` checks that both values are non-empty before it selects a commit. When either is unset, the workflow writes the missing names to the job summary, sets `should_release=false`, and exits successfully. It does not build or upload unsigned zips. A value that is set but is not 64 characters still fails the build. `workflow_dispatch` input `force` does not bypass a missing key.
+
+`.github/workflows/release.yml` checks both values in the version job, including the 64-hex-character shape, and fails that job before the platform matrix when the check does not pass. A `v*` tag does not create an unsigned draft.
+
 ## Steps
 
 1. Update `CHANGELOG.md`. Move the `## [Unreleased]` notes into a new `## [X.Y.Z] - YYYY-MM-DD` section and leave `## [Unreleased]` empty. Point the compare links at the bottom at `vX.Y.Z`.

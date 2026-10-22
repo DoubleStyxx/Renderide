@@ -4,6 +4,11 @@
 # binaries in release mode, and publishes a GitHub Release with per-platform
 # zips. The most recent release acts as the "last good version" pointer - this
 # workflow no-ops when no new green commit has appeared since.
+#
+# Bundles are Ed25519-signed. When repository variable
+# RENDERIDE_RELEASE_PUBLIC_KEY_HEX or repository secret
+# RENDERIDE_RELEASE_PRIVATE_KEY_HEX is unset, this workflow skips the publish
+# and exits successfully. It does not upload unsigned bundles. See RELEASING.md.
 name: Nightly
 
 "on":
@@ -47,8 +52,32 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           FORCE: ${{ inputs.force }}
+          PUBLIC_KEY_CONFIGURED: ${{ vars.RENDERIDE_RELEASE_PUBLIC_KEY_HEX != '' }}
+          PRIVATE_KEY_CONFIGURED: ${{ secrets.RENDERIDE_RELEASE_PRIVATE_KEY_HEX != '' }}
         run: |
           set -euo pipefail
+
+          # Booleans only. The key material stays out of this step.
+          if [ "${PUBLIC_KEY_CONFIGURED}" != "true" ] || [ "${PRIVATE_KEY_CONFIGURED}" != "true" ]; then
+            {
+              echo "Nightly publish skipped: release signing is not configured."
+              echo "Unsigned bundles are not published. The updater rejects a manifest without a valid Ed25519 signature."
+              echo ""
+              echo "Configure these before the next nightly (see RELEASING.md):"
+              if [ "${PUBLIC_KEY_CONFIGURED}" != "true" ]; then
+                echo "- Repository variable RENDERIDE_RELEASE_PUBLIC_KEY_HEX is unset. Set it to 64 hex characters (Ed25519 public key)."
+              else
+                echo "- Repository variable RENDERIDE_RELEASE_PUBLIC_KEY_HEX is set."
+              fi
+              if [ "${PRIVATE_KEY_CONFIGURED}" != "true" ]; then
+                echo "- Repository secret RENDERIDE_RELEASE_PRIVATE_KEY_HEX is unset. Set it to 64 hex characters (Ed25519 private key seed)."
+              else
+                echo "- Repository secret RENDERIDE_RELEASE_PRIVATE_KEY_HEX is set."
+              fi
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "should_release=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
 
           green_shas=$(mktemp)
           gh api -X GET \
@@ -57,7 +86,7 @@ jobs:
             | jq -r '.workflow_runs[].head_sha' \
             | sort -u >"${green_shas}"
 
-          master_ref=$(git rev-parse --verify origin/master^{commit})
+          master_ref=$(git rev-parse --verify "origin/master^{commit}")
           candidate=""
           while IFS= read -r master_sha; do
             if grep -qx "${master_sha}" "${green_shas}"; then
@@ -196,16 +225,16 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           if ([string]::IsNullOrWhiteSpace($env:RENDERIDE_RELEASE_PUBLIC_KEY_HEX)) {
-            throw "RENDERIDE_RELEASE_PUBLIC_KEY_HEX repository variable is required."
+            throw "RENDERIDE_RELEASE_PUBLIC_KEY_HEX repository variable is required. See RELEASING.md."
           }
           if ($env:RENDERIDE_RELEASE_PUBLIC_KEY_HEX.Length -ne 64) {
-            throw "RENDERIDE_RELEASE_PUBLIC_KEY_HEX must be 64 hex characters."
+            throw "RENDERIDE_RELEASE_PUBLIC_KEY_HEX must be 64 hex characters. See RELEASING.md."
           }
           if ([string]::IsNullOrWhiteSpace($env:RENDERIDE_RELEASE_PRIVATE_KEY_HEX)) {
-            throw "RENDERIDE_RELEASE_PRIVATE_KEY_HEX repository secret is required."
+            throw "RENDERIDE_RELEASE_PRIVATE_KEY_HEX repository secret is required. See RELEASING.md."
           }
           if ($env:RENDERIDE_RELEASE_PRIVATE_KEY_HEX.Length -ne 64) {
-            throw "RENDERIDE_RELEASE_PRIVATE_KEY_HEX must be 64 hex characters."
+            throw "RENDERIDE_RELEASE_PRIVATE_KEY_HEX must be 64 hex characters. See RELEASING.md."
           }
 
       - name: Build (release)

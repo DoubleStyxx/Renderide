@@ -3,6 +3,11 @@
 # Pushing a v* tag builds the same platform bundles as nightly.yml, writes
 # SHA256SUMS, attests provenance, and opens a draft GitHub release.
 # A person publishes the draft. This workflow does not.
+#
+# Bundles are Ed25519-signed. The version job fails before the platform
+# matrix when repository variable RENDERIDE_RELEASE_PUBLIC_KEY_HEX or
+# repository secret RENDERIDE_RELEASE_PRIVATE_KEY_HEX is unset or is not
+# 64 hex characters. Unsigned drafts are not created. See RELEASING.md.
 name: Release
 
 "on":
@@ -48,6 +53,42 @@ jobs:
             exit 1
           fi
           echo "tag ${tag} matches crates/renderide version ${cargo_version}"
+
+      - name: Require release signing keys
+        shell: bash
+        env:
+          RENDERIDE_RELEASE_PUBLIC_KEY_HEX: ${{ vars.RENDERIDE_RELEASE_PUBLIC_KEY_HEX }}
+          RENDERIDE_RELEASE_PRIVATE_KEY_HEX: ${{ secrets.RENDERIDE_RELEASE_PRIVATE_KEY_HEX }}
+        run: |
+          set -euo pipefail
+
+          public="${RENDERIDE_RELEASE_PUBLIC_KEY_HEX:-}"
+          private="${RENDERIDE_RELEASE_PRIVATE_KEY_HEX:-}"
+          missing=0
+
+          if [ -z "${public}" ]; then
+            echo "Repository variable RENDERIDE_RELEASE_PUBLIC_KEY_HEX is unset. Set it to 64 hex characters (Ed25519 public key)." | tee -a "${GITHUB_STEP_SUMMARY}" >&2
+            missing=1
+          fi
+          if [ -z "${private}" ]; then
+            echo "Repository secret RENDERIDE_RELEASE_PRIVATE_KEY_HEX is unset. Set it to 64 hex characters (Ed25519 private key seed)." | tee -a "${GITHUB_STEP_SUMMARY}" >&2
+            missing=1
+          fi
+          if [ "${missing}" -ne 0 ]; then
+            echo "Tag release aborted before the platform matrix. Configure the keys in RELEASING.md, then push the tag again. Unsigned drafts are not created." | tee -a "${GITHUB_STEP_SUMMARY}" >&2
+            exit 1
+          fi
+
+          if [[ ! "${public}" =~ ^[0-9a-fA-F]{64}$ ]]; then
+            echo "RENDERIDE_RELEASE_PUBLIC_KEY_HEX must be 64 hex characters (Ed25519 public key). See RELEASING.md." | tee -a "${GITHUB_STEP_SUMMARY}" >&2
+            exit 1
+          fi
+          if [[ ! "${private}" =~ ^[0-9a-fA-F]{64}$ ]]; then
+            echo "RENDERIDE_RELEASE_PRIVATE_KEY_HEX must be 64 hex characters (Ed25519 private key seed). See RELEASING.md." | tee -a "${GITHUB_STEP_SUMMARY}" >&2
+            exit 1
+          fi
+
+          echo "Release signing keys are present and 64 hex characters." | tee -a "${GITHUB_STEP_SUMMARY}"
 
   build:
     name: ${{ matrix.platform }}
@@ -109,16 +150,16 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           if ([string]::IsNullOrWhiteSpace($env:RENDERIDE_RELEASE_PUBLIC_KEY_HEX)) {
-            throw "RENDERIDE_RELEASE_PUBLIC_KEY_HEX repository variable is required."
+            throw "RENDERIDE_RELEASE_PUBLIC_KEY_HEX repository variable is required. See RELEASING.md."
           }
           if ($env:RENDERIDE_RELEASE_PUBLIC_KEY_HEX.Length -ne 64) {
-            throw "RENDERIDE_RELEASE_PUBLIC_KEY_HEX must be 64 hex characters."
+            throw "RENDERIDE_RELEASE_PUBLIC_KEY_HEX must be 64 hex characters. See RELEASING.md."
           }
           if ([string]::IsNullOrWhiteSpace($env:RENDERIDE_RELEASE_PRIVATE_KEY_HEX)) {
-            throw "RENDERIDE_RELEASE_PRIVATE_KEY_HEX repository secret is required."
+            throw "RENDERIDE_RELEASE_PRIVATE_KEY_HEX repository secret is required. See RELEASING.md."
           }
           if ($env:RENDERIDE_RELEASE_PRIVATE_KEY_HEX.Length -ne 64) {
-            throw "RENDERIDE_RELEASE_PRIVATE_KEY_HEX must be 64 hex characters."
+            throw "RENDERIDE_RELEASE_PRIVATE_KEY_HEX must be 64 hex characters. See RELEASING.md."
           }
 
       # bootstrapper produces the renderide launcher that nightly zips ship
