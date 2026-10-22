@@ -9,6 +9,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use glam::{Quat, Vec3};
+use renderide_shared::shared::{QualityConfig, RendererCommand};
 
 use crate::error::HarnessError;
 use crate::scene::textures::{checker_rgba, uv_ramp_rgba};
@@ -29,7 +30,7 @@ use super::{
 pub struct BenchDriveConfig {
     /// Path to the `renderide-renderer` binary.
     pub renderer_path: PathBuf,
-    /// `unlit_sphere` or `multi_primitive_unlit`.
+    /// `unlit_sphere`, `multi_primitive_unlit`, or `many_shadowed_point_lights`.
     pub scenario: String,
     /// Raw per-frame JSON path the renderer writes when the measured window completes.
     pub report_path: PathBuf,
@@ -88,6 +89,7 @@ pub fn drive_bench(cfg: &BenchDriveConfig) -> Result<(), HarnessError> {
         &prefix,
         DEFAULT_HANDSHAKE_TIMEOUT,
     )?;
+    publish_many_light_shadow_quality(&mut session.queues, &cfg.scenario)?;
 
     let mut setup = build_scene_setup(template);
     apply_camera(&mut setup, cfg);
@@ -140,8 +142,29 @@ fn scenario_template(name: &str) -> Result<SessionTemplate, HarnessError> {
                 texture_size: (256, 256),
             })
         }
+        "many_shadowed_point_lights" => Ok(SessionTemplate::ManyShadowedPointLights),
         other => Err(HarnessError::UnknownBenchScenario(other.to_string())),
     }
+}
+
+fn publish_many_light_shadow_quality(
+    queues: &mut renderide_shared::ipc::HostDualQueueIpc,
+    scenario: &str,
+) -> Result<(), HarnessError> {
+    if scenario != "many_shadowed_point_lights" {
+        return Ok(());
+    }
+    let sent = queues.send_primary(RendererCommand::QualityConfig(QualityConfig {
+        per_pixel_lights: 32,
+        shadow_distance: 30.0,
+        ..QualityConfig::default()
+    }));
+    if sent {
+        return Ok(());
+    }
+    Err(HarnessError::QueueOptions(
+        "send_primary(QualityConfig) returned false (queue full?)".to_string(),
+    ))
 }
 
 fn apply_camera(setup: &mut super::SceneSetup, cfg: &BenchDriveConfig) {

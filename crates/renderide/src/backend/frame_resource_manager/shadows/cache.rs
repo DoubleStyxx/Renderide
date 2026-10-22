@@ -10,7 +10,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::backend::HostShadowQuality;
 use crate::camera::ViewId;
 use crate::gpu::{GpuLight, GpuLimits};
-use crate::materials::{RasterFrontFace, RasterPrimitiveTopology};
+use crate::materials::host_data::MaterialPropertyLookupIds;
+use crate::materials::{RasterFrontFace, RasterPipelineKind, RasterPrimitiveTopology};
 use crate::shared::ShadowCastMode;
 use crate::world_mesh::{WorldMeshDrawItem, WorldMeshDrawPlan};
 
@@ -23,6 +24,8 @@ pub(in crate::backend::frame_resource_manager) struct ShadowPlanCache {
     fingerprint: u64,
     rendered_fingerprint: AtomicU64,
     assignments: Vec<CachedShadowAssignment>,
+    /// Reused buffer for restoring light assignments without a per-frame allocation.
+    assignment_scratch: Vec<CachedShadowAssignment>,
 }
 
 impl Default for ShadowPlanCache {
@@ -31,6 +34,7 @@ impl Default for ShadowPlanCache {
             fingerprint: 0,
             rendered_fingerprint: AtomicU64::new(0),
             assignments: Vec::new(),
+            assignment_scratch: Vec::new(),
         }
     }
 }
@@ -68,12 +72,49 @@ impl ShadowPlanCache {
     }
 
     /// Forgets a successful draw so the next submission re-renders the atlas.
-    pub(super) fn clear_rendered(&self) {
+    pub(in crate::backend::frame_resource_manager) fn clear_rendered(&self) {
         self.rendered_fingerprint.store(0, Ordering::Relaxed);
     }
 
-    pub(super) fn assignments(&self) -> &[CachedShadowAssignment] {
-        &self.assignments
+    /// Copies the retained assignments into the reused scratch buffer.
+    ///
+    /// The caller must [`Self::return_assignment_scratch`] so the next hit does not allocate.
+    pub(super) fn take_assignment_copy(&mut self) -> Vec<CachedShadowAssignment> {
+        let mut scratch = std::mem::take(&mut self.assignment_scratch);
+        scratch.clear();
+        scratch.extend_from_slice(&self.assignments);
+        scratch
+    }
+
+    pub(super) fn return_assignment_scratch(&mut self, scratch: Vec<CachedShadowAssignment>) {
+        self.assignment_scratch = scratch;
+    }
+}
+
+/// Mesh upload generation and material property revision visible to shadow planning.
+///
+/// Production passes the asset-transfer queue and the material property store. Tests and the
+/// planner bench pass [`ZeroShadowContentRevisions`].
+pub(crate) trait ShadowContentRevisions {
+    /// Generation of the resident mesh buffers for `mesh_asset_id`.
+    fn mesh_upload_generation(&self, mesh_asset_id: i32) -> u64;
+    /// Property-store revision for the draw's material and property blocks.
+    fn material_property_revision(&self, ids: MaterialPropertyLookupIds) -> u64;
+}
+
+/// Revisions that never change. Used when the caller has no upload or material store.
+#[cfg(any(test, feature = "bench-api"))]
+#[derive(Clone, Copy, Debug, Default)]
+pub(in crate::backend) struct ZeroShadowContentRevisions;
+
+#[cfg(any(test, feature = "bench-api"))]
+impl ShadowContentRevisions for ZeroShadowContentRevisions {
+    fn mesh_upload_generation(&self, _mesh_asset_id: i32) -> u64 {
+        0
+    }
+
+    fn material_property_revision(&self, _ids: MaterialPropertyLookupIds) -> u64 {
+        0
     }
 }
 
@@ -91,11 +132,16 @@ pub(super) struct ShadowInputSignature {
     pub(super) casters_need_redraw: bool,
 }
 
-pub(super) fn shadow_input_signature(
+pub(super) fn shadow_input_signature<'a, I, R>(
     manager: &FrameResourceManager,
     quality: HostShadowQuality,
-    views: &[(ViewId, &WorldMeshDrawPlan)],
-) -> ShadowInputSignature {
+    views: I,
+    revisions: &R,
+) -> ShadowInputSignature
+where
+    I: IntoIterator<Item = (ViewId, &'a WorldMeshDrawPlan)>,
+    R: ShadowContentRevisions,
+{
     profiling::scope!("render::prepare_shadow_frame::fingerprint");
     let mut fp = Fingerprint::new();
     hash_quality(&mut fp, quality);
@@ -113,10 +159,10 @@ pub(super) fn shadow_input_signature(
                 continue;
             }
             casters_need_redraw |= caster_needs_redraw(item);
-            draws.mix(hash_caster(item));
+            draws.mix(hash_caster(item, revisions));
         }
         draws.write(&mut fp);
-        hash_lights(&mut fp, view_lights(manager, *view_id));
+        hash_lights(&mut fp, view_lights(manager, view_id));
     }
     ShadowInputSignature {
         fingerprint: fp.into_u64(),
@@ -197,15 +243,31 @@ fn hash_light(fp: &mut Fingerprint, light: &GpuLight) {
     fp.mix_u64(casts);
 }
 
-fn hash_caster(item: &WorldMeshDrawItem) -> u64 {
+/// Hashes one shadow caster.
+///
+/// The depth-only shadow shaders (`world_mesh_shadow_caster.wgsl` and the radial variant) do
+/// not sample material property blocks or alpha clip: `fs_main` is empty.
+/// [`crate::passes::WorldMeshForwardDepthPrepassPipelineKey::for_shadow_draw`] also ignores
+/// [`RasterPipelineKind`]; its variant is front face, cull, topology, and double-sided, which
+/// are hashed below. Pipeline identity, material asset id, and property revision are still
+/// part of the key because [`super::shadow_draw_casts`] follows the pipeline's caster policy,
+/// and a material swap or in-place property edit must not reuse a map recorded for a different
+/// caster. Mesh upload generation is required for a different reason: encode reads the live
+/// mesh-pool buffers for `mesh_asset_id`, so a re-upload that keeps the same asset id and
+/// index count still has to miss.
+fn hash_caster(item: &WorldMeshDrawItem, revisions: &impl ShadowContentRevisions) -> u64 {
     let mut fp = Fingerprint::new();
     fp.mix_u64(item.instance_id.0);
     fp.mix_u64(signed_key(item.node_id));
     fp.mix_u64(u64::try_from(item.slot_index).unwrap_or(u64::MAX));
     fp.mix_u64(signed_key(item.mesh_asset_id));
+    fp.mix_u64(revisions.mesh_upload_generation(item.mesh_asset_id));
     fp.mix_u64(u64::from(item.first_index));
     fp.mix_u64(u64::from(item.index_count));
     fp.mix_u64(shadow_cast_mode_key(item.shadow_cast_mode));
+    hash_pipeline(&mut fp, &item.batch_key.pipeline);
+    fp.mix_u64(signed_key(item.batch_key.material_asset_id));
+    fp.mix_u64(revisions.material_property_revision(item.lookup_ids));
     fp.mix_u64(u64::from(item.skinned));
     fp.mix_u64(u64::from(item.world_space_deformed));
     fp.mix_u64(u64::from(item.blendshape_deformed));
@@ -228,6 +290,16 @@ fn shadow_cast_mode_key(mode: ShadowCastMode) -> u64 {
         ShadowCastMode::On => 1,
         ShadowCastMode::ShadowOnly => 2,
         ShadowCastMode::DoubleSided => 3,
+    }
+}
+
+fn hash_pipeline(fp: &mut Fingerprint, pipeline: &RasterPipelineKind) {
+    match pipeline {
+        RasterPipelineKind::Null => fp.mix_u64(0),
+        RasterPipelineKind::EmbeddedStem(stem) => {
+            fp.mix_u64(1);
+            stem.hash(fp);
+        }
     }
 }
 

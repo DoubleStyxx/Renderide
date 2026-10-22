@@ -274,7 +274,8 @@ impl GraphFrameGlobalResources for FrameResourceManager {
         if let Some(fgpu) = self.frame_gpu()
             && fgpu.encode_shadow_atlas(self.shadow_frame_plan(), params)
         {
-            self.note_shadow_maps_rendered();
+            // The full layer range is in this encoder. Note only after that buffer is submitted.
+            self.arm_shadow_maps_for_submit();
         }
     }
 
@@ -318,8 +319,48 @@ impl GraphFrameGlobalResources for FrameResourceManager {
             return false;
         };
         if fgpu.record_shadow_atlas_layers(self.shadow_frame_plan(), unit_range, params) {
-            self.note_shadow_maps_rendered();
+            // A single chunk is not a complete atlas. The join arms the submit note only if
+            // every chunk returns and at least one of them recorded a layer.
+            self.mark_shadow_split_chunk_recorded();
         }
         true
+    }
+
+    fn arm_shadow_maps_for_submit(&self) {
+        self.shadow_maps_awaiting_submit
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn mark_shadow_split_chunk_recorded(&self) {
+        self.shadow_split_chunk_recorded
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn arm_shadow_maps_if_split_recorded(&self) {
+        if self
+            .shadow_split_chunk_recorded
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            self.arm_shadow_maps_for_submit();
+        }
+    }
+
+    fn abandon_shadow_split_recording(&self) {
+        self.shadow_split_chunk_recorded
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn finish_shadow_map_submit(&self, submitted: bool) {
+        if !self
+            .shadow_maps_awaiting_submit
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
+        if submitted {
+            self.note_shadow_maps_rendered();
+        } else {
+            self.shadow_plan_cache.clear_rendered();
+        }
     }
 }

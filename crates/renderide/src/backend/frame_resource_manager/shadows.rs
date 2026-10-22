@@ -31,7 +31,10 @@ mod cache;
 mod point_faces;
 mod range_cull;
 
+pub(in crate::backend) use cache::ShadowContentRevisions;
 pub(super) use cache::ShadowPlanCache;
+#[cfg(any(test, feature = "bench-api"))]
+pub(in crate::backend) use cache::ZeroShadowContentRevisions;
 
 const POINT_FACE_COUNT: u32 = point_faces::POINT_FACE_COUNT;
 const SHADOW_TYPE_NONE: u32 = 0;
@@ -181,30 +184,36 @@ impl FrameResourceManager {
     ///
     /// A static world is not camera-culled into the caster set, so the plan and the atlas layers
     /// are retained when the shadow inputs match the previous submission.
-    pub(crate) fn prepare_shadow_frame_for_views<'a, I>(
+    pub(crate) fn prepare_shadow_frame_for_views<'a, I, R>(
         &mut self,
         quality: HostShadowQuality,
         views: I,
+        revisions: &R,
     ) where
         I: IntoIterator<Item = (ViewId, &'a WorldMeshDrawPlan)>,
+        I::IntoIter: Clone,
+        R: ShadowContentRevisions,
     {
         profiling::scope!("render::prepare_shadow_frame");
         clear_shadow_assignments(self);
-        let views = views.into_iter().collect::<Vec<_>>();
+        let views = views.into_iter();
         if !shadow_atlas_rendering_supported(self.limits.as_deref()) {
             self.reset_unsupported_shadow_plan();
             return;
         }
-        let signature = cache::shadow_input_signature(self, quality, &views);
+        let signature = cache::shadow_input_signature(self, quality, views.clone(), revisions);
         if self.reuse_cached_shadow_plan(&signature) {
             return;
         }
+        let views = views.collect::<Vec<_>>();
         self.rebuild_shadow_plan(quality, &views, signature);
     }
 
     /// Marks the retained atlas as drawn for the current shadow inputs.
     ///
-    /// Encode runs on a shared manager, so the rendered fingerprint is atomic.
+    /// Encode runs on a shared manager, so the rendered fingerprint is atomic. Call this only
+    /// after the shadow command buffers were submitted, or from the planner bench which stands
+    /// in for that submit.
     pub(crate) fn note_shadow_maps_rendered(&self) {
         self.shadow_plan_cache.note_current_rendered();
     }
@@ -228,13 +237,20 @@ impl FrameResourceManager {
         if !self.shadow_plan_cache.matches(signature.fingerprint) {
             return false;
         }
-        let assignments = self.shadow_plan_cache.assignments().to_vec();
-        if !restore_shadow_assignments(self, &assignments) {
+        let assignments = self.shadow_plan_cache.take_assignment_copy();
+        let restored = restore_shadow_assignments(self, &assignments);
+        self.shadow_plan_cache
+            .return_assignment_scratch(assignments);
+        if !restored {
             clear_shadow_assignments(self);
             return false;
         }
         profiling::scope!("render::prepare_shadow_frame::reuse");
         self.shadow_frame.plan_reused = true;
+        // Cached caster draws are clones of the collect-time items. They keep mesh identity,
+        // matrices, and deform flags, not a snapshot of skinned or blend-shape vertices.
+        // Encode reads the live skin and deform buffers for this submission, so a reused plan
+        // still redraws when `casters_need_redraw` is set.
         self.shadow_frame.maps_need_render = self
             .shadow_plan_cache
             .maps_need_render(signature.fingerprint, signature.casters_need_redraw);
@@ -304,6 +320,9 @@ impl FrameResourceManager {
     }
 
     /// Updates shadow metadata so it matches the atlas texture selected by frame-GPU sync.
+    ///
+    /// This edits the retained plan in place. A later cache hit serves these adjusted rects
+    /// and texel sizes rather than the pre-clamp request.
     pub(crate) fn apply_shadow_atlas_resolution(&mut self, atlas_resolution: u32) {
         let plan = &mut self.shadow_frame;
         if plan.render_views.is_empty() {

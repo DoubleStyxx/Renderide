@@ -66,6 +66,8 @@ pub enum CaseTemplate {
     CustomShaderPropertyUpdate,
     /// Poincare-disk tiling and a raymarched gyroid, each with `_Speed` 0.
     ExoticShaderPair,
+    /// Hard-shadowed cube on a PBS floor, static then moved.
+    ShadowedCasterMove,
 }
 
 /// Default golden directory, relative to the workspace root: `crates/renderide-test/goldens/`.
@@ -185,6 +187,24 @@ pub fn custom_shader_property_update() -> IntegrationCase {
     }
 }
 
+/// Hard spot shadow on a PBS cube and floor.
+///
+/// The companion golden is the static frame. The compared golden is the same scene after the
+/// cube moves. The session rejects a static recapture that is not pixel-identical before that
+/// move.
+pub fn shadowed_caster_move() -> IntegrationCase {
+    IntegrationCase {
+        name: "shadowed_caster_move".to_string(),
+        description:
+            "PBS floor and cube under a hard spot shadow on lavapipe. plain.png is the static frame. The harness requires the next static frame to match it exactly, then actual.png is the frame after the cube moves."
+                .to_string(),
+        golden_path: default_goldens_dir().join("shadowed_caster_move.png"),
+        resolution: (256, 256),
+        tolerance: visual_tolerance(0.78, 56, 0.22, 18, 24, 0.06),
+        template: CaseTemplate::ShadowedCasterMove,
+    }
+}
+
 /// Poincare disk on the left and a gyroid SDF on the right. Both materials keep `_Speed` at 0.
 pub fn exotic_shader_pair() -> IntegrationCase {
     IntegrationCase {
@@ -231,6 +251,7 @@ pub fn registry() -> Vec<IntegrationCase> {
         alpha_cutout_masked_quads(),
         custom_shader_property_update(),
         exotic_shader_pair(),
+        shadowed_caster_move(),
     ];
     let gltf_fixture = default_fixture_path();
     if gltf_fixture.is_file() {
@@ -248,7 +269,9 @@ impl IntegrationCase {
     /// Golden for the pre-update capture, when this case records two frames.
     pub fn plain_capture_golden(&self) -> Option<PathBuf> {
         match self.template {
-            CaseTemplate::CustomShaderPropertyUpdate => Some(plain_png_path(&self.golden_path)),
+            CaseTemplate::CustomShaderPropertyUpdate | CaseTemplate::ShadowedCasterMove => {
+                Some(plain_png_path(&self.golden_path))
+            }
             _ => None,
         }
     }

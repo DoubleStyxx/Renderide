@@ -222,7 +222,7 @@ fn enqueue_submit_and_schedule_transient_release(
     submit_callbacks: Vec<Box<dyn FnOnce() + Send + 'static>>,
     retained_resources: GpuRetainedResources,
     transient_by_key: HashMap<GraphResolveKey, GraphResolvedResources>,
-) -> f64 {
+) -> (f64, bool) {
     let (submit_enqueue_ms, submit_token) = enqueue_primary_submit_batch(
         mv_ctx,
         all_cmds,
@@ -230,6 +230,7 @@ fn enqueue_submit_and_schedule_transient_release(
         submit_callbacks,
         retained_resources,
     );
+    let submitted = submit_token.is_some();
     if let Some(token) = submit_token {
         mv_ctx.backend.schedule_transient_release_after_submit(
             token,
@@ -238,7 +239,11 @@ fn enqueue_submit_and_schedule_transient_release(
     } else {
         release_transients_and_gc(mv_ctx, transient_by_key);
     }
-    submit_enqueue_ms
+    mv_ctx
+        .backend
+        .frame_resources()
+        .finish_shadow_map_submit(submitted);
+    (submit_enqueue_ms, submitted)
 }
 
 fn apply_per_view_hud_outputs(
@@ -291,13 +296,13 @@ impl CompiledRenderGraph {
 
         let hud_cmd = {
             profiling::scope!("graph::single_submit::encode_hud");
-            encode_swapchain_hud_overlay(
+            encode_hud_or_drop_unsubmitted_shadows(
                 mv_ctx,
                 queue_ref,
                 target_is_swapchain,
                 backbuffer_view_holder.as_ref(),
-            )
-        }?;
+            )?
+        };
 
         let upload = drain_upload_for_submit(mv_ctx, upload_batch, queue_ref);
         mv_ctx.backend.record_frame_upload_stats(upload.stats);
@@ -345,14 +350,15 @@ impl CompiledRenderGraph {
             !retained_resources_empty,
         );
 
-        let submit_enqueue_ms = enqueue_submit_and_schedule_transient_release(
-            mv_ctx,
-            all_cmds,
-            surface_tex,
-            submit_callbacks,
-            retained_resources,
-            transient_by_key,
-        );
+        let (submit_enqueue_ms, _shadow_maps_submitted) =
+            enqueue_submit_and_schedule_transient_release(
+                mv_ctx,
+                all_cmds,
+                surface_tex,
+                submit_callbacks,
+                retained_resources,
+                transient_by_key,
+            );
         logger::trace!(
             "graph submit enqueue timing: upload_drain_ms={:.3} upload_finish_ms={:.3} command_batch_assembly_ms={:.3} submit_enqueue_ms={:.3}",
             upload.drain_ms,
@@ -379,6 +385,26 @@ impl CompiledRenderGraph {
 /// Returns `None` when the target isn't the swapchain or the HUD has no visible window for this
 /// frame. In the no-content case, cached input-capture flags are cleared so a hidden HUD does not
 /// block input dispatch to the world.
+fn encode_hud_or_drop_unsubmitted_shadows(
+    mv_ctx: &mut MultiViewExecutionContext<'_>,
+    queue_ref: &wgpu::Queue,
+    target_is_swapchain: bool,
+    backbuffer_view: Option<&wgpu::TextureView>,
+) -> Result<Option<wgpu::CommandBuffer>, GraphExecuteError> {
+    match encode_swapchain_hud_overlay(mv_ctx, queue_ref, target_is_swapchain, backbuffer_view) {
+        Ok(command) => Ok(command),
+        Err(err) => {
+            // The HUD encoder failed before the batch reached the driver, so an armed shadow
+            // plan must not be treated as rendered.
+            mv_ctx
+                .backend
+                .frame_resources()
+                .finish_shadow_map_submit(false);
+            Err(err)
+        }
+    }
+}
+
 fn encode_swapchain_hud_overlay(
     mv_ctx: &mut MultiViewExecutionContext<'_>,
     queue_ref: &wgpu::Queue,

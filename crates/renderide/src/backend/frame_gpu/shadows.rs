@@ -31,7 +31,10 @@ use crate::world_mesh::WorldMeshPhase;
 use super::super::frame_gpu_error::FrameGpuInitError;
 use super::super::frame_resource_manager::{ShadowCasterSet, ShadowFramePlan, ShadowRenderView};
 use super::super::per_draw_resources::PerDrawResources;
-use super::super::shadow_atlas_budget::{ShadowAtlasExtent, stable_shadow_atlas_extent};
+use super::super::shadow_atlas_budget::{
+    SHADOW_ATLAS_MAX_BYTES, ShadowAtlasExtent, ShadowAtlasGrantLog, ShadowAtlasResidency,
+    advance_shadow_atlas_residency, note_shadow_atlas_grant, shadow_atlas_extent_bytes,
+};
 use super::super::shadow_atlas_format::{
     select_shadow_atlas_binding_format, select_shadow_atlas_format,
 };
@@ -267,6 +270,10 @@ pub(super) struct ShadowAtlasResources {
     layer_scratch: parking_lot::Mutex<Vec<PaddedShadowLayerUniforms>>,
     resolution: u32,
     layers: u32,
+    shrink_resolution: u32,
+    shrink_layers: u32,
+    shrink_frames: u32,
+    grant_log: ShadowAtlasGrantLog,
     version: u64,
 }
 
@@ -331,6 +338,10 @@ impl ShadowAtlasResources {
             layer_scratch: parking_lot::Mutex::new(Vec::new()),
             resolution,
             layers: 1,
+            shrink_resolution: 0,
+            shrink_layers: 0,
+            shrink_frames: 0,
+            grant_log: ShadowAtlasGrantLog::default(),
             version: 1,
         })
     }
@@ -347,30 +358,44 @@ impl ShadowAtlasResources {
         let _ = self
             .per_draw
             .ensure_draw_slot_capacity(device, requested_draw_slots);
-        let next = stable_shadow_atlas_extent(
-            ShadowAtlasExtent {
-                resolution: self.resolution,
-                layers: self.layers,
+        let next = advance_shadow_atlas_residency(
+            ShadowAtlasResidency {
+                extent: ShadowAtlasExtent {
+                    resolution: self.resolution,
+                    layers: self.layers,
+                },
+                shrink_resolution: self.shrink_resolution,
+                shrink_layers: self.shrink_layers,
+                shrink_frames: self.shrink_frames,
             },
             requested_resolution,
             requested_layers,
             limits,
             self.format,
         );
-        self.ensure_layer_uniform_capacity(device, next.layers as usize);
+        self.log_shadow_atlas_grant(requested_resolution, requested_layers, next.extent);
+        self.shrink_resolution = next.shrink_resolution;
+        self.shrink_layers = next.shrink_layers;
+        self.shrink_frames = next.shrink_frames;
+        self.ensure_layer_uniform_capacity(device, next.extent.layers as usize);
         if !self.renderable {
             return self.sync_result(false);
         }
-        if next.resolution == self.resolution && next.layers == self.layers {
+        if next.extent.resolution == self.resolution && next.extent.layers == self.layers {
             return self.sync_result(false);
         }
-        let (texture, atlas_view, layer_views) =
-            create_shadow_texture(device, next.resolution, next.layers, self.format, true);
+        let (texture, atlas_view, layer_views) = create_shadow_texture(
+            device,
+            next.extent.resolution,
+            next.extent.layers,
+            self.format,
+            true,
+        );
         self.texture = texture;
         self.atlas_view = atlas_view;
         self.layer_views = layer_views;
-        self.resolution = next.resolution;
-        self.layers = next.layers;
+        self.resolution = next.extent.resolution;
+        self.layers = next.extent.layers;
         self.version = self.version.saturating_add(1);
         self.sync_result(true)
     }
@@ -451,6 +476,46 @@ impl ShadowAtlasResources {
         ShadowResourceSyncResult {
             changed,
             resolution: self.resolution,
+        }
+    }
+
+    fn log_shadow_atlas_grant(
+        &mut self,
+        requested_resolution: u32,
+        requested_layers: u32,
+        granted: ShadowAtlasExtent,
+    ) {
+        let decision = note_shadow_atlas_grant(
+            self.grant_log,
+            requested_resolution,
+            requested_layers,
+            granted,
+        );
+        self.grant_log = decision.state;
+        if !decision.log {
+            return;
+        }
+        let bytes = shadow_atlas_extent_bytes(granted, self.format);
+        if decision.warn {
+            logger::warn!(
+                "shadow atlas granted {}x{} ({} bytes) instead of requested {}x{}; cap is {} bytes",
+                granted.resolution,
+                granted.layers,
+                bytes,
+                requested_resolution.max(1),
+                requested_layers.max(1),
+                SHADOW_ATLAS_MAX_BYTES,
+            );
+        } else {
+            logger::info!(
+                "shadow atlas granted {}x{} ({} bytes) instead of requested {}x{}; cap is {} bytes",
+                granted.resolution,
+                granted.layers,
+                bytes,
+                requested_resolution.max(1),
+                requested_layers.max(1),
+                SHADOW_ATLAS_MAX_BYTES,
+            );
         }
     }
 

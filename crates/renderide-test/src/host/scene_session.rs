@@ -13,7 +13,7 @@
 use std::time::{Duration, Instant, SystemTime};
 
 use glam::{Quat, Vec3};
-use renderide_shared::shared::{ColorProfile, RenderBoundingBox, RenderTransform};
+use renderide_shared::shared::{ColorProfile, RenderBoundingBox, RenderTransform, ShadowCastMode};
 
 use crate::error::HarnessError;
 use crate::scene::mesh::Mesh;
@@ -37,6 +37,7 @@ mod config;
 mod consts;
 mod custom_property;
 mod exotic_pair;
+mod shadowed_caster;
 
 pub use bench_drive::{BenchDriveConfig, drive_bench};
 pub mod png_readback;
@@ -100,6 +101,10 @@ pub enum SessionTemplate {
     CustomShaderPropertyUpdate,
     /// Poincare disk on the left quad and a gyroid on the right. Both materials set `_Speed` to 0.
     ExoticShaderPair,
+    /// PBS floor and cube under a hard spot shadow, captured static and then moved.
+    ShadowedCasterMove,
+    /// Thirty hard-shadow point lights over a small caster grid. Opt-in frame bench only.
+    ManyShadowedPointLights,
 }
 
 /// Drives the full session end-to-end. The renderer process is killed on `Err` via [`Drop`] of
@@ -135,6 +140,7 @@ pub(super) fn run_session(
 
     let property_recapture = matches!(template, SessionTemplate::CustomShaderPropertyUpdate);
     let exotic_pair = matches!(template, SessionTemplate::ExoticShaderPair);
+    let shadow_move = matches!(template, SessionTemplate::ShadowedCasterMove);
     let setup = build_scene_setup(template);
     let _uploaded_meshes = upload_scene_meshes(
         &mut session.queues,
@@ -157,50 +163,17 @@ pub(super) fn run_session(
         exotic_pair::install_and_assign(&mut session.queues, &mut lockstep, &setup)?;
     }
 
-    let scene = build_scene_state(&prefix, &backing_dir, &setup.scene, &mut lockstep)?;
-
-    let scene_submit_index =
-        ensure_scene_submitted(&mut session.queues, &mut lockstep, cfg.timeout)?;
-    let scene_submitted_at = SystemTime::now();
-    let scene_submit_instant = Instant::now();
-    logger::info!(
-        "Session: scene submitted at frame_index={scene_submit_index}, mtime_baseline={scene_submitted_at:?}; waiting for fresh PNG"
-    );
-
-    #[expect(
-        clippy::expect_used,
-        reason = "child set immediately above by spawn_renderer"
-    )]
-    let renderer = spawned.child.as_mut().expect("child set");
-    let png_outcome = run_lockstep_until_png_stable(
+    let png_outcome = capture_submitted_scene(
         &mut session.queues,
         &mut lockstep,
-        &cfg.output_path,
-        PngStabilityWaitTiming {
-            scene_submitted_at,
-            scene_submit_instant,
-            overall_timeout: cfg.timeout,
-            interval: Duration::from_millis(cfg.interval_ms.max(1)),
-        },
-        renderer,
+        &prefix,
+        &backing_dir,
+        &setup,
+        &mut spawned,
+        cfg,
+        property_recapture,
+        shadow_move,
     )?;
-    let _property_update = if property_recapture {
-        Some(custom_property::recapture_after_property_update(
-            custom_property::PropertyRecapture {
-                queues: &mut session.queues,
-                lockstep: &mut lockstep,
-                prefix: &prefix,
-                backing_dir: &backing_dir,
-                setup: &setup,
-                output_path: &cfg.output_path,
-                timeout: cfg.timeout,
-                renderer,
-            },
-        )?)
-    } else {
-        None
-    };
-    drop(scene);
 
     request_shutdown_and_wait(&mut session.queues, &mut spawned)?;
 
@@ -273,6 +246,106 @@ struct UnlitTexturedMaterialParams {
     floats: Vec<FloatBinding>,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the capture keeps the same session handles the PNG wait already threads through"
+)]
+fn capture_submitted_scene(
+    queues: &mut renderide_shared::ipc::HostDualQueueIpc,
+    lockstep: &mut LockstepDriver,
+    prefix: &str,
+    backing_dir: &std::path::Path,
+    setup: &SceneSetup,
+    spawned: &mut spawn::SpawnedRenderer,
+    cfg: &SceneSessionConfig,
+    property_recapture: bool,
+    shadow_move: bool,
+) -> Result<SceneSessionOutcome, HarnessError> {
+    let mut scene = build_scene_state(prefix, backing_dir, &setup.scene, lockstep)?;
+    let scene_submit_index = ensure_scene_submitted(queues, lockstep, cfg.timeout)?;
+    let scene_submitted_at = SystemTime::now();
+    let scene_submit_instant = Instant::now();
+    logger::info!(
+        "Session: scene submitted at frame_index={scene_submit_index}, mtime_baseline={scene_submitted_at:?}; waiting for fresh PNG"
+    );
+    #[expect(
+        clippy::expect_used,
+        reason = "child set immediately above by spawn_renderer"
+    )]
+    let renderer = spawned.child.as_mut().expect("child set");
+    let png_outcome = run_lockstep_until_png_stable(
+        queues,
+        lockstep,
+        &cfg.output_path,
+        PngStabilityWaitTiming {
+            scene_submitted_at,
+            scene_submit_instant,
+            overall_timeout: cfg.timeout,
+            interval: Duration::from_millis(cfg.interval_ms.max(1)),
+        },
+        renderer,
+    )?;
+    finish_extra_captures(
+        ExtraCaptures {
+            queues,
+            lockstep,
+            prefix,
+            backing_dir,
+            setup,
+            scene: &mut scene,
+            cfg,
+            renderer,
+        },
+        property_recapture,
+        shadow_move,
+    )?;
+    drop(scene);
+    Ok(png_outcome)
+}
+
+struct ExtraCaptures<'a> {
+    queues: &'a mut renderide_shared::ipc::HostDualQueueIpc,
+    lockstep: &'a mut LockstepDriver,
+    prefix: &'a str,
+    backing_dir: &'a std::path::Path,
+    setup: &'a SceneSetup,
+    scene: &'a mut scene_state::SceneState,
+    cfg: &'a SceneSessionConfig,
+    renderer: &'a mut std::process::Child,
+}
+
+fn finish_extra_captures(
+    capture: ExtraCaptures<'_>,
+    property_recapture: bool,
+    shadow_move: bool,
+) -> Result<(), HarnessError> {
+    if property_recapture {
+        custom_property::recapture_after_property_update(custom_property::PropertyRecapture {
+            queues: capture.queues,
+            lockstep: capture.lockstep,
+            prefix: capture.prefix,
+            backing_dir: capture.backing_dir,
+            setup: capture.setup,
+            output_path: &capture.cfg.output_path,
+            timeout: capture.cfg.timeout,
+            renderer: capture.renderer,
+        })?;
+    }
+    if shadow_move {
+        shadowed_caster::recapture_after_move(shadowed_caster::ShadowMoveRecapture {
+            queues: capture.queues,
+            lockstep: capture.lockstep,
+            scene: capture.scene,
+            setup: capture.setup,
+            output_path: &capture.cfg.output_path,
+            timeout: capture.cfg.timeout,
+            interval: Duration::from_millis(capture.cfg.interval_ms.max(1)),
+            renderer: capture.renderer,
+        })?;
+    }
+    Ok(())
+}
+
 fn template_label(template: &SessionTemplate) -> &'static str {
     match template {
         SessionTemplate::Sphere => "Sphere",
@@ -283,6 +356,8 @@ fn template_label(template: &SessionTemplate) -> &'static str {
         SessionTemplate::GltfTexturedStaticMesh { .. } => "GltfTexturedStaticMesh",
         SessionTemplate::CustomShaderPropertyUpdate => "CustomShaderPropertyUpdate",
         SessionTemplate::ExoticShaderPair => "ExoticShaderPair",
+        SessionTemplate::ShadowedCasterMove => "ShadowedCasterMove",
+        SessionTemplate::ManyShadowedPointLights => "ManyShadowedPointLights",
     }
 }
 
@@ -310,6 +385,8 @@ fn build_scene_setup(template: SessionTemplate) -> SceneSetup {
         } => gltf_textured_static_mesh_setup(mesh, texture_rgba, texture_size),
         SessionTemplate::CustomShaderPropertyUpdate => custom_property::scene_setup(),
         SessionTemplate::ExoticShaderPair => exotic_pair::scene_setup(),
+        SessionTemplate::ShadowedCasterMove => shadowed_caster::scene_setup(),
+        SessionTemplate::ManyShadowedPointLights => shadowed_caster::many_point_lights_setup(),
     }
 }
 
@@ -493,6 +570,7 @@ fn multi_primitive_unlit_grid_setup(
         mesh_asset_id: scene_mesh_id(asset_index),
         material_asset_id: scene_material_id(asset_index),
         sorting_order: 0,
+        shadow_cast_mode: ShadowCastMode::Off,
     })
     .collect();
     SceneSetup {
@@ -539,6 +617,7 @@ fn pbs_lit_material_matrix_setup() -> SceneSetup {
         mesh_asset_id: scene_mesh_id(0),
         material_asset_id: scene_material_id(index as i32),
         sorting_order: 0,
+        shadow_cast_mode: ShadowCastMode::Off,
     })
     .collect();
     let lights = vec![
@@ -607,6 +686,7 @@ fn alpha_cutout_masked_quads_setup(mask_rgba: Vec<u8>, texture_size: (u32, u32))
         mesh_asset_id: scene_mesh_id(0),
         material_asset_id: scene_material_id(0),
         sorting_order: index as i32,
+        shadow_cast_mode: ShadowCastMode::Off,
     })
     .collect();
     SceneSetup {
@@ -648,6 +728,7 @@ fn gltf_textured_static_mesh_setup(
                 mesh_asset_id: scene_mesh_id(0),
                 material_asset_id: scene_material_id(0),
                 sorting_order: 0,
+                shadow_cast_mode: ShadowCastMode::Off,
             }],
             lights: Vec::new(),
         },

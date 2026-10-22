@@ -50,11 +50,16 @@ impl ShadowChurnWorkload {
     /// The reuse bit keeps the cached path observable to criterion without changing the view count
     /// the planner reports.
     pub fn prepare(&mut self) -> u64 {
-        self.manager
-            .prepare_shadow_frame_for_views(self.quality, [(ViewId::Main, &self.plan)]);
+        self.manager.prepare_shadow_frame_for_views(
+            self.quality,
+            [(ViewId::Main, &self.plan)],
+            &super::ZeroShadowContentRevisions,
+        );
         let planned = self.manager.shadow_frame_plan();
         let views = planned.render_views.len() as u64;
         let reused = u64::from(planned.plan_reused);
+        // Stands in for a successful GPU submit. The measured work is the CPU planner on the
+        // following cache hit, not the shadow atlas pass.
         self.manager.note_shadow_maps_rendered();
         views + (reused << 32)
     }

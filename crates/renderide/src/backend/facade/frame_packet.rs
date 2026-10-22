@@ -2,10 +2,11 @@
 
 use hashbrown::{HashMap, HashSet};
 
-use crate::backend::FrameLightViewDesc;
+use crate::backend::frame_resource_manager::ShadowContentRevisions;
+use crate::backend::{AssetTransferQueue, FrameLightViewDesc};
 use crate::gpu_pools::MeshPool;
 use crate::materials::ShaderPermutation;
-use crate::materials::host_data::MaterialPropertyStore;
+use crate::materials::host_data::{MaterialPropertyLookupIds, MaterialPropertyStore};
 use crate::materials::{MaterialPipelinePropertyIds, MaterialRouter};
 use crate::reflection_probes::specular::ReflectionProbeFrameSelection;
 use crate::scene::{RenderSpaceId, SceneApplyReport, SceneCacheFlushReport, SceneCoordinator};
@@ -17,6 +18,23 @@ use crate::world_mesh::{
 
 use super::draw_preparation::{DrawPreparationExtractDesc, render_context_cache_key};
 use super::{OcclusionSystem, RenderBackend};
+
+struct ShadowContentRevisionSources<'a> {
+    transfers: &'a AssetTransferQueue,
+    materials: &'a MaterialPropertyStore,
+}
+
+impl ShadowContentRevisions for ShadowContentRevisionSources<'_> {
+    fn mesh_upload_generation(&self, mesh_asset_id: i32) -> u64 {
+        self.transfers
+            .current_mesh_upload_generation(mesh_asset_id)
+            .unwrap_or(0)
+    }
+
+    fn material_property_revision(&self, ids: MaterialPropertyLookupIds) -> u64 {
+        self.materials.mutation_generation(ids)
+    }
+}
 
 /// Immutable backend-owned extraction snapshot produced by [`RenderBackend::extract_frame_shared`].
 ///
@@ -148,10 +166,16 @@ impl RenderBackend {
     pub(crate) fn prepare_shadow_frame_for_views<'a, I>(&mut self, views: I)
     where
         I: IntoIterator<Item = (crate::camera::ViewId, &'a WorldMeshDrawPlan)>,
+        I::IntoIter: Clone,
     {
+        let quality = self.shadow_quality();
+        let revisions = ShadowContentRevisionSources {
+            transfers: &self.asset_transfers,
+            materials: self.materials.material_property_store(),
+        };
         self.frame_services
             .frame_resources
-            .prepare_shadow_frame_for_views(self.shadow_quality(), views);
+            .prepare_shadow_frame_for_views(quality, views, &revisions);
     }
 
     /// Drains completed Hi-Z readbacks into CPU snapshots at the top of the tick.
