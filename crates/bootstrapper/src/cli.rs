@@ -45,7 +45,7 @@ pub(crate) fn normalize_flag_token(token: &str) -> String {
 /// Returns Host arguments plus bootstrapper-only startup options.
 pub fn parse_args() -> ParsedArgs {
     let args: Vec<String> = env::args().skip(1).collect();
-    parse_bootstrap_args_tokens(&args)
+    parse_bootstrap_args_tokens(&crate::launch_args::expand_launcher_args(&args))
 }
 
 /// Parses bootstrapper args after the program name, including update-control flags.

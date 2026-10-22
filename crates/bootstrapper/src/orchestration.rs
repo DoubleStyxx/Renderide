@@ -157,6 +157,10 @@ pub fn run(config: &ResoBootConfig, ctx: RunContext) -> Result<(), BootstrapErro
 
     let args = assemble_host_args(host_args, &config.shared_memory_prefix);
     logger::info!("Host args: {:?}", args);
+    logger::info!(
+        "Host command line: {}",
+        crate::launch_args::quote_windows_command_line(&args)
+    );
 
     let host_process = start_host_with_drainers(config, &args, &lifetime, &log_timestamp)
         .map_err(BootstrapError::Io)?;

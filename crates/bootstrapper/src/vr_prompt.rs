@@ -16,25 +16,18 @@ use std::env;
 pub const ENV_SKIP_VR_DIALOG: &str = "RENDERIDE_SKIP_VR_DIALOG";
 
 /// Forwards to [`crate::cli::normalize_flag_token`].
-///
-/// Kept as a module-local alias so VR-prompt callers reference the operation by the
-/// argv-scanning name they already use, while the implementation lives in [`crate::cli`]
-/// alongside the other flag-parsing logic.
+#[cfg(test)]
 fn normalized_flag_token(arg: &str) -> String {
     crate::cli::normalize_flag_token(arg)
 }
 
-/// Returns `true` when `args` already specify `FrooxEngine` output via `-Screen` or `-Device ...`.
+/// Returns `true` when `args` already tell Resonite which output to use.
 ///
-/// Any `-Device` token counts as explicit (even if the following value is invalid for the host).
+/// Recognizes `-Screen`, `-Device` (including `-Device=SteamVR` and `-Device:Screen360`),
+/// legacy switches such as `-SteamVR` and `-RiftTouch`, and a bare `none`. A value that
+/// merely contains those words, such as `-Data screen`, does not count.
 pub(crate) fn host_args_have_explicit_output_device(args: &[String]) -> bool {
-    for a in args {
-        let n = normalized_flag_token(a);
-        if n == "screen" || n == "device" {
-            return true;
-        }
-    }
-    false
+    crate::launch_args::host_args_specify_output_mode(args)
 }
 
 /// On Linux, returns `true` when at least one of `DISPLAY` (X11) or `WAYLAND_DISPLAY` (Wayland)
@@ -196,6 +189,28 @@ mod tests {
             env::set_var(ENV_SKIP_VR_DIALOG, "1");
         }
         assert!(!should_prompt_vr_dialog(&[]));
+    }
+
+    #[test]
+    fn should_prompt_false_for_attached_device_form() {
+        let _g = crate::test_env::lock_process_env();
+        let _snap = crate::test_env::EnvSnapshot::capture(VR_ENV_KEYS);
+        // SAFETY: env mutation in test; serialized via the process env test lock.
+        unsafe {
+            env::remove_var("CI");
+        }
+        // SAFETY: env mutation in test; serialized via the process env test lock.
+        unsafe {
+            env::remove_var(ENV_SKIP_VR_DIALOG);
+        }
+        // SAFETY: env mutation in test; serialized via the process env test lock.
+        unsafe {
+            env::set_var("DISPLAY", ":0");
+        }
+        assert!(!should_prompt_vr_dialog(&["-Device=SteamVR".into()]));
+        assert!(!should_prompt_vr_dialog(&["-SteamVR".into()]));
+        assert!(!should_prompt_vr_dialog(&["none".into()]));
+        assert!(should_prompt_vr_dialog(&["-Data".into(), "screen".into()]));
     }
 
     #[test]
