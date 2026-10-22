@@ -146,12 +146,17 @@ impl DriverThread {
         let surface_counters_clone = Arc::clone(&surface_counters);
         let submit_counters_clone = Arc::clone(&submit_counters);
         let flight_recorder_clone = Arc::clone(&flight_recorder);
+        let device_health_for_driver = Arc::clone(&device_health);
         let handle = thread::Builder::new()
             .name("renderer-driver".to_string())
             .spawn(move || {
                 worker::driver_loop(
                     ring_clone,
-                    worker::DriverGpuHandles { device, queue },
+                    worker::DriverGpuHandles {
+                        device,
+                        queue,
+                        device_health: device_health_for_driver,
+                    },
                     gpu_queue_access_gate,
                     errors_clone,
                     surface_counters_clone,

@@ -29,9 +29,14 @@
 //!
 //! The gate is held around `Queue::write_texture` call sites in the asset texture upload
 //! path, decoded video texture callbacks, the driver thread's `Queue::submit`,
-//! `SurfaceTexture::present`, and the narrow OpenXR calls listed above. Long waits such as `xrWaitFrame`,
-//! `xrWaitSwapchainImage`, view location, and input sync stay outside the gate so
-//! compositor stalls do not block unrelated GPU submissions.
+//! `SurfaceTexture::present`, and the narrow OpenXR calls listed above. `Queue::write_buffer`
+//! is not gated. Long waits such as `xrWaitFrame`, `xrWaitSwapchainImage`, view location,
+//! and input sync stay outside the gate so compositor stalls do not block unrelated GPU
+//! submissions.
+//!
+//! The VR swapchain GPU wait (`Device::poll`) also stays outside this gate. That poll
+//! holds wgpu-core's snatch and fence read locks for at most 500 ms; `destroy()` stalls
+//! on the snatch write lock for that bound. The wait's own comment records the lock set.
 
 use std::sync::Arc;
 

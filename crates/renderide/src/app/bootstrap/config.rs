@@ -4,7 +4,7 @@ use logger::LogLevel;
 
 use crate::config::{
     ConfigFilePolicy, ConfigLoadResult, GraphicsApiSetting, PresentationModeSetting,
-    load_renderer_settings, log_config_resolve_trace,
+    VrSwapchainGpuWait, load_renderer_settings, log_config_resolve_trace,
 };
 use crate::ipc::get_ignore_config;
 
@@ -24,6 +24,8 @@ pub(crate) struct GpuStartupConfig {
     pub(crate) power_preference: wgpu::PowerPreference,
     /// Startup graphics API preference for desktop/headless GPU selection.
     pub(crate) graphics_api: GraphicsApiSetting,
+    /// VR swapchain GPU-wait mode, resolved when an OpenXR session starts.
+    pub(crate) vr_swapchain_gpu_wait: VrSwapchainGpuWait,
 }
 
 /// App configuration bundle consumed by bootstrap dispatch.
@@ -103,6 +105,7 @@ pub(crate) fn load_app_config(log_level_cli: Option<LogLevel>) -> AppConfig {
         gpu_validation_layers: load.settings.debug.gpu_validation_layers,
         power_preference: load.settings.debug.power_preference.to_wgpu(),
         graphics_api: load.settings.rendering.graphics_api,
+        vr_swapchain_gpu_wait: load.settings.rendering.vr_swapchain_gpu_wait,
     };
     log_startup_config_summary(&load, gpu, resolved_log_level);
 
@@ -116,7 +119,7 @@ fn log_startup_config_summary(
 ) {
     let settings = &load.settings;
     logger::info!(
-        "Renderer config summary: source={:?} loaded_path={} save_path={} suppress_disk_writes={} log_verbose={} log_level={:?} log_level_source={} presentation_mode={} graphics_api={} gpu_validation={} power_preference={} msaa={} scene_color={:?} post_processing_enabled={} gtao={} bloom={} motion_blur={} auto_exposure={} tonemap={} watchdog_enabled={}",
+        "Renderer config summary: source={:?} loaded_path={} save_path={} suppress_disk_writes={} log_verbose={} log_level={:?} log_level_source={} presentation_mode={} graphics_api={} vr_swapchain_gpu_wait={} gpu_validation={} power_preference={} msaa={} scene_color={:?} post_processing_enabled={} gtao={} bloom={} motion_blur={} auto_exposure={} tonemap={} watchdog_enabled={}",
         load.resolve.source,
         load.resolve
             .loaded_path
@@ -130,6 +133,7 @@ fn log_startup_config_summary(
         log_level.source.as_str(),
         gpu.presentation_mode.persist_str(),
         gpu.graphics_api.as_persist_str(),
+        gpu.vr_swapchain_gpu_wait.persist_str(),
         gpu.gpu_validation_layers,
         settings.debug.power_preference.persist_str(),
         settings.rendering.msaa.persist_str(),
@@ -202,6 +206,7 @@ mod tests {
             gpu_validation_layers: load.settings.debug.gpu_validation_layers,
             power_preference: load.settings.debug.power_preference.to_wgpu(),
             graphics_api: load.settings.rendering.graphics_api,
+            vr_swapchain_gpu_wait: load.settings.rendering.vr_swapchain_gpu_wait,
         };
         log_startup_config_summary(&load, gpu, resolve_renderer_log_level(None, false));
     }

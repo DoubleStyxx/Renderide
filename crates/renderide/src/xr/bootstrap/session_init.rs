@@ -19,6 +19,8 @@ pub(super) struct OpenXrSessionBootstrapDescriptor<'a> {
     pub(super) vk_device: &'a ash::Device,
     pub(super) queue_family_index: u32,
     pub(super) profile_gates: ProfileExtensionGates,
+    /// Resolved `[rendering] vr_swapchain_gpu_wait` for this session.
+    pub(super) swapchain_gpu_wait: bool,
 }
 
 /// Creates the OpenXR session, the STAGE reference space, the controller-action subsystem, and
@@ -84,6 +86,7 @@ pub(super) fn openxr_session_state_and_input(
         frame_wait,
         frame_stream,
         stage,
+        swapchain_gpu_wait: desc.swapchain_gpu_wait,
     });
     Ok((xr_session, openxr_input))
 }

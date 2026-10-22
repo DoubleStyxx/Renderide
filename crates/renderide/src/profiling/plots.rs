@@ -16,6 +16,7 @@ mod rayon_admission;
 mod render_world;
 mod shadow_atlas;
 mod tracy_plot;
+mod vr_swapchain;
 mod world_mesh_prepare;
 
 pub use asset_integration::{AssetIntegrationProfileSample, plot_asset_integration};
@@ -38,4 +39,5 @@ pub(crate) use mesh_upload::{
 pub use rayon_admission::{RayonAdmissionProfileSample, plot_rayon_admission};
 pub use render_world::{RenderWorldMaintenanceProfileSample, plot_render_world_maintenance};
 pub use shadow_atlas::{plot_frame_global_split, plot_shadow_atlas};
+pub use vr_swapchain::plot_vr_swapchain_gpu_wait_ms;
 pub use world_mesh_prepare::plot_world_mesh_prepare;
