@@ -129,6 +129,7 @@ public partial class CustomShaderMaterial : SingleShaderMaterialProvider
         if (!Enabled.Value)
             return;
 
+        FlushDynVarValues();
         EnsurePropertiesInitialized();
         QueuePropertyIds();
         var nameState = NameResolutionState();

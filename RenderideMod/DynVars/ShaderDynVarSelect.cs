@@ -239,7 +239,7 @@ public static class ShaderDynVarSelect
     /// <param name="variableName">Raw variable name.</param>
     /// <param name="slotId">Slot of the variable.</param>
     /// <param name="slots">Slots already copied, including parents of <paramref name="slotId"/>.</param>
-    /// <param name="spaces">Spaces already copied on that chain.</param>
+    /// <param name="spaces">Every space on the chain. A nearer <c>OnlyDirectBinding</c> space hides the ancestor when that ancestor is missing from this list.</param>
     /// <param name="prefix">Raw prefix. Blank becomes <see cref="DefaultPrefix"/>.</param>
     /// <returns>False when no live space binds the name, or the property would be empty.</returns>
     public static bool VariableCanMatch(
@@ -300,19 +300,43 @@ public static class ShaderDynVarSelect
             }
 
             var sample = samples[index];
-            if (!WriterMatches(binding.WriterKind, sample.ValueKind))
+            var apply = ApplySample(binding, sample, out var next);
+            if (apply == ShaderDynValueApply.NeedsRebind)
             {
                 destination.Clear();
-                return ShaderDynValueApply.NeedsRebind;
+                return apply;
             }
 
-            var next = ToBinding(sample, binding.Property);
-            if (!SameSample(binding, next))
+            if (apply == ShaderDynValueApply.Changed)
                 changed = true;
             destination.Add(next);
         }
 
         return changed ? ShaderDynValueApply.Changed : ShaderDynValueApply.Unchanged;
+    }
+
+    /// <summary>
+    /// Writes one fresh sample onto one binding. The property name stays.
+    /// </summary>
+    /// <param name="binding">Binding from the last structure walk.</param>
+    /// <param name="sample">Fresh sample. <see cref="ShaderDynVariable.Id"/> must equal <see cref="ShaderDynBinding.VariableId"/>.</param>
+    /// <param name="updated">The binding with the sample's lanes. Default when the result is <see cref="ShaderDynValueApply.NeedsRebind"/>.</param>
+    /// <returns>Whether this pair's lanes changed, or the writer no longer matches.</returns>
+    public static ShaderDynValueApply ApplySample(
+        in ShaderDynBinding binding,
+        in ShaderDynVariable sample,
+        out ShaderDynBinding updated)
+    {
+        if (sample.Id != binding.VariableId || !WriterMatches(binding.WriterKind, sample.ValueKind))
+        {
+            updated = default;
+            return ShaderDynValueApply.NeedsRebind;
+        }
+
+        updated = ToBinding(sample, binding.Property);
+        return SameSample(binding, updated)
+            ? ShaderDynValueApply.Unchanged
+            : ShaderDynValueApply.Changed;
     }
 
     private static bool WriterMatches(ShaderDynWriterKind writer, ShaderDynValueKind kind)

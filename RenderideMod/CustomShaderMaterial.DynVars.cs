@@ -24,6 +24,7 @@ public partial class CustomShaderMaterial
     private string? _dynPrefix;
     private string _dynLoggedNames = "";
     private bool _dynRefreshing;
+    private bool _dynValueDirty;
     private bool _ownSlotHooked;
     private int _nextTextureToken = 1;
 
@@ -42,8 +43,19 @@ public partial class CustomShaderMaterial
     {
         if (!_ownSlotHooked)
             return;
-        Slot.ParentChanged -= OnDynHierarchyChanged;
         _ownSlotHooked = false;
+        // OnDestroy can run after Slot is gone. ParentChanged throws on a destroyed slot,
+        // and the subscription dies with the slot, so the unsubscribe is skipped.
+        try
+        {
+            if (Slot.IsRemoved || Slot.IsDestroyed)
+                return;
+            Slot.ParentChanged -= OnDynHierarchyChanged;
+        }
+        catch (Exception ex)
+        {
+            ResoniteMod.Warn($"custom shader material dynvar parent unhook skipped: {ex.Message}");
+        }
     }
 
     private void OnDynHierarchyChanged(Slot _)
@@ -58,6 +70,7 @@ public partial class CustomShaderMaterial
             return;
 
         _dynRefreshing = true;
+        _dynValueDirty = false;
         try
         {
             UnbindDynVarHooks();
@@ -100,6 +113,7 @@ public partial class CustomShaderMaterial
         _samples.Clear();
         _dynBindings.Clear();
         _dynVarNames.Clear();
+        _dynValueDirty = false;
         // OnChanges rebuilds the cached name list only for sync-list edits.
         // Disable and destroy clear dynvar names without OnChanges, so the next
         // NameResolutionState would keep hashing names that are no longer bound.
@@ -153,6 +167,10 @@ public partial class CustomShaderMaterial
             }
         }
 
+        // The chain loop above walks a nearer space before a farther one is in Spaces.
+        // VariableCanMatch on that partial list misses an unslashed name under a nearer
+        // OnlyDirectBinding space that actually binds to the farther space.
+        snapshot.HookCapturedVariables(this);
         return snapshot;
     }
 
@@ -260,8 +278,16 @@ public partial class CustomShaderMaterial
         if (canMatch)
         {
             Action<IChangeable> value = _ => OnDynValueChanged();
-            HookNamedMember(component, "Value", value);
-            HookNamedMember(component, "Reference", value);
+            var hookedValue = HookNamedMember(component, "Value", value);
+            var hookedReference = HookNamedMember(component, "Reference", value);
+            if (!hookedValue && !hookedReference)
+            {
+                ResoniteMod.Warn(
+                    "custom shader material dynvar: no Value or Reference sync member on "
+                    + component.GetType().Name
+                    + " name="
+                    + variable.VariableName);
+            }
         }
 
         if (component is IDestroyable destroyable)
@@ -276,7 +302,18 @@ public partial class CustomShaderMaterial
     {
         if (_dynRefreshing || !Enabled.Value)
             return;
+        _dynValueDirty = true;
+    }
 
+    /// <summary>
+    /// One resample for every value event since the previous update.
+    /// Reads bound variables only. Does not walk slots or replace hooks.
+    /// </summary>
+    private void FlushDynVarValues()
+    {
+        if (!_dynValueDirty || _dynRefreshing)
+            return;
+        _dynValueDirty = false;
         switch (ResampleBoundValues())
         {
             case ShaderDynValueApply.Changed:
@@ -290,31 +327,26 @@ public partial class CustomShaderMaterial
     }
 
     /// <summary>
-    /// Reads the variables already bound and copies lanes with <see cref="ShaderDynVarSelect.ApplyValueSamples"/>.
-    /// Does not walk slots or replace hooks.
+    /// Copies fresh lanes onto <see cref="_dynBindings"/> with <see cref="ShaderDynVarSelect.ApplySample"/>.
+    /// Unbound captured variables are not read.
     /// </summary>
     private ShaderDynValueApply ResampleBoundValues()
     {
-        var samples = new List<ShaderDynVariable>(_samples.Count);
-        for (var i = 0; i < _samples.Count; i++)
+        var changed = false;
+        for (var i = 0; i < _dynBindings.Count; i++)
         {
-            var source = _samples[i];
+            var binding = _dynBindings[i];
+            if ((uint)binding.VariableId >= (uint)_samples.Count)
+                return ShaderDynValueApply.NeedsRebind;
+            var source = _samples[binding.VariableId];
             if (source.Source is not Component component || !TrySample(source.Source, out var sampled))
-            {
-                foreach (var binding in _dynBindings)
-                {
-                    if (binding.VariableId == i)
-                        return ShaderDynValueApply.NeedsRebind;
-                }
+                return ShaderDynValueApply.NeedsRebind;
 
-                continue;
-            }
             var token = sampled.Kind == ShaderDynValueKind.Texture
                 ? TokenFor(sampled.Texture)
                 : 0;
-            source.Texture = sampled.Texture;
-            samples.Add(new ShaderDynVariable(
-                i,
+            var sample = new ShaderDynVariable(
+                binding.VariableId,
                 0,
                 component is IDynamicVariable variable ? variable.VariableName : null,
                 IsLive(component),
@@ -324,20 +356,22 @@ public partial class CustomShaderMaterial
                 sampled.Z,
                 sampled.W,
                 token,
-                i,
-                sampled.Profile));
+                0,
+                sampled.Profile);
+            var apply = ShaderDynVarSelect.ApplySample(binding, sample, out var updated);
+            if (apply == ShaderDynValueApply.NeedsRebind)
+                return apply;
+            source.Texture = sampled.Texture;
+            if (apply == ShaderDynValueApply.Unchanged)
+                continue;
+            _dynBindings[i] = updated;
+            changed = true;
         }
 
-        var next = new List<ShaderDynBinding>(_dynBindings.Count);
-        var result = ShaderDynVarSelect.ApplyValueSamples(_dynBindings, samples, next);
-        if (result != ShaderDynValueApply.Changed)
-            return result;
-        _dynBindings.Clear();
-        _dynBindings.AddRange(next);
-        return result;
+        return changed ? ShaderDynValueApply.Changed : ShaderDynValueApply.Unchanged;
     }
 
-    private void HookNamedMember(Component component, string name, Action<IChangeable> handler)
+    private bool HookNamedMember(Component component, string name, Action<IChangeable> handler)
     {
         var count = component.SyncMemberCount;
         for (var i = 0; i < count; i++)
@@ -347,8 +381,10 @@ public partial class CustomShaderMaterial
             if (!string.Equals(element.Name, name, StringComparison.Ordinal))
                 continue;
             HookMember(element, handler);
-            return;
+            return true;
         }
+
+        return false;
     }
 
     private void HookMember(IChangeable member, Action<IChangeable> handler)
@@ -455,6 +491,8 @@ public partial class CustomShaderMaterial
 
     private void PruneTextureTokens()
     {
+        if (_textureTokens.Count == 0)
+            return;
         var live = new HashSet<int>();
         foreach (var binding in _dynBindings)
         {
@@ -625,6 +663,13 @@ public partial class CustomShaderMaterial
         private readonly Dictionary<Slot, int> _slotIds = [];
         private readonly HashSet<DynamicVariableSpace> _spacesSeen = [];
         private readonly HashSet<Slot> _walked = [];
+        private readonly List<PendingVar> _pending = [];
+
+        private struct PendingVar
+        {
+            public IDynamicVariable Variable;
+            public int SlotId;
+        }
 
         public DynSnapshot(string prefix)
         {
@@ -695,15 +740,27 @@ public partial class CustomShaderMaterial
                 Walk(owner, child);
         }
 
+        /// <summary>
+        /// Hooks each captured variable against the finished space list.
+        /// A nearer <c>OnlyDirectBinding</c> space is walked before its ancestor is added.
+        /// </summary>
+        public void HookCapturedVariables(CustomShaderMaterial owner)
+        {
+            foreach (var pending in _pending)
+            {
+                var canMatch = ShaderDynVarSelect.VariableCanMatch(
+                    pending.Variable.VariableName,
+                    pending.SlotId,
+                    Slots,
+                    Spaces,
+                    Prefix);
+                owner.HookVariable(pending.Variable, canMatch);
+            }
+        }
+
         private void AddVariable(CustomShaderMaterial owner, IDynamicVariable variable, int slotId)
         {
-            var canMatch = ShaderDynVarSelect.VariableCanMatch(
-                variable.VariableName,
-                slotId,
-                Slots,
-                Spaces,
-                Prefix);
-            owner.HookVariable(variable, canMatch);
+            _pending.Add(new PendingVar { Variable = variable, SlotId = slotId });
             if (variable is not Component component || !TrySample(variable, out var sampled))
                 return;
 

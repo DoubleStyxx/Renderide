@@ -372,6 +372,81 @@ public sealed class ShaderDynVarSelectTests
         Assert.True(ShaderDynVarSelect.VariableCanMatch("_Speed", 1, slots, indirectChild, "Shader/"));
     }
 
+    /// <summary>
+    /// An unslashed name under a nearer OnlyDirectBinding Shader space binds to the farther Shader space.
+    /// The nearer space alone does not: that is the mid-walk list, and it must not decide the value hook.
+    /// </summary>
+    [Fact]
+    public void Unslashed_name_under_direct_only_space_uses_the_ancestor_shader_space()
+    {
+        var slots = new List<ShaderDynSlot>
+        {
+            new(0, null, 0),
+            new(1, 0, 0),
+        };
+        var nearerOnly = new List<ShaderDynSpace>
+        {
+            new(1, "Shader", true, true, 0),
+        };
+        Assert.False(ShaderDynVarSelect.VariableCanMatch("_Speed", 1, slots, nearerOnly, "Shader/"));
+
+        var withAncestor = new List<ShaderDynSpace>
+        {
+            new(1, "Shader", true, true, 0),
+            new(0, "Shader", false, true, 0),
+        };
+        Assert.True(ShaderDynVarSelect.VariableCanMatch("_Speed", 1, slots, withAncestor, "Shader/"));
+
+        var variables = new List<ShaderDynVariable>
+        {
+            new(0, 1, "_Speed", true, ShaderDynValueKind.Scalar, 0.5f, 0f, 0f, 0f, 0, 0),
+        };
+        var selected = ShaderDynVarSelect.Select(1, slots, withAncestor, variables, "Shader/");
+        var binding = Assert.Single(selected);
+        Assert.Equal("_Speed", binding.Property);
+        Assert.Equal(0.5f, binding.X);
+        Assert.Empty(ShaderDynVarSelect.Select(1, slots, nearerOnly, variables, "Shader/"));
+    }
+
+    /// <summary>One bound sample updates in place. A writer mismatch asks for a full rebind.</summary>
+    [Fact]
+    public void Apply_sample_updates_one_binding_without_the_other_variables()
+    {
+        var speed = new ShaderDynBinding(3, "_Speed", ShaderDynWriterKind.Scalar, 0.2f, 0f, 0f, 0f, 0);
+        var sample = new ShaderDynVariable(
+            3,
+            1,
+            "Shader/_Speed",
+            true,
+            ShaderDynValueKind.Scalar,
+            0.5f,
+            0f,
+            0f,
+            0f,
+            0,
+            0);
+        Assert.Equal(ShaderDynValueApply.Changed, ShaderDynVarSelect.ApplySample(speed, sample, out var updated));
+        Assert.Equal("_Speed", updated.Property);
+        Assert.Equal(0.5f, updated.X);
+
+        Assert.Equal(ShaderDynValueApply.Unchanged, ShaderDynVarSelect.ApplySample(updated, sample, out _));
+
+        var color = new ShaderDynVariable(
+            3,
+            1,
+            "Shader/_Speed",
+            true,
+            ShaderDynValueKind.Color,
+            0.5f,
+            0f,
+            0f,
+            1f,
+            0,
+            0,
+            ShaderDynColorProfile.Srgb);
+        Assert.Equal(ShaderDynValueApply.NeedsRebind, ShaderDynVarSelect.ApplySample(updated, color, out _));
+    }
+
     /// <summary>NaN lanes compare equal by bits so an unchanged sample is not a new value.</summary>
     [Fact]
     public void Same_sample_treats_nan_as_unchanged()
