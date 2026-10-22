@@ -23,7 +23,7 @@ name: Nightly
         default: false
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release
@@ -33,6 +33,10 @@ jobs:
   select-commit:
     name: Select candidate commit
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
     outputs:
       sha: ${{ steps.pick.outputs.sha }}
       short_sha: ${{ steps.pick.outputs.short_sha }}
@@ -41,7 +45,7 @@ jobs:
       tag: ${{ steps.pick.outputs.tag }}
       should_release: ${{ steps.pick.outputs.should_release }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: master
           fetch-depth: 0
@@ -59,6 +63,7 @@ jobs:
 
           # Booleans only. The key material stays out of this step.
           if [ "${PUBLIC_KEY_CONFIGURED}" != "true" ] || [ "${PRIVATE_KEY_CONFIGURED}" != "true" ]; then
+            echo "::warning::Nightly publish skipped: release signing keys not configured"
             {
               echo "Nightly publish skipped: release signing is not configured."
               echo "Unsigned bundles are not published. The updater rejects a manifest without a valid Ed25519 signature."
@@ -169,6 +174,9 @@ jobs:
     needs: select-commit
     if: needs.select-commit.outputs.should_release == 'true'
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 240
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -186,7 +194,7 @@ jobs:
           - os: macos-latest
             platform: macos-aarch64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.select-commit.outputs.sha }}
 
@@ -201,9 +209,11 @@ jobs:
             mesa-vulkan-drivers vulkan-tools \
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: release-${{ matrix.platform }}-cargo-binless-v1
           cache-bin: "false"
@@ -227,13 +237,13 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($env:RENDERIDE_RELEASE_PUBLIC_KEY_HEX)) {
             throw "RENDERIDE_RELEASE_PUBLIC_KEY_HEX repository variable is required. See RELEASING.md."
           }
-          if ($env:RENDERIDE_RELEASE_PUBLIC_KEY_HEX.Length -ne 64) {
+          if ($env:RENDERIDE_RELEASE_PUBLIC_KEY_HEX -notmatch '^[0-9a-fA-F]{64}$') {
             throw "RENDERIDE_RELEASE_PUBLIC_KEY_HEX must be 64 hex characters. See RELEASING.md."
           }
           if ([string]::IsNullOrWhiteSpace($env:RENDERIDE_RELEASE_PRIVATE_KEY_HEX)) {
             throw "RENDERIDE_RELEASE_PRIVATE_KEY_HEX repository secret is required. See RELEASING.md."
           }
-          if ($env:RENDERIDE_RELEASE_PRIVATE_KEY_HEX.Length -ne 64) {
+          if ($env:RENDERIDE_RELEASE_PRIVATE_KEY_HEX -notmatch '^[0-9a-fA-F]{64}$') {
             throw "RENDERIDE_RELEASE_PRIVATE_KEY_HEX must be 64 hex characters. See RELEASING.md."
           }
 
@@ -315,7 +325,7 @@ jobs:
               encoding="utf-8",
           )
           PY
-          cargo run --release --locked -p bootstrapper --bin renderide-sign-release-manifest -- "${dist}/renderide-release.json" > "${dist}/renderide-release.json.sig"
+          "${src}/renderide-sign-release-manifest" "${dist}/renderide-release.json" > "${dist}/renderide-release.json.sig"
           ( cd dist && zip -r "${name}.zip" "${name}" )
 
       - name: Stage zip (Windows)
@@ -368,11 +378,12 @@ jobs:
             sha256 = $sha256
           }
           $manifest | ConvertTo-Json -Depth 4 | Set-Content "$dist/renderide-release.json" -Encoding utf8
-          $signature = cargo run --release --locked -p bootstrapper --bin renderide-sign-release-manifest -- "$dist/renderide-release.json"
+          $signature = & "$src/renderide-sign-release-manifest.exe" "$dist/renderide-release.json"
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($signature)) { throw "manifest signing failed" }
           Set-Content "$dist/renderide-release.json.sig" -Encoding ascii -NoNewline -Value $signature
           Compress-Archive -Path $dist -DestinationPath "dist/$name.zip" -Force
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: renderide-${{ matrix.platform }}
           path: dist/renderide-${{ matrix.platform }}-${{ needs.select-commit.outputs.tag }}.zip
@@ -383,14 +394,17 @@ jobs:
     needs: [select-commit, build]
     if: needs.select-commit.outputs.should_release == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.select-commit.outputs.sha }}
           fetch-depth: 0
           fetch-tags: true
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: artifacts
 
@@ -454,7 +468,7 @@ jobs:
             cat changelog.md
           } > release-notes.md
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ needs.select-commit.outputs.tag }}
           name: ${{ needs.select-commit.outputs.tag }}

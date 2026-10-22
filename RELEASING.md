@@ -23,7 +23,7 @@ No other repository secrets are required for these workflows. `GITHUB_TOKEN` is 
 2. Set the same `X.Y.Z` in `crates/renderide/Cargo.toml` (`version`) and `RenderideMod/RenderideMod.csproj` (`<Version>`). The tag workflow fails unless the tag is `v` plus the crate version.
 3. Open a pull request.
 4. Wait until CI is green on that pull request and on `master` after it merges.
-5. GO gate: do not tag until a GO from DoubleStyxx, relayed by Kairo, is recorded.
+5. Do not tag until maintainer approval from DoubleStyxx is recorded.
 6. On `master`, tag the release commit and push the tag:
 
    ```bash
