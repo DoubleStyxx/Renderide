@@ -23,7 +23,15 @@ use crate::world_mesh::{
 use super::super::shadow_atlas_format::select_shadow_atlas_format;
 use super::manager::FrameResourceManager;
 
+#[cfg(feature = "bench-api")]
+mod bench;
+#[cfg(feature = "bench-api")]
+pub use bench::{SHADOW_CHURN_CASTERS, SHADOW_CHURN_LIGHTS, ShadowChurnWorkload};
+mod cache;
 mod point_faces;
+mod range_cull;
+
+pub(super) use cache::ShadowPlanCache;
 
 const POINT_FACE_COUNT: u32 = point_faces::POINT_FACE_COUNT;
 const SHADOW_TYPE_NONE: u32 = 0;
@@ -107,6 +115,13 @@ pub(crate) struct ShadowFramePlan {
     pub(crate) requested_layers: u32,
     /// Requested shadow per-draw slab rows across all atlas layers.
     pub(crate) requested_draw_slots: usize,
+    /// True when this plan was retained from the previous submission.
+    ///
+    /// Retained plans skip caster grouping and per-face visibility. The bench uses this to tell a
+    /// cached repaint from a full rebuild.
+    pub(crate) plan_reused: bool,
+    /// True when atlas layers must be re-rendered for this submission.
+    pub(crate) maps_need_render: bool,
 }
 
 struct ShadowPlanningView<'a> {
@@ -163,6 +178,9 @@ impl ShadowCasterPlanScratch {
 
 impl FrameResourceManager {
     /// Plans shadow maps from packed per-view lights and sorted view draw plans.
+    ///
+    /// A static world is not camera-culled into the caster set, so the plan and the atlas layers
+    /// are retained when the shadow inputs match the previous submission.
     pub(crate) fn prepare_shadow_frame_for_views<'a, I>(
         &mut self,
         quality: HostShadowQuality,
@@ -171,22 +189,67 @@ impl FrameResourceManager {
         I: IntoIterator<Item = (ViewId, &'a WorldMeshDrawPlan)>,
     {
         profiling::scope!("render::prepare_shadow_frame");
-        for lights in self.per_view_lights.values_mut() {
-            for light in &mut lights.lights {
-                clear_light_shadow_assignment(light);
-            }
-        }
-        let mut plan = std::mem::take(&mut self.shadow_frame);
-        plan.caster_sets.clear();
-        plan.render_views.clear();
-        plan.metadata.clear();
-        plan.requested_resolution = 0;
-        plan.requested_layers = 0;
-        plan.requested_draw_slots = 0;
+        clear_shadow_assignments(self);
+        let views = views.into_iter().collect::<Vec<_>>();
         if !shadow_atlas_rendering_supported(self.limits.as_deref()) {
-            self.shadow_frame = plan;
+            self.reset_unsupported_shadow_plan();
             return;
         }
+        let signature = cache::shadow_input_signature(self, quality, &views);
+        if self.reuse_cached_shadow_plan(&signature) {
+            return;
+        }
+        self.rebuild_shadow_plan(quality, &views, signature);
+    }
+
+    /// Marks the retained atlas as drawn for the current shadow inputs.
+    ///
+    /// Encode runs on a shared manager, so the rendered fingerprint is atomic.
+    pub(crate) fn note_shadow_maps_rendered(&self) {
+        self.shadow_plan_cache.note_current_rendered();
+    }
+
+    /// Forces the next shadow pass to redraw after the atlas texture is replaced.
+    pub(crate) fn mark_shadow_maps_for_render(&mut self) {
+        self.shadow_frame.maps_need_render = true;
+        self.shadow_plan_cache.clear_rendered();
+    }
+
+    fn reset_unsupported_shadow_plan(&mut self) {
+        self.shadow_plan_cache.invalidate();
+        let mut plan = std::mem::take(&mut self.shadow_frame);
+        clear_shadow_plan(&mut plan);
+        plan.plan_reused = false;
+        plan.maps_need_render = false;
+        self.shadow_frame = plan;
+    }
+
+    fn reuse_cached_shadow_plan(&mut self, signature: &cache::ShadowInputSignature) -> bool {
+        if !self.shadow_plan_cache.matches(signature.fingerprint) {
+            return false;
+        }
+        let assignments = self.shadow_plan_cache.assignments().to_vec();
+        if !restore_shadow_assignments(self, &assignments) {
+            clear_shadow_assignments(self);
+            return false;
+        }
+        profiling::scope!("render::prepare_shadow_frame::reuse");
+        self.shadow_frame.plan_reused = true;
+        self.shadow_frame.maps_need_render = self
+            .shadow_plan_cache
+            .maps_need_render(signature.fingerprint, signature.casters_need_redraw);
+        true
+    }
+
+    fn rebuild_shadow_plan(
+        &mut self,
+        quality: HostShadowQuality,
+        views: &[(ViewId, &WorldMeshDrawPlan)],
+        signature: cache::ShadowInputSignature,
+    ) {
+        profiling::scope!("render::prepare_shadow_frame::rebuild");
+        let mut plan = std::mem::take(&mut self.shadow_frame);
+        clear_shadow_plan(&mut plan);
         plan.requested_resolution = 1;
         plan.requested_layers = 1;
         let max_shadow_views = shadow_view_capacity(self.limits.as_deref());
@@ -194,7 +257,10 @@ impl FrameResourceManager {
             append_shadow_views_for_view(
                 self,
                 quality,
-                ShadowPlanningView { view_id, draw_plan },
+                ShadowPlanningView {
+                    view_id: *view_id,
+                    draw_plan,
+                },
                 &mut plan,
                 max_shadow_views,
             );
@@ -204,7 +270,16 @@ impl FrameResourceManager {
         }
         plan.requested_layers = plan.render_views.len().max(1).min(u32::MAX as usize) as u32;
         refresh_shadow_metadata_atlas_rects(&mut plan);
+        plan.plan_reused = false;
+        plan.maps_need_render = true;
+        let view_ids = views
+            .iter()
+            .map(|(view_id, _)| *view_id)
+            .collect::<Vec<_>>();
+        let assignments = cache::snapshot_shadow_assignments(self, &view_ids);
         self.shadow_frame = plan;
+        self.shadow_plan_cache
+            .remember(signature.fingerprint, assignments);
     }
 
     /// Returns the current shadow frame plan.
@@ -303,18 +378,15 @@ fn append_shadow_views_for_view(
     let shadow_draws = collection
         .items
         .iter()
-        .filter(|item| {
-            item.shadow_cast_mode != ShadowCastMode::Off
-                && shadow_caster_policy_for_pipeline(&item.batch_key.pipeline).casts()
-        })
+        .filter(|item| shadow_draw_casts(item))
         .cloned()
         .collect::<Arc<[WorldMeshDrawItem]>>();
     if shadow_draws.is_empty() {
         return;
     }
-    let Some(lights) = manager.per_view_lights.get_mut(view.view_id) else {
+    if manager.per_view_lights.get(view.view_id).is_none() {
         return;
-    };
+    }
     let caster_set_index = plan.caster_sets.len();
     let supports_base_instance = manager
         .limits
@@ -333,66 +405,128 @@ fn append_shadow_views_for_view(
         slab_slot_offset,
     });
 
+    let light_count = manager
+        .per_view_lights
+        .get(view.view_id)
+        .map(|lights| lights.lights.len())
+        .unwrap_or(0);
     let mut local_shadowed = 0u32;
-    for light in &mut lights.lights {
-        if light.shadow_type == SHADOW_TYPE_NONE || light.shadow_strength <= 0.0 {
-            clear_light_shadow_assignment(light);
-            continue;
-        }
-        let requested_count = shadow_view_count_for_light(light.light_type, quality);
-        if requested_count == 0 {
-            clear_light_shadow_assignment(light);
-            continue;
-        }
-        if light.light_type != light_type_u32(LightType::Directional) {
-            if local_shadowed >= quality.per_pixel_lights {
-                clear_light_shadow_assignment(light);
-                continue;
-            }
-            local_shadowed = local_shadowed.saturating_add(1);
-        }
-        let remaining = max_shadow_views.saturating_sub(plan.metadata.len());
-        if remaining == 0 {
-            clear_light_shadow_assignment(light);
-            continue;
-        }
-        let view_count = requested_count.min(remaining as u32);
-        let start = plan.metadata.len() as u32;
-        let kind = shadow_kind_for_light(light.light_type);
-        let light_position = Vec3::from_array(light.position);
-        let light_range = light.range.max(0.001);
-        let shadow_bias = light.shadow_bias.max(0.0);
-        let resolution = shadow_resolution_for_light(light, quality, manager.limits.as_deref());
-        plan.requested_resolution = plan.requested_resolution.max(resolution);
-        for view_offset in 0..view_count {
-            let layer = plan.render_views.len().min(u32::MAX as usize) as u32;
-            let view_proj = shadow_projection_for_light(light, view_offset, view_count, quality);
-            let visible_groups =
-                visible_shadow_groups_for_view(view_proj, &plan.caster_sets[caster_set_index]);
-            plan.metadata.push(gpu_shadow_view_for_light(
+    for light_index in 0..light_count {
+        let Some(light) = manager
+            .per_view_lights
+            .get(view.view_id)
+            .and_then(|lights| lights.lights.get(light_index).copied())
+        else {
+            break;
+        };
+        append_shadow_views_for_light(
+            manager,
+            quality,
+            LightShadowInput {
+                view_id: view.view_id,
+                light_index,
                 light,
-                view_proj,
-                layer,
-                resolution,
-                view_offset,
-                view_count,
-                quality,
-            ));
-            plan.render_views.push(ShadowRenderView {
-                layer,
-                kind,
-                resolution,
-                view_proj,
-                light_position,
-                light_range,
-                shadow_bias,
-                caster_set_index,
-                visible_groups,
-            });
+            },
+            plan,
+            caster_set_index,
+            max_shadow_views,
+            &mut local_shadowed,
+        );
+    }
+}
+
+struct LightShadowInput {
+    view_id: ViewId,
+    light_index: usize,
+    light: crate::gpu::GpuLight,
+}
+
+fn append_shadow_views_for_light(
+    manager: &mut FrameResourceManager,
+    quality: HostShadowQuality,
+    input: LightShadowInput,
+    plan: &mut ShadowFramePlan,
+    caster_set_index: usize,
+    max_shadow_views: usize,
+    local_shadowed: &mut u32,
+) {
+    let LightShadowInput {
+        view_id,
+        light_index,
+        light,
+    } = input;
+    if light.shadow_type == SHADOW_TYPE_NONE || light.shadow_strength <= 0.0 {
+        clear_stored_shadow_assignment(manager, view_id, light_index);
+        return;
+    }
+    let requested_count = shadow_view_count_for_light(light.light_type, quality);
+    if requested_count == 0 {
+        clear_stored_shadow_assignment(manager, view_id, light_index);
+        return;
+    }
+    if light.light_type != light_type_u32(LightType::Directional) {
+        if *local_shadowed >= quality.per_pixel_lights {
+            clear_stored_shadow_assignment(manager, view_id, light_index);
+            return;
         }
-        light.shadow_view_start = start;
-        light.shadow_view_count = view_count;
-        light.shadow_flags = 0;
+        *local_shadowed = local_shadowed.saturating_add(1);
+    }
+    let remaining = max_shadow_views.saturating_sub(plan.metadata.len());
+    if remaining == 0 {
+        clear_stored_shadow_assignment(manager, view_id, light_index);
+        return;
+    }
+    let view_count = requested_count.min(remaining as u32);
+    let start = plan.metadata.len() as u32;
+    let kind = shadow_kind_for_light(light.light_type);
+    let light_position = Vec3::from_array(light.position);
+    let light_range = light.range.max(0.001);
+    let shadow_bias = light.shadow_bias.max(0.0);
+    let resolution = shadow_resolution_for_light(&light, quality, manager.limits.as_deref());
+    plan.requested_resolution = plan.requested_resolution.max(resolution);
+    let use_mask = range_cull::influence_range_mask(
+        &light,
+        &plan.caster_sets[caster_set_index].draws,
+        &mut manager.shadow_range_mask,
+    )
+    .is_some();
+    for view_offset in 0..view_count {
+        let layer = plan.render_views.len().min(u32::MAX as usize) as u32;
+        let view_proj = shadow_projection_for_light(&light, view_offset, view_count, quality);
+        let visible_groups = visible_shadow_groups_for_view(
+            view_proj,
+            &plan.caster_sets[caster_set_index],
+            use_mask.then_some(manager.shadow_range_mask.as_slice()),
+        );
+        plan.metadata.push(gpu_shadow_view_for_light(
+            &light,
+            view_proj,
+            layer,
+            resolution,
+            view_offset,
+            view_count,
+            quality,
+        ));
+        plan.render_views.push(ShadowRenderView {
+            layer,
+            kind,
+            resolution,
+            view_proj,
+            light_position,
+            light_range,
+            shadow_bias,
+            caster_set_index,
+            visible_groups,
+        });
+    }
+    if let Some(stored) = manager
+        .per_view_lights
+        .get_mut(view_id)
+        .and_then(|lights| lights.lights.get_mut(light_index))
+    {
+        stored.shadow_view_start = start;
+        stored.shadow_view_count = view_count;
+        stored.shadow_flags = 0;
     }
 }
 
@@ -433,6 +567,11 @@ fn build_shadow_caster_plan(
             .push(draw_group);
     }
     plan
+}
+
+pub(super) fn shadow_draw_casts(item: &WorldMeshDrawItem) -> bool {
+    item.shadow_cast_mode != ShadowCastMode::Off
+        && shadow_caster_policy_for_pipeline(&item.batch_key.pipeline).casts()
 }
 
 fn shadow_draw_requires_singleton(item: &WorldMeshDrawItem, supports_base_instance: bool) -> bool {
@@ -479,12 +618,13 @@ fn append_shadow_draw_group(
 fn visible_shadow_groups_for_view(
     view_proj: Mat4,
     caster_set: &ShadowCasterSet,
+    range_mask: Option<&[u8]>,
 ) -> RenderPhaseSet<WorldMeshPhase, DrawGroup> {
     profiling::scope!("render::prepare_shadow_frame::visible_groups");
     let mut visible = RenderPhaseSet::new();
     for phase in WorldMeshPhase::PRIMARY_FORWARD {
         for group in caster_set.instance_plan.phase(phase) {
-            if shadow_group_visible_to_view(view_proj, caster_set, group) {
+            if shadow_group_visible_to_view(view_proj, caster_set, group, range_mask) {
                 visible.phase_mut(phase).push(group.clone());
             }
         }
@@ -496,6 +636,7 @@ fn shadow_group_visible_to_view(
     view_proj: Mat4,
     caster_set: &ShadowCasterSet,
     group: &DrawGroup,
+    range_mask: Option<&[u8]>,
 ) -> bool {
     let start = group.instance_range.start as usize;
     let end = group.instance_range.end as usize;
@@ -503,6 +644,9 @@ fn shadow_group_visible_to_view(
         return true;
     };
     members.iter().any(|&draw_idx| {
+        if range_cull::shadow_draw_outside_influence(range_mask, draw_idx) {
+            return false;
+        }
         caster_set
             .draws
             .get(draw_idx)
@@ -564,6 +708,55 @@ fn shadow_view_capacity(limits: Option<&GpuLimits>) -> usize {
         limits.max_texture_array_layers().max(1) as usize
     });
     MAX_SHADOW_VIEWS.min(max_layers).max(1)
+}
+
+fn clear_shadow_plan(plan: &mut ShadowFramePlan) {
+    plan.caster_sets.clear();
+    plan.render_views.clear();
+    plan.metadata.clear();
+    plan.requested_resolution = 0;
+    plan.requested_layers = 0;
+    plan.requested_draw_slots = 0;
+}
+
+fn clear_shadow_assignments(manager: &mut FrameResourceManager) {
+    for lights in manager.per_view_lights.values_mut() {
+        for light in &mut lights.lights {
+            clear_light_shadow_assignment(light);
+        }
+    }
+}
+
+fn restore_shadow_assignments(
+    manager: &mut FrameResourceManager,
+    assignments: &[cache::CachedShadowAssignment],
+) -> bool {
+    for assignment in assignments {
+        let Some(light) = manager
+            .per_view_lights
+            .get_mut(assignment.view_id)
+            .and_then(|lights| lights.lights.get_mut(assignment.light_index))
+        else {
+            return false;
+        };
+        light.shadow_view_start = assignment.start;
+        light.shadow_view_count = assignment.count;
+    }
+    true
+}
+
+fn clear_stored_shadow_assignment(
+    manager: &mut FrameResourceManager,
+    view_id: ViewId,
+    light_index: usize,
+) {
+    if let Some(light) = manager
+        .per_view_lights
+        .get_mut(view_id)
+        .and_then(|lights| lights.lights.get_mut(light_index))
+    {
+        clear_light_shadow_assignment(light);
+    }
 }
 
 fn clear_light_shadow_assignment(light: &mut crate::gpu::GpuLight) {

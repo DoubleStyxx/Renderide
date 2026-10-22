@@ -7,6 +7,42 @@ pub(in crate::backend) const SHADOW_ATLAS_MAX_BYTES: u64 = 512 * 1024 * 1024;
 
 const SHADOW_ATLAS_CONSERVATIVE_BYTES_PER_TEXEL: u64 = 4;
 
+/// Resident shadow-atlas shape.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::backend) struct ShadowAtlasExtent {
+    /// Edge length of every atlas layer, in texels.
+    pub resolution: u32,
+    /// Array layers retained for the atlas.
+    pub layers: u32,
+}
+
+/// Grows the atlas toward the request without snapping back below the byte budget.
+///
+/// A high-resolution few-layer request and a many-layer request can each fit in
+/// [`SHADOW_ATLAS_MAX_BYTES`] while their product does not. Snapping to the instantaneous
+/// request recreates the texture every time those shapes alternate. This keeps the high-water
+/// layer count and lowers resolution to the budget instead.
+#[must_use]
+pub(in crate::backend) fn stable_shadow_atlas_extent(
+    current: ShadowAtlasExtent,
+    requested_resolution: u32,
+    requested_layers: u32,
+    limits: &GpuLimits,
+    format: wgpu::TextureFormat,
+) -> ShadowAtlasExtent {
+    let layer_cap = limits.max_texture_array_layers().max(1);
+    let requested_layers = requested_layers.max(1).min(layer_cap);
+    let requested_resolution =
+        clamp_shadow_atlas_resolution(limits, requested_resolution, requested_layers, format);
+    let layers = current.layers.max(requested_layers).min(layer_cap).max(1);
+    let mut resolution = current.resolution.max(requested_resolution).max(1);
+    let budgeted = clamp_shadow_atlas_resolution(limits, resolution, layers, format);
+    if budgeted != resolution {
+        resolution = budgeted;
+    }
+    ShadowAtlasExtent { resolution, layers }
+}
+
 /// Clamps a shadow atlas edge to device dimensions and the internal atlas allocation budget.
 #[must_use]
 pub(in crate::backend) fn clamp_shadow_atlas_resolution(
@@ -71,7 +107,7 @@ fn floor_sqrt_u64(value: u64) -> u32 {
 mod tests {
     use hashbrown::HashMap;
 
-    use super::clamp_shadow_atlas_resolution;
+    use super::{ShadowAtlasExtent, clamp_shadow_atlas_resolution, stable_shadow_atlas_extent};
 
     fn limits(max_texture_dimension_2d: u32) -> crate::gpu::GpuLimits {
         crate::gpu::GpuLimits::synthetic_for_tests(
@@ -111,6 +147,41 @@ mod tests {
         assert_eq!(
             clamp_shadow_atlas_resolution(&limits, 4096, 16, wgpu::TextureFormat::Depth16Unorm),
             4096
+        );
+    }
+
+    #[test]
+    fn alternating_shadow_atlas_requests_keep_a_stable_extent() {
+        let limits = limits(8192);
+        let format = wgpu::TextureFormat::Depth32Float;
+        let few_layers = stable_shadow_atlas_extent(
+            ShadowAtlasExtent {
+                resolution: 1,
+                layers: 1,
+            },
+            4096,
+            4,
+            &limits,
+            format,
+        );
+        assert_eq!(
+            few_layers,
+            ShadowAtlasExtent {
+                resolution: 4096,
+                layers: 4,
+            }
+        );
+        let many_layers = stable_shadow_atlas_extent(few_layers, 1024, 32, &limits, format);
+        let repeated = stable_shadow_atlas_extent(many_layers, 4096, 4, &limits, format);
+        assert_eq!(repeated, many_layers);
+        assert!(repeated.layers >= 32);
+        assert_eq!(
+            clamp_shadow_atlas_resolution(&limits, repeated.resolution, repeated.layers, format),
+            repeated.resolution
+        );
+        assert_eq!(
+            stable_shadow_atlas_extent(repeated, 4096, 4, &limits, format),
+            repeated
         );
     }
 

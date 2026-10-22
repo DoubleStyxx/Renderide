@@ -44,6 +44,8 @@ pub use facade::{RenderBackend, RenderBackendAttachDesc};
 pub use frame_gpu_bindings::FrameGpuBindingsError;
 pub use frame_resource_manager::FrameResourceManager;
 pub(crate) use frame_resource_manager::{FrameLightCullDesc, FrameLightViewDesc};
+#[cfg(feature = "bench-api")]
+pub use frame_resource_manager::{SHADOW_CHURN_CASTERS, SHADOW_CHURN_LIGHTS, ShadowChurnWorkload};
 pub(crate) use shadow_quality::HostShadowQuality;
 pub(crate) use view_resource_registry::ViewResourceRegistry;
 pub(crate) use world_mesh_frame_plan::{

@@ -31,6 +31,9 @@ mod tests;
 
 pub use manager::FrameResourceManager;
 
+#[cfg(feature = "bench-api")]
+pub use shadows::{SHADOW_CHURN_CASTERS, SHADOW_CHURN_LIGHTS, ShadowChurnWorkload};
+
 pub(crate) use shadows::{ShadowCasterSet, ShadowFramePlan, ShadowRenderView};
 pub(crate) use view_desc::{FrameLightCullDesc, FrameLightViewDesc};
 

@@ -47,6 +47,10 @@ pub struct FrameResourceManager {
     pub(super) light_visibility_stats: LightVisibilityStats,
     /// Shadow metadata and atlas render views planned for the current graph submission.
     pub(super) shadow_frame: ShadowFramePlan,
+    /// Retained shadow-plan identity for static worlds.
+    pub(super) shadow_plan_cache: super::shadows::ShadowPlanCache,
+    /// Scratch bytes for per-light shadow influence tests.
+    pub(super) shadow_range_mask: Vec<u8>,
     /// Whether any packed light set subtracts in at least one signed-radiance channel.
     pub(super) signed_scene_color_required: bool,
     /// When true, [`crate::passes::MeshDeformPass`] already dispatched for the current graph
@@ -93,6 +97,8 @@ impl FrameResourceManager {
             per_view_lights: PerViewResourceMap::new(),
             light_visibility_stats: LightVisibilityStats::default(),
             shadow_frame: ShadowFramePlan::default(),
+            shadow_plan_cache: super::shadows::ShadowPlanCache::default(),
+            shadow_range_mask: Vec::new(),
             signed_scene_color_required: false,
             mesh_deform_dispatched_this_submission: AtomicBool::new(false),
             visible_mesh_deform_keys: Mutex::new(None),

@@ -266,12 +266,15 @@ impl GraphFrameGlobalResources for FrameResourceManager {
     }
 
     fn has_shadow_atlas_requests(&self) -> bool {
-        self.frame_gpu().is_some() && !self.shadow_frame_plan().render_views.is_empty()
+        let plan = self.shadow_frame_plan();
+        self.frame_gpu().is_some() && !plan.render_views.is_empty() && plan.maps_need_render
     }
 
     fn encode_shadow_atlas(&self, params: ShadowAtlasEncodeParams<'_, '_, '_>) {
-        if let Some(fgpu) = self.frame_gpu() {
-            fgpu.encode_shadow_atlas(self.shadow_frame_plan(), params);
+        if let Some(fgpu) = self.frame_gpu()
+            && fgpu.encode_shadow_atlas(self.shadow_frame_plan(), params)
+        {
+            self.note_shadow_maps_rendered();
         }
     }
 
@@ -314,7 +317,9 @@ impl GraphFrameGlobalResources for FrameResourceManager {
         let Some(fgpu) = self.frame_gpu() else {
             return false;
         };
-        fgpu.record_shadow_atlas_layers(self.shadow_frame_plan(), unit_range, params);
+        if fgpu.record_shadow_atlas_layers(self.shadow_frame_plan(), unit_range, params) {
+            self.note_shadow_maps_rendered();
+        }
         true
     }
 }

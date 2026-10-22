@@ -15,7 +15,7 @@ use crate::world_mesh::test_fixtures::{DummyDrawItemSpec, dummy_world_mesh_draw_
 use crate::world_mesh::{
     PrefetchedWorldMeshViewDraws, WorldMeshDrawItem, WorldMeshDrawPlan, WorldMeshPhase,
 };
-use glam::Vec3;
+use glam::{Mat4, Vec3};
 
 use super::{
     POINT_FACE_COUNT, light_type_u32, point_shadow_projection, shadow_view_count_for_light,
@@ -403,4 +403,214 @@ fn shadow_planning_disables_when_depth_atlas_format_is_not_renderable() {
     assert_eq!(light.shadow_view_start, 0);
     assert_eq!(light.shadow_view_count, 0);
     assert_eq!(light.shadow_flags, 0);
+}
+
+fn positioned_caster(node_id: i32, position: Vec3) -> WorldMeshDrawItem {
+    let mut item = pbs_draw(node_id, ShadowCastMode::On);
+    item.mesh_asset_id = node_id;
+    item.rigid_world_matrix = Some(Mat4::from_translation(position));
+    let extent = Vec3::splat(0.05);
+    item.world_aabb = Some((position - extent, position + extent));
+    item
+}
+
+fn spot_shadow_manager(
+    draw: WorldMeshDrawItem,
+) -> (super::FrameResourceManager, WorldMeshDrawPlan) {
+    let mut manager = super::FrameResourceManager::new();
+    manager
+        .per_view_lights
+        .get_or_insert_with(ViewId::Main, PreparedViewLights::default)
+        .lights
+        .push(shadowed_light(LightType::Spot));
+    let plan = prefetched_plan(vec![draw]);
+    (manager, plan)
+}
+
+#[test]
+fn static_shadow_plan_is_reused_and_skips_redraw_after_encode() {
+    let draw = positioned_caster(1, Vec3::new(1.0, 0.0, 0.0));
+    let (mut manager, draw_plan) = spot_shadow_manager(draw.clone());
+    manager
+        .prepare_shadow_frame_for_views(HostShadowQuality::default(), [(ViewId::Main, &draw_plan)]);
+    let first_draws = Arc::clone(&manager.shadow_frame_plan().caster_sets[0].draws);
+    assert!(!manager.shadow_frame_plan().plan_reused);
+    assert!(manager.shadow_frame_plan().maps_need_render);
+
+    manager
+        .prepare_shadow_frame_for_views(HostShadowQuality::default(), [(ViewId::Main, &draw_plan)]);
+    assert!(manager.shadow_frame_plan().plan_reused);
+    assert!(manager.shadow_frame_plan().maps_need_render);
+    assert!(Arc::ptr_eq(
+        &first_draws,
+        &manager.shadow_frame_plan().caster_sets[0].draws
+    ));
+
+    manager.note_shadow_maps_rendered();
+    manager
+        .prepare_shadow_frame_for_views(HostShadowQuality::default(), [(ViewId::Main, &draw_plan)]);
+    assert!(manager.shadow_frame_plan().plan_reused);
+    assert!(!manager.shadow_frame_plan().maps_need_render);
+    assert_eq!(
+        manager.per_view_lights.get(ViewId::Main).unwrap().lights[0].shadow_view_count,
+        1
+    );
+
+    let reversed = prefetched_plan(vec![draw.clone(), {
+        let mut other = draw.clone();
+        other.node_id = 2;
+        other.instance_id = crate::scene::MeshRendererInstanceId(99);
+        other
+    }]);
+    // A pure reorder of the same caster still hits. A new caster misses below.
+    let same_order = prefetched_plan(vec![draw]);
+    manager.prepare_shadow_frame_for_views(
+        HostShadowQuality::default(),
+        [(ViewId::Main, &same_order)],
+    );
+    assert!(manager.shadow_frame_plan().plan_reused);
+
+    manager
+        .prepare_shadow_frame_for_views(HostShadowQuality::default(), [(ViewId::Main, &reversed)]);
+    assert!(!manager.shadow_frame_plan().plan_reused);
+}
+
+#[test]
+fn shadow_plan_ignores_caster_order_and_light_color() {
+    let first = positioned_caster(1, Vec3::new(0.0, 0.0, 1.0));
+    let second = positioned_caster(2, Vec3::new(0.0, 1.0, 0.0));
+    let (mut manager, _) = spot_shadow_manager(first.clone());
+    let both = prefetched_plan(vec![first.clone(), second.clone()]);
+    manager.prepare_shadow_frame_for_views(HostShadowQuality::default(), [(ViewId::Main, &both)]);
+    manager.note_shadow_maps_rendered();
+    let reversed = prefetched_plan(vec![second, first]);
+    manager
+        .prepare_shadow_frame_for_views(HostShadowQuality::default(), [(ViewId::Main, &reversed)]);
+    assert!(manager.shadow_frame_plan().plan_reused);
+    assert!(!manager.shadow_frame_plan().maps_need_render);
+
+    let light = &mut manager
+        .per_view_lights
+        .get_mut(ViewId::Main)
+        .unwrap()
+        .lights[0];
+    light.color = [0.2, 0.3, 0.4];
+    light.intensity = 4.0;
+    light.shadow_strength = 0.4;
+    let both_again = prefetched_plan(vec![
+        positioned_caster(1, Vec3::new(0.0, 0.0, 1.0)),
+        positioned_caster(2, Vec3::new(0.0, 1.0, 0.0)),
+    ]);
+    manager.prepare_shadow_frame_for_views(
+        HostShadowQuality::default(),
+        [(ViewId::Main, &both_again)],
+    );
+    assert!(manager.shadow_frame_plan().plan_reused);
+    assert_eq!(
+        manager.per_view_lights.get(ViewId::Main).unwrap().lights[0].shadow_view_count,
+        1
+    );
+}
+
+#[test]
+fn shadow_plan_misses_when_bias_matrix_or_strength_drop() {
+    let draw = positioned_caster(1, Vec3::ZERO);
+    let (mut manager, draw_plan) = spot_shadow_manager(draw);
+    manager
+        .prepare_shadow_frame_for_views(HostShadowQuality::default(), [(ViewId::Main, &draw_plan)]);
+    manager.note_shadow_maps_rendered();
+
+    manager
+        .per_view_lights
+        .get_mut(ViewId::Main)
+        .unwrap()
+        .lights[0]
+        .shadow_bias = 0.9;
+    manager
+        .prepare_shadow_frame_for_views(HostShadowQuality::default(), [(ViewId::Main, &draw_plan)]);
+    assert!(!manager.shadow_frame_plan().plan_reused);
+    manager.note_shadow_maps_rendered();
+
+    let moved = prefetched_plan(vec![positioned_caster(1, Vec3::new(1.0, 0.0, 0.0))]);
+    manager.prepare_shadow_frame_for_views(HostShadowQuality::default(), [(ViewId::Main, &moved)]);
+    assert!(!manager.shadow_frame_plan().plan_reused);
+    manager.note_shadow_maps_rendered();
+
+    manager
+        .per_view_lights
+        .get_mut(ViewId::Main)
+        .unwrap()
+        .lights[0]
+        .shadow_strength = 0.0;
+    manager.prepare_shadow_frame_for_views(HostShadowQuality::default(), [(ViewId::Main, &moved)]);
+    assert!(manager.shadow_frame_plan().render_views.is_empty());
+    assert_eq!(
+        manager.per_view_lights.get(ViewId::Main).unwrap().lights[0].shadow_view_count,
+        0
+    );
+}
+
+#[test]
+fn deformed_casters_reuse_the_plan_and_still_redraw() {
+    let mut draw = positioned_caster(1, Vec3::ZERO);
+    draw.world_space_deformed = true;
+    let (mut manager, draw_plan) = spot_shadow_manager(draw);
+    manager
+        .prepare_shadow_frame_for_views(HostShadowQuality::default(), [(ViewId::Main, &draw_plan)]);
+    manager.note_shadow_maps_rendered();
+    manager
+        .prepare_shadow_frame_for_views(HostShadowQuality::default(), [(ViewId::Main, &draw_plan)]);
+    assert!(manager.shadow_frame_plan().plan_reused);
+    assert!(manager.shadow_frame_plan().maps_need_render);
+}
+
+#[test]
+fn point_shadow_influence_keeps_near_casters_and_drops_distant_ones() {
+    let mut manager = super::FrameResourceManager::new();
+    let mut light = shadowed_light(LightType::Point);
+    light.position = [0.0, 0.0, 0.0];
+    light.range = 4.0;
+    manager
+        .per_view_lights
+        .get_or_insert_with(ViewId::Main, PreparedViewLights::default)
+        .lights
+        .push(light);
+    let draw_plan = prefetched_plan(vec![
+        positioned_caster(1, Vec3::new(2.0, 0.0, 0.0)),
+        positioned_caster(2, Vec3::new(40.0, 0.0, 0.0)),
+    ]);
+    manager
+        .prepare_shadow_frame_for_views(HostShadowQuality::default(), [(ViewId::Main, &draw_plan)]);
+
+    let plan = manager.shadow_frame_plan();
+    assert_eq!(plan.render_views.len(), POINT_FACE_COUNT as usize);
+    assert!(
+        !plan.render_views[0]
+            .groups(WorldMeshPhase::ForwardOpaque)
+            .is_empty()
+    );
+    assert!(
+        plan.render_views[1..]
+            .iter()
+            .all(|view| view.groups(WorldMeshPhase::ForwardOpaque).is_empty())
+    );
+    let visible = &plan.render_views[0].groups(WorldMeshPhase::ForwardOpaque)[0];
+    let members = &plan.caster_sets[0].instance_plan.slab_layout
+        [visible.instance_range.start as usize..visible.instance_range.end as usize];
+    assert_eq!(members, &[0]);
+}
+
+#[test]
+fn point_influence_radius_covers_cube_far_corners() {
+    let mut light = shadowed_light(LightType::Point);
+    light.range = 8.0;
+    light.shadow_near_plane = 0.05;
+    let radius_sq = super::range_cull::influence_radius_sq(&light).unwrap();
+    let corner = 8.0 * 3.0_f32.sqrt();
+    assert!(corner * corner < radius_sq);
+    let outside = 3.1_f32.sqrt() * 8.0 + 0.05;
+    assert!(outside * outside > radius_sq);
+
+    light.light_type = light_type_u32(LightType::Directional);
+    assert!(super::range_cull::influence_radius_sq(&light).is_none());
 }

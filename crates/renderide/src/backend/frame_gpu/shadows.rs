@@ -31,7 +31,7 @@ use crate::world_mesh::WorldMeshPhase;
 use super::super::frame_gpu_error::FrameGpuInitError;
 use super::super::frame_resource_manager::{ShadowCasterSet, ShadowFramePlan, ShadowRenderView};
 use super::super::per_draw_resources::PerDrawResources;
-use super::super::shadow_atlas_budget::clamp_shadow_atlas_resolution;
+use super::super::shadow_atlas_budget::{ShadowAtlasExtent, stable_shadow_atlas_extent};
 use super::super::shadow_atlas_format::{
     select_shadow_atlas_binding_format, select_shadow_atlas_format,
 };
@@ -347,34 +347,30 @@ impl ShadowAtlasResources {
         let _ = self
             .per_draw
             .ensure_draw_slot_capacity(device, requested_draw_slots);
-        let layers = requested_layers
-            .max(1)
-            .min(limits.wgpu.max_texture_array_layers.max(1));
-        self.ensure_layer_uniform_capacity(device, layers as usize);
+        let next = stable_shadow_atlas_extent(
+            ShadowAtlasExtent {
+                resolution: self.resolution,
+                layers: self.layers,
+            },
+            requested_resolution,
+            requested_layers,
+            limits,
+            self.format,
+        );
+        self.ensure_layer_uniform_capacity(device, next.layers as usize);
         if !self.renderable {
             return self.sync_result(false);
         }
-        let requested_resolution =
-            clamp_shadow_texture_resolution(limits, requested_resolution, layers, self.format);
-        let grown_layers = self.layers.max(layers);
-        let grown_resolution = self.resolution.max(requested_resolution);
-        let budgeted_grown_resolution =
-            clamp_shadow_texture_resolution(limits, grown_resolution, grown_layers, self.format);
-        let (next_resolution, next_layers) = if budgeted_grown_resolution == grown_resolution {
-            (grown_resolution, grown_layers)
-        } else {
-            (requested_resolution, layers)
-        };
-        if next_resolution == self.resolution && next_layers == self.layers {
+        if next.resolution == self.resolution && next.layers == self.layers {
             return self.sync_result(false);
         }
         let (texture, atlas_view, layer_views) =
-            create_shadow_texture(device, next_resolution, next_layers, self.format, true);
+            create_shadow_texture(device, next.resolution, next.layers, self.format, true);
         self.texture = texture;
         self.atlas_view = atlas_view;
         self.layer_views = layer_views;
-        self.resolution = next_resolution;
-        self.layers = next_layers;
+        self.resolution = next.resolution;
+        self.layers = next.layers;
         self.version = self.version.saturating_add(1);
         self.sync_result(true)
     }
@@ -543,15 +539,6 @@ fn clamp_shadow_resolution(limits: &GpuLimits, requested: u32) -> u32 {
     requested.clamp(1, limits.wgpu.max_texture_dimension_2d.max(1))
 }
 
-fn clamp_shadow_texture_resolution(
-    limits: &GpuLimits,
-    requested: u32,
-    layers: u32,
-    format: wgpu::TextureFormat,
-) -> u32 {
-    clamp_shadow_atlas_resolution(limits, requested, layers, format)
-}
-
 fn create_shadow_texture(
     device: &wgpu::Device,
     resolution: u32,
@@ -643,10 +630,10 @@ impl FrameGpuResources {
         &self,
         plan: &ShadowFramePlan,
         params: ShadowAtlasEncodeParams<'_, '_, '_>,
-    ) {
+    ) -> bool {
         profiling::scope!("shadows::encode_atlas");
         if plan.render_views.is_empty() || !self.shadows.renderable() {
-            return;
+            return false;
         }
         self.prepare_shadow_atlas_uploads(plan, params.gpu_limits, params.uploads);
         self.record_shadow_atlas_layers(
@@ -661,7 +648,7 @@ impl FrameGpuResources {
                 gpu_limits: params.gpu_limits,
                 profiler: params.profiler,
             },
-        );
+        )
     }
 
     /// Returns split-recording workload for the current atlas when parallel recording is useful.
@@ -711,10 +698,10 @@ impl FrameGpuResources {
         plan: &ShadowFramePlan,
         layer_range: std::ops::Range<usize>,
         params: FrameGlobalSplitPassEncodeParams<'_, '_>,
-    ) {
+    ) -> bool {
         profiling::scope!("shadows::record_atlas_layers");
         if plan.render_views.is_empty() || !self.shadows.renderable() {
-            return;
+            return false;
         }
         let mut encode_refs = WorldMeshForwardEncodeRefs {
             materials: params.materials,
@@ -735,12 +722,15 @@ impl FrameGpuResources {
             gpu_limits: params.gpu_limits,
             profiler: params.profiler,
         };
+        let mut recorded = false;
         for layer_idx in layer_range {
             let Some(layer) = shadow_layer_plan(plan, layer_idx) else {
                 continue;
             };
             self.encode_shadow_view(&layer, &mut ctx);
+            recorded = true;
         }
+        recorded
     }
 
     fn encode_shadow_view(
