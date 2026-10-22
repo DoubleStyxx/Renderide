@@ -258,9 +258,13 @@ Example programs on `shaders/exotic-dynvars` (`7997b084`) use the names below wi
 
 Other types are ignored. A dynvar property replaces a `Floats`, `Colors`, or `Textures` row of the same name. The value still uses `MaterialPropertyIdRequest` and `MaterialUpdateWriter`. `ShaderUpload` is unchanged: it only installs or removes WGSL, and only when `ShaderKey` or the source changes.
 
-The component subscribes to space, slot, and variable change events and calls `MarkChangeDirty` only when the mapped value or the mapped set changes. It does not poll variable values from `OnCommonUpdate`.
+The component subscribes to space, slot, and variable change events and calls `MarkChangeDirty` only when the mapped value or the mapped set changes. It does not poll variable values from `OnCommonUpdate`. Parent changes and active changes on the material slot and on the watched ancestors rebind the same way. Leaving a value alone does not dirty the material again.
+
+There is no public `DynamicVariableSpace.SpaceLookup`. The private variable handler is not read. `ShaderDynVarSelect` is the parent walk: a name that contains `/` binds to the first live ancestor space with that name, and any other name binds to the first live ancestor space whose `OnlyDirectBinding` is false. That is the same split as `DynamicVariableHelper.ParsePath`. `ProcessName` still normalizes space names before the walk. The selector trims whitespace only, so `Shader/_Speed` writes `_Speed`.
 
 Nearest ancestor space wins when two variables map to one property. Inside one space, the first live variable in slot hierarchy order wins. A disabled variable or an inactive slot does not override.
+
+`ShaderDynVarSelect` lives in `RenderideMod/DynVars` and is compiled into `RenderideMod.dll`. It does not reference FrooxEngine. `dotnet test RenderideMod.DynVarCore.Tests` covers the walk, the prefix, padding, and the smoke hierarchy. The component file still needs the Resonite assemblies. This reader is the dynvar half of `CustomShaderMaterial` (#32). It does not change shader upload or the property-id queue.
 
 ## Smoke checklist: dynamic variables
 
@@ -276,7 +280,7 @@ Build and run the rainbow-beside-unlit setup first. Install `example_rainbow` wi
 8. `float2` / `float3` dynvars, if added under names such as `Shader/_Pad`, upload as `SetFloat4` with the unused lanes at 0. The property is `_Pad`.
 9. Delete the `Shader/_Speed` variable, or disable it. The static `Floats` value `0.2` is written again. Box B is unchanged.
 10. Clear `ShaderKey` or disable the component. Mod log: `custom shader material clear: material=<id>`. Box A returns to packaged Unlit.
-11. Move the material slot out from under the `Shader` space. The dynvar overrides drop and the static rows apply. Move it back and the overrides return.
+11. Move the material slot, or a parent between the material and the space, out from under the `Shader` space. The dynvar overrides drop and the static rows apply. Move it back and the overrides return. Deactivating that slot drops the override while the slot stays inactive.
 12. Set `VariablePrefix` to `Other/`. The `Shader/` variables stop overriding. Set it back to `Shader/` and they return. Blank prefix is `Shader/`.
 
 `PropertyName` is the WGSL name (`_Color`, `_MainTex`, `_Speed`, `RAINBOW`). Blank names are skipped. The entry field is not named `Name` because that hides `SyncObject.Name`.

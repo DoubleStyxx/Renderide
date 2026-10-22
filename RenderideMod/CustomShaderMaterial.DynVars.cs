@@ -1,41 +1,40 @@
 using Elements.Core;
 using FrooxEngine;
+using RenderideMod.DynVars;
 using ResoniteModLoader;
 
 namespace RenderideMod;
 
 public partial class CustomShaderMaterial
 {
-    private const string DefaultVariablePrefix = "Shader/";
+    private const string DefaultVariablePrefix = ShaderDynVarSelect.DefaultPrefix;
 
-    private readonly List<BoundDynVar> _dynVars = new();
+    private readonly List<SampledDynVar> _samples = [];
+    private readonly List<ShaderDynBinding> _dynBindings = [];
     private readonly HashSet<string> _dynVarNames = new(StringComparer.Ordinal);
-    private readonly List<Action> _dynUnsub = new();
-    private readonly HashSet<Slot> _dynComponentSlots = new();
-    private readonly HashSet<Slot> _dynChildSlots = new();
-    private readonly HashSet<IDynamicVariable> _dynHookedVars = new();
-    private readonly HashSet<DynamicVariableSpace> _dynHookedSpaces = new();
-    private readonly HashSet<IChangeable> _dynHookedMembers = new();
+    private readonly List<Action> _dynUnsub = [];
+    private readonly HashSet<Slot> _dynComponentSlots = [];
+    private readonly HashSet<Slot> _dynChildSlots = [];
+    private readonly HashSet<Slot> _dynLifetimeSlots = [];
+    private readonly HashSet<IDynamicVariable> _dynHookedVars = [];
+    private readonly HashSet<DynamicVariableSpace> _dynHookedSpaces = [];
+    private readonly HashSet<IChangeable> _dynHookedMembers = [];
+    private readonly Dictionary<IAssetProvider<ITexture2D>, int> _textureTokens = new(ReferenceEqualityComparer.Instance);
 
     private string? _dynPrefix;
     private string _dynLoggedNames = "";
     private bool _dynRefreshing;
     private bool _ownSlotHooked;
+    private int _nextTextureToken = 1;
 
     /// <summary>Blank <see cref="VariablePrefix"/> uses <see cref="DefaultVariablePrefix"/>.</summary>
-    private string ActivePrefix()
-    {
-        var prefix = VariablePrefix.Value?.Trim();
-        if (string.IsNullOrEmpty(prefix))
-            return DefaultVariablePrefix;
-        return prefix;
-    }
+    private string ActivePrefix() => ShaderDynVarSelect.ActivePrefix(VariablePrefix.Value);
 
     private void HookOwnSlot()
     {
         if (_ownSlotHooked)
             return;
-        Slot.ParentChanged += OnOwnParentChanged;
+        Slot.ParentChanged += OnDynHierarchyChanged;
         _ownSlotHooked = true;
     }
 
@@ -43,13 +42,13 @@ public partial class CustomShaderMaterial
     {
         if (!_ownSlotHooked)
             return;
-        Slot.ParentChanged -= OnOwnParentChanged;
+        Slot.ParentChanged -= OnDynHierarchyChanged;
         _ownSlotHooked = false;
     }
 
-    private void OnOwnParentChanged(Slot _)
+    private void OnDynHierarchyChanged(Slot _)
     {
-        if (Enabled.Value)
+        if (!_dynRefreshing && Enabled.Value)
             BindDynVars();
     }
 
@@ -63,14 +62,20 @@ public partial class CustomShaderMaterial
         {
             UnbindDynVarHooks();
             var prefix = ActivePrefix();
-            var seen = new HashSet<string>(StringComparer.Ordinal);
-            var next = new List<BoundDynVar>();
-            CollectDynVars(prefix, seen, next);
-
-            var changed = !SameDynVars(next);
-            _dynVars.Clear();
-            _dynVars.AddRange(next);
+            var snapshot = Capture(prefix);
+            var next = ShaderDynVarSelect.Select(
+                snapshot.ReaderSlotId,
+                snapshot.Slots,
+                snapshot.Spaces,
+                snapshot.Variables,
+                prefix);
+            var changed = !SameBindings(next);
+            _samples.Clear();
+            _samples.AddRange(snapshot.Samples);
+            _dynBindings.Clear();
+            _dynBindings.AddRange(next);
             RebuildDynVarNames();
+            PruneTextureTokens();
             _dynPrefix = prefix;
             QueueDynVarPropertyIds();
             LogDynVarNames();
@@ -90,8 +95,10 @@ public partial class CustomShaderMaterial
     private void UnbindDynVars()
     {
         UnbindDynVarHooks();
-        _dynVars.Clear();
+        _samples.Clear();
+        _dynBindings.Clear();
         _dynVarNames.Clear();
+        _textureTokens.Clear();
         _dynPrefix = null;
         _dynLoggedNames = "";
     }
@@ -103,81 +110,77 @@ public partial class CustomShaderMaterial
         _dynUnsub.Clear();
         _dynComponentSlots.Clear();
         _dynChildSlots.Clear();
+        _dynLifetimeSlots.Clear();
         _dynHookedVars.Clear();
         _dynHookedSpaces.Clear();
         _dynHookedMembers.Clear();
     }
 
     /// <summary>
-    /// Spaces on this slot and its parents. A space is walked only when a variable bound to it
-    /// can produce a canonical name that starts with <paramref name="prefix"/>.
+    /// Copies the slot chain and the variables under spaces that can match <paramref name="prefix"/>.
+    /// Selection itself is <see cref="ShaderDynVarSelect"/>.
     /// </summary>
-    private void CollectDynVars(string prefix, HashSet<string> seen, List<BoundDynVar> next)
+    private DynSnapshot Capture(string prefix)
     {
+        var snapshot = new DynSnapshot();
+        var chain = new List<Slot>();
         var slot = Slot;
         while (slot != null)
         {
-            WatchAncestorSlot(slot);
-            foreach (var space in slot.GetComponents<DynamicVariableSpace>())
-            {
-                if (!IsLive(space))
-                    continue;
-                HookSpace(space);
-                if (!SpaceCanMatch(SpaceKey(space), prefix))
-                    continue;
-                AbsorbSpace(space, prefix, seen, next);
-            }
-
+            chain.Add(slot);
             slot = slot.Parent;
         }
-    }
 
-    private void AbsorbSpace(
-        DynamicVariableSpace space,
-        string prefix,
-        HashSet<string> seen,
-        List<BoundDynVar> next)
-    {
-        VisitSlots(space.Slot, slot =>
+        for (var i = chain.Count - 1; i >= 0; i--)
         {
-            WatchSpaceSlot(slot);
-            foreach (var variable in slot.GetComponents<IDynamicVariable>())
-            {
-                HookVariable(variable);
-                if (variable is not Component component || !IsLive(component))
-                    continue;
-                if (!TryMap(variable, space, prefix, out var mapped))
-                    continue;
-                if (!seen.Add(mapped.Property))
-                    continue;
-                next.Add(mapped);
-            }
-        });
-    }
+            WatchAncestorSlot(chain[i]);
+            snapshot.AddSlot(chain[i]);
+        }
 
-    private static void VisitSlots(Slot slot, Action<Slot> visit)
-    {
-        visit(slot);
-        foreach (var child in slot.Children)
-            VisitSlots(child, visit);
+        snapshot.ReaderSlotId = snapshot.SlotId(Slot);
+        for (var i = 0; i < chain.Count; i++)
+        {
+            foreach (var space in chain[i].GetComponents<DynamicVariableSpace>())
+            {
+                var walk = ShaderDynVarSelect.SpaceCanMatch(SpaceKey(space), prefix);
+                snapshot.AddSpace(this, space, walk);
+            }
+        }
+
+        return snapshot;
     }
 
     private void WatchAncestorSlot(Slot slot)
     {
         WatchComponentEvents(slot);
+        WatchSlotLifetime(slot);
     }
 
     private void WatchSpaceSlot(Slot slot)
     {
         WatchComponentEvents(slot);
+        WatchSlotLifetime(slot);
         if (!_dynChildSlots.Add(slot))
             return;
-        slot.ChildAdded += OnSpaceChildAdded;
-        slot.ChildRemoved += OnSpaceChildRemoved;
+        slot.ChildAdded += OnDynHierarchyChanged;
+        slot.ChildRemoved += OnDynHierarchyChanged;
         _dynUnsub.Add(() =>
         {
-            slot.ChildAdded -= OnSpaceChildAdded;
-            slot.ChildRemoved -= OnSpaceChildRemoved;
+            slot.ChildAdded -= OnDynHierarchyChanged;
+            slot.ChildRemoved -= OnDynHierarchyChanged;
+        });
+    }
+
+    private void WatchSlotLifetime(Slot slot)
+    {
+        if (!_dynLifetimeSlots.Add(slot))
+            return;
+        slot.ParentChanged += OnDynHierarchyChanged;
+        slot.ActiveChanged += OnDynHierarchyChanged;
+        _dynUnsub.Add(() =>
+        {
+            slot.ParentChanged -= OnDynHierarchyChanged;
+            slot.ActiveChanged -= OnDynHierarchyChanged;
         });
     }
 
@@ -192,18 +195,6 @@ public partial class CustomShaderMaterial
             slot.ComponentAdded -= OnSlotComponentAdded;
             slot.ComponentRemoved -= OnSlotComponentRemoved;
         });
-    }
-
-    private void OnSpaceChildAdded(Slot _)
-    {
-        if (!_dynRefreshing && Enabled.Value)
-            BindDynVars();
-    }
-
-    private void OnSpaceChildRemoved(Slot _)
-    {
-        if (!_dynRefreshing && Enabled.Value)
-            BindDynVars();
     }
 
     private void OnSlotComponentAdded(Component component)
@@ -227,11 +218,7 @@ public partial class CustomShaderMaterial
         if (!_dynHookedSpaces.Add(space))
             return;
 
-        Action<IChangeable> handler = _ =>
-        {
-            if (!_dynRefreshing && Enabled.Value)
-                BindDynVars();
-        };
+        Action<IChangeable> handler = _ => OnDynHierarchyChanged(space.Slot);
         HookMember(space, handler);
         HookSyncMembers(space, handler);
     }
@@ -241,16 +228,12 @@ public partial class CustomShaderMaterial
         if (!_dynHookedVars.Add(variable) || variable is not Component component)
             return;
 
-        Action<IChangeable> handler = _ => OnVariableChanged(variable);
+        Action<IChangeable> handler = _ => OnDynHierarchyChanged(component.Slot);
         HookMember(component, handler);
         HookSyncMembers(component, handler);
         if (component is IDestroyable destroyable)
         {
-            Action<IDestroyable> destroyed = _ =>
-            {
-                if (!_dynRefreshing && Enabled.Value)
-                    BindDynVars();
-            };
+            Action<IDestroyable> destroyed = _ => OnDynHierarchyChanged(component.Slot);
             destroyable.Destroyed += destroyed;
             _dynUnsub.Add(() => destroyable.Destroyed -= destroyed);
         }
@@ -278,261 +261,98 @@ public partial class CustomShaderMaterial
         });
     }
 
-    private void OnVariableChanged(IDynamicVariable variable)
-    {
-        if (_dynRefreshing || !Enabled.Value)
-            return;
-
-        try
-        {
-            var index = IndexOfDynVar(variable);
-            if (index < 0)
-            {
-                if (CouldMap(variable))
-                    BindDynVars();
-                return;
-            }
-
-            var current = _dynVars[index];
-            if (!TryMapLive(variable, ActivePrefix(), out var mapped)
-                || mapped.Property != current.Property
-                || mapped.Kind != current.Kind)
-            {
-                BindDynVars();
-                return;
-            }
-
-            if (ValuesEqual(current, mapped))
-                return;
-
-            current.FloatValue = mapped.FloatValue;
-            current.Vector = mapped.Vector;
-            current.Color = mapped.Color;
-            current.Texture = mapped.Texture;
-            MarkChangeDirty();
-        }
-        catch (Exception ex)
-        {
-            ResoniteMod.Warn($"custom shader material dynvar read failed: {ex.Message}");
-        }
-    }
-
-    private int IndexOfDynVar(IDynamicVariable variable)
-    {
-        for (var i = 0; i < _dynVars.Count; i++)
-        {
-            if (ReferenceEquals(_dynVars[i].Source, variable))
-                return i;
-        }
-
-        return -1;
-    }
-
-    private bool CouldMap(IDynamicVariable variable)
-    {
-        if (variable is not Component component || !IsLive(component))
-            return false;
-        var space = FindBoundSpace(component, variable.VariableName);
-        return space != null
-            && IsAncestorSpace(space)
-            && TryMap(variable, space, ActivePrefix(), out _);
-    }
-
-    private bool TryMapLive(IDynamicVariable variable, string prefix, out BoundDynVar mapped)
-    {
-        mapped = null!;
-        if (variable is not Component component || !IsLive(component))
-            return false;
-        var space = FindBoundSpace(component, variable.VariableName);
-        if (space == null || !IsAncestorSpace(space))
-            return false;
-        return TryMap(variable, space, prefix, out mapped);
-    }
-
-    private bool IsAncestorSpace(DynamicVariableSpace space)
-    {
-        var slot = Slot;
-        var spaceSlot = space.Slot;
-        while (slot != null)
-        {
-            if (ReferenceEquals(slot, spaceSlot))
-                return true;
-            slot = slot.Parent;
-        }
-
-        return false;
-    }
-
-    /// <summary>
-    /// Standard lookup: direct names bind to the named space, other names bind to the first
-    /// ancestor space that allows indirect binding. <see cref="DynamicVariableHandler{T}.CurrentSpace"/>
-    /// is the same link; the handler field on the variable is not public.
-    /// </summary>
-    private static DynamicVariableSpace? FindBoundSpace(Component component, string? variableName)
-    {
-        DynamicVariableHelper.ParsePath(variableName ?? "", out var explicitSpace, out _);
-        var direct = !string.IsNullOrEmpty(explicitSpace);
-        var slot = component.Slot;
-        while (slot != null)
-        {
-            foreach (var space in slot.GetComponents<DynamicVariableSpace>())
-            {
-                if (!IsLive(space))
-                    continue;
-                if (direct)
-                {
-                    if (SpaceNamesEqual(space.SpaceName.Value, explicitSpace))
-                        return space;
-                }
-                else if (!space.OnlyDirectBinding.Value)
-                {
-                    return space;
-                }
-            }
-
-            slot = slot.Parent;
-        }
-
-        return null;
-    }
-
-    private static bool TryMap(
-        IDynamicVariable variable,
-        DynamicVariableSpace space,
-        string prefix,
-        out BoundDynVar mapped)
-    {
-        mapped = null!;
-        if (FindBoundSpace((Component)variable, variable.VariableName) != space)
-            return false;
-        if (!TryCanonical(variable, space, out var canonical))
-            return false;
-        if (!canonical.StartsWith(prefix, StringComparison.Ordinal))
-            return false;
-
-        var property = canonical.Substring(prefix.Length).Trim();
-        if (property.Length == 0)
-            return false;
-        if (!TrySample(variable, out var kind, out var scalar, out var vector, out var color, out var texture))
-            return false;
-
-        mapped = new BoundDynVar
-        {
-            Source = variable,
-            Property = property,
-            Kind = kind,
-            FloatValue = scalar,
-            Vector = vector,
-            Color = color,
-            Texture = texture,
-        };
-        return true;
-    }
-
-    private static bool TryCanonical(IDynamicVariable variable, DynamicVariableSpace space, out string canonical)
-    {
-        canonical = "";
-        var raw = variable.VariableName;
-        if (string.IsNullOrEmpty(raw))
-            return false;
-
-        DynamicVariableHelper.ParsePath(raw, out var explicitSpace, out _);
-        if (!string.IsNullOrEmpty(explicitSpace))
-        {
-            canonical = raw;
-            return true;
-        }
-
-        var spaceName = SpaceKey(space);
-        if (string.IsNullOrEmpty(spaceName))
-            return false;
-        canonical = spaceName + "/" + raw;
-        return true;
-    }
-
-    /// <summary>
-    /// True when some name bound to <paramref name="spaceName"/> can start with <paramref name="prefix"/>.
-    /// </summary>
-    private static bool SpaceCanMatch(string? spaceName, string prefix)
-    {
-        if (string.IsNullOrEmpty(spaceName) || string.IsNullOrEmpty(prefix))
-            return false;
-        var rooted = spaceName + "/";
-        return rooted.StartsWith(prefix, StringComparison.Ordinal)
-            || prefix.StartsWith(rooted, StringComparison.Ordinal);
-    }
-
     private static string? SpaceKey(DynamicVariableSpace space)
     {
         var raw = space.SpaceName.Value;
-        return DynamicVariableHelper.ProcessName(raw) ?? raw;
+        var processed = DynamicVariableHelper.ProcessName(raw);
+        if (!string.IsNullOrEmpty(processed))
+            return processed;
+        return ShaderDynVarSelect.Normalize(raw);
     }
 
-    private static bool SpaceNamesEqual(string? left, string? right)
+    private static bool TrySample(IDynamicVariable variable, out SampledValue sampled)
     {
-        var a = DynamicVariableHelper.ProcessName(left) ?? left;
-        var b = DynamicVariableHelper.ProcessName(right) ?? right;
-        return !string.IsNullOrEmpty(a) && string.Equals(a, b, StringComparison.Ordinal);
-    }
-
-    private static bool TrySample(
-        IDynamicVariable variable,
-        out DynKind kind,
-        out float scalar,
-        out float4 vector,
-        out colorX color,
-        out IAssetProvider<ITexture2D>? texture)
-    {
-        scalar = 0f;
-        vector = default;
-        color = default;
-        texture = null;
         if (variable is DynamicVariableBase<float> floatVar)
         {
-            kind = DynKind.Float;
-            scalar = floatVar.DynamicValue;
+            var value = floatVar.DynamicValue;
+            sampled = new SampledValue(ShaderDynValueKind.Scalar, value, 0f, 0f, 0f, null);
             return true;
         }
 
         if (variable is DynamicVariableBase<float2> float2Var)
         {
-            kind = DynKind.Float4;
             var value = float2Var.DynamicValue;
-            vector = new float4(value.x, value.y, 0f, 0f);
+            sampled = new SampledValue(ShaderDynValueKind.Float2, value.x, value.y, 0f, 0f, null);
             return true;
         }
 
         if (variable is DynamicVariableBase<float3> float3Var)
         {
-            kind = DynKind.Float4;
             var value = float3Var.DynamicValue;
-            vector = new float4(value.x, value.y, value.z, 0f);
+            sampled = new SampledValue(ShaderDynValueKind.Float3, value.x, value.y, value.z, 0f, null);
             return true;
         }
 
         if (variable is DynamicVariableBase<float4> float4Var)
         {
-            kind = DynKind.Float4;
-            vector = float4Var.DynamicValue;
+            var value = float4Var.DynamicValue;
+            sampled = new SampledValue(ShaderDynValueKind.Float4, value.x, value.y, value.z, value.w, null);
             return true;
         }
 
         if (variable is DynamicVariableBase<colorX> colorVar)
         {
-            kind = DynKind.Color;
-            color = colorVar.DynamicValue;
+            var value = colorVar.DynamicValue;
+            sampled = new SampledValue(ShaderDynValueKind.Color, value.r, value.g, value.b, value.a, null);
             return true;
         }
 
         if (variable is DynamicVariableBase<IAssetProvider<ITexture2D>> textureVar)
         {
-            kind = DynKind.Texture;
-            texture = textureVar.DynamicValue;
+            sampled = new SampledValue(ShaderDynValueKind.Texture, 0f, 0f, 0f, 0f, textureVar.DynamicValue);
             return true;
         }
 
-        kind = default;
+        sampled = default;
         return false;
+    }
+
+    private int TokenFor(IAssetProvider<ITexture2D>? texture)
+    {
+        if (texture is null)
+            return 0;
+        if (_textureTokens.TryGetValue(texture, out var token))
+            return token;
+        token = _nextTextureToken++;
+        _textureTokens[texture] = token;
+        return token;
+    }
+
+    private void PruneTextureTokens()
+    {
+        var live = new HashSet<int>();
+        foreach (var binding in _dynBindings)
+        {
+            if (binding.TextureToken != 0)
+                live.Add(binding.TextureToken);
+        }
+
+        if (live.Count == _textureTokens.Count)
+            return;
+
+        List<IAssetProvider<ITexture2D>>? stale = null;
+        foreach (var pair in _textureTokens)
+        {
+            if (live.Contains(pair.Value))
+                continue;
+            stale ??= [];
+            stale.Add(pair.Key);
+        }
+
+        if (stale is null)
+            return;
+        foreach (var key in stale)
+            _textureTokens.Remove(key);
     }
 
     private static bool IsLive(Component component)
@@ -540,122 +360,220 @@ public partial class CustomShaderMaterial
         return !component.IsRemoved && component.Enabled.Value && component.Slot.IsActive;
     }
 
-    private bool SameDynVars(List<BoundDynVar> next)
+    private bool SameBindings(IReadOnlyList<ShaderDynBinding> next)
     {
-        if (next.Count != _dynVars.Count)
+        if (next.Count != _dynBindings.Count)
             return false;
-        for (var i = 0; i < next.Count; i++)
+        foreach (var binding in next)
         {
-            var a = _dynVars[i];
-            var b = next[i];
-            if (!ReferenceEquals(a.Source, b.Source) || a.Property != b.Property || a.Kind != b.Kind)
-                return false;
-            if (!ValuesEqual(a, b))
+            var found = false;
+            foreach (var current in _dynBindings)
+            {
+                if (!string.Equals(current.Property, binding.Property, StringComparison.Ordinal))
+                    continue;
+                if (!ShaderDynVarSelect.SameSample(current, binding))
+                    return false;
+                found = true;
+                break;
+            }
+
+            if (!found)
                 return false;
         }
 
         return true;
     }
 
-    private static bool ValuesEqual(BoundDynVar left, BoundDynVar right)
-    {
-        if (left.Kind != right.Kind)
-            return false;
-        switch (left.Kind)
-        {
-            case DynKind.Float:
-                return left.FloatValue == right.FloatValue;
-            case DynKind.Float4:
-                return left.Vector.x == right.Vector.x
-                    && left.Vector.y == right.Vector.y
-                    && left.Vector.z == right.Vector.z
-                    && left.Vector.w == right.Vector.w;
-            case DynKind.Color:
-                return left.Color.Equals(right.Color);
-            case DynKind.Texture:
-                return ReferenceEquals(left.Texture, right.Texture);
-            default:
-                return false;
-        }
-    }
-
     private void RebuildDynVarNames()
     {
         _dynVarNames.Clear();
-        foreach (var binding in _dynVars)
+        foreach (var binding in _dynBindings)
             _dynVarNames.Add(binding.Property);
     }
 
     private void LogDynVarNames()
     {
-        var names = new string[_dynVars.Count];
-        for (var i = 0; i < _dynVars.Count; i++)
-            names[i] = _dynVars[i].Property;
+        var names = new string[_dynBindings.Count];
+        for (var i = 0; i < _dynBindings.Count; i++)
+            names[i] = _dynBindings[i].Property;
         var key = string.Join(",", names);
         if (key == _dynLoggedNames)
             return;
         _dynLoggedNames = key;
         ResoniteMod.Msg(
-            $"custom shader material dynvars: count={_dynVars.Count} prefix={_dynPrefix}");
+            $"custom shader material dynvars: count={_dynBindings.Count} prefix={_dynPrefix}");
     }
 
     private void QueueDynVarPropertyIds()
     {
-        foreach (var binding in _dynVars)
+        foreach (var binding in _dynBindings)
             Ipc.MaterialPropertyIds.Request(binding.Property);
     }
 
-    private bool DynVarOverrides(string property)
-    {
-        return _dynVarNames.Contains(property);
-    }
+    private bool DynVarOverrides(string property) => _dynVarNames.Contains(property);
 
     private void PushDynVars(ref MaterialUpdateWriter writer)
     {
-        foreach (var binding in _dynVars)
+        foreach (var binding in _dynBindings)
         {
-            if (binding.Source is IWorldElement element && element.IsRemoved)
+            if ((uint)binding.VariableId >= (uint)_samples.Count)
+                continue;
+            var sample = _samples[binding.VariableId];
+            if (sample.Source is IWorldElement element && element.IsRemoved)
                 continue;
             if (!Ipc.MaterialPropertyIds.TryGet(binding.Property, out var propertyId))
                 continue;
 
-            switch (binding.Kind)
+            switch (binding.WriterKind)
             {
-                case DynKind.Float:
-                    writer.SetFloat(propertyId, binding.FloatValue);
+                case ShaderDynWriterKind.Scalar:
+                    writer.SetFloat(propertyId, binding.X);
                     break;
-                case DynKind.Float4:
-                    var vector = binding.Vector;
+                case ShaderDynWriterKind.Float4:
+                    var vector = new float4(binding.X, binding.Y, binding.Z, binding.W);
                     writer.SetFloat4(propertyId, in vector);
                     break;
-                case DynKind.Color:
-                    // SetColor profiles through RenderSystem.MaterialColorProfile (MaterialUpdateWriter.cs:223).
-                    var color = binding.Color;
+                case ShaderDynWriterKind.Color:
+                    // SetColor profiles through RenderSystem.MaterialColorProfile before SetFloat4.
+                    var color = new colorX(binding.X, binding.Y, binding.Z, binding.W);
                     writer.SetColor(propertyId, in color);
                     break;
-                case DynKind.Texture:
-                    writer.SetTexture(propertyId, binding.Texture);
+                case ShaderDynWriterKind.Texture:
+                    writer.SetTexture(propertyId, sample.Texture);
                     break;
             }
         }
     }
 
-    private enum DynKind : byte
+    private readonly struct SampledValue(
+        ShaderDynValueKind kind,
+        float x,
+        float y,
+        float z,
+        float w,
+        IAssetProvider<ITexture2D>? texture)
     {
-        Float,
-        Float4,
-        Color,
-        Texture,
+        public ShaderDynValueKind Kind { get; } = kind;
+        public float X { get; } = x;
+        public float Y { get; } = y;
+        public float Z { get; } = z;
+        public float W { get; } = w;
+        public IAssetProvider<ITexture2D>? Texture { get; } = texture;
     }
 
-    private sealed class BoundDynVar
+    private sealed class SampledDynVar
     {
         public IDynamicVariable Source = null!;
-        public string Property = "";
-        public DynKind Kind;
-        public float FloatValue;
-        public float4 Vector;
-        public colorX Color;
         public IAssetProvider<ITexture2D>? Texture;
+    }
+
+    private sealed class DynSnapshot
+    {
+        private readonly Dictionary<Slot, int> _slotIds = [];
+        private readonly HashSet<DynamicVariableSpace> _spacesSeen = [];
+        private readonly HashSet<Slot> _walked = [];
+
+        public List<ShaderDynSlot> Slots { get; } = [];
+        public List<ShaderDynSpace> Spaces { get; } = [];
+        public List<ShaderDynVariable> Variables { get; } = [];
+        public List<SampledDynVar> Samples { get; } = [];
+        public int ReaderSlotId { get; set; }
+
+        public int SlotId(Slot slot) => _slotIds[slot];
+
+        public int AddSlot(Slot slot)
+        {
+            if (_slotIds.TryGetValue(slot, out var existing))
+                return existing;
+
+            int? parentId = null;
+            var sibling = 0;
+            if (slot.Parent is Slot parent && _slotIds.TryGetValue(parent, out var parentSlotId))
+            {
+                parentId = parentSlotId;
+                sibling = SiblingIndex(slot);
+            }
+
+            var id = Slots.Count;
+            _slotIds[slot] = id;
+            Slots.Add(new ShaderDynSlot(id, parentId, sibling));
+            return id;
+        }
+
+        public void AddSpace(CustomShaderMaterial owner, DynamicVariableSpace space, bool walkSubtree)
+        {
+            if (!_spacesSeen.Add(space))
+            {
+                if (walkSubtree)
+                    Walk(owner, space.Slot);
+                return;
+            }
+
+            owner.HookSpace(space);
+            var slotId = AddSlot(space.Slot);
+            Spaces.Add(new ShaderDynSpace(
+                slotId,
+                SpaceKey(space),
+                space.OnlyDirectBinding.Value,
+                IsLive(space),
+                Spaces.Count));
+            if (walkSubtree)
+                Walk(owner, space.Slot);
+        }
+
+        private void Walk(CustomShaderMaterial owner, Slot slot)
+        {
+            if (!_walked.Add(slot))
+                return;
+            owner.WatchSpaceSlot(slot);
+            var slotId = AddSlot(slot);
+            foreach (var space in slot.GetComponents<DynamicVariableSpace>())
+                AddSpace(owner, space, walkSubtree: false);
+            foreach (var variable in slot.GetComponents<IDynamicVariable>())
+                AddVariable(owner, variable, slotId);
+            foreach (var child in slot.Children)
+                Walk(owner, child);
+        }
+
+        private void AddVariable(CustomShaderMaterial owner, IDynamicVariable variable, int slotId)
+        {
+            owner.HookVariable(variable);
+            if (variable is not Component component || !TrySample(variable, out var sampled))
+                return;
+
+            var token = sampled.Kind == ShaderDynValueKind.Texture
+                ? owner.TokenFor(sampled.Texture)
+                : 0;
+            var id = Samples.Count;
+            Samples.Add(new SampledDynVar { Source = variable, Texture = sampled.Texture });
+            Variables.Add(new ShaderDynVariable(
+                id,
+                slotId,
+                variable.VariableName,
+                IsLive(component),
+                sampled.Kind,
+                sampled.X,
+                sampled.Y,
+                sampled.Z,
+                sampled.W,
+                token,
+                Variables.Count));
+        }
+
+        private static int SiblingIndex(Slot slot)
+        {
+            var parent = slot.Parent;
+            if (parent is null)
+                return 0;
+            var index = 0;
+            foreach (var child in parent.Children)
+            {
+                if (ReferenceEquals(child, slot))
+                    return index;
+                index++;
+            }
+
+            return index;
+        }
     }
 }
