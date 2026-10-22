@@ -374,17 +374,17 @@ pub(super) mod prepared_admission {
     }
 
     /// Clears admissions recorded on this thread.
-    pub(super) fn reset() {
+    pub(in super::super) fn reset() {
         ADMITTED.with(|admitted| admitted.borrow_mut().clear());
     }
 
     /// Records one renderer run that passed view visibility gates.
-    pub(super) fn note(space_id: RenderSpaceId) {
+    pub(in super::super) fn note(space_id: RenderSpaceId) {
         ADMITTED.with(|admitted| admitted.borrow_mut().push(space_id));
     }
 
     /// Takes the admissions recorded on this thread.
-    pub(super) fn take() -> Vec<RenderSpaceId> {
+    pub(in super::super) fn take() -> Vec<RenderSpaceId> {
         ADMITTED.with(|admitted| admitted.replace(Vec::new()))
     }
 }

@@ -585,12 +585,12 @@ fn admitted_prepared_spaces(
     ctx.view.transform_filter_space = filter_space;
     ctx.caches.material_cache = Some(&material_cache);
     ctx.caches.prepared = Some(&prepared);
-    super::prepared::prepared_admission::reset();
+    prepared::prepared_admission::reset();
     let _queued = queue_draws_with_parallelism(
         &ctx,
         WorldMeshDrawCollectParallelism::SerialInnerForNestedBatch,
     );
-    super::prepared::prepared_admission::take()
+    prepared::prepared_admission::take()
 }
 
 /// Selective list used by dashboard-style cameras in these tests.
