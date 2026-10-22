@@ -88,10 +88,7 @@ fn extract_zip_archive(archive_path: &Path, extract_dir: &Path) -> Result<(), Up
         let mut entry = zip
             .by_index(index)
             .map_err(|e| UpdateError::InvalidArchive(e.to_string()))?;
-        let name = entry
-            .name()
-            .map_err(|e| UpdateError::InvalidArchive(e.to_string()))?
-            .into_owned();
+        let name = bundle::archive_entry_name(entry.name())?.into_owned();
         bundle::validate_zip_entry_name(&name)?;
         let output_path = extract_dir.join(&name);
         if entry.is_dir() {

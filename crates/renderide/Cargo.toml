@@ -80,7 +80,7 @@ pollster = "1.0"
 rayon = "1.12"
 crossbeam-channel = "0.5"
 lru = "0.19"
-parking_lot = "0.13"
+parking_lot = "0.12"
 thiserror = "2.0"
 ## Portable SIMD wrappers (u32x4/etc.) used in mip downsample inner accumulators. Pulled in via
 ## glam transitively, listed here as a direct dep since renderide CPU code calls it.
@@ -105,8 +105,9 @@ winit = "0.31.0-beta.3"
 ash = "0.38"
 openxr = { version = "0.22", default-features = false, features = ["loaded"] }
 imgui = { version = "0.12", features = ["tables-api"] }
-## crates.io 0.28.0 still depends on wgpu 29. This rev is imgui-wgpu master, which
-## depends on wgpu 30 and has not been published.
+## Upstream Yatekii/imgui-wgpu-rs commit 3c9a5e9331d36cd050592424216a07a64c78743f.
+## crates.io 0.28.0 still depends on wgpu 29. Return this dependency to crates.io
+## when a wgpu-30 release of imgui-wgpu exists.
 imgui-wgpu = { git = "https://github.com/Yatekii/imgui-wgpu-rs", rev = "3c9a5e9331d36cd050592424216a07a64c78743f" }
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 crash-handler = "0.8"

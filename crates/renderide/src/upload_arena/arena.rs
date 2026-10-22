@@ -209,6 +209,21 @@ impl PersistentUploadArena {
         }
     }
 
+    /// Returns a persistent slot to `Free` without unmapping.
+    ///
+    /// Used when the mapped range cannot be filled. The buffer stays mapped so the
+    /// next drain can write it. `finish_persistent_write` is the path that unmaps
+    /// and waits for GPU completion.
+    pub(super) fn abort_persistent_write(&mut self, slot: usize, generation: u64) {
+        let Some(arena_slot) = self.slots.get_mut(slot) else {
+            return;
+        };
+        if arena_slot.state != (UploadArenaSlotState::Writing { generation }) {
+            return;
+        }
+        arena_slot.state = UploadArenaSlotState::Free;
+    }
+
     pub(super) fn finish_persistent_write(
         &mut self,
         slot: usize,

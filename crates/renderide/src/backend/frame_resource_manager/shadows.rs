@@ -684,6 +684,12 @@ fn shadow_projection_for_light(
     }
 }
 
+// Shadow matrices below use wgpu clip space: NDC z in [0, 1] (near → 0, far → 1), Y-up.
+//
+// Caster tests use `world_aabb_visible_in_homogeneous_clip`: a box is rejected when
+// every corner has `z < 0` or every corner has `z > w`, the same [0, w] interval these
+// matrices produce. `Frustum::from_view_proj` is `cfg(test)` and is not on this path;
+// its near plane is the OpenGL half-space `z >= -w`.
 fn directional_shadow_projection(
     direction: Vec3,
     view_offset: u32,
@@ -695,7 +701,7 @@ fn directional_shadow_projection(
     let extent = distance * cascade_scale;
     let eye = -direction * extent;
     let view = glam::camera::rh::view::look_at_mat4(eye, Vec3::ZERO, light_up(direction));
-    let proj = glam::camera::rh::proj::opengl::orthographic(
+    let proj = glam::camera::rh::proj::directx::orthographic(
         -extent,
         extent,
         -extent,
@@ -713,7 +719,7 @@ fn spot_shadow_projection(light: &crate::gpu::GpuLight, position: Vec3, directio
     let fovy = (half_angle * 2.0).clamp(0.01, std::f32::consts::PI - 0.01);
     let view =
         glam::camera::rh::view::look_at_mat4(position, position + direction, light_up(direction));
-    let proj = glam::camera::rh::proj::opengl::perspective(fovy, 1.0, near, far);
+    let proj = glam::camera::rh::proj::directx::perspective(fovy, 1.0, near, far);
     proj * view
 }
 
@@ -723,7 +729,7 @@ fn point_shadow_projection(light: &crate::gpu::GpuLight, position: Vec3, face: u
     let (direction, up) = point_faces::basis(face);
     let view = glam::camera::rh::view::look_at_mat4(position, position + direction, up);
     let proj =
-        glam::camera::rh::proj::opengl::perspective(std::f32::consts::FRAC_PI_2, 1.0, near, far);
+        glam::camera::rh::proj::directx::perspective(std::f32::consts::FRAC_PI_2, 1.0, near, far);
     proj * view
 }
 

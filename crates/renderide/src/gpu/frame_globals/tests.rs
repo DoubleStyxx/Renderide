@@ -132,8 +132,8 @@ mod offset_and_packing_tests {
 
     #[test]
     fn proj_params_extract_diagonal_and_offcenter_are_zero_for_symmetric() {
-        // Symmetric perspective: [0][2] and [1][2] are zero.
-        let p = glam::camera::rh::proj::opengl::perspective(
+        // Symmetric DirectX/WebGPU perspective (z in [0, 1]): [0][2] and [1][2] are zero.
+        let p = glam::camera::rh::proj::directx::perspective(
             60.0_f32.to_radians(),
             16.0 / 9.0,
             0.1,

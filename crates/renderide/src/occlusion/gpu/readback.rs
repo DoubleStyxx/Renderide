@@ -136,7 +136,12 @@ fn drain_primary_slot(state: &mut HiZGpuState, slot: usize, shape: ScratchShape)
             let Some(pending) = state.readback.take_primary_pending(slot) else {
                 return;
             };
-            let raw = read_mapped_buffer(pending.buffer());
+            let Some(raw) = read_mapped_buffer(pending.buffer()) else {
+                // Map failure leaves `state.desktop` / `state.stereo` unchanged.
+                // `OcclusionSystem::hi_z_cull_data` keeps the previous pyramid and
+                // returns `None` only when no successful read has landed yet.
+                return;
+            };
             apply_primary_bytes(state, slot, shape, raw);
         }
         Ok(Err(_)) => {
@@ -177,7 +182,11 @@ fn drain_secondary_slot(state: &mut HiZGpuState, slot: usize) {
             let Some(pending) = state.readback.take_secondary_pending(slot) else {
                 return;
             };
-            let raw = read_mapped_buffer(pending.buffer());
+            let Some(raw) = read_mapped_buffer(pending.buffer()) else {
+                // Same as the primary slot: do not stash empty bytes. A later
+                // successful right-eye read can still pair with a stashed left.
+                return;
+            };
             state.stereo_stash.set_right(slot, raw);
         }
         Ok(Err(_)) => {
@@ -210,17 +219,21 @@ fn combine_paired_stereo(state: &mut HiZGpuState, shape: ScratchShape) {
 }
 
 /// Reads and unmaps a completed staging buffer into CPU-owned bytes.
-fn read_mapped_buffer(buf: &wgpu::Buffer) -> Vec<u8> {
+///
+/// `None` means `get_mapped_range` failed. Callers must not substitute an empty
+/// buffer: [`crate::occlusion::OcclusionSystem::hi_z_cull_data`] then keeps the
+/// last successful pyramid (or `None` if this view has never read one back).
+fn read_mapped_buffer(buf: &wgpu::Buffer) -> Option<Vec<u8>> {
     profiling::scope!("hi_z::read_mapped_buffer");
     let range = match buf.slice(..).get_mapped_range() {
         Ok(view) => {
             let bytes = view.to_vec();
             drop(view);
-            bytes
+            Some(bytes)
         }
         Err(err) => {
-            logger::warn!("Hi-Z mapped range failed: {err}");
-            Vec::new()
+            logger::error!("Hi-Z mapped range failed: {err}; keeping the previous pyramid");
+            None
         }
     };
     buf.unmap();

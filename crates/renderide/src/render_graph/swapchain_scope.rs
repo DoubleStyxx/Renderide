@@ -167,6 +167,10 @@ impl SwapchainScope {
 impl Drop for SwapchainScope {
     fn drop(&mut self) {
         if let Some(tex) = self.inner.take() {
+            debug_assert!(
+                self.queue.is_some(),
+                "SwapchainScope dropped an acquired surface texture with no present queue"
+            );
             let Some(queue) = self.queue.as_ref() else {
                 return;
             };

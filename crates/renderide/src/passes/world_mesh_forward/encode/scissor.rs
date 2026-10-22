@@ -122,9 +122,9 @@ mod tests {
     use super::project_rect_to_scissor;
     use glam::{Mat4, Vec4};
 
-    /// Symmetric ortho mapping NDC [-1, 1] in xy to overlay-space [-1, 1].
+    /// Symmetric ortho. XY stays NDC [-1, 1]; Z is wgpu [0, 1].
     fn ortho() -> Mat4 {
-        glam::camera::rh::proj::opengl::orthographic(-1.0, 1.0, -1.0, 1.0, -1.0, 1.0)
+        glam::camera::rh::proj::directx::orthographic(-1.0, 1.0, -1.0, 1.0, -1.0, 1.0)
     }
 
     #[test]

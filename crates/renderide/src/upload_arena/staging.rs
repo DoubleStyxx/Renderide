@@ -36,6 +36,24 @@ impl PreparedUploadStaging {
         self.size > 0 && self.buffer.is_none()
     }
 
+    /// Drops this staging attempt and leaves persistent slots mapped for reuse.
+    ///
+    /// Call this when the mapped range cannot be filled. Do not record copy commands
+    /// from the buffer afterwards: its contents were never written.
+    pub(crate) fn abort(self, arena: &mut PersistentUploadArena) {
+        match self.source {
+            UploadStagingSource::None | UploadStagingSource::QueueFallbackOversized => {}
+            UploadStagingSource::Temporary => {
+                if let Some(buffer) = self.buffer.as_ref() {
+                    buffer.unmap();
+                }
+            }
+            UploadStagingSource::Persistent { slot, generation } => {
+                arena.abort_persistent_write(slot, generation);
+            }
+        }
+    }
+
     /// Unmaps staging storage and returns the buffer/callback pair required by submit.
     pub(crate) fn finish(self, arena: &mut PersistentUploadArena) -> FinishedUploadStaging {
         match self.source {

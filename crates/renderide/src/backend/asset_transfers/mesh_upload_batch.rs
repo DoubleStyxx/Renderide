@@ -179,8 +179,25 @@ impl MeshUploadStagingBatch {
             stats.traffic.staged_writes,
         );
         stats.apply_arena_acquire(staging.acquire_stats());
-        if let Some(staging_buffer) = staging.buffer() {
-            fill_staging_buffer(staging_buffer, &writes, &plans, &payload_bytes);
+        let staging_filled = match staging.buffer() {
+            Some(staging_buffer) => {
+                fill_staging_buffer(staging_buffer, &writes, &plans, &payload_bytes)
+            }
+            None => true,
+        };
+        if !staging_filled {
+            staging.abort(upload_arena);
+            force_queue_fallback_stats(&mut stats);
+            replay_all_writes_through_queue(queue, &writes, &payload_bytes);
+            stats.finish_ms = 0.0;
+            stats.apply_arena_pressure(upload_arena.pressure());
+            self.restore_recorded_upload_capacity(writes, payload_bytes);
+            crate::profiling::plot_mesh_upload_batch(&stats.profile_sample());
+            return Some(MeshUploadFlush {
+                command_buffer: None,
+                on_submitted_work_done: None,
+                stats,
+            });
         }
         if staging.requires_queue_fallback() {
             stats.traffic.copy_ops = 0;
@@ -432,13 +449,15 @@ fn fill_staging_buffer(
     writes: &[QueueWrite],
     plans: &[WritePlan],
     payload_bytes: &[u8],
-) {
+) -> bool {
     profiling::scope!("mesh_upload::copy_to_staging");
     let mut mapped = match buffer.slice(..).get_mapped_range_mut() {
         Ok(mapped) => mapped,
         Err(err) => {
-            logger::error!("mesh upload staging buffer map range failed: {err}");
-            return;
+            logger::error!(
+                "mesh upload staging buffer map range failed: {err}; replaying the batch through queue writes"
+            );
+            return false;
         }
     };
     for (write, plan) in writes.iter().zip(plans.iter()) {
@@ -455,6 +474,7 @@ fn fill_staging_buffer(
             .slice(dst_start..dst_end)
             .copy_from_slice(&payload_bytes[write.data.clone()]);
     }
+    true
 }
 
 fn record_upload_command_buffer(
