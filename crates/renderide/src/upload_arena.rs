@@ -12,3 +12,4 @@ mod staging;
 
 pub(crate) use crate::upload_stats::{UploadArenaAcquireStats, UploadArenaPressure};
 pub(crate) use arena::PersistentUploadArena;
+pub(crate) use staging::{StagingMapFailure, staging_map_failure};

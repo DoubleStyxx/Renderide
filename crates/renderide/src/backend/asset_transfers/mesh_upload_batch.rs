@@ -183,10 +183,11 @@ impl MeshUploadStagingBatch {
             Some(staging_buffer) => {
                 fill_staging_buffer(staging_buffer, &writes, &plans, &payload_bytes)
             }
-            None => true,
+            None => Ok(()),
         };
-        if !staging_filled {
-            staging.abort(upload_arena);
+        if let Err(failure) = staging_filled {
+            let still_mapped = failure == crate::upload_arena::StagingMapFailure::StillMapped;
+            staging.abort(upload_arena, still_mapped);
             force_queue_fallback_stats(&mut stats);
             replay_all_writes_through_queue(queue, &writes, &payload_bytes);
             stats.finish_ms = 0.0;
@@ -449,7 +450,7 @@ fn fill_staging_buffer(
     writes: &[QueueWrite],
     plans: &[WritePlan],
     payload_bytes: &[u8],
-) -> bool {
+) -> Result<(), crate::upload_arena::StagingMapFailure> {
     profiling::scope!("mesh_upload::copy_to_staging");
     let mut mapped = match buffer.slice(..).get_mapped_range_mut() {
         Ok(mapped) => mapped,
@@ -457,7 +458,7 @@ fn fill_staging_buffer(
             logger::error!(
                 "mesh upload staging buffer map range failed: {err}; replaying the batch through queue writes"
             );
-            return false;
+            return Err(crate::upload_arena::staging_map_failure(&err));
         }
     };
     for (write, plan) in writes.iter().zip(plans.iter()) {
@@ -474,7 +475,7 @@ fn fill_staging_buffer(
             .slice(dst_start..dst_end)
             .copy_from_slice(&payload_bytes[write.data.clone()]);
     }
-    true
+    Ok(())
 }
 
 fn record_upload_command_buffer(

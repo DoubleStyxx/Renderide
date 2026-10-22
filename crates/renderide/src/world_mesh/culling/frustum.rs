@@ -124,7 +124,8 @@ impl Frustum {
 ///
 /// Transforms all eight corners with the same **`view_proj`** used for [`crate::gpu::PaddedPerDrawUniforms`]
 /// (`projection * view`, no model matrix). For each clip-space half-space, if **all** corners lie
-/// outside, the box is culled. Matches reverse-Z clip (`z` vs `w`) used by the renderer.
+/// outside, the box is culled. Depth stays inside the [0, w] interval: the box is
+/// rejected when every corner has `z < 0` or every corner has `z > w`.
 ///
 /// Implementation packs the eight corners as two SoA `Vec4`-of-4 (low / high half), evaluating each
 /// `view_proj` row once per half so all four lanes of the same component (`clip.x`, `.y`, `.z`,
@@ -180,7 +181,7 @@ pub fn world_aabb_visible_in_homogeneous_clip(
     //   "all w <= EPS"     <=> max(w over all corners) <= EPS
     //   "all x + w < -EPS" <=> max(x + w over all corners) < -EPS
     //   "all w - x < -EPS" <=> max(w - x over all corners) < -EPS  (equivalently min(x - w) > EPS)
-    //   ...and similar for y, z half-spaces and the reverse-Z near/far tests.
+    //   ...and similar for y and for the [0, w] depth interval below.
     let max_w = cw_lo.max(cw_hi).max_element();
     if max_w <= HOMOGENEOUS_CLIP_EPS {
         return false;
@@ -202,13 +203,12 @@ pub fn world_aabb_visible_in_homogeneous_clip(
     if max_w_minus_y < -HOMOGENEOUS_CLIP_EPS {
         return false;
     }
-    // Reverse-Z near plane: scalar reference rejected when `all p.z < -EPS`, so we max over `cz`.
+    // Below the z = 0 plane of the [0, w] interval: rejected when `all p.z < -EPS`.
     let max_z = cz_lo.max(cz_hi).max_element();
     if max_z < -HOMOGENEOUS_CLIP_EPS {
         return false;
     }
-    // Reverse-Z far plane: scalar reference rejected when `all p.z - p.w > +EPS`, so we min and
-    // compare against +EPS.
+    // Past the z = w plane of the [0, w] interval: rejected when `all p.z - p.w > +EPS`.
     let min_z_minus_w = (cz_lo - cw_lo).min(cz_hi - cw_hi).min_element();
     if min_z_minus_w > HOMOGENEOUS_CLIP_EPS {
         return false;

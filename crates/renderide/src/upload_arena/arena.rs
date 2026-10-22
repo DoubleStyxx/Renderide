@@ -209,19 +209,31 @@ impl PersistentUploadArena {
         }
     }
 
-    /// Returns a persistent slot to `Free` without unmapping.
+    /// Ends a persistent write that never filled the staging buffer.
     ///
-    /// Used when the mapped range cannot be filled. The buffer stays mapped so the
-    /// next drain can write it. `finish_persistent_write` is the path that unmaps
-    /// and waits for GPU completion.
-    pub(super) fn abort_persistent_write(&mut self, slot: usize, generation: u64) {
+    /// A matching `Writing { generation }` returns to `Free` when `still_mapped` is
+    /// true, leaving the mapped buffer in place. When the buffer is not known to
+    /// still be mapped, the slot becomes `Empty` and its buffer is dropped so the
+    /// next drain allocates a fresh mapped buffer. A stale generation is ignored.
+    pub(super) fn abort_persistent_write(
+        &mut self,
+        slot: usize,
+        generation: u64,
+        still_mapped: bool,
+    ) {
         let Some(arena_slot) = self.slots.get_mut(slot) else {
             return;
         };
         if arena_slot.state != (UploadArenaSlotState::Writing { generation }) {
             return;
         }
-        arena_slot.state = UploadArenaSlotState::Free;
+        if still_mapped {
+            arena_slot.state = UploadArenaSlotState::Free;
+            return;
+        }
+        arena_slot.buffer = None;
+        arena_slot.capacity = 0;
+        arena_slot.state = UploadArenaSlotState::Empty;
     }
 
     pub(super) fn finish_persistent_write(
@@ -333,6 +345,49 @@ impl Default for PersistentUploadArena {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn abort_persistent_write_frees_current_generation_and_ignores_stale() {
+        let mut arena = PersistentUploadArena::new();
+        arena.slots[0].state = UploadArenaSlotState::Writing { generation: 3 };
+        arena.slots[0].capacity = 4096;
+
+        arena.abort_persistent_write(0, 3, true);
+
+        assert_eq!(arena.slots[0].state, UploadArenaSlotState::Free);
+        assert_eq!(arena.slots[0].capacity, 4096);
+
+        arena.slots[0].state = UploadArenaSlotState::Writing { generation: 5 };
+        arena.abort_persistent_write(0, 4, true);
+
+        assert_eq!(
+            arena.slots[0].state,
+            UploadArenaSlotState::Writing { generation: 5 }
+        );
+        assert_eq!(arena.slots[0].capacity, 4096);
+    }
+
+    #[test]
+    fn abort_persistent_write_drops_slot_when_buffer_is_not_mapped() {
+        let mut arena = PersistentUploadArena::new();
+        arena.slots[0].state = UploadArenaSlotState::Writing { generation: 3 };
+        arena.slots[0].capacity = 4096;
+
+        arena.abort_persistent_write(0, 3, false);
+
+        assert_eq!(arena.slots[0].state, UploadArenaSlotState::Empty);
+        assert!(arena.slots[0].buffer.is_none());
+        assert_eq!(arena.slots[0].capacity, 0);
+
+        arena.slots[1].state = UploadArenaSlotState::Writing { generation: 8 };
+        arena.slots[1].capacity = 128;
+        arena.abort_persistent_write(1, 7, false);
+        assert_eq!(
+            arena.slots[1].state,
+            UploadArenaSlotState::Writing { generation: 8 }
+        );
+        assert_eq!(arena.slots[1].capacity, 128);
+    }
 
     #[test]
     fn stale_completion_does_not_free_newer_generation() {
