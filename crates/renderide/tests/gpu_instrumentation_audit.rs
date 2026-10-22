@@ -4,6 +4,10 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// `cfg(test)` GPU probes. They submit outside the frame graph, so they are not timestamped,
+/// profiler-scoped, or counted as primary submits.
+const TEST_ONLY_GPU_PROBE_FILES: &[&str] = &["src/gpu/frame_globals/matcap_gpu.rs"];
+
 /// Files whose copy commands are covered by a caller-level GPU profiler scope.
 const PARENT_SCOPED_COPY_FILES: &[&str] = &[
     "src/app/headless/readback.rs",
@@ -107,12 +111,17 @@ fn copy_window_has_gpu_scope(window: &str) -> bool {
 
 /// Returns whether this file's copy commands are covered by a broader query scope.
 fn copy_file_parent_scoped(label: &str) -> bool {
-    PARENT_SCOPED_COPY_FILES.contains(&label)
+    PARENT_SCOPED_COPY_FILES.contains(&label) || TEST_ONLY_GPU_PROBE_FILES.contains(&label)
 }
 
 /// Returns whether this file owns intentionally direct queue submissions.
 fn direct_queue_submit_file_allowed(label: &str) -> bool {
-    DIRECT_QUEUE_SUBMIT_FILES.contains(&label)
+    DIRECT_QUEUE_SUBMIT_FILES.contains(&label) || TEST_ONLY_GPU_PROBE_FILES.contains(&label)
+}
+
+/// Returns whether this file is a test probe and not a frame-graph pass.
+fn test_only_gpu_probe(label: &str) -> bool {
+    TEST_ONLY_GPU_PROBE_FILES.contains(&label)
 }
 
 #[test]
@@ -120,6 +129,9 @@ fn gpu_passes_have_timestamp_writes() -> io::Result<()> {
     let mut offenders = Vec::new();
     for path in rust_sources()? {
         let label = file_label(&path);
+        if test_only_gpu_probe(&label) {
+            continue;
+        }
         let src = fs::read_to_string(&path)?;
         let lines: Vec<&str> = src.lines().collect();
         for (idx, line) in lines.iter().enumerate() {
