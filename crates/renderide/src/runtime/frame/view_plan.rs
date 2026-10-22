@@ -337,6 +337,7 @@ impl<'a> FrameViewPlan<'a> {
                 .draw_filter
                 .as_ref()
                 .is_some_and(CameraTransformDrawFilter::has_selective_roots),
+            transform_filter_space: self.transform_filter_space,
             head_output_transform: self.host_camera.head_output_transform,
             render_shadows: self.render_shadows,
             cull: None,

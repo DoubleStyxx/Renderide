@@ -6,6 +6,7 @@ use hashbrown::HashSet;
 use super::FramePreparedRenderables;
 use super::world_matrix::front_face_for_draw_matrices;
 use super::*;
+use crate::camera::HostCameraFrame;
 use crate::cpu_parallelism::{ParallelAdmission, RENDER_COMMAND_CHUNK_DRAWS};
 use crate::gpu_pools::MeshPool;
 use crate::materials::host_data::{MaterialDictionary, MaterialPropertyStore, PropertyIdRegistry};
@@ -15,6 +16,7 @@ use crate::materials::{
 use crate::scene::{MeshRendererInstanceId, RenderSpaceId, SceneCoordinator};
 use crate::shared::{LayerType, RenderTransform, RenderingContext, ShadowCastMode};
 use crate::world_mesh::CameraTransformDrawFilter;
+use crate::world_mesh::culling::{WorldMeshCullInput, WorldMeshCullProjParams};
 use crate::world_mesh::materials::FrameMaterialBatchCache;
 
 /// Builds a unit-scale transform for draw-prep tests.
@@ -555,11 +557,24 @@ fn prepared_world_and_userspace(scene: &SceneCoordinator) -> FramePreparedRender
     prepared
 }
 
-/// Runs uncullled prepared collection and returns spaces admitted before mesh lookup.
+/// Runs unculled prepared collection and returns spaces admitted before mesh lookup.
 fn admitted_prepared_spaces(
     layer_policy: ViewLayerPolicy,
     filter: Option<&CameraTransformDrawFilter>,
     filter_space: Option<RenderSpaceId>,
+) -> Vec<RenderSpaceId> {
+    collect_admitted_prepared_spaces(layer_policy, filter, filter_space, false)
+}
+
+/// Runs prepared collection and returns spaces admitted before mesh lookup.
+///
+/// `frustum_cull` selects the spatial path. Collection stays serial because the admission hook is
+/// thread-local.
+fn collect_admitted_prepared_spaces(
+    layer_policy: ViewLayerPolicy,
+    filter: Option<&CameraTransformDrawFilter>,
+    filter_space: Option<RenderSpaceId>,
+    frustum_cull: bool,
 ) -> Vec<RenderSpaceId> {
     let scene = seed_world_and_private_userspace();
     let prepared = prepared_world_and_userspace(&scene);
@@ -570,6 +585,17 @@ fn admitted_prepared_spaces(
     let router = MaterialRouter::new(RasterPipelineKind::Null);
     let registry = PropertyIdRegistry::new();
     let property_ids = MaterialPipelinePropertyIds::new(&registry);
+    let host_camera = HostCameraFrame::default();
+    let cull_input = WorldMeshCullInput {
+        proj: WorldMeshCullProjParams {
+            world_proj: Mat4::IDENTITY,
+            overlay_proj: Mat4::IDENTITY,
+            vr_stereo: None,
+        },
+        host_camera: &host_camera,
+        hi_z: None,
+        hi_z_temporal: None,
+    };
     let mut ctx = test_draw_context(
         TestDrawContextResources {
             scene: &scene,
@@ -583,6 +609,9 @@ fn admitted_prepared_spaces(
         layer_policy,
     );
     ctx.view.transform_filter_space = filter_space;
+    if frustum_cull {
+        ctx.view.culling = Some(&cull_input);
+    }
     ctx.caches.material_cache = Some(&material_cache);
     ctx.caches.prepared = Some(&prepared);
     prepared::prepared_admission::reset();
@@ -602,7 +631,7 @@ fn selective_root_filter() -> CameraTransformDrawFilter {
 }
 
 #[test]
-fn uncullled_prepared_collection_honors_render_private_ui() {
+fn unculled_prepared_collection_honors_render_private_ui() {
     let hidden = admitted_prepared_spaces(ViewLayerPolicy::camera(false), None, None);
     let shown = admitted_prepared_spaces(ViewLayerPolicy::camera(true), None, None);
 
@@ -611,10 +640,19 @@ fn uncullled_prepared_collection_honors_render_private_ui() {
 }
 
 #[test]
-fn uncullled_prepared_collection_keeps_private_ui_in_the_main_view() {
+fn unculled_prepared_collection_keeps_private_ui_in_the_main_view() {
     let admitted = admitted_prepared_spaces(ViewLayerPolicy::MainView, None, None);
 
     assert_eq!(admitted, vec![PUBLIC_WORLD_SPACE, PRIVATE_USERSPACE]);
+}
+
+#[test]
+fn frustum_culled_prepared_collection_honors_render_private_ui() {
+    let hidden = collect_admitted_prepared_spaces(ViewLayerPolicy::camera(false), None, None, true);
+    let shown = collect_admitted_prepared_spaces(ViewLayerPolicy::camera(true), None, None, true);
+
+    assert_eq!(hidden, vec![PUBLIC_WORLD_SPACE]);
+    assert_eq!(shown, vec![PUBLIC_WORLD_SPACE, PRIVATE_USERSPACE]);
 }
 
 #[test]

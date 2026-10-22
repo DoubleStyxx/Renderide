@@ -270,7 +270,7 @@ fn collect_prepared_renderer_run<'a>(
     let Some(first) = run.first() else {
         return (0, 0, 0);
     };
-    // Shadow passes and other uncullled walks visit every prepared run. The filtered space-id
+    // Shadow passes and other unculled walks visit every prepared run. The filtered space-id
     // list is not consulted here, and LOD treats a missing space as visible, so private UI has
     // to be rejected by the same predicate as the color query.
     if !render_space_visible_in_view(ctx, first.space_id) {
@@ -363,6 +363,10 @@ pub(super) fn collect_prepared_chunk<'a>(
 ///
 /// Production builds omit this. Tests use it because a missing mesh yields no draw items for
 /// both filtered and leaked runs, so draw length cannot show whether private UI was rejected.
+///
+/// The record is thread-local. It is complete only when collection stays on the calling thread
+/// (`WorldMeshDrawCollectParallelism::SerialInnerForNestedBatch`). Parallel chunk workers note
+/// their own threads, and `take` does not see those notes.
 #[cfg(test)]
 pub(super) mod prepared_admission {
     use std::cell::RefCell;
