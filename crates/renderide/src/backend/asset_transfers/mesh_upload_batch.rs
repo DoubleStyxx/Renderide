@@ -434,7 +434,13 @@ fn fill_staging_buffer(
     payload_bytes: &[u8],
 ) {
     profiling::scope!("mesh_upload::copy_to_staging");
-    let mut mapped = buffer.slice(..).get_mapped_range_mut();
+    let mut mapped = match buffer.slice(..).get_mapped_range_mut() {
+        Ok(mapped) => mapped,
+        Err(err) => {
+            logger::error!("mesh upload staging buffer map range failed: {err}");
+            return;
+        }
+    };
     for (write, plan) in writes.iter().zip(plans.iter()) {
         let WritePlan::Stage {
             staging_offset,

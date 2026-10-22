@@ -287,7 +287,8 @@ mod tests {
     #[test]
     fn frustum_plane_cross_check_matches_homogeneous_clip_random_boxes() {
         let proj = crate::camera::reverse_z_perspective(16.0 / 9.0, 60f32.to_radians(), 0.1, 100.0);
-        let view = Mat4::look_at_rh(Vec3::new(0.0, 1.5, 4.0), Vec3::ZERO, Vec3::Y);
+        let view =
+            glam::camera::rh::view::look_at_mat4(Vec3::new(0.0, 1.5, 4.0), Vec3::ZERO, Vec3::Y);
         let view_proj = proj * view;
 
         let frustum = Frustum::from_view_proj(view_proj);
@@ -311,7 +312,8 @@ mod tests {
     #[test]
     fn frustum_rejects_box_fully_outside_left() {
         let proj = crate::camera::reverse_z_perspective(1.0, 60f32.to_radians(), 0.1, 100.0);
-        let view = Mat4::look_at_rh(Vec3::new(0.0, 0.0, 5.0), Vec3::ZERO, Vec3::Y);
+        let view =
+            glam::camera::rh::view::look_at_mat4(Vec3::new(0.0, 0.0, 5.0), Vec3::ZERO, Vec3::Y);
         let view_proj = proj * view;
 
         let frustum = Frustum::from_view_proj(view_proj);
@@ -377,7 +379,7 @@ mod tests {
                 if (cam - target).length_squared() < 0.01 {
                     continue;
                 }
-                let view = Mat4::look_at_rh(cam, target, Vec3::Y);
+                let view = glam::camera::rh::view::look_at_mat4(cam, target, Vec3::Y);
                 let view_proj = proj * view;
 
                 let center = Vec3::new(

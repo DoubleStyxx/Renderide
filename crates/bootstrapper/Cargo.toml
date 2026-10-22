@@ -19,9 +19,9 @@ path = "src/bin/renderide-sign-release-manifest.rs"
 interprocess = { path = "../interprocess" }
 logger = { path = "../logger" }
 thiserror = "2.0"
-arboard = "3.6"
-base64 = "0.22"
-ed25519-dalek = "2.2"
+arboard = "3.7"
+base64 = { version = "0.23", default-features = false, features = ["std"] }
+ed25519-dalek = "3.0"
 serde_json = "1.0"
 sha2 = "0.11"
 getrandom = "0.4"
@@ -29,14 +29,16 @@ libc = "0.2"
 rfd = { version = "0.17", features = ["common-controls-v6"] }
 directories = "6.0"
 toml_edit = "0.25"
-http = "1.4"
-self_update = { version = "0.44", default-features = false, features = [
+http = "1.5"
+# 1.x parses release tags as semver and skips non-semver tags. Nightly updates
+# select `nightly-*` tags, so stay on 0.44 until that listing can keep them.
+self_update = { version = "=0.44.0", default-features = false, features = [
   "archive-zip",
   "compression-zip-deflate",
   "reqwest",
   "rustls",
 ] }
-zip = { version = "8.6", default-features = false, features = ["deflate"] }
+zip = { version = "9.0", default-features = false, features = ["deflate"] }
 mimalloc = "0.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]

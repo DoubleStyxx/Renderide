@@ -3,15 +3,17 @@
 //! ## Safety contract
 //!
 //! wgpu's Vulkan backend ties a per-frame acquire semaphore to the [`wgpu::SurfaceTexture`].
-//! The texture **must** be presented -- via [`wgpu::SurfaceTexture::present`] -- regardless of
+//! The texture **must** be presented -- via [`wgpu::Queue::present`] -- regardless of
 //! whether the frame completes successfully, returns an error, or panics, so the semaphore and
 //! image return to the swapchain pool. Failing to present causes a secondary panic
 //! (`SwapchainAcquireSemaphore` still in use) that masks the original failure.
 //!
-//! [`SwapchainScope`] owns the surface texture and calls `present()` in its [`Drop`]
+//! [`SwapchainScope`] owns the surface texture and calls [`wgpu::Queue::present`] in its [`Drop`]
 //! implementation, providing the guarantee unconditionally. This replaces the tuple-field
 //! drop-order trick that was previously inlined in
 //! `crates/renderide/src/render_graph/compiled/exec.rs`.
+
+use std::sync::Arc;
 
 use crate::gpu::{GpuContext, GpuQueueAccessGate};
 use crate::present::{SurfaceAcquireTrace, SurfaceFrameOutcome, acquire_surface_outcome_traced};
@@ -50,8 +52,7 @@ pub enum SwapchainEnterOutcome {
 /// RAII guard that presents the swapchain surface texture when dropped.
 ///
 /// Callers must keep this value alive for the entire duration of the frame.
-/// The swapchain image is presented in [`Drop`]; errors during drop are silently swallowed
-/// since `present()` has no return value.
+/// The swapchain image is presented in [`Drop`]. `Queue::present` has no return value.
 pub struct SwapchainScope {
     /// Held for the frame; presented and taken on drop.
     inner: Option<wgpu::SurfaceTexture>,
@@ -59,6 +60,8 @@ pub struct SwapchainScope {
     backbuffer_view: Option<wgpu::TextureView>,
     /// Queue gate used by the drop-time fallback present path.
     queue_gate: Option<GpuQueueAccessGate>,
+    /// Queue that presents the surface texture if this scope still owns it at drop.
+    queue: Option<Arc<wgpu::Queue>>,
 }
 
 impl SwapchainScope {
@@ -68,11 +71,16 @@ impl SwapchainScope {
             inner: None,
             backbuffer_view: None,
             queue_gate: None,
+            queue: None,
         }
     }
 
     /// Wraps an acquired surface texture and creates its default color view.
-    pub fn new(tex: wgpu::SurfaceTexture, queue_gate: GpuQueueAccessGate) -> Self {
+    pub fn new(
+        tex: wgpu::SurfaceTexture,
+        queue_gate: GpuQueueAccessGate,
+        queue: Arc<wgpu::Queue>,
+    ) -> Self {
         let view = tex
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -81,6 +89,7 @@ impl SwapchainScope {
             inner: Some(tex),
             backbuffer_view: Some(view),
             queue_gate: Some(queue_gate),
+            queue: Some(queue),
         }
     }
 
@@ -128,6 +137,7 @@ impl SwapchainScope {
             SurfaceFrameOutcome::Acquired(tex) => Ok(SwapchainEnterOutcome::Acquired(Self::new(
                 tex,
                 gpu.gpu_queue_access_gate().clone(),
+                Arc::clone(gpu.queue()),
             ))),
         }
     }
@@ -141,7 +151,8 @@ impl SwapchainScope {
     /// handing ownership to the caller.
     ///
     /// Intended for the driver-thread submit path: once the caller hands the texture off to
-    /// [`crate::gpu::GpuContext::submit_frame_batch`], the driver thread performs `present()`
+    /// [`crate::gpu::GpuContext::submit_frame_batch`], the driver thread performs
+    /// [`wgpu::Queue::present`]
     /// after the submit. The scope's [`Drop`] tolerates the texture being gone -- it becomes a
     /// no-op for this frame. The backbuffer view is dropped alongside (it is tied to the
     /// texture's lifetime).
@@ -156,11 +167,14 @@ impl SwapchainScope {
 impl Drop for SwapchainScope {
     fn drop(&mut self) {
         if let Some(tex) = self.inner.take() {
+            let Some(queue) = self.queue.as_ref() else {
+                return;
+            };
             if let Some(queue_gate) = self.queue_gate.as_ref() {
                 let _gate = queue_gate.lock();
-                tex.present();
+                queue.present(tex);
             } else {
-                tex.present();
+                queue.present(tex);
             }
         }
     }

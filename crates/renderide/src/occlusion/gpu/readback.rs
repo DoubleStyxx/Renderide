@@ -212,7 +212,17 @@ fn combine_paired_stereo(state: &mut HiZGpuState, shape: ScratchShape) {
 /// Reads and unmaps a completed staging buffer into CPU-owned bytes.
 fn read_mapped_buffer(buf: &wgpu::Buffer) -> Vec<u8> {
     profiling::scope!("hi_z::read_mapped_buffer");
-    let range = buf.slice(..).get_mapped_range().to_vec();
+    let range = match buf.slice(..).get_mapped_range() {
+        Ok(view) => {
+            let bytes = view.to_vec();
+            drop(view);
+            bytes
+        }
+        Err(err) => {
+            logger::warn!("Hi-Z mapped range failed: {err}");
+            Vec::new()
+        }
+    };
     buf.unmap();
     range
 }

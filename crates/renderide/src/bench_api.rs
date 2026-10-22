@@ -288,7 +288,8 @@ impl BufferPoolWorkload {
 
 /// Perspective view-projection aimed at the origin from `+Z`.
 fn bench_view_proj() -> Mat4 {
-    let view = Mat4::look_at_rh(Vec3::new(0.0, 1.5, 6.0), Vec3::ZERO, Vec3::Y);
-    let projection = Mat4::perspective_rh(60.0_f32.to_radians(), 16.0 / 9.0, 0.05, 250.0);
+    let view = glam::camera::rh::view::look_at_mat4(Vec3::new(0.0, 1.5, 6.0), Vec3::ZERO, Vec3::Y);
+    let projection =
+        glam::camera::rh::proj::opengl::perspective(60.0_f32.to_radians(), 16.0 / 9.0, 0.05, 250.0);
     projection * view
 }

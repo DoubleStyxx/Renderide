@@ -694,8 +694,15 @@ fn directional_shadow_projection(
     let cascade_scale = (view_offset + 1) as f32 / view_count.max(1) as f32;
     let extent = distance * cascade_scale;
     let eye = -direction * extent;
-    let view = Mat4::look_at_rh(eye, Vec3::ZERO, light_up(direction));
-    let proj = Mat4::orthographic_rh(-extent, extent, -extent, extent, 0.0, distance * 2.0);
+    let view = glam::camera::rh::view::look_at_mat4(eye, Vec3::ZERO, light_up(direction));
+    let proj = glam::camera::rh::proj::opengl::orthographic(
+        -extent,
+        extent,
+        -extent,
+        extent,
+        0.0,
+        distance * 2.0,
+    );
     proj * view
 }
 
@@ -704,8 +711,9 @@ fn spot_shadow_projection(light: &crate::gpu::GpuLight, position: Vec3, directio
     let far = light.range.max(near + 0.001);
     let half_angle = light.spot_cos_half_angle.clamp(0.0, 1.0).acos();
     let fovy = (half_angle * 2.0).clamp(0.01, std::f32::consts::PI - 0.01);
-    let view = Mat4::look_at_rh(position, position + direction, light_up(direction));
-    let proj = Mat4::perspective_rh(fovy, 1.0, near, far);
+    let view =
+        glam::camera::rh::view::look_at_mat4(position, position + direction, light_up(direction));
+    let proj = glam::camera::rh::proj::opengl::perspective(fovy, 1.0, near, far);
     proj * view
 }
 
@@ -713,8 +721,9 @@ fn point_shadow_projection(light: &crate::gpu::GpuLight, position: Vec3, face: u
     let near = light.shadow_near_plane.max(0.001);
     let far = light.range.max(near + 0.001);
     let (direction, up) = point_faces::basis(face);
-    let view = Mat4::look_at_rh(position, position + direction, up);
-    let proj = Mat4::perspective_rh(std::f32::consts::FRAC_PI_2, 1.0, near, far);
+    let view = glam::camera::rh::view::look_at_mat4(position, position + direction, up);
+    let proj =
+        glam::camera::rh::proj::opengl::perspective(std::f32::consts::FRAC_PI_2, 1.0, near, far);
     proj * view
 }
 

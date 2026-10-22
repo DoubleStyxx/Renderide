@@ -73,10 +73,10 @@ pub(super) fn create_reflection_probe_specular_fallback(
         mapped_at_creation: true,
     }));
     crate::profiling::note_resource_churn!(Buffer, "backend::frame_reflection_probe_metadata");
-    metadata_buffer
-        .slice(..)
-        .get_mapped_range_mut()
-        .copy_from_slice(bytemuck::cast_slice(&metadata));
+    match metadata_buffer.slice(..).get_mapped_range_mut() {
+        Ok(mut mapped) => mapped.copy_from_slice(bytemuck::cast_slice(&metadata)),
+        Err(err) => logger::error!("reflection probe metadata map range failed: {err}"),
+    }
     metadata_buffer.unmap();
     (texture, view, sampler, metadata_buffer)
 }

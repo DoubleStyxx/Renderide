@@ -124,7 +124,7 @@ mod tests {
 
     /// Symmetric ortho mapping NDC [-1, 1] in xy to overlay-space [-1, 1].
     fn ortho() -> Mat4 {
-        Mat4::orthographic_rh(-1.0, 1.0, -1.0, 1.0, -1.0, 1.0)
+        glam::camera::rh::proj::opengl::orthographic(-1.0, 1.0, -1.0, 1.0, -1.0, 1.0)
     }
 
     #[test]

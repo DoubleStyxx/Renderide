@@ -378,7 +378,13 @@ fn fill_staging_buffer(
     payload_bytes: &[u8],
 ) {
     crate::profiling::scope!("frame_upload::copy_to_staging");
-    let mut mapped = buf.slice(..).get_mapped_range_mut();
+    let mut mapped = match buf.slice(..).get_mapped_range_mut() {
+        Ok(mapped) => mapped,
+        Err(err) => {
+            logger::error!("frame upload staging buffer map range failed: {err}");
+            return;
+        }
+    };
     for (write, plan) in writes.iter().zip(plans.iter()) {
         let (
             QueueWrite::Buffer { data, .. },

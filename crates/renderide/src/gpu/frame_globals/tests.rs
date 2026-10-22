@@ -133,7 +133,12 @@ mod offset_and_packing_tests {
     #[test]
     fn proj_params_extract_diagonal_and_offcenter_are_zero_for_symmetric() {
         // Symmetric perspective: [0][2] and [1][2] are zero.
-        let p = Mat4::perspective_rh(60.0_f32.to_radians(), 16.0 / 9.0, 0.1, 1000.0);
+        let p = glam::camera::rh::proj::opengl::perspective(
+            60.0_f32.to_radians(),
+            16.0 / 9.0,
+            0.1,
+            1000.0,
+        );
         let coeffs = FrameGpuUniforms::proj_params_from_proj(p);
         assert!(coeffs[0].abs() > 0.0);
         assert!(coeffs[1].abs() > 0.0);

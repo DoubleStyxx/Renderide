@@ -88,8 +88,12 @@ fn extract_zip_archive(archive_path: &Path, extract_dir: &Path) -> Result<(), Up
         let mut entry = zip
             .by_index(index)
             .map_err(|e| UpdateError::InvalidArchive(e.to_string()))?;
-        bundle::validate_zip_entry_name(entry.name())?;
-        let output_path = extract_dir.join(entry.name());
+        let name = entry
+            .name()
+            .map_err(|e| UpdateError::InvalidArchive(e.to_string()))?
+            .into_owned();
+        bundle::validate_zip_entry_name(&name)?;
+        let output_path = extract_dir.join(&name);
         if entry.is_dir() {
             fs::create_dir_all(&output_path).map_err(|source| UpdateError::Io {
                 context: format!("create extracted directory {}", output_path.display()),
@@ -110,7 +114,7 @@ fn extract_zip_archive(archive_path: &Path, extract_dir: &Path) -> Result<(), Up
         io::copy(&mut entry, &mut output)
             .map(|_| ())
             .map_err(|source| UpdateError::Io {
-                context: format!("extract {} to {}", entry.name(), output_path.display()),
+                context: format!("extract {name} to {}", output_path.display()),
                 source,
             })?;
         set_extracted_file_permissions(&output_path, entry.unix_mode())?;

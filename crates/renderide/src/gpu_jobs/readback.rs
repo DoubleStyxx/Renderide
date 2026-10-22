@@ -266,7 +266,13 @@ where
 /// Reads a mapped staging buffer into a typed payload.
 fn read_from_staging<T>(staging: &wgpu::Buffer, parse: fn(&[u8]) -> Option<T>) -> Option<T> {
     profiling::scope!("gpu_jobs::readback_parse_staging");
-    let mapped = staging.slice(..).get_mapped_range();
+    let mapped = match staging.slice(..).get_mapped_range() {
+        Ok(mapped) => mapped,
+        Err(err) => {
+            logger::warn!("gpu readback mapped range failed: {err}");
+            return None;
+        }
+    };
     let result = parse(&mapped);
     drop(mapped);
     result

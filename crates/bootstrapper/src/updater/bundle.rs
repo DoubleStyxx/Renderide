@@ -29,7 +29,10 @@ pub(super) fn validate_zip_paths(archive_path: &Path) -> Result<(), UpdateError>
         let entry = zip
             .by_index(index)
             .map_err(|e| UpdateError::InvalidArchive(e.to_string()))?;
-        validate_zip_entry_name(entry.name())?;
+        let name = entry
+            .name()
+            .map_err(|e| UpdateError::InvalidArchive(e.to_string()))?;
+        validate_zip_entry_name(name.as_ref())?;
     }
     Ok(())
 }
