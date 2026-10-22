@@ -9,8 +9,8 @@ description = "Regression test for the Wayland tablet-pad launch abort."
 winit = "0.31.0-beta.2"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
-# Already in Cargo.lock via wayland-backend. Safe poll; no new crate.
-rustix = { version = "1.1.4", features = ["event"] }
+# Already in Cargo.lock via wayland-backend. Safe poll and kill; no new crate.
+rustix = { version = "1.1.4", features = ["event", "process"] }
 wayland-protocols = { version = "0.32.12", features = ["server"] }
 wayland-server = "0.31.12"
 

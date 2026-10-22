@@ -97,7 +97,7 @@ impl Drop for TempRuntime {
 }
 
 fn wait_for_child(mut child: std::process::Child, timeout: Duration) -> Result<ExitStatus, String> {
-    let pid = child.id();
+    let pid = rustix::process::Pid::from_child(&child);
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let status = child.wait();
@@ -106,9 +106,7 @@ fn wait_for_child(mut child: std::process::Child, timeout: Duration) -> Result<E
     match rx.recv_timeout(timeout) {
         Ok(status) => status.map_err(|err| format!("wait for tablet-pad child: {err}")),
         Err(mpsc::RecvTimeoutError::Timeout) => {
-            let _ = Command::new("kill")
-                .args(["-KILL", &pid.to_string()])
-                .status();
+            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
             let _ = rx.recv_timeout(Duration::from_secs(2));
             Err("tablet-pad child timed out".to_owned())
         }
@@ -163,12 +161,13 @@ fn drive_until_pad_events(
 ) -> Result<(), String> {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        pump(event_loop, app)?;
+        pump(event_loop, app);
         match announced.try_recv() {
             Ok(()) => {
                 // The signal is sent after the server flushes, so this pump
                 // dispatches the pad burst. Without the stub it aborts.
-                return pump(event_loop, app);
+                pump(event_loop, app);
+                return Ok(());
             }
             Err(mpsc::TryRecvError::Empty) => {
                 if Instant::now() >= deadline {
@@ -182,14 +181,13 @@ fn drive_until_pad_events(
     }
 }
 
-fn pump(event_loop: &mut EventLoop, app: &mut IdleApp) -> Result<(), String> {
+fn pump(event_loop: &mut EventLoop, app: &mut IdleApp) {
     let status = event_loop.pump_app_events(Some(Duration::from_millis(50)), app);
     assert_eq!(
         status,
         PumpStatus::Continue,
         "event loop exited while a tablet pad was announced"
     );
-    Ok(())
 }
 
 struct IdleApp;
