@@ -3727,6 +3727,7 @@ dependencies = [
 name = "renderide-wayland-tablet"
 version = "0.1.1"
 dependencies = [
+ "libc",
  "wayland-protocols",
  "wayland-server",
  "winit",

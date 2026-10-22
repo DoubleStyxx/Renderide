@@ -1,3 +1,10 @@
+// Modified by Renderide. Apache-2.0 section 4(b) notice: this file is the only
+// change to the vendored crates.io crate winit-wayland 0.31.0-beta.2
+// (https://static.crates.io/crates/winit-wayland/winit-wayland-0.31.0-beta.2.crate,
+// upstream git f98ccf8efc5e3f6dd3e31b705178603f6556d316). It stubs
+// zwp_tablet_pad_v2 child objects (group, ring, strip, and dial) so a connected
+// pad does not abort startup. Every other file in this crate is unmodified.
+
 //! Handling of wp_tablet_input_v2.
 
 use std::sync::Mutex;
