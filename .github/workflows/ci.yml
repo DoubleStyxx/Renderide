@@ -1,6 +1,9 @@
 # Builds the Rust workspace and the .NET generator solution on all major desktop OSes.
 name: CI
 
+# Path filters intentionally omit `RenderideMod/**`. The mod references FrooxEngine.dll
+# and Renderite.Shared.dll from a Resonite install. Those assemblies are proprietary and
+# are not on hosted runners, so CI does not build the mod.
 "on":
   push:
     branches: [master]
@@ -61,7 +64,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # `materials::registry` wgpu smoke test requires an adapter when `CI` is set (GitHub sets it by default).
+      # mesa-vulkan-drivers provides lavapipe so `renderide-test check-suite` can open a
+      # headless Vulkan adapter. There is no `materials::registry` GPU smoke test.
       # GStreamer dev packages are required only when the `video-textures` feature is enabled
       # (Linux clippy does this via `--all-features`); pkg-config resolves the headers/libs at build time.
       - name: Install Linux system dependencies (Vulkan + GStreamer)
@@ -111,8 +115,10 @@ jobs:
       - name: Check TOML formatting (taplo)
         run: taplo fmt --check --diff
 
+      # `-D warnings -D clippy::all` is the same on Ubuntu, Windows, and macOS.
+      # The matrix adds `--all-features` on Linux only (`video-textures` needs GStreamer).
       - name: Clippy
-        run: cargo clippy --all-targets --locked ${{ matrix.clippy_features }} -- -D warnings
+        run: cargo clippy --all-targets --locked ${{ matrix.clippy_features }} -- -D warnings -D clippy::all
 
       - name: Check Tracy feature
         if: runner.os != 'Linux'
