@@ -146,8 +146,11 @@ mod tests {
     use glam::{Mat4, Vec3};
 
     use super::*;
-    use crate::camera::EyeView;
+    use crate::camera::{CameraPose, EyeView, StereoViewMatrices};
     use crate::gpu::frame_globals::SkyboxSpecularUniformParams;
+    use crate::gpu::frame_globals::matcap::{
+        fragment_eye_from_vertex_view_idx, matcap_uv, matcap_view_rows,
+    };
     use crate::scene::SceneCoordinator;
 
     fn projection_with_non_unit_y() -> Mat4 {
@@ -190,6 +193,97 @@ mod tests {
             FrameGpuUniforms::proj_params_from_proj(proj)
         );
         assert_eq!(uniforms.proj_left, proj.to_cols_array());
+    }
+
+    /// Production stereo upload: `views[0]` / `stereo.left` stays the left uniform rows, and
+    /// multiview `view_idx` 0 reads those rows. Nothing in this path complements the eye index.
+    #[test]
+    fn stereo_frame_uniforms_keep_left_then_right_and_view_idx_order() {
+        let left_pos = Vec3::new(-0.032, 0.0, 0.0);
+        let right_pos = Vec3::new(0.032, 0.0, 0.0);
+        let proj = Mat4::IDENTITY;
+        let left = EyeView::from_pose_projection(
+            CameraPose::from_world_matrix(Mat4::from_translation(left_pos)),
+            proj,
+        );
+        let right = EyeView::from_pose_projection(
+            CameraPose::from_world_matrix(Mat4::from_translation(right_pos)),
+            proj,
+        );
+        let host = HostCameraFrame {
+            vr_active: true,
+            stereo: Some(StereoViewMatrices::new(left, right)),
+            ..HostCameraFrame::default()
+        };
+        let mut inputs = frame_inputs(OffscreenWriteTarget::None);
+        inputs.use_multiview = true;
+        let uniforms = build_frame_gpu_uniforms(&host, &SceneCoordinator::new(), inputs);
+
+        assert_eq!(
+            uniforms.view_space_x_coeffs,
+            FrameGpuUniforms::view_space_x_coeffs_from_world_to_view(left.view)
+        );
+        assert_eq!(
+            uniforms.view_space_y_coeffs,
+            FrameGpuUniforms::view_space_y_coeffs_from_world_to_view(left.view)
+        );
+        assert_eq!(
+            uniforms.view_space_z_coeffs,
+            FrameGpuUniforms::view_space_z_coeffs_from_world_to_view(left.view)
+        );
+        assert_eq!(
+            uniforms.view_space_x_coeffs_right,
+            FrameGpuUniforms::view_space_x_coeffs_from_world_to_view(right.view)
+        );
+        assert_eq!(
+            uniforms.view_space_y_coeffs_right,
+            FrameGpuUniforms::view_space_y_coeffs_from_world_to_view(right.view)
+        );
+        assert_eq!(
+            uniforms.view_space_z_coeffs_right,
+            FrameGpuUniforms::view_space_z_coeffs_from_world_to_view(right.view)
+        );
+        assert_ne!(
+            uniforms.view_space_x_coeffs,
+            uniforms.view_space_x_coeffs_right
+        );
+        assert!((uniforms.camera_world_pos[0] - left_pos.x).abs() < 1e-6);
+        assert!((uniforms.camera_world_pos_right[0] - right_pos.x).abs() < 1e-6);
+
+        assert_eq!(fragment_eye_from_vertex_view_idx(0), 0);
+        assert_eq!(fragment_eye_from_vertex_view_idx(1), 1);
+        assert_eq!(
+            matcap_view_rows(&uniforms, fragment_eye_from_vertex_view_idx(0)).x,
+            uniforms.view_space_x_coeffs
+        );
+        assert_eq!(
+            matcap_view_rows(&uniforms, fragment_eye_from_vertex_view_idx(1)).x,
+            uniforms.view_space_x_coeffs_right
+        );
+
+        let facing = Vec3::new(0.0, 0.0, -1.0);
+        let point = Vec3::new(0.0, 0.0, 1.0);
+        let left_ref = matcap_uv(&uniforms, facing, point, 0, false);
+        let right_ref = matcap_uv(&uniforms, facing, point, 1, false);
+        assert!((left_ref - right_ref).length() < 1e-5);
+        let left_uv = matcap_uv(
+            &uniforms,
+            facing,
+            point,
+            fragment_eye_from_vertex_view_idx(0),
+            true,
+        );
+        let right_uv = matcap_uv(
+            &uniforms,
+            facing,
+            point,
+            fragment_eye_from_vertex_view_idx(1),
+            true,
+        );
+        assert!(
+            left_uv.x > right_uv.x,
+            "left view_idx must sample to the right of the right eye, got {left_uv:?} {right_uv:?}"
+        );
     }
 
     #[test]

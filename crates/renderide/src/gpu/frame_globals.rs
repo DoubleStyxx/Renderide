@@ -12,7 +12,7 @@ mod skybox_specular;
 mod uniforms;
 
 #[cfg(test)]
-mod matcap;
+pub(crate) mod matcap;
 #[cfg(test)]
 mod matcap_gpu;
 #[cfg(test)]

@@ -173,9 +173,9 @@ fn matcap_shader_uses_active_view_normal_basis() -> io::Result<()> {
         "@location(4) @interpolate(flat) view_layer: u32,",
         "out.view_layer = view_layer;",
         "let n_view = rg::world_to_view_normal_for_view(n_world, view_layer);",
-        "let uv = rg::matcap_uv_for_view(n_view, world_pos, view_layer);",
-        "out.world_pos = world_p.xyz;",
-        "@location(5) world_pos: vec3<f32>,",
+        "let uv = rg::matcap_uv_for_view(n_view, view_pos, view_layer);",
+        "out.view_pos = rg::world_to_view_position_for_view(world_p.xyz, view_layer);",
+        "@location(5) view_pos: vec3<f32>,",
     ] {
         assert!(
             matcap.contains(required),
@@ -192,6 +192,9 @@ fn matcap_shader_uses_active_view_normal_basis() -> io::Result<()> {
         "frag_screen_uv",
         "screen_uv",
         "frag_pos.xy",
+        "let view_layer = 1u - view_idx",
+        "let view_layer = view_idx ^ 1u",
+        "(world_pos.x + f32(view_layer)) * 0.0",
     ] {
         assert!(
             !matcap.contains(forbidden),
@@ -209,9 +212,8 @@ fn matcap_multiview_uv_uses_per_eye_view_position() -> io::Result<()> {
         "fn world_to_view_position_for_view(world_pos: vec3<f32>, view_layer: u32) -> vec3<f32>",
         "dot(x_coeffs.xyz, world_pos) + x_coeffs.w",
         "fn matcap_view_dir_from_camera(view_pos: vec3<f32>, view_layer: u32) -> vec3<f32>",
-        "fn matcap_uv_for_view(n_view: vec3<f32>, world_pos: vec3<f32>, view_layer: u32) -> vec2<f32>",
-        "let view_dir = matcap_view_dir_from_camera(",
-        "world_to_view_position_for_view(world_pos, view_layer),",
+        "fn matcap_uv_for_view(n_view: vec3<f32>, view_pos: vec3<f32>, view_layer: u32) -> vec2<f32>",
+        "let view_dir = matcap_view_dir_from_camera(view_pos, view_layer);",
         "let c = cross(view_dir, n_view);",
         "return vec2<f32>(-c.y, c.x) * 0.5 + vec2<f32>(0.5);",
     ] {
@@ -220,6 +222,10 @@ fn matcap_multiview_uv_uses_per_eye_view_position() -> io::Result<()> {
             "Matcap multiview UVs must use the per-eye translated view ray via `{required}`"
         );
     }
+    assert!(
+        !globals.contains("(world_pos.x + f32(view_layer)) * 0.0"),
+        "mono Matcap UV must not keep inputs live with a 0 multiply"
+    );
     Ok(())
 }
 

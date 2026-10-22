@@ -198,23 +198,23 @@ fn matcap_view_dir_from_camera(view_pos: vec3<f32>, view_layer: u32) -> vec3<f32
 
 /// Matcap texture UV for one view layer.
 ///
-/// Mono permutations keep the Unity `UNITY_MATRIX_V` lookup (`n_view.xy`), which is upright for
-/// desktop and in-world cameras. Multiview HMD eyes are typically parallel, so that rotation-only
-/// UV is the same in both eyes and the matcap sticks to the screen. The multiview path
-/// perspective-corrects with the per-eye view ray. On an eye's optical axis
-/// (`view_dir = (0, 0, -1)`) the correction equals `n_view.xy`.
-fn matcap_uv_for_view(n_view: vec3<f32>, world_pos: vec3<f32>, view_layer: u32) -> vec2<f32> {
-    let orientation_uv = n_view.xy * 0.5 + vec2<f32>(0.5);
+/// `reference_uv` is Resonite's lookup: `(float3x3)UNITY_MATRIX_V` times the normal, then
+/// `.xy * 0.5 + 0.5`. Parallel eyes share that 3x3, so both eyes get the same UV. That match
+/// is the reference behaviour.
+///
+/// `view_pos` is the fragment in this eye's view space (the vertex stage transforms the world
+/// position with the translated rows). Under `MULTIVIEW` only, the UV deliberately departs from
+/// the reference and uses `cross(view_dir, n_view)`. On the optical axis (`view_dir = (0, 0, -1)`)
+/// the departure equals `reference_uv`. A face-on wall fragment 45 degrees off axis
+/// (`view_dir` in the XZ plane) moves U by `0.5 / sqrt(2)` relative to the reference.
+fn matcap_uv_for_view(n_view: vec3<f32>, view_pos: vec3<f32>, view_layer: u32) -> vec2<f32> {
+    let reference_uv = n_view.xy * 0.5 + vec2<f32>(0.5);
 #ifdef MULTIVIEW
-    let view_dir = matcap_view_dir_from_camera(
-        world_to_view_position_for_view(world_pos, view_layer),
-        view_layer,
-    );
+    let view_dir = matcap_view_dir_from_camera(view_pos, view_layer);
     let c = cross(view_dir, n_view);
     return vec2<f32>(-c.y, c.x) * 0.5 + vec2<f32>(0.5);
 #else
-    // Keep the position and layer live so the mono fragment interface still carries them.
-    return orientation_uv + vec2<f32>((world_pos.x + f32(view_layer)) * 0.0, 0.0);
+    return reference_uv;
 #endif
 }
 

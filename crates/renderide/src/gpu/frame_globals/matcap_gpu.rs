@@ -1,8 +1,10 @@
-//! Lavapipe (or any other Vulkan adapter) check that the composed Matcap UV helper matches
-//! the CPU per-eye uniform oracle.
+//! GPU check that the composed Matcap UV helper matches the CPU per-eye uniform oracle.
 //!
-//! This is not an OpenXR swapchain test. It composes `frame/globals.wgsl` twice — mono and
-//! multiview — and dispatches the same world normal / world position through both permutations.
+//! No shared compute-probe helper exists in this crate (custom-shader tests only compile a
+//! module; shader composition at build time does not dispatch). This probe composes
+//! `frame/globals.wgsl` twice — mono and multiview — and compares the dispatched UVs to the
+//! CPU oracle, including the hand-computed 45-degree wall. Linux CI must find an adapter
+//! (lavapipe). Other CI hosts skip when no backend is available.
 
 use std::path::PathBuf;
 
@@ -35,7 +37,8 @@ struct MatcapQuery {
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let query = queries[id.x];
     let n_view = rg::world_to_view_normal_for_view(query.world_n, query.view_layer);
-    let uv = rg::matcap_uv_for_view(n_view, query.world_pos, query.view_layer);
+    let view_pos = rg::world_to_view_position_for_view(query.world_pos, query.view_layer);
+    let uv = rg::matcap_uv_for_view(n_view, view_pos, query.view_layer);
     uvs[id.x] = vec4<f32>(uv, 0.0, 0.0);
 }
 "#;
@@ -57,32 +60,17 @@ struct ProbeCase {
 }
 
 #[test]
-fn composed_multiview_matcap_uv_uses_the_view_ray_cross() {
-    let multiview = compose_probe(true).expect("multiview probe");
-    let mono = compose_probe(false).expect("mono probe");
-    assert!(
-        multiview.contains("cross("),
-        "multiview Matcap UV must perspective-correct with a view-ray cross product"
-    );
-    assert!(
-        !mono.contains("cross("),
-        "mono Matcap UV must stay on the view-normal XY lookup so cameras do not change"
-    );
-}
-
-#[test]
-fn lavapipe_matcap_uv_matches_per_eye_uniform_rows() {
+fn gpu_matcap_uv_matches_per_eye_uniform_rows() {
     let Some(device) = open_probe_device() else {
         assert!(
-            std::env::var_os("CI").is_none(),
-            "CI must expose a Vulkan adapter (lavapipe) for the Matcap stereo UV probe"
+            !(cfg!(target_os = "linux") && std::env::var_os("CI").is_some()),
+            "Linux CI installs lavapipe and must expose an adapter for the Matcap UV probe"
         );
-        eprintln!("skipping Matcap stereo UV probe: no Vulkan adapter");
+        eprintln!("skipping Matcap UV probe: no GPU adapter");
         return;
     };
 
-    let left =
-        apply_view_handedness_fix(Mat4::from_translation(Vec3::new(-0.032, 0.0, 0.0)).inverse());
+    let left = apply_view_handedness_fix(Mat4::IDENTITY);
     let right = Mat4::from_rotation_y(-0.15)
         * apply_view_handedness_fix(Mat4::from_translation(Vec3::new(0.032, 0.05, 0.0)).inverse());
     let normal = Vec3::new(0.0, 0.0, -1.0);
@@ -119,6 +107,13 @@ fn lavapipe_matcap_uv_matches_per_eye_uniform_rows() {
             view_layer: 1,
             orthographic: true,
         },
+        // Face-on wall, 45 degrees off the origin camera's +Z axis. Left eye is that camera.
+        ProbeCase {
+            world_n: normal,
+            world_pos: Vec3::new(1.0, 0.0, 1.0),
+            view_layer: 0,
+            orthographic: false,
+        },
     ];
 
     let perspective = frame_from_eye_views(left, right, false);
@@ -138,15 +133,44 @@ fn lavapipe_matcap_uv_matches_per_eye_uniform_rows() {
                 case.view_layer,
                 multiview,
             );
-            let delta = (glam::Vec2::new(uv[0], uv[1]) - expected).length();
+            let gpu_uv = glam::Vec2::new(uv[0], uv[1]);
+            let delta = (gpu_uv - expected).length();
             assert!(
                 delta < 2e-4,
                 "multiview={multiview} layer={} ortho={} gpu {uv:?} != cpu {expected:?} (delta {delta})",
                 case.view_layer,
                 case.orthographic
             );
+            assert_face_on_wall_hand_uv(case, normal, multiview, gpu_uv);
         }
     }
+}
+
+/// Behavioural check for the 45-degree face-on wall. Mono stays on the Resonite center UV.
+/// Multiview moves U by `0.5 / sqrt(2)`. Not a scan of the generated WGSL text.
+fn assert_face_on_wall_hand_uv(
+    case: &ProbeCase,
+    facing: Vec3,
+    multiview: bool,
+    gpu_uv: glam::Vec2,
+) {
+    if case.view_layer != 0
+        || case.orthographic
+        || case.world_n != facing
+        || case.world_pos != Vec3::new(1.0, 0.0, 1.0)
+    {
+        return;
+    }
+    let hand = if multiview {
+        glam::Vec2::new(0.5 + 0.5 / std::f32::consts::SQRT_2, 0.5)
+    } else {
+        glam::Vec2::splat(0.5)
+    };
+    let hand_delta = (gpu_uv - hand).length();
+    assert!(
+        hand_delta < 2e-4,
+        "multiview={multiview} gpu {gpu_uv:?} != hand {hand:?} (delta {hand_delta})"
+    );
 }
 
 fn compose_probe(multiview: bool) -> Result<String, String> {
@@ -242,10 +266,10 @@ struct ProbeDevice {
 
 fn open_probe_device() -> Option<ProbeDevice> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::VULKAN,
+        backends: wgpu::Backends::all(),
         ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
-    let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::VULKAN));
+    let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
     let mut ordered = adapters;
     ordered.sort_by_key(|adapter| match adapter.get_info().device_type {
         wgpu::DeviceType::Cpu => 0,

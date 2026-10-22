@@ -1,9 +1,9 @@
 //! CPU mirror of the Matcap UV in `shaders/modules/frame/globals.wgsl`.
 //!
-//! The shader is the runtime lookup. These helpers are the per-eye uniform oracle: which
-//! [`FrameGpuUniforms`] rows a view layer reads, and how multiview UVs move when the eye
-//! translation changes. Mono permutations stay on the rotation-only UV so desktop and in-world
-//! cameras keep the upright Unity `UNITY_MATRIX_V` result.
+//! Mono UVs are the Resonite reference: the view-space normal's XY, which is the same in both
+//! parallel eyes. Multiview UVs are a deliberate departure that uses the translated view ray.
+//! [`frame_from_eye_views`] only packs rows for that formula. The production stereo upload is
+//! covered by the world-mesh forward frame-uniform test.
 
 use bytemuck::Zeroable;
 use glam::{Mat4, Vec2, Vec3};
@@ -15,7 +15,7 @@ const NORMALIZE_EPSILON: f32 = 0.000_001;
 
 /// View rows and orthographic flag one Matcap view layer reads from [`FrameGpuUniforms`].
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct MatcapViewRows {
+pub(crate) struct MatcapViewRows {
     /// World -> view X row, including translation in `.w`.
     pub x: [f32; 4],
     /// World -> view Y row, including translation in `.w`.
@@ -53,7 +53,7 @@ pub(super) fn frame_from_eye_views(
 }
 
 /// Rows selected by `view_index_from_layer`: the low bit is the eye, matching multiview `view_idx`.
-pub(super) fn matcap_view_rows(frame: &FrameGpuUniforms, view_layer: u32) -> MatcapViewRows {
+pub(crate) fn matcap_view_rows(frame: &FrameGpuUniforms, view_layer: u32) -> MatcapViewRows {
     if view_layer & 1 != 0 {
         MatcapViewRows {
             x: frame.view_space_x_coeffs_right,
@@ -73,9 +73,20 @@ pub(super) fn matcap_view_rows(frame: &FrameGpuUniforms, view_layer: u32) -> Mat
 
 /// Matcap UV for one view layer.
 ///
-/// `multiview == false` matches the mono shader permutation (left/mono rows, rotation-only UV).
-/// `multiview == true` matches the `#ifdef MULTIVIEW` perspective correction.
-pub(super) fn matcap_uv(
+/// `multiview == false` is the Resonite reference (left/mono rows, rotation-only UV).
+/// `multiview == true` is the deliberate view-ray departure. `world_pos` is transformed with the
+/// eye's rows the same way the vertex stage writes `view_pos`.
+/// Eye selected for a multiview builtin.
+///
+/// `matcap.wgsl` copies `view_idx` into `view_layer` with no complement or xor. The frame
+/// uniform helper then keeps the low bit (`view_layer & 1`). For the only multiview values
+/// `0` and `1`, that low bit is the builtin itself: `0` left, `1` right.
+pub(crate) fn fragment_eye_from_vertex_view_idx(view_idx: u32) -> u32 {
+    let view_layer = view_idx;
+    view_layer & 1
+}
+
+pub(crate) fn matcap_uv(
     frame: &FrameGpuUniforms,
     world_normal: Vec3,
     world_pos: Vec3,
@@ -136,7 +147,9 @@ fn safe_normalize(v: Vec3, fallback: Vec3) -> Vec3 {
 mod tests {
     use glam::{Mat4, Vec2, Vec3};
 
-    use super::{frame_from_eye_views, matcap_uv, matcap_view_rows};
+    use super::{
+        fragment_eye_from_vertex_view_idx, frame_from_eye_views, matcap_uv, matcap_view_rows,
+    };
     use crate::camera::apply_view_handedness_fix;
 
     const EYE_X: f32 = 0.032;
@@ -286,6 +299,55 @@ mod tests {
         assert_uv_close(
             matcap_uv(&frame, normal, point, 3, true),
             matcap_uv(&frame, normal, point, 1, true),
+        );
+    }
+
+    /// Three UVs derived from the view geometry, not by calling the cross product.
+    ///
+    /// Camera at the origin, view = diag(1, 1, -1). A normal toward the camera is world
+    /// `(0, 0, -1)` and view `(0, 0, 1)`. World up stays view up.
+    #[test]
+    fn hand_computed_uvs_for_three_canonical_cases() {
+        let view = eye_view(Vec3::ZERO);
+        let frame = frame_from_eye_views(view, view, false);
+        let facing = Vec3::new(0.0, 0.0, -1.0);
+        let on_axis = Vec3::new(0.0, 0.0, 1.0);
+        let center = Vec2::new(0.5, 0.5);
+        let top = Vec2::new(0.5, 1.0);
+        // Point (1, 0, 1) is 45 degrees off +Z on a face-on wall (constant normal).
+        // Reference UV stays at the center. The departure's view ray is
+        // normalize(1, 0, -1), and the resulting U is `0.5 + 0.5/sqrt(2)`.
+        let wall = Vec3::new(1.0, 0.0, 1.0);
+        let departure = Vec2::new(0.5 + 0.5 / std::f32::consts::SQRT_2, 0.5);
+
+        assert_uv_close(matcap_uv(&frame, facing, on_axis, 0, false), center);
+        assert_uv_close(matcap_uv(&frame, facing, on_axis, 0, true), center);
+        assert_uv_close(matcap_uv(&frame, Vec3::Y, on_axis, 0, false), top);
+        assert_uv_close(matcap_uv(&frame, Vec3::Y, on_axis, 0, true), top);
+        assert_uv_close(matcap_uv(&frame, facing, wall, 0, false), center);
+        assert_uv_close(matcap_uv(&frame, facing, wall, 0, true), departure);
+
+        let delta_u = departure.x - center.x;
+        assert!(
+            (delta_u - 0.5 / std::f32::consts::SQRT_2).abs() < 1e-6,
+            "45-degree face-on wall U delta {delta_u}"
+        );
+    }
+
+    #[test]
+    fn vertex_view_idx_low_bit_is_the_fragment_eye() {
+        assert_eq!(fragment_eye_from_vertex_view_idx(0), 0);
+        assert_eq!(fragment_eye_from_vertex_view_idx(1), 1);
+        let left = eye_view(Vec3::new(-EYE_X, 0.0, 0.0));
+        let right = eye_view(Vec3::new(EYE_X, 0.0, 0.0));
+        let frame = frame_from_eye_views(left, right, false);
+        assert_eq!(
+            matcap_view_rows(&frame, fragment_eye_from_vertex_view_idx(0)).x,
+            frame.view_space_x_coeffs
+        );
+        assert_eq!(
+            matcap_view_rows(&frame, fragment_eye_from_vertex_view_idx(1)).x,
+            frame.view_space_x_coeffs_right
         );
     }
 
