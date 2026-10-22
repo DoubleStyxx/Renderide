@@ -103,10 +103,12 @@ fn non_canvas_depth_meters(distance_sq: f32) -> f64 {
     }
 }
 
-/// Per-draw canvas step in submission order.
+/// Per-draw canvas step along `draws`.
 ///
-/// Only canvas stems advance the rank. The rank resets when the quantized plane depth changes
-/// and is capped at [`CANVAS_DEPTH_STEP_CAP`]. Later draws in a coplanar run get a closer bias.
+/// Production passes the arranged draw list, so the step follows painter order: the first canvas
+/// in a coplanar run stays unbiased and each later one is pulled closer. Only canvas stems
+/// advance the rank. The rank resets when the quantized plane depth changes and is capped at
+/// [`CANVAS_DEPTH_STEP_CAP`]. Non-canvas draws between two same-plane canvases do not reset it.
 pub(crate) fn assign_canvas_depth_steps(draws: &[WorldMeshDrawItem]) -> Vec<u32> {
     let mut steps = vec![0u32; draws.len()];
     let mut rank = 0u32;
