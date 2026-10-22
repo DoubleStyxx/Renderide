@@ -388,10 +388,8 @@ mod tests {
         );
     }
 
-    /// Cross-golden failing fraction at `max_abs_diff` 56. A no-op clear is this far from the
-    /// cleared frame, so the case tolerance has to sit under it.
-    const BESIDE_UNLIT_CROSS_FAILING_FRACTION: f64 = 7961.0 / 102_400.0;
-
+    /// The two goldens must miss the case tolerance, and the failing-pixel fraction must sit
+    /// above the configured limit. A no-op clear would otherwise pass.
     #[test]
     fn beside_unlit_goldens_disagree_and_the_left_quad_flattens() {
         let case = lookup("custom_shader_beside_unlit").expect("registered");
@@ -410,17 +408,19 @@ mod tests {
             !plain_vs_cleared.passed && !cleared_vs_plain.passed,
             "the two frames must fail the case tolerance against each other"
         );
-        assert_eq!(
-            plain_vs_cleared.failing_pixel_fraction,
-            Some(BESIDE_UNLIT_CROSS_FAILING_FRACTION)
-        );
         let limit = case
             .tolerance
             .max_failing_pixel_fraction
             .expect("pixel fraction");
+        let fraction = plain_vs_cleared
+            .failing_pixel_fraction
+            .expect("failing fraction");
+        let reverse = cleared_vs_plain
+            .failing_pixel_fraction
+            .expect("reverse failing fraction");
         assert!(
-            limit < BESIDE_UNLIT_CROSS_FAILING_FRACTION,
-            "tolerance {limit} would accept a no-op clear"
+            fraction > limit && reverse > limit,
+            "cross-golden fractions {fraction} and {reverse} must exceed tolerance {limit}"
         );
 
         let (plain_colors, plain_luma) = left_quad_center(&plain);

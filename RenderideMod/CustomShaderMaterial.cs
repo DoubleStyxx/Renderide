@@ -52,6 +52,12 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
     private string? _rejectedKey;
     private int? _nameState;
 
+    /// <summary>Sorted property names for <see cref="NameResolutionState"/>.</summary>
+    private readonly List<string> _resolutionNames = new();
+
+    /// <summary>True when <see cref="_resolutionNames"/> must be rebuilt from the sync lists.</summary>
+    private bool _resolutionNamesDirty = true;
+
     /// <summary>Packaged Unlit shader. The custom program replaces it per material, not by name.</summary>
     protected override Uri ShaderURL => OfficialAssets.Shaders.Unlit;
 
@@ -76,6 +82,7 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
     protected override void OnEnabled()
     {
         base.OnEnabled();
+        InvalidateResolutionNames();
         if (EnsurePropertiesInitialized())
             MarkChangeDirty();
         QueuePropertyIds();
@@ -86,6 +93,7 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
     protected override void OnChanges()
     {
         base.OnChanges();
+        InvalidateResolutionNames();
         if (!Enabled.Value)
             return;
         QueuePropertyIds();
@@ -212,13 +220,24 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
     /// <summary>
     /// Hash of this material's property names and their settled ids.
     /// Another component's results do not change it.
+    /// The sorted name list is rebuilt only after the sync lists change.
     /// </summary>
     private int NameResolutionState()
     {
-        var names = new List<string>();
-        CollectPropertyNames(names);
-        names.Sort(StringComparer.Ordinal);
-        return Ipc.MaterialPropertyIds.StateFor(names);
+        if (_resolutionNamesDirty)
+        {
+            _resolutionNames.Clear();
+            CollectPropertyNames(_resolutionNames);
+            _resolutionNames.Sort(StringComparer.Ordinal);
+            _resolutionNamesDirty = false;
+        }
+
+        return Ipc.MaterialPropertyIds.StateFor(_resolutionNames);
+    }
+
+    private void InvalidateResolutionNames()
+    {
+        _resolutionNamesDirty = true;
     }
 
     private void CollectPropertyNames(List<string> names)

@@ -260,13 +260,15 @@ fn per_material_override_replaces_only_the_assigned_material() {
 }
 
 /// Host `_ALPHATEST` is bit 0, the same index as custom `RAINBOW`. An override must ignore it.
+///
+/// Ids stay off `4101`/`4102`. The uniform-pack contract test uses those, and both tests share
+/// the process-global override map.
 #[test]
 fn per_material_override_ignores_host_alphatest_bit() {
     const KEY: &str = "rainbow-override-bits";
-    const ASSIGNED: i32 = 4101;
-    const NAMED: i32 = 4102;
-    let _ = crate::materials::custom_shader::remove(KEY);
-    let _ = crate::materials::custom_shader::clear_material_override(ASSIGNED);
+    const ASSIGNED: i32 = 4301;
+    const NAMED: i32 = 4302;
+    let _guard = OverrideBitGuard(KEY, ASSIGNED, NAMED);
     let installed = crate::materials::custom_shader::install(
         KEY,
         include_str!("../../../../../../RenderideMod/Shaders/example_rainbow.wgsl"),
@@ -310,9 +312,17 @@ fn per_material_override_ignores_host_alphatest_bit() {
     );
     let named = resolve_bits(NAMED, &store, &router, &ids, &registry);
     assert_eq!(named, 1, "a shader-name route still ORs host bit 0");
+}
 
-    crate::materials::custom_shader::clear_material_override(ASSIGNED);
-    crate::materials::custom_shader::remove(KEY).expect("remove");
+/// Drops the override-bit test's key and material ids when an assert fails.
+struct OverrideBitGuard(&'static str, i32, i32);
+
+impl Drop for OverrideBitGuard {
+    fn drop(&mut self) {
+        let _ = crate::materials::custom_shader::remove(self.0);
+        let _ = crate::materials::custom_shader::clear_material_override(self.1);
+        let _ = crate::materials::custom_shader::clear_material_override(self.2);
+    }
 }
 
 fn resolve_bits(

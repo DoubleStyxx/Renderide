@@ -36,7 +36,14 @@ internal static class MaterialPropertyIds
     /// <summary>Retry count that logs one warning. Later retries stay quiet.</summary>
     private const int WarnAfterRetries = 5;
 
+    /// <summary>
+    /// Retired request ids kept so a late result can still fill unsettled names.
+    /// A name that never settles would otherwise add one entry per retry.
+    /// </summary>
+    private const int MaxRetired = 64;
+
     private static readonly Dictionary<int, string[]> Retired = new();
+    private static readonly List<int> RetiredOrder = new();
     private static readonly Dictionary<string, int> RetryCounts = new();
     private static readonly HashSet<string> ZeroIdWarned = new();
 
@@ -190,6 +197,7 @@ internal static class MaterialPropertyIds
     /// <summary>
     /// Moves unanswered requests to <see cref="Retired"/> and queues names that are still unsettled.
     /// The old request id stays mapped so a late result can still fill those names.
+    /// Oldest retired ids past <see cref="MaxRetired"/> are dropped.
     /// </summary>
     private static void RetireDueRequests(List<string> warnNames)
     {
@@ -205,7 +213,7 @@ internal static class MaterialPropertyIds
         {
             var tracked = Inflight[requestId];
             Inflight.Remove(requestId);
-            Retired[requestId] = tracked.Names;
+            RememberRetired(requestId, tracked.Names);
             foreach (var name in tracked.Names)
             {
                 if (Ids.ContainsKey(name))
@@ -219,6 +227,31 @@ internal static class MaterialPropertyIds
         }
 
         DropSettledRetired();
+        TrimRetired();
+    }
+
+    private static void RememberRetired(int requestId, string[] names)
+    {
+        Retired[requestId] = names;
+        RetiredOrder.Add(requestId);
+    }
+
+    private static void ForgetRetired(int requestId)
+    {
+        if (!Retired.Remove(requestId))
+            return;
+        RetiredOrder.Remove(requestId);
+    }
+
+    /// <summary>Drops the oldest retired ids once <see cref="Retired"/> is past <see cref="MaxRetired"/>.</summary>
+    private static void TrimRetired()
+    {
+        while (Retired.Count > MaxRetired && RetiredOrder.Count > 0)
+        {
+            var oldest = RetiredOrder[0];
+            RetiredOrder.RemoveAt(0);
+            Retired.Remove(oldest);
+        }
     }
 
     private static int Backoff(int retries)
@@ -247,7 +280,7 @@ internal static class MaterialPropertyIds
         }
 
         foreach (var requestId in done)
-            Retired.Remove(requestId);
+            ForgetRetired(requestId);
     }
 
     private static bool TryHook(RenderiteMessagingHost messagingHost)
@@ -326,10 +359,18 @@ internal static class MaterialPropertyIds
         List<string>? zeroNames = null;
         lock (Gate)
         {
-            string[]? names = null;
+            string[]? names;
             if (Inflight.Remove(result.requestId, out var tracked))
                 names = tracked.Names;
-            else if (!Retired.Remove(result.requestId, out names))
+            else if (Retired.TryGetValue(result.requestId, out var retiredNames))
+            {
+                names = retiredNames;
+                ForgetRetired(result.requestId);
+            }
+            else
+                return;
+
+            if (names is null)
                 return;
 
             var ids = result.propertyIDs;
