@@ -1,0 +1,62 @@
+# Pull-request gate for formatting, Clippy, and the workspace test suite.
+#
+# Linux is the only GitHub-hosted runner where `cargo clippy --all-features` builds.
+# `--all-features` turns on `video-textures`, which links GStreamer, and those dev
+# packages install reliably from apt here. Windows and macOS need a manual GStreamer
+# setup this workflow does not attempt. `ci.yml` still builds, lints (without
+# `video-textures`), and tests those platforms.
+#
+# This file does not change the Release workflow.
+name: Rust checks
+
+"on":
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: rust-checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fmt-clippy-test:
+    name: fmt, clippy, test
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      # Lavapipe satisfies wgpu adapter tests when GitHub sets `CI`.
+      # GStreamer headers are required to compile `video-textures` under `--all-features`.
+      - name: Install Linux system dependencies (Vulkan + GStreamer)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            mesa-vulkan-drivers vulkan-tools \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          cache-bin: "false"
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      # Workspace crates set `[lints] workspace = true`, and `[workspace.lints.clippy]`
+      # sets `clippy::all` to warn. `-D warnings` therefore denies `clippy::all`.
+      # `--locked` matches `ci.yml` so a stale `Cargo.lock` fails the job.
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+      # Virtual workspace: `cargo test` runs every member's unit and integration tests.
+      # Default features only. Feature-gated tests (`tracy`, `video-textures`,
+      # `bench-api`, `control-api`) are linted above but not executed here.
+      - name: Test
+        run: cargo test --locked
