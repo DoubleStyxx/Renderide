@@ -122,7 +122,7 @@ public partial class CustomShaderMaterial
     /// </summary>
     private DynSnapshot Capture(string prefix)
     {
-        var snapshot = new DynSnapshot();
+        var snapshot = new DynSnapshot(prefix);
         var chain = new List<Slot>();
         var slot = Slot;
         while (slot != null)
@@ -162,24 +162,35 @@ public partial class CustomShaderMaterial
         WatchSlotLifetime(slot);
         if (!_dynChildSlots.Add(slot))
             return;
-        slot.ChildAdded += OnDynHierarchyChanged;
-        slot.ChildRemoved += OnDynHierarchyChanged;
+        // ChildAdded and ChildRemoved are SlotChildEvent(Slot parent, Slot child).
+        slot.ChildAdded += OnDynChildChanged;
+        slot.ChildRemoved += OnDynChildChanged;
         _dynUnsub.Add(() =>
         {
-            slot.ChildAdded -= OnDynHierarchyChanged;
-            slot.ChildRemoved -= OnDynHierarchyChanged;
+            slot.ChildAdded -= OnDynChildChanged;
+            slot.ChildRemoved -= OnDynChildChanged;
         });
+    }
+
+    private void OnDynChildChanged(Slot parent, Slot _)
+    {
+        OnDynHierarchyChanged(parent);
     }
 
     private void WatchSlotLifetime(Slot slot)
     {
         if (!_dynLifetimeSlots.Add(slot))
             return;
-        slot.ParentChanged += OnDynHierarchyChanged;
+        // ParentChanged and ActiveChanged are SlotEvent(Slot). HookOwnSlot already
+        // subscribes ParentChanged on this component's slot for the component lifetime.
+        var ownSlot = ReferenceEquals(slot, Slot);
+        if (!ownSlot)
+            slot.ParentChanged += OnDynHierarchyChanged;
         slot.ActiveChanged += OnDynHierarchyChanged;
         _dynUnsub.Add(() =>
         {
-            slot.ParentChanged -= OnDynHierarchyChanged;
+            if (!ownSlot)
+                slot.ParentChanged -= OnDynHierarchyChanged;
             slot.ActiveChanged -= OnDynHierarchyChanged;
         });
     }
@@ -219,24 +230,7 @@ public partial class CustomShaderMaterial
             return;
 
         Action<IChangeable> handler = _ => OnDynHierarchyChanged(space.Slot);
-        HookMember(space, handler);
         HookSyncMembers(space, handler);
-    }
-
-    private void HookVariable(IDynamicVariable variable)
-    {
-        if (!_dynHookedVars.Add(variable) || variable is not Component component)
-            return;
-
-        Action<IChangeable> handler = _ => OnDynHierarchyChanged(component.Slot);
-        HookMember(component, handler);
-        HookSyncMembers(component, handler);
-        if (component is IDestroyable destroyable)
-        {
-            Action<IDestroyable> destroyed = _ => OnDynHierarchyChanged(component.Slot);
-            destroyable.Destroyed += destroyed;
-            _dynUnsub.Add(() => destroyable.Destroyed -= destroyed);
-        }
     }
 
     private void HookSyncMembers(Component component, Action<IChangeable> handler)
@@ -246,6 +240,108 @@ public partial class CustomShaderMaterial
         {
             if (component.GetSyncMember(i) is IChangeable member)
                 HookMember(member, handler);
+        }
+    }
+
+    private void HookVariable(IDynamicVariable variable, bool canMatch)
+    {
+        if (!_dynHookedVars.Add(variable) || variable is not Component component)
+            return;
+
+        Action<IChangeable> rebind = _ => OnDynHierarchyChanged(component.Slot);
+        HookMember(component.Enabled, rebind);
+        HookNamedMember(component, "VariableName", rebind);
+        if (canMatch)
+        {
+            Action<IChangeable> value = _ => OnDynValueChanged();
+            HookNamedMember(component, "Value", value);
+            HookNamedMember(component, "Reference", value);
+        }
+
+        if (component is IDestroyable destroyable)
+        {
+            Action<IDestroyable> destroyed = _ => OnDynHierarchyChanged(component.Slot);
+            destroyable.Destroyed += destroyed;
+            _dynUnsub.Add(() => destroyable.Destroyed -= destroyed);
+        }
+    }
+
+    private void OnDynValueChanged()
+    {
+        if (_dynRefreshing || !Enabled.Value)
+            return;
+
+        switch (ResampleBoundValues())
+        {
+            case ShaderDynValueApply.Changed:
+                PruneTextureTokens();
+                MarkChangeDirty();
+                break;
+            case ShaderDynValueApply.NeedsRebind:
+                BindDynVars();
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Reads the variables already bound and copies lanes with <see cref="ShaderDynVarSelect.ApplyValueSamples"/>.
+    /// Does not walk slots or replace hooks.
+    /// </summary>
+    private ShaderDynValueApply ResampleBoundValues()
+    {
+        var samples = new List<ShaderDynVariable>(_samples.Count);
+        for (var i = 0; i < _samples.Count; i++)
+        {
+            var source = _samples[i];
+            if (source.Source is not Component component || !TrySample(source.Source, out var sampled))
+            {
+                foreach (var binding in _dynBindings)
+                {
+                    if (binding.VariableId == i)
+                        return ShaderDynValueApply.NeedsRebind;
+                }
+
+                continue;
+            }
+            var token = sampled.Kind == ShaderDynValueKind.Texture
+                ? TokenFor(sampled.Texture)
+                : 0;
+            source.Texture = sampled.Texture;
+            samples.Add(new ShaderDynVariable(
+                i,
+                0,
+                component is IDynamicVariable variable ? variable.VariableName : null,
+                IsLive(component),
+                sampled.Kind,
+                sampled.X,
+                sampled.Y,
+                sampled.Z,
+                sampled.W,
+                token,
+                i,
+                sampled.Profile));
+        }
+
+        var next = new List<ShaderDynBinding>(_dynBindings.Count);
+        var result = ShaderDynVarSelect.ApplyValueSamples(_dynBindings, samples, next);
+        if (result != ShaderDynValueApply.Changed)
+            return result;
+        _dynBindings.Clear();
+        _dynBindings.AddRange(next);
+        return result;
+    }
+
+    private void HookNamedMember(Component component, string name, Action<IChangeable> handler)
+    {
+        var count = component.SyncMemberCount;
+        for (var i = 0; i < count; i++)
+        {
+            if (component.GetSyncMember(i) is not SyncElement element)
+                continue;
+            if (!string.Equals(element.Name, name, StringComparison.Ordinal))
+                continue;
+            HookMember(element, handler);
+            return;
         }
     }
 
@@ -275,46 +371,69 @@ public partial class CustomShaderMaterial
         if (variable is DynamicVariableBase<float> floatVar)
         {
             var value = floatVar.DynamicValue;
-            sampled = new SampledValue(ShaderDynValueKind.Scalar, value, 0f, 0f, 0f, null);
+            sampled = new SampledValue(ShaderDynValueKind.Scalar, value, 0f, 0f, 0f, null, ShaderDynColorProfile.Linear);
             return true;
         }
 
         if (variable is DynamicVariableBase<float2> float2Var)
         {
             var value = float2Var.DynamicValue;
-            sampled = new SampledValue(ShaderDynValueKind.Float2, value.x, value.y, 0f, 0f, null);
+            sampled = new SampledValue(ShaderDynValueKind.Float2, value.x, value.y, 0f, 0f, null, ShaderDynColorProfile.Linear);
             return true;
         }
 
         if (variable is DynamicVariableBase<float3> float3Var)
         {
             var value = float3Var.DynamicValue;
-            sampled = new SampledValue(ShaderDynValueKind.Float3, value.x, value.y, value.z, 0f, null);
+            sampled = new SampledValue(ShaderDynValueKind.Float3, value.x, value.y, value.z, 0f, null, ShaderDynColorProfile.Linear);
             return true;
         }
 
         if (variable is DynamicVariableBase<float4> float4Var)
         {
             var value = float4Var.DynamicValue;
-            sampled = new SampledValue(ShaderDynValueKind.Float4, value.x, value.y, value.z, value.w, null);
+            sampled = new SampledValue(ShaderDynValueKind.Float4, value.x, value.y, value.z, value.w, null, ShaderDynColorProfile.Linear);
             return true;
         }
 
         if (variable is DynamicVariableBase<colorX> colorVar)
         {
             var value = colorVar.DynamicValue;
-            sampled = new SampledValue(ShaderDynValueKind.Color, value.r, value.g, value.b, value.a, null);
+            sampled = new SampledValue(
+                ShaderDynValueKind.Color,
+                value.r,
+                value.g,
+                value.b,
+                value.a,
+                null,
+                ColorProfileOf(value.profile));
             return true;
         }
 
         if (variable is DynamicVariableBase<IAssetProvider<ITexture2D>> textureVar)
         {
-            sampled = new SampledValue(ShaderDynValueKind.Texture, 0f, 0f, 0f, 0f, textureVar.DynamicValue);
+            sampled = new SampledValue(
+                ShaderDynValueKind.Texture,
+                0f,
+                0f,
+                0f,
+                0f,
+                textureVar.DynamicValue,
+                ShaderDynColorProfile.Linear);
             return true;
         }
 
         sampled = default;
         return false;
+    }
+
+    /// <summary>
+    /// <c>Elements.Core.ColorProfile</c> is a byte enum: Linear 0, sRGB 1, sRGBAlpha 2.
+    /// Values outside that set stay as the raw byte so a later profile still round-trips.
+    /// </summary>
+    private static ShaderDynColorProfile ColorProfileOf(ColorProfile profile)
+    {
+        return (ShaderDynColorProfile)(byte)profile;
     }
 
     private int TokenFor(IAssetProvider<ITexture2D>? texture)
@@ -447,8 +566,14 @@ public partial class CustomShaderMaterial
                     writer.SetFloat4(propertyId, in vector);
                     break;
                 case ShaderDynWriterKind.Color:
-                    // SetColor profiles through RenderSystem.MaterialColorProfile before SetFloat4.
-                    var color = new colorX(binding.X, binding.Y, binding.Z, binding.W);
+                    // colorX(r, g, b, a) defaults the profile. SetColor then runs
+                    // ToProfile(RenderSystem.MaterialColorProfile), so the stored profile has to be passed.
+                    var color = new colorX(
+                        binding.X,
+                        binding.Y,
+                        binding.Z,
+                        binding.W,
+                        (ColorProfile)(byte)binding.ColorProfile);
                     writer.SetColor(propertyId, in color);
                     break;
                 case ShaderDynWriterKind.Texture:
@@ -464,7 +589,8 @@ public partial class CustomShaderMaterial
         float y,
         float z,
         float w,
-        IAssetProvider<ITexture2D>? texture)
+        IAssetProvider<ITexture2D>? texture,
+        ShaderDynColorProfile profile)
     {
         public ShaderDynValueKind Kind { get; } = kind;
         public float X { get; } = x;
@@ -472,6 +598,7 @@ public partial class CustomShaderMaterial
         public float Z { get; } = z;
         public float W { get; } = w;
         public IAssetProvider<ITexture2D>? Texture { get; } = texture;
+        public ShaderDynColorProfile Profile { get; } = profile;
     }
 
     private sealed class SampledDynVar
@@ -485,6 +612,13 @@ public partial class CustomShaderMaterial
         private readonly Dictionary<Slot, int> _slotIds = [];
         private readonly HashSet<DynamicVariableSpace> _spacesSeen = [];
         private readonly HashSet<Slot> _walked = [];
+
+        public DynSnapshot(string prefix)
+        {
+            Prefix = prefix;
+        }
+
+        public string Prefix { get; }
 
         public List<ShaderDynSlot> Slots { get; } = [];
         public List<ShaderDynSpace> Spaces { get; } = [];
@@ -550,7 +684,13 @@ public partial class CustomShaderMaterial
 
         private void AddVariable(CustomShaderMaterial owner, IDynamicVariable variable, int slotId)
         {
-            owner.HookVariable(variable);
+            var canMatch = ShaderDynVarSelect.VariableCanMatch(
+                variable.VariableName,
+                slotId,
+                Slots,
+                Spaces,
+                Prefix);
+            owner.HookVariable(variable, canMatch);
             if (variable is not Component component || !TrySample(variable, out var sampled))
                 return;
 
@@ -570,7 +710,8 @@ public partial class CustomShaderMaterial
                 sampled.Z,
                 sampled.W,
                 token,
-                Variables.Count));
+                Variables.Count,
+                sampled.Profile));
         }
 
         private static int SiblingIndex(Slot slot)

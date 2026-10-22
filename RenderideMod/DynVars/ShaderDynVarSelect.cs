@@ -204,16 +204,129 @@ public static class ShaderDynVarSelect
     /// <summary>Bitwise float compare so a NaN sample does not dirty the material on every edit.</summary>
     /// <param name="left">Current binding.</param>
     /// <param name="right">Next binding.</param>
-    /// <returns>True when the property, writer, lanes, and texture token match.</returns>
+    /// <returns>True when the property, writer, lanes, texture token, and color profile match.</returns>
     public static bool SameSample(ShaderDynBinding left, ShaderDynBinding right)
     {
         return string.Equals(left.Property, right.Property, StringComparison.Ordinal)
             && left.WriterKind == right.WriterKind
             && left.TextureToken == right.TextureToken
+            && left.ColorProfile == right.ColorProfile
             && Bits(left.X) == Bits(right.X)
             && Bits(left.Y) == Bits(right.Y)
             && Bits(left.Z) == Bits(right.Z)
             && Bits(left.W) == Bits(right.W);
+    }
+
+    /// <summary>
+    /// True when <paramref name="variableName"/> can produce a property under <paramref name="prefix"/>.
+    /// A slashed name ignores <paramref name="spaceName"/>. A local name uses that space.
+    /// </summary>
+    /// <param name="variableName">Raw variable name.</param>
+    /// <param name="spaceName">Space that would bind a name with no slash.</param>
+    /// <param name="prefix">Raw prefix. Blank becomes <see cref="DefaultPrefix"/>.</param>
+    /// <returns>False when the canonical name does not start with the prefix.</returns>
+    public static bool VariableCanMatch(string? variableName, string? spaceName, string? prefix)
+    {
+        if (!TryCanonical(variableName, spaceName, out var canonical))
+            return false;
+        return TryProperty(canonical, ActivePrefix(prefix), out _);
+    }
+
+    /// <summary>
+    /// True when <paramref name="variableName"/> on <paramref name="slotId"/> binds to a space
+    /// whose canonical name starts with <paramref name="prefix"/>. Uses the same space walk as <see cref="Select"/>.
+    /// </summary>
+    /// <param name="variableName">Raw variable name.</param>
+    /// <param name="slotId">Slot of the variable.</param>
+    /// <param name="slots">Slots already copied, including parents of <paramref name="slotId"/>.</param>
+    /// <param name="spaces">Spaces already copied on that chain.</param>
+    /// <param name="prefix">Raw prefix. Blank becomes <see cref="DefaultPrefix"/>.</param>
+    /// <returns>False when no live space binds the name, or the property would be empty.</returns>
+    public static bool VariableCanMatch(
+        string? variableName,
+        int slotId,
+        IReadOnlyList<ShaderDynSlot> slots,
+        IReadOnlyList<ShaderDynSpace> spaces,
+        string? prefix)
+    {
+        var slotById = new Dictionary<int, ShaderDynSlot>(slots.Count);
+        foreach (var slot in slots)
+            slotById[slot.Id] = slot;
+        if (!slotById.ContainsKey(slotId))
+            return false;
+
+        var variable = new ShaderDynVariable(
+            0,
+            slotId,
+            variableName,
+            true,
+            ShaderDynValueKind.Scalar,
+            0f,
+            0f,
+            0f,
+            0f,
+            0,
+            0);
+        var spaceIndex = FindBoundSpace(variable, spaces, GroupSpaces(spaces), slotById);
+        var spaceName = spaceIndex is int index ? spaces[index].Name : null;
+        return VariableCanMatch(variableName, spaceName, prefix);
+    }
+
+    /// <summary>
+    /// Copies sampled lanes onto bindings with the same <see cref="ShaderDynBinding.VariableId"/>.
+    /// The property name stays. A sample whose type does not match the writer asks for a full rebind.
+    /// </summary>
+    /// <param name="bindings">Bindings from the last structure walk.</param>
+    /// <param name="samples">Fresh samples. <see cref="ShaderDynVariable.Id"/> matches <see cref="ShaderDynBinding.VariableId"/>.</param>
+    /// <param name="destination">Replaced with the updated bindings. Empty when the result is <see cref="ShaderDynValueApply.NeedsRebind"/>.</param>
+    /// <returns>Whether any <see cref="SameSample"/> comparison failed, or the writer no longer matches.</returns>
+    public static ShaderDynValueApply ApplyValueSamples(
+        IReadOnlyList<ShaderDynBinding> bindings,
+        IReadOnlyList<ShaderDynVariable> samples,
+        List<ShaderDynBinding> destination)
+    {
+        destination.Clear();
+        var byId = new Dictionary<int, int>(samples.Count);
+        for (var i = 0; i < samples.Count; i++)
+            byId[samples[i].Id] = i;
+
+        var changed = false;
+        foreach (var binding in bindings)
+        {
+            if (!byId.TryGetValue(binding.VariableId, out var index))
+            {
+                destination.Add(binding);
+                continue;
+            }
+
+            var sample = samples[index];
+            if (!WriterMatches(binding.WriterKind, sample.ValueKind))
+            {
+                destination.Clear();
+                return ShaderDynValueApply.NeedsRebind;
+            }
+
+            var next = ToBinding(sample, binding.Property);
+            if (!SameSample(binding, next))
+                changed = true;
+            destination.Add(next);
+        }
+
+        return changed ? ShaderDynValueApply.Changed : ShaderDynValueApply.Unchanged;
+    }
+
+    private static bool WriterMatches(ShaderDynWriterKind writer, ShaderDynValueKind kind)
+    {
+        return writer switch
+        {
+            ShaderDynWriterKind.Scalar => kind == ShaderDynValueKind.Scalar,
+            ShaderDynWriterKind.Float4 => kind is ShaderDynValueKind.Float2
+                or ShaderDynValueKind.Float3
+                or ShaderDynValueKind.Float4,
+            ShaderDynWriterKind.Color => kind == ShaderDynValueKind.Color,
+            ShaderDynWriterKind.Texture => kind == ShaderDynValueKind.Texture,
+            _ => false,
+        };
     }
 
     private static int Bits(float value) => BitConverter.SingleToInt32Bits(value);
@@ -445,7 +558,10 @@ public static class ShaderDynVarSelect
                 break;
         }
 
-        return new ShaderDynBinding(variable.Id, property, writer, x, y, z, w, texture);
+        var profile = writer == ShaderDynWriterKind.Color
+            ? variable.ColorProfile
+            : ShaderDynColorProfile.Linear;
+        return new ShaderDynBinding(variable.Id, property, writer, x, y, z, w, texture, profile);
     }
 }
 
@@ -483,7 +599,7 @@ public enum ShaderDynValueKind : byte
     /// <summary><c>float4</c>. Written with <c>SetFloat4</c>.</summary>
     Float4,
 
-    /// <summary><c>colorX</c>. Written with <c>SetColor</c>.</summary>
+    /// <summary><c>colorX</c>. Written with <c>SetColor</c>. <see cref="ShaderDynVariable.ColorProfile"/> is kept.</summary>
     Color,
 
     /// <summary><c>IAssetProvider&lt;ITexture2D&gt;</c>. Written with <c>SetTexture</c>.</summary>
@@ -506,6 +622,35 @@ public enum ShaderDynWriterKind : byte
     Texture,
 }
 
+/// <summary>
+/// <c>Elements.Core.ColorProfile</c> stored by its underlying value.
+/// Linear is 0, sRGB is 1, sRGBAlpha is 2.
+/// </summary>
+public enum ShaderDynColorProfile : byte
+{
+    /// <summary><c>ColorProfile.Linear</c>.</summary>
+    Linear = 0,
+
+    /// <summary><c>ColorProfile.sRGB</c>.</summary>
+    Srgb = 1,
+
+    /// <summary><c>ColorProfile.sRGBAlpha</c>.</summary>
+    SrgbAlpha = 2,
+}
+
+/// <summary>Result of copying new lanes onto an existing binding set.</summary>
+public enum ShaderDynValueApply : byte
+{
+    /// <summary>Every <see cref="ShaderDynVarSelect.SameSample"/> comparison matched.</summary>
+    Unchanged,
+
+    /// <summary>At least one lane, texture token, or color profile changed.</summary>
+    Changed,
+
+    /// <summary>A sample type no longer matches the writer. The caller rebinds.</summary>
+    NeedsRebind,
+}
+
 /// <summary>One sampled variable.</summary>
 /// <param name="Id">Index the caller uses to recover the source component.</param>
 /// <param name="SlotId">Slot of the component.</param>
@@ -518,6 +663,7 @@ public enum ShaderDynWriterKind : byte
 /// <param name="W">Lane 3.</param>
 /// <param name="TextureToken">Stable identity for a texture reference. Zero is null.</param>
 /// <param name="Order">Order among variables on <paramref name="SlotId"/>.</param>
+/// <param name="ColorProfile"><c>colorX.profile</c>. Ignored unless <paramref name="ValueKind"/> is <see cref="ShaderDynValueKind.Color"/>.</param>
 public readonly record struct ShaderDynVariable(
     int Id,
     int SlotId,
@@ -529,7 +675,8 @@ public readonly record struct ShaderDynVariable(
     float Z,
     float W,
     int TextureToken,
-    int Order);
+    int Order,
+    ShaderDynColorProfile ColorProfile = ShaderDynColorProfile.Linear);
 
 /// <summary>One property the material writer should emit.</summary>
 /// <param name="VariableId"><see cref="ShaderDynVariable.Id"/> of the winning variable.</param>
@@ -540,6 +687,7 @@ public readonly record struct ShaderDynVariable(
 /// <param name="Z">Lane 2.</param>
 /// <param name="W">Lane 3.</param>
 /// <param name="TextureToken">Texture identity. Zero is a null texture.</param>
+/// <param name="ColorProfile"><c>colorX.profile</c> for <see cref="ShaderDynWriterKind.Color"/>. Otherwise <see cref="ShaderDynColorProfile.Linear"/>.</param>
 public readonly record struct ShaderDynBinding(
     int VariableId,
     string Property,
@@ -548,4 +696,5 @@ public readonly record struct ShaderDynBinding(
     float Y,
     float Z,
     float W,
-    int TextureToken);
+    int TextureToken,
+    ShaderDynColorProfile ColorProfile = ShaderDynColorProfile.Linear);

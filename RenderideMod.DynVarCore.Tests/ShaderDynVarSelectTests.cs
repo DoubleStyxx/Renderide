@@ -103,6 +103,7 @@ public sealed class ShaderDynVarSelectTests
         var texture = Assert.Single(bindings, binding => binding.Property == "_MainTex");
         Assert.Equal(ShaderDynWriterKind.Color, color.WriterKind);
         Assert.Equal((0.1f, 0.2f, 0.3f, 1f), (color.X, color.Y, color.Z, color.W));
+        Assert.Equal(ShaderDynColorProfile.Linear, color.ColorProfile);
         Assert.Equal(ShaderDynWriterKind.Texture, texture.WriterKind);
         Assert.Equal(7, texture.TextureToken);
     }
@@ -252,6 +253,125 @@ public sealed class ShaderDynVarSelectTests
         Assert.Equal(8f, Assert.Single(world.Select(child)).X);
     }
 
+    /// <summary>
+    /// <c>colorX.profile</c> is part of the sample. Linear and sRGB with the same lanes are different.
+    /// </summary>
+    [Fact]
+    public void Color_profile_survives_selection_and_value_edits()
+    {
+        var world = new DynFixture();
+        var space = world.Slot();
+        world.Space(space, "Shader");
+        world.Add(
+            space,
+            "Shader/_Color",
+            ShaderDynValueKind.Color,
+            0.2f,
+            0.4f,
+            0.6f,
+            1f,
+            profile: ShaderDynColorProfile.Srgb);
+
+        var selected = Assert.Single(world.Select(space));
+        Assert.Equal(ShaderDynWriterKind.Color, selected.WriterKind);
+        Assert.Equal(ShaderDynColorProfile.Srgb, selected.ColorProfile);
+
+        var edited = new ShaderDynVariable(
+            selected.VariableId,
+            space,
+            "Shader/_Color",
+            true,
+            ShaderDynValueKind.Color,
+            0.2f,
+            0.4f,
+            0.6f,
+            1f,
+            0,
+            0,
+            ShaderDynColorProfile.Linear);
+        var updated = new List<ShaderDynBinding>();
+        Assert.Equal(
+            ShaderDynValueApply.Changed,
+            ShaderDynVarSelect.ApplyValueSamples([selected], [edited], updated));
+        var next = Assert.Single(updated);
+        Assert.Equal("_Color", next.Property);
+        Assert.Equal(ShaderDynColorProfile.Linear, next.ColorProfile);
+        Assert.False(ShaderDynVarSelect.SameSample(selected, next));
+
+        updated.Clear();
+        Assert.Equal(
+            ShaderDynValueApply.Unchanged,
+            ShaderDynVarSelect.ApplyValueSamples([next], [edited], updated));
+    }
+
+    /// <summary>A value edit keeps the property and does not treat an unchanged sample as new.</summary>
+    [Fact]
+    public void Value_sample_updates_lanes_and_leaves_the_property()
+    {
+        var binding = new ShaderDynBinding(3, "_Speed", ShaderDynWriterKind.Scalar, 0.2f, 0f, 0f, 0f, 0);
+        var sample = new ShaderDynVariable(
+            3,
+            1,
+            "Shader/_Speed",
+            true,
+            ShaderDynValueKind.Scalar,
+            0.5f,
+            9f,
+            9f,
+            9f,
+            0,
+            0);
+        var updated = new List<ShaderDynBinding>();
+        Assert.Equal(
+            ShaderDynValueApply.Changed,
+            ShaderDynVarSelect.ApplyValueSamples([binding], [sample], updated));
+        var next = Assert.Single(updated);
+        Assert.Equal("_Speed", next.Property);
+        Assert.Equal(ShaderDynWriterKind.Scalar, next.WriterKind);
+        Assert.Equal(0.5f, next.X);
+        Assert.Equal(0f, next.Y);
+    }
+
+    /// <summary>Names that cannot produce a property under the prefix are not value-hooked.</summary>
+    [Theory]
+    [InlineData("Shader/_Speed", "Shader", "Shader/", true)]
+    [InlineData("_Speed", "Shader", "Shader/", true)]
+    [InlineData("World/Position", "Shader", "Shader/", false)]
+    [InlineData("_Speed", "World", "Shader/", false)]
+    [InlineData("Shader/_Color", "World", "Shader/", true)]
+    public void Variable_can_match_only_when_the_prefix_covers_the_name(
+        string variableName,
+        string spaceName,
+        string prefix,
+        bool expected)
+    {
+        Assert.Equal(expected, ShaderDynVarSelect.VariableCanMatch(variableName, spaceName, prefix));
+    }
+
+    /// <summary>The hook filter uses the same space walk as selection, including OnlyDirectBinding.</summary>
+    [Fact]
+    public void Variable_can_match_follows_the_bound_space()
+    {
+        var slots = new List<ShaderDynSlot>
+        {
+            new(0, null, 0),
+            new(1, 0, 0),
+        };
+        var directChild = new List<ShaderDynSpace>
+        {
+            new(0, "Shader", false, true, 0),
+            new(1, "World", false, true, 1),
+        };
+        Assert.False(ShaderDynVarSelect.VariableCanMatch("_Speed", 1, slots, directChild, "Shader/"));
+
+        var indirectChild = new List<ShaderDynSpace>
+        {
+            new(0, "Shader", false, true, 0),
+            new(1, "World", true, true, 1),
+        };
+        Assert.True(ShaderDynVarSelect.VariableCanMatch("_Speed", 1, slots, indirectChild, "Shader/"));
+    }
+
     /// <summary>NaN lanes compare equal by bits so an unchanged sample is not a new value.</summary>
     [Fact]
     public void Same_sample_treats_nan_as_unchanged()
@@ -316,7 +436,8 @@ public sealed class ShaderDynVarSelectTests
             float z = 0f,
             float w = 0f,
             int texture = 0,
-            bool live = true)
+            bool live = true,
+            ShaderDynColorProfile profile = ShaderDynColorProfile.Linear)
         {
             var id = _variables.Count;
             _variables.Add(new ShaderDynVariable(
@@ -330,7 +451,8 @@ public sealed class ShaderDynVarSelectTests
                 z,
                 w,
                 texture,
-                id));
+                id,
+                profile));
         }
 
         public ShaderDynBinding[] Select(int reader, string? prefix = null)

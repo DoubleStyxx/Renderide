@@ -212,7 +212,7 @@ The canonical name is the component `VariableName` when it contains a slash, oth
 | `colorX` | `SetColor`, same path as static `Colors` and stock `UnlitMaterial` |
 | `IAssetProvider<ITexture2D>` | `SetTexture` |
 
-`SetColor` (`MaterialUpdateWriter.cs:223`) converts with `ToProfile(RenderSystem.MaterialColorProfile)` and then calls `SetFloat4` (`MaterialUpdateWriter.cs:217`). Stock `UnlitMaterial.cs:510` uses `writer.UpdateColor`, which calls `SetColor`. Static `Colors` already use `SetColor`. A color dynvar uses that same call so the profile matches a stock material.
+`SetColor` (`MaterialUpdateWriter.cs:223`) converts with `ToProfile(RenderSystem.MaterialColorProfile)` and then calls `SetFloat4` (`MaterialUpdateWriter.cs:217`). Stock `UnlitMaterial.cs:510` uses `writer.UpdateColor`, which calls `SetColor`. Static `Colors` pass the stored `colorX`, including `profile`. A color dynvar does the same: `new colorX(r, g, b, a, profile)`. The four-float constructor would replace that profile with the default. `Elements.Core.ColorProfile` is Linear 0, sRGB 1, sRGBAlpha 2. The selector stores that byte and the writer casts it back.
 
 Example programs on `shaders/exotic-dynvars` (`7997b084`) use the names below with prefix `Shader/`. The written property is the dynvar name after that prefix. Each program except `example_solid` also declares `_MainTex` (`texture_2d`) and `_MainTex_sampler`. The sampler is paired with the texture and is not a dynvar.
 
@@ -260,7 +260,7 @@ Other types are ignored. A dynvar property replaces a `Floats`, `Colors`, or `Te
 
 Dynvar property names go through the same `MaterialPropertyIds.Request` path as list rows, including the unanswered-request retry. They are part of this material's settled-id hash. `OnCommonUpdate` marks the material dirty when that hash changes, which is when one of this material's names gains a stored id. It does not resample dynvar values and it does not watch a process-wide generation counter. A result stored for another material's names does not dirty this one.
 
-The component subscribes to space, slot, and variable change events and calls `MarkChangeDirty` only when the mapped value or the mapped set changes. It does not poll variable values from `OnCommonUpdate`. Parent changes and active changes on the material slot and on the watched ancestors rebind the same way. Leaving a value alone does not dirty the material again.
+A value edit on a variable whose name can match the prefix resamples the bound variables and compares them with `SameSample`. That path does not walk the slot tree or replace hooks. Name, enabled, prefix, and hierarchy changes still run the full rebind. The component does not poll variable values from `OnCommonUpdate`. Parent changes and active changes on the material slot and on the watched ancestors rebind the same way. The material slot's `ParentChanged` is subscribed once. Leaving a value alone does not dirty the material again.
 
 There is no public `DynamicVariableSpace.SpaceLookup`. The private variable handler is not read. `ShaderDynVarSelect` is the parent walk: a name that contains `/` binds to the first live ancestor space with that name, and any other name binds to the first live ancestor space whose `OnlyDirectBinding` is false. That is the same split as `DynamicVariableHelper.ParsePath`. `ProcessName` still normalizes space names before the walk. The selector trims whitespace only, so `Shader/_Speed` writes `_Speed`.
 
