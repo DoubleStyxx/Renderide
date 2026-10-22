@@ -14,6 +14,7 @@ use crate::mesh_deform::PaddedPerDrawUniforms;
 use crate::scene::SceneTransformRead;
 use crate::shared::RenderingContext;
 use crate::world_mesh::draw_prep::WorldMeshDrawItem;
+use crate::world_mesh::{assign_canvas_depth_steps, canvas_ndc_z_bias};
 
 use super::prepare::WorldMeshForwardPrepareFrame;
 use super::vp::compute_per_draw_vp_matrices;
@@ -115,7 +116,9 @@ fn pack_per_draw_vp_uniforms(
     hc: &HostCameraFrame,
 ) {
     profiling::scope!("world_mesh::pack_vp_matrices");
-    let pack_one = |slot: &mut PaddedPerDrawUniforms, item: &WorldMeshDrawItem| {
+    let canvas_steps = assign_canvas_depth_steps(inputs.draws);
+    let pack_one = |slot: &mut PaddedPerDrawUniforms, draw_index: usize| {
+        let item = &inputs.draws[draw_index];
         let matrices = compute_per_draw_vp_matrices(
             scene,
             item,
@@ -123,6 +126,7 @@ fn pack_per_draw_vp_uniforms(
             inputs.render_context,
             inputs.world_proj,
             inputs.overlay_proj,
+            canvas_ndc_z_bias(item, canvas_steps[draw_index]),
         );
         let packed = if matrices.view_proj_left == matrices.view_proj_right {
             PaddedPerDrawUniforms::new_single(matrices.view_proj_left, matrices.model)
@@ -162,12 +166,12 @@ fn pack_per_draw_vp_uniforms(
             .for_each(|(slots, layout)| {
                 profiling::scope!("world_mesh::pack_vp_matrices::worker");
                 for (slot, &draw_idx) in slots.iter_mut().zip(layout.iter()) {
-                    pack_one(slot, &inputs.draws[draw_idx]);
+                    pack_one(slot, draw_idx);
                 }
             });
     } else {
         for (slot, &draw_idx) in uniforms.iter_mut().zip(inputs.slab_layout.iter()) {
-            pack_one(slot, &inputs.draws[draw_idx]);
+            pack_one(slot, draw_idx);
         }
     }
 }

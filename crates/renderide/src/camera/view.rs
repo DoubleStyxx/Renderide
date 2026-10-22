@@ -6,7 +6,7 @@ use crate::scene::render_transform_to_matrix;
 use crate::scene::{RenderSpaceRead, SceneSpaceRead};
 use crate::shared::RenderTransform;
 
-use super::host_camera_frame::HostCameraFrame;
+use super::host_camera_frame::{HostCameraFrame, overlay_camera_view_matrix};
 
 /// Clamps scale for view matrix construction: if any axis is nearly zero, use unit scale.
 pub fn filter_scale_legacy(scale: Vec3) -> Vec3 {
@@ -85,4 +85,53 @@ pub fn world_to_view_pair_for_skybox(
         })
     });
     (view, view)
+}
+
+/// World-space camera forward for a world-to-view matrix.
+///
+/// View space is right-handed with −Z forward. The returned vector is
+/// `inverse(view) * (0, 0, −1)`, normalized. A zero vector means the view basis is unusable.
+#[inline]
+pub(crate) fn view_forward_world_from_view_matrix(view: Mat4) -> Vec3 {
+    unit_direction(view.inverse().transform_vector3(Vec3::new(0.0, 0.0, -1.0)))
+}
+
+/// Camera forward used when collecting one view's draws.
+///
+/// Prefers [`HostCameraFrame::explicit_world_to_view`] and otherwise the active main-space view.
+/// Identity is used only when neither exists, which looks down world −Z.
+pub(crate) fn view_forward_world_for_collection(
+    scene: &(impl SceneSpaceRead + ?Sized),
+    host_camera: &HostCameraFrame,
+) -> Vec3 {
+    let view = host_camera.explicit_world_to_view().unwrap_or_else(|| {
+        scene.active_main_space().map_or(Mat4::IDENTITY, |space| {
+            view_matrix_for_world_mesh_render_space(scene, space)
+        })
+    });
+    view_forward_world_from_view_matrix(view)
+}
+
+/// Overlay-camera origin and forward in overlay-local space.
+///
+/// Desktop overlay draws are not in the main camera frame, so their canvas plane depth uses this
+/// fixed basis instead of [`view_forward_world_for_collection`].
+pub(crate) fn overlay_canvas_view_basis() -> (Vec3, Vec3) {
+    let view = overlay_camera_view_matrix();
+    let origin = view.inverse().transform_point3(Vec3::ZERO);
+    (origin, view_forward_world_from_view_matrix(view))
+}
+
+/// Returns a unit direction, or zero when `direction` is non-finite or degenerate.
+#[inline]
+fn unit_direction(direction: Vec3) -> Vec3 {
+    if !direction.is_finite() {
+        return Vec3::ZERO;
+    }
+    let length_sq = direction.length_squared();
+    if length_sq <= 1.0e-12 {
+        Vec3::ZERO
+    } else {
+        direction * length_sq.sqrt().recip()
+    }
 }

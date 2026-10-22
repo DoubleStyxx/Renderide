@@ -16,6 +16,7 @@
 
 mod arrange;
 mod bitset;
+mod canvas_depth;
 mod collect;
 mod command_cache;
 mod filter;
@@ -24,6 +25,10 @@ mod prepared_renderables;
 mod render_world;
 mod sort;
 
+pub(crate) use canvas_depth::{
+    apply_reverse_z_ndc_bias, assign_canvas_depth_steps, canvas_ndc_z_bias,
+    canvas_plane_depth_meters,
+};
 pub(crate) use collect::queue_prepared_draws_for_views_with_parallelism;
 pub use collect::{
     DrawCollectionFrameCaches, DrawCollectionInputs, DrawCollectionMaterialInputs,

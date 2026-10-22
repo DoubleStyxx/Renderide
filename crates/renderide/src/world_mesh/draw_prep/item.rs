@@ -149,8 +149,16 @@ pub struct WorldMeshDrawItem {
     /// Approximate camera distance metric used for transparent-sorted back-to-front ordering.
     ///
     /// Transparent draws prefer world bounds when available and fall back to transform-origin
-    /// distance when the host has not provided usable mesh bounds for the draw.
+    /// distance when the host has not provided usable mesh bounds for the draw. This remains the
+    /// farthest-corner metric. Canvas stems do not use it for UI-versus-UI ordering; see
+    /// [`Self::canvas_plane_depth`].
     pub camera_distance_sq: f32,
+    /// View-plane depth of the draw AABB center, in meters along the camera forward.
+    ///
+    /// `Some` only for canvas UI stems (`ui_unlit`, `ui_textunlit`, `ui_circlesegment`) when the
+    /// view basis and bounds are finite. Larger values are farther from the camera. `None` keeps
+    /// farthest-corner ordering for that draw.
+    pub canvas_plane_depth: Option<f32>,
     /// Conservative world-space bounds for visibility tests that run after draw collection.
     ///
     /// `None` keeps the draw visible. Overlay-space draws and sources with unusable host bounds

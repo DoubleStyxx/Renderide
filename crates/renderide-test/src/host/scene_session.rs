@@ -100,6 +100,8 @@ pub enum SessionTemplate {
     CustomShaderPropertyUpdate,
     /// Poincare disk on the left quad and a gyroid on the right. Both materials set `_Speed` to 0.
     ExoticShaderPair,
+    /// Two coplanar `UI/Unlit` quads. The later, larger quad must cover the earlier smaller one.
+    CoplanarCanvasUiQuads,
 }
 
 /// Drives the full session end-to-end. The renderer process is killed on `Err` via [`Drop`] of
@@ -283,6 +285,7 @@ fn template_label(template: &SessionTemplate) -> &'static str {
         SessionTemplate::GltfTexturedStaticMesh { .. } => "GltfTexturedStaticMesh",
         SessionTemplate::CustomShaderPropertyUpdate => "CustomShaderPropertyUpdate",
         SessionTemplate::ExoticShaderPair => "ExoticShaderPair",
+        SessionTemplate::CoplanarCanvasUiQuads => "CoplanarCanvasUiQuads",
     }
 }
 
@@ -310,6 +313,7 @@ fn build_scene_setup(template: SessionTemplate) -> SceneSetup {
         } => gltf_textured_static_mesh_setup(mesh, texture_rgba, texture_size),
         SessionTemplate::CustomShaderPropertyUpdate => custom_property::scene_setup(),
         SessionTemplate::ExoticShaderPair => exotic_pair::scene_setup(),
+        SessionTemplate::CoplanarCanvasUiQuads => coplanar_canvas_ui_quads_setup(),
     }
 }
 
@@ -617,6 +621,60 @@ fn alpha_cutout_masked_quads_setup(mask_rgba: Vec<u8>, texture_size: (u32, u32))
             renderables,
             lights: Vec::new(),
         },
+    }
+}
+
+fn coplanar_canvas_ui_quads_setup() -> SceneSetup {
+    let meshes = vec![mesh_asset(
+        0,
+        generate_quad(),
+        centered_bounds(Vec3::new(0.55, 0.55, 0.05)),
+    )];
+    let materials = vec![
+        ui_unlit_color_material(0, [1.0, 0.05, 0.05, 1.0]),
+        ui_unlit_color_material(1, [0.05, 0.2, 1.0, 1.0]),
+    ];
+    let renderables = [(0, Vec3::new(0.4, 0.4, 1.0)), (1, Vec3::ONE)]
+        .into_iter()
+        .map(|(index, scale)| SceneRenderable {
+            transform_id: index,
+            pose: transform(Vec3::ZERO, scale, Quat::IDENTITY),
+            mesh_asset_id: scene_mesh_id(0),
+            material_asset_id: scene_material_id(index),
+            sorting_order: 0,
+        })
+        .collect();
+    SceneSetup {
+        meshes,
+        materials,
+        scene: SceneSubmission {
+            camera_world_pose: default_camera_world_pose(),
+            renderables,
+            lights: Vec::new(),
+        },
+    }
+}
+
+fn ui_unlit_color_material(index: i32, tint: [f32; 4]) -> MaterialAsset {
+    MaterialAsset {
+        asset_id: scene_material_id(index),
+        update_batch_id: scene_update_batch_id(index),
+        property_request_id: scene_property_request_id(index),
+        update_base_buffer_id: scene_material_update_buffer_id(index),
+        binding: Some(MaterialBinding {
+            shader_asset_id: scene_shader_id(index),
+            shader_name: "UI_Unlit.shader",
+            shader_variant_bits: None,
+            textures: Vec::new(),
+            floats: vec![FloatBinding {
+                property_name: "_ZWrite",
+                value: 1.0,
+            }],
+            float4s: vec![Float4Binding {
+                property_name: "_Tint",
+                value: tint,
+            }],
+        }),
     }
 }
 

@@ -5,6 +5,7 @@ use std::cmp::Ordering;
 #[cfg(test)]
 use rayon::slice::ParallelSliceMut;
 
+use super::canvas_depth::transparent_depth_sort_key;
 use super::item::WorldMeshDrawItem;
 
 /// Draws assigned to one secondary structural resort worker chunk.
@@ -89,7 +90,8 @@ pub fn pack_sort_prefix(
 
 /// Tiebreaker for transparent draws sharing the same `(overlay, render_queue)` bucket.
 ///
-/// Order-dependent classes keep `sorting_order`, back-to-front distance, then collection order.
+/// Order-dependent classes keep `sorting_order`, back-to-front depth, then collection order.
+/// Canvas stems compare quantized view-plane depth instead of farthest-corner distance.
 /// Unstacked commutative additive/multiply classes may sort by batch key inside exact same-depth
 /// buckets because their color composition is order independent.
 #[inline]
@@ -132,8 +134,8 @@ pub(super) fn cmp_order_sensitive_draws(a: &WorldMeshDrawItem, b: &WorldMeshDraw
 /// Orders transparent draws after `sorting_order` has already matched.
 #[inline]
 fn cmp_transparent_class_tie(a: &WorldMeshDrawItem, b: &WorldMeshDrawItem) -> Ordering {
-    b.camera_distance_sq
-        .total_cmp(&a.camera_distance_sq)
+    transparent_depth_sort_key(b)
+        .total_cmp(&transparent_depth_sort_key(a))
         .then_with(|| {
             let a_class = transparent_tie_order_class(a);
             let b_class = transparent_tie_order_class(b);

@@ -66,6 +66,8 @@ pub enum CaseTemplate {
     CustomShaderPropertyUpdate,
     /// Poincare-disk tiling and a raymarched gyroid, each with `_Speed` 0.
     ExoticShaderPair,
+    /// Coplanar UI quads: a small earlier quad must not paint over the later larger quad.
+    CoplanarCanvasUiQuads,
 }
 
 /// Default golden directory, relative to the workspace root: `crates/renderide-test/goldens/`.
@@ -207,6 +209,24 @@ pub fn exotic_shader_pair() -> IntegrationCase {
     }
 }
 
+/// Coplanar `UI/Unlit` quads that share a center and sorting order.
+///
+/// The smaller red quad is submitted first. Canvas order plus a reverse-Z depth step must draw
+/// the larger blue quad on top. The red quad sits entirely inside the blue one, so a correct
+/// capture is background plus one blue color.
+pub fn coplanar_canvas_ui_quads() -> IntegrationCase {
+    IntegrationCase {
+        name: "coplanar_canvas_ui_quads".to_string(),
+        description:
+            "Two coplanar UI/Unlit quads. The later larger quad covers the earlier smaller one."
+                .to_string(),
+        golden_path: default_goldens_dir().join("coplanar_canvas_ui_quads.png"),
+        resolution: (256, 256),
+        tolerance: visual_tolerance(0.9, 24, 0.08, 16, 2, 0.04),
+        template: CaseTemplate::CoplanarCanvasUiQuads,
+    }
+}
+
 /// Optional GLB fixture case. The registry includes it only when the fixture file is present,
 /// so the suite remains useful before a commit-safe model has been added.
 pub fn gltf_textured_static_mesh(path: PathBuf) -> IntegrationCase {
@@ -231,6 +251,7 @@ pub fn registry() -> Vec<IntegrationCase> {
         alpha_cutout_masked_quads(),
         custom_shader_property_update(),
         exotic_shader_pair(),
+        coplanar_canvas_ui_quads(),
     ];
     let gltf_fixture = default_fixture_path();
     if gltf_fixture.is_file() {

@@ -175,7 +175,11 @@ fn build_shadow_caster_draw_collection_contexts<'a>(
                 setup,
                 dict,
                 prep,
-                shadow_caster_view_inputs(prep, mesh_lod_bias),
+                shadow_caster_view_inputs(
+                    prep,
+                    mesh_lod_bias,
+                    view_forward_for_plan(setup.scene, prep),
+                ),
             )
         })
         .collect()
@@ -213,6 +217,13 @@ fn build_draw_collection_context<'a>(
     }
 }
 
+fn view_forward_for_plan(
+    scene: &crate::scene::SceneCoordinator,
+    prep: &FrameViewPlan<'_>,
+) -> glam::Vec3 {
+    crate::camera::view_forward_world_for_collection(scene, &prep.host_camera)
+}
+
 fn visible_view_inputs<'a>(
     setup: &'a ExtractedFrameShared<'a>,
     prep: &'a FrameViewPlan<'_>,
@@ -223,6 +234,7 @@ fn visible_view_inputs<'a>(
         render_context: prep.render_context(),
         head_output_transform: prep.host_camera.head_output_transform,
         view_origin_world: prep.view_origin_world(),
+        view_forward_world: view_forward_for_plan(setup.scene, prep),
         culling,
         mesh_lod_bias,
         transform_filter: prep.draw_filter.as_ref(),
@@ -302,7 +314,11 @@ fn queue_desktop_overlay_draws(
                 shader_perm,
                 property_registry: Some(setup.property_registry),
             },
-            view: desktop_overlay_view_inputs(prep, mesh_lod_bias),
+            view: desktop_overlay_view_inputs(
+                prep,
+                mesh_lod_bias,
+                view_forward_for_plan(setup.scene, prep),
+            ),
             caches: DrawCollectionFrameCaches {
                 material_cache,
                 prepared: setup.prepared_renderables_for(render_context),
@@ -318,11 +334,13 @@ fn queue_desktop_overlay_draws(
 pub(super) fn desktop_overlay_view_inputs<'a>(
     prep: &FrameViewPlan<'_>,
     mesh_lod_bias: f32,
+    view_forward_world: glam::Vec3,
 ) -> DrawCollectionViewInputs<'a> {
     DrawCollectionViewInputs {
         render_context: prep.render_context(),
         head_output_transform: prep.host_camera.head_output_transform,
         view_origin_world: prep.view_origin_world(),
+        view_forward_world,
         culling: None,
         mesh_lod_bias,
         transform_filter: None,
@@ -337,11 +355,13 @@ pub(super) fn desktop_overlay_view_inputs<'a>(
 pub(super) fn shadow_caster_view_inputs<'a>(
     prep: &'a FrameViewPlan<'_>,
     mesh_lod_bias: f32,
+    view_forward_world: glam::Vec3,
 ) -> DrawCollectionViewInputs<'a> {
     DrawCollectionViewInputs {
         render_context: prep.render_context(),
         head_output_transform: prep.host_camera.head_output_transform,
         view_origin_world: prep.view_origin_world(),
+        view_forward_world,
         culling: None,
         mesh_lod_bias,
         transform_filter: prep.draw_filter.as_ref(),

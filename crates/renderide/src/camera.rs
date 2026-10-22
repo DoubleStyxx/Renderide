@@ -54,6 +54,7 @@ pub use view::{
     view_matrix_for_world_mesh_render_space, view_matrix_from_render_transform,
     world_to_view_pair_for_skybox,
 };
+pub(crate) use view::{overlay_canvas_view_basis, view_forward_world_for_collection};
 #[cfg(test)]
 pub(crate) use view_id::SecondaryCameraId;
 pub use view_id::ViewId;
@@ -72,7 +73,7 @@ mod tests {
         clamp_desktop_fov_degrees, effective_head_output_clip_planes, reverse_z_orthographic,
         reverse_z_perspective, reverse_z_perspective_openxr_fov,
     };
-    use super::view::view_matrix_from_render_transform;
+    use super::view::{view_forward_world_from_view_matrix, view_matrix_from_render_transform};
 
     fn expected_reverse_z_perspective_cols(
         aspect: f32,
@@ -125,6 +126,20 @@ mod tests {
         assert!(m.w_axis.w.is_finite());
         assert!(m.x_axis.x > 0.0 && m.y_axis.y > 0.0);
         assert!(m.z_axis.w == -1.0);
+    }
+
+    #[test]
+    fn identity_camera_forward_is_positive_z() {
+        let tr = RenderTransform {
+            position: Vec3::new(0.0, 0.0, -3.0),
+            scale: Vec3::ONE,
+            rotation: Quat::IDENTITY,
+        };
+        let forward = view_forward_world_from_view_matrix(view_matrix_from_render_transform(&tr));
+        assert!(
+            (forward - Vec3::Z).length() < 1.0e-5,
+            "identity rotation looks along +Z, got {forward}"
+        );
     }
 
     #[test]

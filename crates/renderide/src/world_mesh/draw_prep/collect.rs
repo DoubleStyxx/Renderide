@@ -158,6 +158,11 @@ pub struct DrawCollectionViewInputs<'a> {
     ///
     /// Populate from `HostCameraFrame::view_origin_world()`.
     pub view_origin_world: Vec3,
+    /// Unit world-space camera forward for canvas view-plane depth.
+    ///
+    /// Zero means the view basis is unknown. Canvas stems then keep farthest-corner ordering.
+    /// Production views fill this from the explicit camera view, or the active main-space view.
+    pub view_forward_world: Vec3,
     /// Optional CPU frustum + Hi-Z cull inputs.
     pub culling: Option<&'a WorldMeshCullInput<'a>>,
     /// Unity-style mesh LOD bias multiplier for relative screen-height selection.

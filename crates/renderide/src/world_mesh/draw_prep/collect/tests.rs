@@ -63,6 +63,7 @@ fn test_draw_context<'a>(
             render_context: RenderingContext::UserView,
             head_output_transform: Mat4::IDENTITY,
             view_origin_world: Vec3::ZERO,
+            view_forward_world: Vec3::ZERO,
             culling: None,
             mesh_lod_bias: 2.0,
             transform_filter,
