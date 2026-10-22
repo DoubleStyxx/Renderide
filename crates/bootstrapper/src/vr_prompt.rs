@@ -25,7 +25,9 @@ fn normalized_flag_token(arg: &str) -> String {
 ///
 /// Recognizes `-Screen`, `-Device` (including `-Device=SteamVR` and `-Device:Screen360`),
 /// legacy switches such as `-SteamVR` and `-RiftTouch`, and a bare `none`. A value that
-/// merely contains those words, such as `-Data screen`, does not count.
+/// merely contains those words, such as `-Data screen`, does not count. Bare `none` after a
+/// boolean switch such as `-Invisible` still counts; see
+/// [`crate::launch_args::host_args_specify_output_mode`].
 pub(crate) fn host_args_have_explicit_output_device(args: &[String]) -> bool {
     crate::launch_args::host_args_specify_output_mode(args)
 }

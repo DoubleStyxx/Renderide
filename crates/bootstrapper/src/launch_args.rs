@@ -1,13 +1,19 @@
 //! Resonite launch-argument quoting, output-mode detection, and renderer-start unwrapping.
 //!
 //! The launcher receives an argv from the OS. Resonite's host and its bootstrap protocol also
-//! exchange those arguments as one command-line string. That string follows Windows
-//! `CommandLineToArgvW` rules (the same rules .NET and Wine `start.exe` use): whitespace splits
-//! tokens, double quotes group a token, and backslashes escape quotes. Unknown tokens are kept
+//! exchange those arguments as one command-line string. That string follows the argument rules
+//! of Windows `CommandLineToArgvW` (the same rules .NET uses when it parses a command line, and
+//! the rules Wine `start.exe` quotes for): whitespace splits tokens, quotes group a token, and
+//! backslashes escape quotes only when they immediately precede one. Unknown tokens are kept
 //! and forwarded unchanged.
+//!
+//! This parser does not apply the program-name rules of `CommandLineToArgvW`. These strings are
+//! argument lists, not a full `CreateProcess` command line, so a leading quote starts an
+//! argument instead of ending `argv[0]`.
 
+use std::io;
 use std::path::{Path, PathBuf};
-use std::process::ExitStatus;
+use std::process::{Command, ExitStatus};
 
 /// Renderer executable name produced by the `renderide-renderer` bin target.
 const RENDERER_FILE_NAME: &str = if cfg!(windows) {
@@ -32,11 +38,21 @@ pub struct RendererLaunchRequest {
     pub args: Vec<String>,
 }
 
-/// Splits `command` with Windows `CommandLineToArgvW` rules.
+/// Splits `command` with Windows `CommandLineToArgvW` argument rules.
 ///
-/// Space and tab separate arguments. Double quotes group an argument and are not part of the
-/// value. A backslash escapes a following quote; backslashes that do not precede a quote are
-/// literal. `""` inside a quoted argument is one literal quote.
+/// Space and tab separate arguments outside quotes. Backslashes are literal unless they
+/// immediately precede a quote: an even run of `2n` backslashes plus a quote becomes `n`
+/// backslashes and the quote is a delimiter; an odd run of `2n+1` becomes `n` backslashes and
+/// one literal quote.
+///
+/// Consecutive quotes use `CommandLineToArgvW`'s rule of three, not the post-2005 C runtime
+/// rule. The C runtime treats `""` inside a quoted argument as one literal quote and stays
+/// quoted. `CommandLineToArgvW` counts a run of quotes, including the quote that opened the
+/// run, and divides by three: `3n` quotes emit `n` quotes, `3n+1` emits `n` quotes and closes
+/// quoting, and `3n+2` emits `n+1` quotes and closes quoting. From outside quotes, the first
+/// quote only opens quoting and the rest of the run follows that rule. Two quotes in
+/// `two""quotes` therefore produce no quote character and leave quoting off, so the following
+/// space still starts the next argument.
 pub(crate) fn split_windows_command_line(command: &str) -> Vec<String> {
     let chars: Vec<char> = command.chars().collect();
     let mut index = 0;
@@ -100,44 +116,78 @@ pub(crate) fn quote_windows_arg(arg: &str) -> String {
     escaped
 }
 
-/// Expands a single packed command-line argument into argv tokens.
+/// Expands one packed renderer command line into argv tokens.
 ///
-/// The OS usually splits argv itself. A parent that forwards one string (for example the
-/// pre-fix `-Renderer` command line) leaves the quotes and spaces inside that string. Already
-/// split argv is returned unchanged.
+/// The OS usually splits argv itself. Resonite's pre-fix `-Renderer` handoff can instead pass
+/// the whole renderer command as a single string. That string is split only when the split
+/// result is a renderer launch: its first token is `STARTRENDERER`, or it contains both
+/// `-QueueName` and `-QueueCapacity`. Any other single argument, including a path or record
+/// URL that contains spaces, is returned unchanged. Already-split argv is returned unchanged.
 pub(crate) fn expand_launcher_args(args: &[String]) -> Vec<String> {
-    if let [only] = args
-        && is_packed_command_line(only)
-    {
-        return split_windows_command_line(only);
+    let [only] = args else {
+        return args.to_vec();
+    };
+    if !only.chars().any(is_command_whitespace) {
+        return args.to_vec();
     }
-    args.to_vec()
+    let split = split_windows_command_line(only);
+    if is_renderer_launch(&split) {
+        split
+    } else {
+        args.to_vec()
+    }
 }
 
 /// Whether these launcher arguments are Resonite starting this process as a renderer.
 ///
 /// Returns the arguments to forward to `renderide-renderer`. `STARTRENDERER <exe> ARGS=...`
 /// is unwrapped. A direct `-QueueName` / `-QueueCapacity` pair (the fixed `-Renderer` form)
-/// is forwarded as-is, including any unknown tokens around it.
+/// is forwarded as-is, including any unknown tokens around it. Launcher-only flags
+/// (`--log-level` / `-l`, `--resonite-dir` / `-ResoniteDir`, `--rollback-update`) are removed
+/// first so they are not forwarded to the renderer.
 pub fn renderer_delegate_from_args(args: &[String]) -> Option<Vec<String>> {
     let launch = parse_renderer_launch_message_from_argv(expand_launcher_args(args));
     if launch.executable.is_some() || has_renderer_connection_args(&launch.args) {
-        return Some(launch.args);
+        return Some(strip_launcher_only_flags(&launch.args));
     }
     None
 }
 
-/// Spawns the sibling renderer and waits for it.
+/// Spawns the sibling renderer, ties its lifetime to this process, and waits for it.
 ///
-/// The Resonite bootstrapper tracks this process id. Waiting, instead of exiting after a
-/// spawn, keeps that id alive until the renderer exits.
-pub fn spawn_renderer_delegate(args: &[String]) -> std::io::Result<ExitStatus> {
+/// The Resonite bootstrapper tracks this process id and kills it when the session ends.
+/// [`crate::child_lifetime::ChildLifetimeGroup`] applies the same parent-death behavior used
+/// for the host (`PR_SET_PDEATHSIG` on Linux, a kill-on-close job on Windows, tracked PIDs on
+/// macOS), so that kill also stops `renderide-renderer`. The returned status is the renderer's
+/// own status.
+///
+/// Returns an error when the only candidate binary is this process. Launching that file would
+/// start the launcher again.
+pub fn spawn_renderer_delegate(args: &[String]) -> io::Result<ExitStatus> {
     let dir = std::env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(Path::to_path_buf))
         .unwrap_or_else(|| PathBuf::from("."));
-    let program = renderer_executable_in(&dir);
-    std::process::Command::new(program).args(args).status()
+    let program = renderer_executable_in(&dir)?;
+    let lifetime = crate::child_lifetime::ChildLifetimeGroup::new()?;
+    let mut cmd = Command::new(program);
+    cmd.args(args);
+    lifetime.prepare_command(&mut cmd);
+    let mut child = cmd.spawn()?;
+    if let Err(error) = lifetime.register_spawned(&child) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+    let status = child.wait()?;
+    // macOS `Drop` signals every registered pid and then sleeps through the grace periods.
+    // The renderer has already been waited on, so that shutdown would only delay its exit
+    // code. Forgetting the group skips that post-exit shutdown. Parent-death during `wait`
+    // is unchanged: the group is alive until then, Linux already armed `PR_SET_PDEATHSIG`,
+    // and Windows closes the job handle when this process is killed.
+    #[cfg(target_os = "macos")]
+    std::mem::forget(lifetime);
+    Ok(status)
 }
 
 /// Parses a host renderer-start message, unwrapping `STARTRENDERER` when present.
@@ -146,6 +196,13 @@ pub(crate) fn parse_renderer_launch_message(message: &str) -> RendererLaunchRequ
 }
 
 /// Returns `true` when `args` already choose desktop, VR, or Resonite autodetect.
+///
+/// A bare `none` means autodetect only when it is its own argument. It is not a mode when it
+/// is the following value of a flag that is known to take one (`-LoadAssembly none`,
+/// `-Join none`, `-Data none`). It is still a mode after a boolean switch such as
+/// `-Invisible none`. Unknown flags are treated the same way as boolean switches: Resonite has
+/// many valueless switches, and assuming every flag consumes the next token would hide a real
+/// `none`.
 pub(crate) fn host_args_specify_output_mode(args: &[String]) -> bool {
     let mut skip_value = false;
     for token in args {
@@ -170,16 +227,57 @@ pub(crate) fn host_args_specify_output_mode(args: &[String]) -> bool {
 }
 
 /// Resolves the renderer binary next to the launcher.
-pub(crate) fn renderer_executable_in(dir: &Path) -> PathBuf {
-    let primary = dir.join(RENDERER_FILE_NAME);
-    if primary.is_file() {
-        return primary;
+///
+/// Prefers `renderide-renderer` and falls back to `Renderite.Renderer`. A candidate whose
+/// canonical path is this process is skipped. Launching it would start the launcher again
+/// whenever the launcher itself is installed under that file name. When every existing
+/// candidate is this process, or neither file exists, this returns an error instead of a path
+/// that [`Command::new`] would execute.
+pub(crate) fn renderer_executable_in(dir: &Path) -> io::Result<PathBuf> {
+    select_renderer_executable(dir, std::env::current_exe().ok().as_deref())
+}
+
+/// Picks a renderer binary in `dir`, skipping `current_exe` when that path is one of the names.
+fn select_renderer_executable(dir: &Path, current_exe: Option<&Path>) -> io::Result<PathBuf> {
+    let mut skipped_self = false;
+    for name in [RENDERER_FILE_NAME, LEGACY_RENDERER_FILE_NAME] {
+        let candidate = dir.join(name);
+        if !candidate.is_file() {
+            continue;
+        }
+        if current_exe.is_some_and(|current| same_executable(&candidate, current)) {
+            skipped_self = true;
+            continue;
+        }
+        return Ok(candidate);
     }
-    let legacy = dir.join(LEGACY_RENDERER_FILE_NAME);
-    if legacy.is_file() {
-        return legacy;
+    if skipped_self {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "refusing to launch {RENDERER_FILE_NAME} or {LEGACY_RENDERER_FILE_NAME} in {}: that file is this process, and launching it would re-launch the launcher forever",
+                dir.display()
+            ),
+        ));
     }
-    primary
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!(
+            "renderide-renderer was not found in {} (looked for {RENDERER_FILE_NAME} and {LEGACY_RENDERER_FILE_NAME})",
+            dir.display()
+        ),
+    ))
+}
+
+/// Returns whether `candidate` and `current_exe` are the same file after resolving symlinks.
+fn same_executable(candidate: &Path, current_exe: &Path) -> bool {
+    match (
+        std::fs::canonicalize(candidate),
+        std::fs::canonicalize(current_exe),
+    ) {
+        (Ok(candidate), Ok(current_exe)) => candidate == current_exe,
+        _ => candidate == current_exe,
+    }
 }
 
 struct FlagToken {
@@ -187,53 +285,61 @@ struct FlagToken {
     attached: Option<String>,
 }
 
+/// Parses one argument using the `CommandLineToArgvW` copy loop (not the `argv[0]` rules).
+///
+/// `quote_count` is `0` outside quotes and `1` inside quotes. A run that leaves it at `2` is
+/// normalized back to `0`, which is how two quotes close a quoted argument after emitting the
+/// quote characters required by the rule of three.
 fn parse_windows_argument(chars: &[char], mut index: usize) -> (String, usize) {
     let mut out = String::new();
-    let mut in_quotes = false;
+    let mut quote_count = 0usize;
+    let mut backslashes = 0usize;
     while index < chars.len() {
         let ch = chars[index];
-        if !in_quotes && is_command_whitespace(ch) {
+        if quote_count == 0 && is_command_whitespace(ch) {
             break;
         }
         if ch == '\\' {
-            index = consume_backslashes(chars, index, &mut out);
+            out.push('\\');
+            backslashes += 1;
+            index += 1;
             continue;
         }
         if ch == '"' {
-            index = consume_quote(chars, index, &mut out, &mut in_quotes);
+            if backslashes.is_multiple_of(2) {
+                pop_backslashes(&mut out, backslashes / 2);
+                quote_count += 1;
+            } else {
+                pop_backslashes(&mut out, backslashes / 2 + 1);
+                out.push('"');
+            }
+            index += 1;
+            backslashes = 0;
+            while index < chars.len() && chars[index] == '"' {
+                quote_count += 1;
+                if quote_count == 3 {
+                    out.push('"');
+                    quote_count = 0;
+                }
+                index += 1;
+            }
+            if quote_count == 2 {
+                quote_count = 0;
+            }
             continue;
         }
         out.push(ch);
+        backslashes = 0;
         index += 1;
     }
     (out, index)
 }
 
-fn consume_backslashes(chars: &[char], mut index: usize, out: &mut String) -> usize {
-    let mut slashes = 0usize;
-    while index < chars.len() && chars[index] == '\\' {
-        slashes += 1;
-        index += 1;
+fn pop_backslashes(out: &mut String, count: usize) {
+    for _ in 0..count {
+        let removed = out.pop();
+        debug_assert_eq!(removed, Some('\\'));
     }
-    if index < chars.len() && chars[index] == '"' {
-        push_repeat(out, '\\', slashes / 2);
-        if slashes % 2 == 1 {
-            out.push('"');
-            index += 1;
-        }
-        return index;
-    }
-    push_repeat(out, '\\', slashes);
-    index
-}
-
-fn consume_quote(chars: &[char], index: usize, out: &mut String, in_quotes: &mut bool) -> usize {
-    if *in_quotes && chars.get(index + 1) == Some(&'"') {
-        out.push('"');
-        return index + 2;
-    }
-    *in_quotes = !*in_quotes;
-    index + 1
 }
 
 fn push_repeat(out: &mut String, ch: char, count: usize) {
@@ -246,12 +352,14 @@ fn is_command_whitespace(ch: char) -> bool {
     ch == ' ' || ch == '\t'
 }
 
-fn is_packed_command_line(token: &str) -> bool {
-    if !token.chars().any(is_command_whitespace) {
-        return false;
-    }
-    let lower = token.to_ascii_lowercase();
-    lower.contains("startrenderer") || token.contains('-') || token.contains('/')
+fn is_renderer_launch(argv: &[String]) -> bool {
+    argv.first()
+        .is_some_and(|token| token.eq_ignore_ascii_case("STARTRENDERER"))
+        || has_renderer_connection_args(argv)
+}
+
+fn strip_launcher_only_flags(args: &[String]) -> Vec<String> {
+    crate::cli::parse_bootstrap_args_tokens(args).host_args
 }
 
 fn parse_renderer_launch_message_from_argv(mut argv: Vec<String>) -> RendererLaunchRequest {
@@ -309,9 +417,10 @@ fn has_renderer_connection_args(args: &[String]) -> bool {
         let Some(flag) = parse_flag(arg) else {
             continue;
         };
-        if flag.name.ends_with("queuename") {
+        // Exact names only. A suffix match would treat `-NotQueueName` as the renderer handoff.
+        if flag.name == "queuename" {
             saw_name = true;
-        } else if flag.name.ends_with("queuecapacity") {
+        } else if flag.name == "queuecapacity" {
             saw_capacity = true;
         }
     }
@@ -445,43 +554,93 @@ mod tests {
     }
 
     #[test]
-    fn packed_launcher_line_forwards_unknown_args_and_strips_launcher_flags() {
+    fn quote_split_roundtrip_backslashes_whitespace_and_unc() {
+        let args = owned(&[
+            r#"a\\"b"#,
+            r#"\""#,
+            r"C:\dir\\",
+            "   ",
+            "\t",
+            " \t ",
+            r"\\server\share\file",
+            r"\\server\share\My Documents",
+            r"a\b",
+            r"a\\b",
+            r"a\\\b",
+            r"a\\\\b",
+        ]);
+        let command = quote_windows_command_line(&args);
+        assert_eq!(split_windows_command_line(&command), args);
+    }
+
+    #[test]
+    fn split_matches_command_line_to_argvw_backslash_and_quote_runs() {
+        // Even backslashes before a quote are halved and the quote is a delimiter.
+        assert_eq!(
+            split_windows_command_line(r#"a\\"b c""#),
+            owned(&[r"a\b c"])
+        );
+        // Four backslashes are an even run as well.
+        assert_eq!(
+            split_windows_command_line(r#"a\\\\"b c""#),
+            owned(&[r"a\\b c"])
+        );
+        // Odd runs emit a literal quote. `\"` is one backslash plus a quote.
+        assert_eq!(split_windows_command_line(r#"a\"b"#), owned(&[r#"a"b"#]));
+        assert_eq!(split_windows_command_line(r#"a\\\"b"#), owned(&[r#"a\"b"#]));
+        // Argument tails from Wine's CommandLineToArgvW tests (the `exe` token omitted).
+        assert_eq!(
+            split_windows_command_line(r#"\"one \\"two" \\\"three \\\\"four" end"#),
+            owned(&[r#""one"#, r"\two", r#"\"three"#, r"\\four", "end"])
+        );
+        // Rule of three, not the C runtime's "stay quoted after `""`".
+        assert_eq!(
+            split_windows_command_line(r#""a"" b""#),
+            owned(&[r#"a""#, "b"])
+        );
+        assert_eq!(
+            split_windows_command_line(r#"two""quotes next"#),
+            owned(&["twoquotes", "next"])
+        );
+        assert_eq!(
+            split_windows_command_line(r#"three"""quotes next"#),
+            owned(&[r#"three"quotes"#, "next"])
+        );
+        assert_eq!(split_windows_command_line("\"   \""), owned(&["   "]));
+        assert_eq!(split_windows_command_line("\"\t\""), owned(&["\t"]));
+        assert_eq!(
+            split_windows_command_line(r#""\\server\share\My Documents""#),
+            owned(&[r"\\server\share\My Documents"])
+        );
+        // A trailing backslash run that does not precede a quote stays literal.
+        assert_eq!(
+            split_windows_command_line(r"C:\dir\\"),
+            owned(&[r"C:\dir\\"])
+        );
+    }
+
+    #[test]
+    fn spaced_path_and_record_url_pass_through_unchanged() {
+        for token in ["C:/Users/John Doe/x", "resrec:///G-Group Name/R-World"] {
+            let args = owned(&[token]);
+            assert_eq!(expand_launcher_args(&args), args);
+            let parsed = crate::cli::parse_bootstrap_args_tokens(&args);
+            assert_eq!(parsed.host_args, args);
+        }
+    }
+
+    #[test]
+    fn non_renderer_packed_line_is_not_split() {
         let packed = quote_windows_command_line(&owned(&[
             "--log-level",
             "debug",
             "-Screen",
             "-LoadAssembly",
             "Libraries/My Mod.dll",
-            "-Custom",
-            "still here",
-            "--resonite-dir",
-            "/games/Resonite",
         ]));
-        let parsed = crate::cli::parse_bootstrap_args_tokens(&expand_launcher_args(&[packed]));
-        assert_eq!(parsed.log_level, Some(logger::LogLevel::Debug));
-        assert_eq!(parsed.resonite_dir, Some(PathBuf::from("/games/Resonite")));
         assert_eq!(
-            parsed.host_args,
-            owned(&[
-                "-Screen",
-                "-LoadAssembly",
-                "Libraries/My Mod.dll",
-                "-Custom",
-                "still here"
-            ])
-        );
-        let forwarded = crate::orchestration::assemble_host_args(parsed.host_args, "Px");
-        assert_eq!(
-            forwarded,
-            owned(&[
-                "-Screen",
-                "-LoadAssembly",
-                "Libraries/My Mod.dll",
-                "-Custom",
-                "still here",
-                "-shmprefix",
-                "Px",
-            ])
+            expand_launcher_args(std::slice::from_ref(&packed)),
+            vec![packed]
         );
     }
 
@@ -536,6 +695,19 @@ mod tests {
             r"C:\R.exe",
             "-Screen"
         ])));
+        // Boolean and unknown switches do not consume the next token, so `none` is still
+        // autodetect. Known value-taking flags do consume it.
+        assert!(host_args_specify_output_mode(&owned(&[
+            "-Invisible",
+            "none"
+        ])));
+        assert!(host_args_specify_output_mode(&owned(&[
+            "-CustomFlag",
+            "none"
+        ])));
+        assert!(!host_args_specify_output_mode(&owned(&["-Join", "none"])));
+        // `-Device` is itself an output flag, so the value `none` is not what selects the mode.
+        assert!(host_args_specify_output_mode(&owned(&["-Device", "none"])));
     }
 
     #[test]
@@ -622,6 +794,58 @@ mod tests {
     }
 
     #[test]
+    fn delegate_matches_exact_queue_flag_names() {
+        assert!(
+            renderer_delegate_from_args(&owned(&["-NotQueueName", "q", "-QueueCapacity", "1"]))
+                .is_none()
+        );
+        assert!(
+            renderer_delegate_from_args(&owned(&["-QueueNameSuffix", "q", "-QueueCapacity", "1"]))
+                .is_none()
+        );
+        assert!(
+            renderer_delegate_from_args(&owned(&["-QueueName", "q", "-MyQueueCapacity", "1"]))
+                .is_none()
+        );
+        assert_eq!(
+            renderer_delegate_from_args(&owned(&["--QueueName", "q", "/QueueCapacity", "8"])),
+            Some(owned(&["--QueueName", "q", "/QueueCapacity", "8"]))
+        );
+    }
+
+    #[test]
+    fn delegate_strips_launcher_only_flags() {
+        let args = owned(&[
+            "--log-level",
+            "debug",
+            "-l",
+            "trace",
+            "--resonite-dir",
+            "/games/Resonite",
+            "-ResoniteDir",
+            "/other",
+            "--rollback-update",
+            "-QueueName",
+            "q",
+            "-QueueCapacity",
+            "10",
+            "-Custom",
+            "kept",
+        ]);
+        assert_eq!(
+            renderer_delegate_from_args(&args),
+            Some(owned(&[
+                "-QueueName",
+                "q",
+                "-QueueCapacity",
+                "10",
+                "-Custom",
+                "kept"
+            ]))
+        );
+    }
+
+    #[test]
     fn delegate_expands_one_packed_renderer_command() {
         let packed = "STARTRENDERER \"C:\\Program Files\\renderide.exe\" ARGS=-QueueName session -QueueCapacity 2048";
         let delegated = renderer_delegate_from_args(&owned(&[packed])).expect("delegate");
@@ -633,19 +857,64 @@ mod tests {
 
     #[test]
     fn renderer_executable_prefers_primary_then_legacy_name() {
-        let dir =
-            std::env::temp_dir().join(format!("renderide_launch_args_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = temp_launch_dir("prefer");
         let primary = dir.join(RENDERER_FILE_NAME);
         let legacy = dir.join(LEGACY_RENDERER_FILE_NAME);
         std::fs::write(&legacy, b"legacy").unwrap();
-        assert_eq!(renderer_executable_in(&dir), legacy);
+        assert_eq!(renderer_executable_in(&dir).unwrap(), legacy);
         std::fs::write(&primary, b"primary").unwrap();
-        assert_eq!(renderer_executable_in(&dir), primary);
+        assert_eq!(renderer_executable_in(&dir).unwrap(), primary);
         std::fs::remove_file(&primary).unwrap();
         std::fs::remove_file(&legacy).unwrap();
-        assert_eq!(renderer_executable_in(&dir), primary);
+        let missing = renderer_executable_in(&dir).unwrap_err();
+        assert_eq!(missing.kind(), io::ErrorKind::NotFound);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn renderer_executable_skips_candidate_that_is_this_process() {
+        let dir = temp_launch_dir("self");
+        let primary = dir.join(RENDERER_FILE_NAME);
+        let legacy = dir.join(LEGACY_RENDERER_FILE_NAME);
+        std::fs::write(&legacy, b"self").unwrap();
+
+        let err = select_renderer_executable(&dir, Some(legacy.as_path())).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("re-launch the launcher"), "{err}");
+
+        std::fs::write(&primary, b"primary").unwrap();
+        assert_eq!(
+            select_renderer_executable(&dir, Some(legacy.as_path())).unwrap(),
+            primary
+        );
+        assert_eq!(
+            select_renderer_executable(&dir, Some(primary.as_path())).unwrap(),
+            legacy
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn renderer_executable_in_rejects_symlink_to_current_exe() {
+        let dir = temp_launch_dir("symlink");
+        let legacy = dir.join(LEGACY_RENDERER_FILE_NAME);
+        let current = std::env::current_exe().unwrap();
+        std::os::unix::fs::symlink(&current, &legacy).unwrap();
+        let err = renderer_executable_in(&dir).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("re-launch the launcher"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn temp_launch_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "renderide_launch_args_{label}_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 }
