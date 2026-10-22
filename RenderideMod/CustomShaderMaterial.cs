@@ -247,7 +247,11 @@ public partial class CustomShaderMaterial : SingleShaderMaterialProvider
     /// <summary>
     /// Hash of this material's property names and their settled ids.
     /// Another component's results do not change it.
-    /// The sorted name list is rebuilt after sync-list changes and after a dynvar rebind.
+    /// The sorted name list is rebuilt after sync-list changes and after dynvar names
+    /// change. <see cref="BindDynVars"/> rebuilds <c>_dynVarNames</c> through
+    /// <c>RebuildDynVarNames</c>, and <see cref="UnbindDynVars"/> clears it. Both of those
+    /// call <see cref="InvalidateResolutionNames"/> because neither runs through
+    /// <see cref="OnChanges"/>. A value-only resample does not.
     /// </summary>
     private int NameResolutionState()
     {

@@ -74,8 +74,9 @@ public partial class CustomShaderMaterial
             _samples.AddRange(snapshot.Samples);
             _dynBindings.Clear();
             _dynBindings.AddRange(next);
+            // RebuildDynVarNames marks the cached property-name list dirty.
+            // OnChanges does not run for this path.
             RebuildDynVarNames();
-            InvalidateResolutionNames();
             PruneTextureTokens();
             _dynPrefix = prefix;
             QueueDynVarPropertyIds();
@@ -99,6 +100,10 @@ public partial class CustomShaderMaterial
         _samples.Clear();
         _dynBindings.Clear();
         _dynVarNames.Clear();
+        // OnChanges rebuilds the cached name list only for sync-list edits.
+        // Disable and destroy clear dynvar names without OnChanges, so the next
+        // NameResolutionState would keep hashing names that are no longer bound.
+        InvalidateResolutionNames();
         _textureTokens.Clear();
         _dynPrefix = null;
         _dynLoggedNames = "";
@@ -509,6 +514,13 @@ public partial class CustomShaderMaterial
         _dynVarNames.Clear();
         foreach (var binding in _dynBindings)
             _dynVarNames.Add(binding.Property);
+        // BindDynVars is not an OnChanges. The cached sorted name list
+        // (_resolutionNames) is rebuilt only when _resolutionNamesDirty is set,
+        // which OnEnabled and OnChanges do for sync lists. A rebind that adds or
+        // drops a dynvar property has to set that flag here, or the settled-id
+        // hash keeps the previous names and a new id never dirties this material.
+        // A value-only resample does not call this: it keeps the property names.
+        InvalidateResolutionNames();
     }
 
     private void LogDynVarNames()
