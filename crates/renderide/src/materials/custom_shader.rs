@@ -348,6 +348,14 @@ pub(crate) fn clear_material_override(material_asset_id: i32) -> bool {
     overrides::clear(material_asset_id)
 }
 
+/// `true` when `material_asset_id` is assigned to a key that is currently installed.
+///
+/// Draw resolution uses this to drop host variant bits. The bits belong to the stock shader
+/// asset (Unlit `_ALPHATEST` is bit 0) and are not custom keyword indices.
+pub(crate) fn has_installed_material_override(material_asset_id: i32) -> bool {
+    overrides::stem_for_material(material_asset_id).is_some()
+}
+
 /// Replaces `stock` when `material_asset_id` has an installed custom program assigned.
 pub(crate) fn apply_material_shader_override(
     material_asset_id: i32,
@@ -478,6 +486,9 @@ pub(crate) fn target_wgsl(stem: &str) -> Option<Arc<str>> {
 }
 
 /// Specialization key for a custom stem's keyword mask, or `None` when the stem has no keywords.
+///
+/// `variant_bits` is `None` for a per-material override, so only toggle floats contribute.
+/// Shader-name routes pass the host bits through [`keyword_mask`].
 pub(crate) fn keyword_specialization_key(
     stem: &str,
     variant_bits: Option<u32>,
@@ -507,8 +518,13 @@ pub(crate) fn keyword_names(stem: &str) -> Option<Arc<[String]>> {
 /// Variant mask for a custom stem.
 ///
 /// Returns `None` when `stem` has no keywords, so packaged specialization stays on pipeline
-/// constants. Bit `i` is set when host `variant_bits` has that bit or `float_for_name` for
-/// keyword `i` is nonzero.
+/// constants. Bit `i` is set when `variant_bits` has that bit or `float_for_name` for keyword
+/// `i` is nonzero.
+///
+/// Draw resolution passes `variant_bits: None` when the material reached `stem` through
+/// [`apply_material_shader_override`]. Host Unlit bits are then ignored, so `_ALPHATEST` (bit 0)
+/// cannot force custom keyword 0 and a zero float can turn that keyword off. A stem reached by
+/// shader name still passes the host bits, and those bits keep this OR.
 pub(crate) fn keyword_mask(
     stem: &str,
     variant_bits: Option<u32>,

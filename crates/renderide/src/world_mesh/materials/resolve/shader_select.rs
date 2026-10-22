@@ -21,3 +21,19 @@ pub(super) fn resolve_material_shader(
         crate::materials::custom_shader::apply_material_shader_override(material_asset_id, stock);
     (shader_asset_id, pipeline)
 }
+
+/// Host variant bits that may OR into custom keyword declaration indices.
+///
+/// A material whose stem came from [`crate::materials::custom_shader::apply_material_shader_override`]
+/// returns `None`. Unlit `_ALPHATEST` is bit 0 and is not custom keyword 0. A stem reached by
+/// shader name still returns the route's bits.
+pub(super) fn keyword_host_bits(
+    material_asset_id: i32,
+    shader_asset_id: i32,
+    router: &MaterialRouter,
+) -> Option<u32> {
+    if crate::materials::custom_shader::has_installed_material_override(material_asset_id) {
+        return None;
+    }
+    router.variant_bits_for_shader_asset(shader_asset_id)
+}

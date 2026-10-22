@@ -15,7 +15,7 @@ namespace RenderideMod;
 /// A second material can stay on the packaged Unlit program. Floats, colors, and textures
 /// are written with <see cref="MaterialUpdateWriter"/> using property ids from
 /// <see cref="Ipc.MaterialPropertyIds"/>. Keywords in the packaged Unlit set go through
-/// <see cref="UpdateKeywords"/>. Any other keyword is a 0/1 float of the same name.
+/// <see cref="UpdateKeywords"/>. Every keyword is also a 0/1 float of the same name.
 /// </para>
 /// <para>
 /// Enable and a non-empty <see cref="ShaderKey"/> assign. Disable, destroy, and a cleared key
@@ -38,20 +38,19 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
     public readonly SyncList<TextureEntry> Textures;
 
     /// <summary>
-    /// Named shader keywords. Unlit metadata keywords use <see cref="UpdateKeywords"/>.
-    /// Other names are uploaded as 0/1 floats.
+    /// Named shader keywords. Each row is uploaded as a 0/1 float. <see cref="UpdateKeywords"/>
+    /// also tracks the sync value for packaged Unlit while the override is not installed.
     /// </summary>
     public readonly SyncList<KeywordEntry> Keywords;
 
     private readonly HashSet<string> _floatKeywords = new(StringComparer.Ordinal);
     private readonly HashSet<string> _clearKeywordFloats = new(StringComparer.Ordinal);
-    private readonly HashSet<string> _writtenKeywordFloats = new(StringComparer.Ordinal);
 
     private static bool _propertiesInitialized;
     private int? _boundMaterialId;
     private string? _boundKey;
     private string? _rejectedKey;
-    private int _propertyGeneration;
+    private int? _nameState;
 
     /// <summary>Packaged Unlit shader. The custom program replaces it per material, not by name.</summary>
     protected override Uri ShaderURL => OfficialAssets.Shaders.Unlit;
@@ -102,10 +101,10 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
 
         EnsurePropertiesInitialized();
         QueuePropertyIds();
-        var generation = Ipc.MaterialPropertyIds.Generation;
-        if (generation != _propertyGeneration || PropertiesPending())
+        var nameState = NameResolutionState();
+        if (_nameState != nameState)
         {
-            _propertyGeneration = generation;
+            _nameState = nameState;
             MarkChangeDirty();
         }
 
@@ -129,8 +128,11 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
     /// <summary>Sets keyword state from <see cref="Keywords"/>.</summary>
     /// <param name="keywords">Host keyword set for this material.</param>
     /// <remarks>
-    /// <c>SetKeyword</c> only accepts names in the packaged Unlit metadata. A miss returns -1
-    /// and the keyword is dropped. Those names are recorded for <see cref="PushKeywordFloats"/>.
+    /// Every row is uploaded as a 0/1 float from <see cref="PushKeywordFloats"/>. The override
+    /// path ignores host variant bits, so a name <c>SetKeyword</c> accepts must still be a float.
+    /// <see cref="ShaderKeywords.UpdateKeyword"/> is the only host call: it tracks the
+    /// <see cref="Sync{T}"/> while this material is still drawing packaged Unlit.
+    /// <c>SetKeyword</c> is not also called; it would snapshot the bool a second time.
     /// </remarks>
     protected override void UpdateKeywords(ShaderKeywords keywords)
     {
@@ -140,8 +142,6 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
             if (!TryPropertyName(entry.PropertyName, out var keyword))
                 continue;
             keywords.UpdateKeyword(keyword, entry.Value);
-            if (keywords.SetKeyword(keyword, entry.Value.Value) >= 0)
-                continue;
             live.Add(keyword);
             Ipc.MaterialPropertyIds.Request(keyword);
         }
@@ -209,36 +209,34 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
         return false;
     }
 
-    private bool PropertiesPending()
+    /// <summary>
+    /// Hash of this material's property names and their settled ids.
+    /// Another component's results do not change it.
+    /// </summary>
+    private int NameResolutionState()
     {
-        if (KeywordFloatsPending())
-            return true;
-        foreach (var entry in Floats)
-        {
-            if (NamePending(entry.PropertyName))
-                return true;
-        }
-
-        foreach (var entry in Colors)
-        {
-            if (NamePending(entry.PropertyName))
-                return true;
-        }
-
-        foreach (var entry in Textures)
-        {
-            if (NamePending(entry.PropertyName))
-                return true;
-        }
-
-        return false;
+        var names = new List<string>();
+        CollectPropertyNames(names);
+        names.Sort(StringComparer.Ordinal);
+        return Ipc.MaterialPropertyIds.StateFor(names);
     }
 
-    private static bool NamePending(Sync<string> name)
+    private void CollectPropertyNames(List<string> names)
     {
-        if (!TryPropertyName(name, out var property))
-            return false;
-        return !Ipc.MaterialPropertyIds.IsSettled(property);
+        foreach (var entry in Floats)
+            AddPropertyName(names, entry.PropertyName);
+        foreach (var entry in Colors)
+            AddPropertyName(names, entry.PropertyName);
+        foreach (var entry in Textures)
+            AddPropertyName(names, entry.PropertyName);
+        foreach (var entry in Keywords)
+            AddPropertyName(names, entry.PropertyName);
+    }
+
+    private static void AddPropertyName(List<string> names, Sync<string> name)
+    {
+        if (TryPropertyName(name, out var property))
+            names.Add(property);
     }
 
     private static void RequestId(Sync<string> name)
@@ -319,22 +317,6 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
             return;
 
         _clearKeywordFloats.Clear();
-        _writtenKeywordFloats.Clear();
-        foreach (var keyword in _floatKeywords)
-            _writtenKeywordFloats.Add(keyword);
-    }
-
-    private bool KeywordFloatsPending()
-    {
-        if (_clearKeywordFloats.Count > 0 || _writtenKeywordFloats.Count != _floatKeywords.Count)
-            return true;
-        foreach (var keyword in _floatKeywords)
-        {
-            if (!_writtenKeywordFloats.Contains(keyword))
-                return true;
-        }
-
-        return false;
     }
 
     private void SyncAssignment()

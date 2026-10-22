@@ -21,8 +21,8 @@ use super::common::{empty_texture_pools, lookup, read_f32_at, read_f32x4};
 const RAINBOW_WGSL: &str =
     include_str!("../../../../../../../RenderideMod/Shaders/example_rainbow.wgsl");
 const KEY: &str = "MaterialContractRainbow";
-const ASSIGNED: i32 = 41_01;
-const STOCK: i32 = 41_02;
+const ASSIGNED: i32 = 4101;
+const STOCK: i32 = 4102;
 const UNLIT: &str = "unlit_default";
 /// Host Unlit `_COLOR` bit. Custom `RAINBOW` is bit 0, so this bit must not force the hue cycle.
 const UNLIT_COLOR_BIT: u32 = 1 << 1;
