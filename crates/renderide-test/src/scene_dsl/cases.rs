@@ -66,6 +66,9 @@ pub enum CaseTemplate {
     CustomShaderPropertyUpdate,
     /// Poincare-disk tiling and a raymarched gyroid, each with `_Speed` 0.
     ExoticShaderPair,
+    /// Rainbow custom shader beside packaged Unlit. `plain.png` is the assigned pair.
+    /// `actual.png` is the frame after the left material is cleared.
+    CustomShaderBesideUnlit,
 }
 
 /// Default golden directory, relative to the workspace root: `crates/renderide-test/goldens/`.
@@ -185,6 +188,28 @@ pub fn custom_shader_property_update() -> IntegrationCase {
     }
 }
 
+/// Rainbow on the left (`RAINBOW` off) and packaged textured Unlit on the right, then clear.
+pub fn custom_shader_beside_unlit() -> IntegrationCase {
+    IntegrationCase {
+        name: "custom_shader_beside_unlit".to_string(),
+        description:
+            "Left quad is ExampleRainbowWgsl with RAINBOW off. Right quad is packaged Unlit on _Tex. The compared frame clears the left material."
+                .to_string(),
+        golden_path: default_goldens_dir().join("custom_shader_beside_unlit.png"),
+        resolution: (320, 320),
+        tolerance: Tolerance {
+            ssim_min: Some(0.72),
+            max_abs_diff: Some(56),
+            max_failing_pixel_fraction: Some(0.22),
+            min_luma_range: Some(20),
+            min_unique_colors: Some(8),
+            min_non_background_pixel_fraction: Some(0.12),
+            combine: Combine::Or,
+        },
+        template: CaseTemplate::CustomShaderBesideUnlit,
+    }
+}
+
 /// Poincare disk on the left and a gyroid SDF on the right. Both materials keep `_Speed` at 0.
 pub fn exotic_shader_pair() -> IntegrationCase {
     IntegrationCase {
@@ -230,6 +255,7 @@ pub fn registry() -> Vec<IntegrationCase> {
         pbs_lit_material_matrix(),
         alpha_cutout_masked_quads(),
         custom_shader_property_update(),
+        custom_shader_beside_unlit(),
         exotic_shader_pair(),
     ];
     let gltf_fixture = default_fixture_path();
@@ -248,7 +274,9 @@ impl IntegrationCase {
     /// Golden for the pre-update capture, when this case records two frames.
     pub fn plain_capture_golden(&self) -> Option<PathBuf> {
         match self.template {
-            CaseTemplate::CustomShaderPropertyUpdate => Some(plain_png_path(&self.golden_path)),
+            CaseTemplate::CustomShaderPropertyUpdate | CaseTemplate::CustomShaderBesideUnlit => {
+                Some(plain_png_path(&self.golden_path))
+            }
             _ => None,
         }
     }

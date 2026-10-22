@@ -27,8 +27,16 @@ internal static class MaterialPropertyIds
     private static readonly Dictionary<int, string[]> Inflight = new();
     private static readonly Dictionary<MessagingManager, RenderCommandHandler> Installed = new();
 
+    /// <summary>
+    /// Flushes with an unanswered request before those names are sent again.
+    /// The background result normally lands within a frame. A missed handler
+    /// install must not leave the name inflight forever.
+    /// </summary>
+    private const int RetryAfterIdleFlushes = 8;
+
     private static int _nextRequestId = RequestIdBase;
     private static int _generation;
+    private static int _idleFlushes;
     private static bool _hookMissLogged;
 
     /// <summary>Bumps when a result is stored. Components dirty themselves when it changes.</summary>
@@ -69,6 +77,16 @@ internal static class MaterialPropertyIds
     }
 
     /// <summary>
+    /// True once a result has stored <paramref name="name"/>, including a non-positive id.
+    /// Callers stop waiting on names that will never become writable.
+    /// </summary>
+    internal static bool IsSettled(string name)
+    {
+        lock (Gate)
+            return Ids.ContainsKey(name);
+    }
+
+    /// <summary>
     /// Hooks <c>_background</c> (and <c>_primary</c> when present), then sends one
     /// <see cref="MaterialPropertyIdRequest"/> for every name still pending.
     /// Property id results arrive on the background queue.
@@ -82,11 +100,28 @@ internal static class MaterialPropertyIds
         int requestId;
         lock (Gate)
         {
+            if (Pending.Count == 0 && Inflight.Count > 0)
+            {
+                _idleFlushes++;
+                if (_idleFlushes >= RetryAfterIdleFlushes)
+                {
+                    foreach (var inflight in Inflight.Values)
+                    {
+                        foreach (var name in inflight)
+                            Pending.Add(name);
+                    }
+
+                    Inflight.Clear();
+                    _idleFlushes = 0;
+                }
+            }
+
             if (Pending.Count == 0)
                 return;
             if (_nextRequestId == int.MaxValue)
                 return;
 
+            _idleFlushes = 0;
             names = new string[Pending.Count];
             Pending.CopyTo(names);
             Pending.Clear();

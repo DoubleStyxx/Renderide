@@ -200,7 +200,7 @@ Limits:
 
 `PropertyName` is the WGSL name (`_Color`, `_MainTex`, `_Speed`, `RAINBOW`). Blank names are skipped. The entry field is not named `Name` because that hides `SyncObject.Name`.
 
-Property ids are not names. Stock materials declare static `MaterialProperty` fields; `MaterialProviderBase` reflects them once per type and `RenderMaterialManager` resolves them with `MaterialPropertyIdRequest`, guarded by static `PropertiesInitialized`. `CustomShaderMaterial` has no static `MaterialProperty` fields. Each list name is requested on first use and on rename through the same `MaterialPropertyIdRequest` command (request ids start at `1<<30`). The renderer answers on the background queue. The mod reads that result from `RenderiteMessagingHost._background` (and `_primary` if that field is present). Results whose request id is `>= 1<<30` are not forwarded to `RenderMaterialManager`. `SetFloat`, `SetColor`, and `SetTexture` use the returned int. Writes wait until the id is positive. `_MainTex_ST` is not a row on this component; an unset `*_ST` stays `(1, 1, 0, 0)`.
+Property ids are not names. Stock materials declare static `MaterialProperty` fields; `MaterialProviderBase` reflects them once per type and `RenderMaterialManager` resolves them with `MaterialPropertyIdRequest`, guarded by static `PropertiesInitialized`. `CustomShaderMaterial` has no static `MaterialProperty` fields. That init sends no request and never sets the flag, so the host would leave `AssetId` at `-1` and skip `UpdateMaterial`. The component sets `PropertiesInitialized` itself in that case. Each list name, including keyword rows, is requested on first use and on rename through the same `MaterialPropertyIdRequest` command (request ids start at `1<<30`). The renderer answers on the background queue. The mod reads that result from `RenderiteMessagingHost._background` (and `_primary` if that field is present). Results whose request id is `>= 1<<30` are not forwarded to `RenderMaterialManager`. `SetFloat`, `SetColor`, and `SetTexture` use the returned int. Writes wait until the id is positive. The material stays change-dirty until every current name has a stored result, and an unanswered request is sent again after several frames. A stored id of `0` is not retried. `_MainTex_ST` is not a row on this component; an unset `*_ST` stays `(1, 1, 0, 0)`.
 
 Enable, and any change of `ShaderKey` to a non-empty value, calls `CustomShaders.AssignMaterial(AssetId, ShaderKey)`. Disable, destroy, and a cleared or whitespace key call `CustomShaders.ClearMaterial`. `AssetId` is `DynamicRendererAsset.AssetId` (`public int`, default `-1`). The assign waits while it is negative. It is not a `ShaderUpload` carrier id.
 
@@ -251,6 +251,8 @@ Fail triage:
 ## Smoke test: rainbow beside unlit
 
 Two materials in one world. One draws `ExampleRainbowWgsl` through `CustomShaderMaterial`. The other is stock `UnlitMaterial`. Install rainbow under its own key so the Unlit shader asset stays on the packaged stem.
+
+Headless coverage of that split is the `custom_shader_beside_unlit` case in `renderide-test`. The left material is `ExampleRainbowWgsl` with `RAINBOW` off (`_MainTex * _Color`). The right material stays packaged Unlit on `_Tex`. The second frame clears the left material. `custom_shader_property_update` is the frame that turns `RAINBOW` on.
 
 1. `dotnet build RenderideMod -c Release` and run Resonite with Renderide, same as the smoke test above.
 2. After RenderideMod loads, call `CustomShaders.Install("Rainbow", CustomShaders.ExampleRainbowWgsl);`.

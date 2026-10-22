@@ -33,6 +33,7 @@ use super::ipc_setup::{DEFAULT_QUEUE_CAPACITY_BYTES, connect_session};
 use super::lockstep::{FrameSubmitScalars, LockstepDriver};
 
 mod bench_drive;
+mod beside_unlit;
 mod config;
 mod consts;
 mod custom_property;
@@ -100,6 +101,9 @@ pub enum SessionTemplate {
     CustomShaderPropertyUpdate,
     /// Poincare disk on the left quad and a gyroid on the right. Both materials set `_Speed` to 0.
     ExoticShaderPair,
+    /// Rainbow custom shader on the left quad (`RAINBOW` off) and packaged Unlit on the right.
+    /// The session renders twice: the assigned pair, then again after the left material is cleared.
+    CustomShaderBesideUnlit,
 }
 
 /// Drives the full session end-to-end. The renderer process is killed on `Err` via [`Drop`] of
@@ -133,8 +137,7 @@ pub(super) fn run_session(
         DEFAULT_HANDSHAKE_TIMEOUT,
     )?;
 
-    let property_recapture = matches!(template, SessionTemplate::CustomShaderPropertyUpdate);
-    let exotic_pair = matches!(template, SessionTemplate::ExoticShaderPair);
+    let extras = SessionExtras::from_template(&template);
     let setup = build_scene_setup(template);
     let _uploaded_meshes = upload_scene_meshes(
         &mut session.queues,
@@ -150,12 +153,7 @@ pub(super) fn run_session(
         &backing_dir,
         &setup,
     )?;
-    if property_recapture {
-        custom_property::install_and_assign(&mut session.queues, &mut lockstep, &setup)?;
-    }
-    if exotic_pair {
-        exotic_pair::install_and_assign(&mut session.queues, &mut lockstep, &setup)?;
-    }
+    install_session_shaders(&mut session.queues, &mut lockstep, &setup, extras)?;
 
     let scene = build_scene_state(&prefix, &backing_dir, &setup.scene, &mut lockstep)?;
 
@@ -184,27 +182,95 @@ pub(super) fn run_session(
         },
         renderer,
     )?;
-    let _property_update = if property_recapture {
-        Some(custom_property::recapture_after_property_update(
-            custom_property::PropertyRecapture {
-                queues: &mut session.queues,
-                lockstep: &mut lockstep,
-                prefix: &prefix,
-                backing_dir: &backing_dir,
-                setup: &setup,
-                output_path: &cfg.output_path,
-                timeout: cfg.timeout,
-                renderer,
-            },
-        )?)
-    } else {
-        None
-    };
+    recapture_second_frame(SecondFrameRecapture {
+        extras,
+        queues: &mut session.queues,
+        lockstep: &mut lockstep,
+        prefix: &prefix,
+        backing_dir: &backing_dir,
+        setup: &setup,
+        output_path: &cfg.output_path,
+        timeout: cfg.timeout,
+        renderer,
+    })?;
     drop(scene);
 
     request_shutdown_and_wait(&mut session.queues, &mut spawned)?;
 
     Ok(png_outcome)
+}
+
+#[derive(Clone, Copy)]
+struct SessionExtras {
+    property_recapture: bool,
+    exotic_pair: bool,
+    beside_unlit: bool,
+}
+
+impl SessionExtras {
+    fn from_template(template: &SessionTemplate) -> Self {
+        Self {
+            property_recapture: matches!(template, SessionTemplate::CustomShaderPropertyUpdate),
+            exotic_pair: matches!(template, SessionTemplate::ExoticShaderPair),
+            beside_unlit: matches!(template, SessionTemplate::CustomShaderBesideUnlit),
+        }
+    }
+}
+
+fn install_session_shaders(
+    queues: &mut renderide_shared::ipc::HostDualQueueIpc,
+    lockstep: &mut LockstepDriver,
+    setup: &SceneSetup,
+    extras: SessionExtras,
+) -> Result<(), HarnessError> {
+    if extras.property_recapture {
+        custom_property::install_and_assign(queues, lockstep, setup)?;
+    }
+    if extras.exotic_pair {
+        exotic_pair::install_and_assign(queues, lockstep, setup)?;
+    }
+    if extras.beside_unlit {
+        beside_unlit::install_and_assign(queues, lockstep, setup)?;
+    }
+    Ok(())
+}
+
+struct SecondFrameRecapture<'a> {
+    extras: SessionExtras,
+    queues: &'a mut renderide_shared::ipc::HostDualQueueIpc,
+    lockstep: &'a mut LockstepDriver,
+    prefix: &'a str,
+    backing_dir: &'a std::path::Path,
+    setup: &'a SceneSetup,
+    output_path: &'a std::path::Path,
+    timeout: Duration,
+    renderer: &'a mut std::process::Child,
+}
+
+fn recapture_second_frame(frame: SecondFrameRecapture<'_>) -> Result<(), HarnessError> {
+    if frame.extras.property_recapture {
+        custom_property::recapture_after_property_update(custom_property::PropertyRecapture {
+            queues: frame.queues,
+            lockstep: frame.lockstep,
+            prefix: frame.prefix,
+            backing_dir: frame.backing_dir,
+            setup: frame.setup,
+            output_path: frame.output_path,
+            timeout: frame.timeout,
+            renderer: frame.renderer,
+        })?;
+    }
+    if frame.extras.beside_unlit {
+        beside_unlit::recapture_after_clear(beside_unlit::ClearRecapture {
+            queues: frame.queues,
+            lockstep: frame.lockstep,
+            setup: frame.setup,
+            output_path: frame.output_path,
+            timeout: frame.timeout,
+            renderer: frame.renderer,
+        })?;
+    }
+    Ok(())
 }
 
 struct SceneSetup {
@@ -283,6 +349,7 @@ fn template_label(template: &SessionTemplate) -> &'static str {
         SessionTemplate::GltfTexturedStaticMesh { .. } => "GltfTexturedStaticMesh",
         SessionTemplate::CustomShaderPropertyUpdate => "CustomShaderPropertyUpdate",
         SessionTemplate::ExoticShaderPair => "ExoticShaderPair",
+        SessionTemplate::CustomShaderBesideUnlit => "CustomShaderBesideUnlit",
     }
 }
 
@@ -310,6 +377,7 @@ fn build_scene_setup(template: SessionTemplate) -> SceneSetup {
         } => gltf_textured_static_mesh_setup(mesh, texture_rgba, texture_size),
         SessionTemplate::CustomShaderPropertyUpdate => custom_property::scene_setup(),
         SessionTemplate::ExoticShaderPair => exotic_pair::scene_setup(),
+        SessionTemplate::CustomShaderBesideUnlit => beside_unlit::scene_setup(),
     }
 }
 

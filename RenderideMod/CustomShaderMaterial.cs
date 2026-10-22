@@ -1,3 +1,4 @@
+using System.Reflection;
 using Elements.Core;
 using FrooxEngine;
 using ResoniteModLoader;
@@ -66,9 +67,18 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
     }
 
     /// <inheritdoc />
+    protected override void OnAwake()
+    {
+        base.OnAwake();
+        EnsurePropertiesInitialized();
+    }
+
+    /// <inheritdoc />
     protected override void OnEnabled()
     {
         base.OnEnabled();
+        if (EnsurePropertiesInitialized())
+            MarkChangeDirty();
         QueuePropertyIds();
         SyncAssignment();
     }
@@ -90,14 +100,15 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
         if (!Enabled.Value)
             return;
 
+        EnsurePropertiesInitialized();
+        QueuePropertyIds();
         var generation = Ipc.MaterialPropertyIds.Generation;
-        if (generation != _propertyGeneration || KeywordFloatsPending())
+        if (generation != _propertyGeneration || PropertiesPending())
         {
             _propertyGeneration = generation;
             MarkChangeDirty();
         }
 
-        QueuePropertyIds();
         SyncAssignment();
     }
 
@@ -166,6 +177,68 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
             RequestId(entry.PropertyName);
         foreach (var entry in Textures)
             RequestId(entry.PropertyName);
+        foreach (var entry in Keywords)
+            RequestId(entry.PropertyName);
+    }
+
+    /// <summary>
+    /// Stock property init only flips <see cref="PropertiesInitialized"/> after it resolves
+    /// static <c>MaterialProperty</c> fields. This type has none, so that init never sends a
+    /// request and never sets the flag. The host then leaves <see cref="AssetId"/> at -1 and
+    /// never calls <see cref="UpdateMaterial"/>. Setting the flag lets the packaged Unlit
+    /// upload run; named rows still wait on <see cref="Ipc.MaterialPropertyIds"/>.
+    /// </summary>
+    /// <returns>True when this call stored the flag.</returns>
+    private bool EnsurePropertiesInitialized()
+    {
+        if (PropertiesInitialized || HasStaticMaterialProperties())
+            return false;
+        PropertiesInitialized = true;
+        return true;
+    }
+
+    private static bool HasStaticMaterialProperties()
+    {
+        const BindingFlags flags = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+        foreach (var field in typeof(CustomShaderMaterial).GetFields(flags))
+        {
+            if (field.FieldType.Name == "MaterialProperty")
+                return true;
+        }
+
+        return false;
+    }
+
+    private bool PropertiesPending()
+    {
+        if (KeywordFloatsPending())
+            return true;
+        foreach (var entry in Floats)
+        {
+            if (NamePending(entry.PropertyName))
+                return true;
+        }
+
+        foreach (var entry in Colors)
+        {
+            if (NamePending(entry.PropertyName))
+                return true;
+        }
+
+        foreach (var entry in Textures)
+        {
+            if (NamePending(entry.PropertyName))
+                return true;
+        }
+
+        return false;
+    }
+
+    private static bool NamePending(Sync<string> name)
+    {
+        if (!TryPropertyName(name, out var property))
+            return false;
+        return !Ipc.MaterialPropertyIds.IsSettled(property);
     }
 
     private static void RequestId(Sync<string> name)
@@ -222,7 +295,8 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
                 continue;
             if (!Ipc.MaterialPropertyIds.TryGet(keyword, out var propertyId))
             {
-                wroteAll = false;
+                if (!Ipc.MaterialPropertyIds.IsSettled(keyword))
+                    wroteAll = false;
                 continue;
             }
 
@@ -233,7 +307,8 @@ public class CustomShaderMaterial : SingleShaderMaterialProvider
         {
             if (!Ipc.MaterialPropertyIds.TryGet(keyword, out var propertyId))
             {
-                wroteAll = false;
+                if (!Ipc.MaterialPropertyIds.IsSettled(keyword))
+                    wroteAll = false;
                 continue;
             }
 
