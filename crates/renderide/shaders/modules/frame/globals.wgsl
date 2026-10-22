@@ -172,6 +172,52 @@ fn world_to_view_normal_for_view(world_n: vec3<f32>, view_layer: u32) -> vec3<f3
     ), vec3<f32>(0.0, 0.0, 1.0));
 }
 
+/// Transforms a world position into the active view layer's view space, including the eye translation.
+fn world_to_view_position_for_view(world_pos: vec3<f32>, view_layer: u32) -> vec3<f32> {
+    let x_coeffs = view_space_x_coeffs_for_view(view_layer);
+    let y_coeffs = view_space_y_coeffs_for_view(view_layer);
+    let z_coeffs = view_space_z_coeffs_for_view(view_layer);
+    return vec3<f32>(
+        dot(x_coeffs.xyz, world_pos) + x_coeffs.w,
+        dot(y_coeffs.xyz, world_pos) + y_coeffs.w,
+        dot(z_coeffs.xyz, world_pos) + z_coeffs.w,
+    );
+}
+
+/// Unit view-space direction from the camera toward `view_pos`.
+///
+/// Orthographic views keep the optical axis `(0, 0, -1)`. Perspective views use the translated
+/// position, which differs per eye even when the two view rotations match.
+fn matcap_view_dir_from_camera(view_pos: vec3<f32>, view_layer: u32) -> vec3<f32> {
+    let fallback = vec3<f32>(0.0, 0.0, -1.0);
+    if (view_is_orthographic(view_layer)) {
+        return fallback;
+    }
+    return safe_normalize_or(view_pos, fallback);
+}
+
+/// Matcap texture UV for one view layer.
+///
+/// Mono permutations keep the Unity `UNITY_MATRIX_V` lookup (`n_view.xy`), which is upright for
+/// desktop and in-world cameras. Multiview HMD eyes are typically parallel, so that rotation-only
+/// UV is the same in both eyes and the matcap sticks to the screen. The multiview path
+/// perspective-corrects with the per-eye view ray. On an eye's optical axis
+/// (`view_dir = (0, 0, -1)`) the correction equals `n_view.xy`.
+fn matcap_uv_for_view(n_view: vec3<f32>, world_pos: vec3<f32>, view_layer: u32) -> vec2<f32> {
+    let orientation_uv = n_view.xy * 0.5 + vec2<f32>(0.5);
+#ifdef MULTIVIEW
+    let view_dir = matcap_view_dir_from_camera(
+        world_to_view_position_for_view(world_pos, view_layer),
+        view_layer,
+    );
+    let c = cross(view_dir, n_view);
+    return vec2<f32>(-c.y, c.x) * 0.5 + vec2<f32>(0.5);
+#else
+    // Keep the position and layer live so the mono fragment interface still carries them.
+    return orientation_uv + vec2<f32>((world_pos.x + f32(view_layer)) * 0.0, 0.0);
+#endif
+}
+
 /// Unit vector from a world position toward the orthographic camera plane.
 fn orthographic_view_dir_for_view(view_layer: u32) -> vec3<f32> {
     let z_coeffs = view_space_z_coeffs_for_view(view_layer);

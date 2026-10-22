@@ -173,7 +173,9 @@ fn matcap_shader_uses_active_view_normal_basis() -> io::Result<()> {
         "@location(4) @interpolate(flat) view_layer: u32,",
         "out.view_layer = view_layer;",
         "let n_view = rg::world_to_view_normal_for_view(n_world, view_layer);",
-        "let uv = n_view.xy * 0.5 + vec2<f32>(0.5);",
+        "let uv = rg::matcap_uv_for_view(n_view, world_pos, view_layer);",
+        "out.world_pos = world_p.xyz;",
+        "@location(5) world_pos: vec3<f32>,",
     ] {
         assert!(
             matcap.contains(required),
@@ -197,6 +199,27 @@ fn matcap_shader_uses_active_view_normal_basis() -> io::Result<()> {
         );
     }
 
+    Ok(())
+}
+
+#[test]
+fn matcap_multiview_uv_uses_per_eye_view_position() -> io::Result<()> {
+    let globals = source_file(manifest_dir().join("shaders/modules/frame/globals.wgsl"))?;
+    for required in [
+        "fn world_to_view_position_for_view(world_pos: vec3<f32>, view_layer: u32) -> vec3<f32>",
+        "dot(x_coeffs.xyz, world_pos) + x_coeffs.w",
+        "fn matcap_view_dir_from_camera(view_pos: vec3<f32>, view_layer: u32) -> vec3<f32>",
+        "fn matcap_uv_for_view(n_view: vec3<f32>, world_pos: vec3<f32>, view_layer: u32) -> vec2<f32>",
+        "let view_dir = matcap_view_dir_from_camera(",
+        "world_to_view_position_for_view(world_pos, view_layer),",
+        "let c = cross(view_dir, n_view);",
+        "return vec2<f32>(-c.y, c.x) * 0.5 + vec2<f32>(0.5);",
+    ] {
+        assert!(
+            globals.contains(required),
+            "Matcap multiview UVs must use the per-eye translated view ray via `{required}`"
+        );
+    }
     Ok(())
 }
 

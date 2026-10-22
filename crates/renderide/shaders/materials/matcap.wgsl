@@ -1,4 +1,9 @@
 //! Matcap (`Shader "Matcap"`): tangent-space normal map, view-space normal matcap lookup.
+//!
+//! Mono views sample the view-space normal XY, matching Unity `mul((float3x3)UNITY_MATRIX_V, n)`.
+//! Multiview samples a perspective-corrected normal built from that eye's view ray. Parallel HMD
+//! eyes share a rotation, so the rotation-only UV is screen-locked; the per-eye translation is
+//! what makes the highlight move with stereo parallax.
 
 
 //#texture_default _MainTex white
@@ -44,6 +49,7 @@ struct VertexOutput {
     @location(2) world_t: vec3<f32>,
     @location(3) world_b: vec3<f32>,
     @location(4) @interpolate(flat) view_layer: u32,
+    @location(5) world_pos: vec3<f32>,
 }
 
 @vertex
@@ -75,6 +81,7 @@ fn vs_main(
     out.world_t = tbn[0];
     out.world_b = tbn[1];
     out.view_layer = view_layer;
+    out.world_pos = world_p.xyz;
     return out;
 }
 
@@ -86,6 +93,7 @@ fn fs_main(
     @location(2) world_t: vec3<f32>,
     @location(3) world_b: vec3<f32>,
     @location(4) @interpolate(flat) view_layer: u32,
+    @location(5) world_pos: vec3<f32>,
 ) -> @location(0) vec4<f32> {
     var normal_ts = vec3<f32>(0.0, 0.0, 1.0);
     if (kw_NORMALMAP()) {
@@ -101,7 +109,7 @@ fn fs_main(
     );
     let n_world = rmath::safe_normalize(tbn * normal_ts, world_n);
     let n_view = rg::world_to_view_normal_for_view(n_world, view_layer);
-    let uv = n_view.xy * 0.5 + vec2<f32>(0.5);
+    let uv = rg::matcap_uv_for_view(n_view, world_pos, view_layer);
     let col = ts::sample_tex_2d(_MainTex, _MainTex_sampler, uv, mat._MainTex_LodBias);
     return rg::retain_globals_additive(col);
 }

@@ -12,6 +12,10 @@ mod skybox_specular;
 mod uniforms;
 
 #[cfg(test)]
+mod matcap;
+#[cfg(test)]
+mod matcap_gpu;
+#[cfg(test)]
 mod tests;
 
 pub use clustered::ClusteredFrameGlobalsParams;
