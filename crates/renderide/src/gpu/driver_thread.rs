@@ -24,6 +24,7 @@ mod ring;
 mod submit_batch;
 mod submit_counters;
 mod surface_counters;
+mod swapchain_handoff;
 mod watchdog;
 mod worker;
 mod xr_finalize;
@@ -118,15 +119,18 @@ pub struct DriverThread {
 }
 
 impl DriverThread {
-    /// Spawns the driver thread. The thread owns its own clone of the wgpu [`wgpu::Queue`];
-    /// the main thread keeps the one inside [`crate::gpu::GpuContext`] for
-    /// `queue.write_buffer` / `queue.write_texture` use during encoding.
+    /// Spawns the driver thread. The thread owns its own clone of the wgpu [`wgpu::Device`]
+    /// and [`wgpu::Queue`]; the main thread keeps the ones inside [`crate::gpu::GpuContext`]
+    /// for `queue.write_buffer` / `queue.write_texture` use during encoding. The device
+    /// clone is used to poll a projection submission to GPU completion before
+    /// `xrReleaseSwapchainImage`.
     ///
     /// `gpu_queue_access_gate` is cloned from [`crate::gpu::GpuContext`]; the driver
     /// loop acquires it around every `Queue::submit` so submits cannot overlap with
     /// texture uploads or OpenXR calls that touch the same Vulkan queue. See
     /// [`crate::gpu::GpuQueueAccessGate`] for the queue-access rules it enforces.
     pub fn new(
+        device: Arc<wgpu::Device>,
         queue: Arc<wgpu::Queue>,
         gpu_queue_access_gate: crate::gpu::GpuQueueAccessGate,
         device_health: Arc<GpuDeviceHealth>,
@@ -147,7 +151,7 @@ impl DriverThread {
             .spawn(move || {
                 worker::driver_loop(
                     ring_clone,
-                    queue,
+                    worker::DriverGpuHandles { device, queue },
                     gpu_queue_access_gate,
                     errors_clone,
                     surface_counters_clone,

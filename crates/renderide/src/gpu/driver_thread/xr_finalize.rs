@@ -1,13 +1,19 @@
 //! OpenXR frame-finalize work piggybacked onto the driver thread.
 //!
 //! The main thread cannot release the OpenXR swapchain image and call `xrEndFrame` until
-//! the previous `wgpu::Queue::submit` for the swapchain-touching work has hit the queue.
-//! Doing the wait synchronously on the main thread defeats the driver-thread pipelining.
-//! Instead the main thread packages everything `xrReleaseSwapchainImage` and
-//! `xrEndFrame` need into [`XrFinalizeWork`] and attaches it to the trailing
-//! [`super::SubmitBatch`] of the VR tick. The driver runs the finalize on its own
-//! thread, then signals back via [`XrFinalizeSignal`] so the next tick's `wait_frame`
-//! can synchronise with `xrBeginFrame` ordering.
+//! the submission that wrote the image has finished on the GPU. `Queue::submit` returning
+//! is not enough: the runtime's release barrier is a later `vkQueueSubmit` that does not
+//! wait on wgpu's relay or timeline semaphore, and Vulkan does not order command buffers
+//! across those batches. See [`super::swapchain_handoff`].
+//!
+//! The main thread packages everything `xrReleaseSwapchainImage` and `xrEndFrame` need
+//! into [`XrFinalizeWork`] and attaches it to the trailing [`super::SubmitBatch`] of the
+//! VR tick. The driver polls that batch's [`wgpu::SubmissionIndex`] when the batch wrote
+//! the swapchain, then releases and ends the frame, then signals back via
+//! [`XrFinalizeSignal`] so the next tick's `wait_frame` can synchronise with `xrBeginFrame`.
+//! The poll stays on the driver thread. The next frame's `xrBeginFrame` therefore waits
+//! out the eye-copy GPU time; that is the overlap this handoff gives up so the compositor
+//! cannot sample an in-flight image.
 //!
 //! Errors observed on the driver thread are stored in a shared slot and surfaced to the
 //! main thread on the next finalize wait so existing recovery paths react one tick later.
@@ -144,10 +150,9 @@ pub struct XrProjectionFinalize {
     pub swapchain: Arc<Mutex<xr::Swapchain<xr::Vulkan>>>,
     /// Per-frame wgpu wrapper for the acquired OpenXR image.
     ///
-    /// Kept in the driver batch until after `Queue::submit` returns so command buffers that
-    /// referenced the imported image cannot outlive the wrapper. The driver drops it before
-    /// `xrReleaseSwapchainImage` so wgpu does not retain tracking state while the compositor owns
-    /// the image.
+    /// Kept alive until the submission that wrote the image is GPU-visible. The driver drops
+    /// it after that wait and before `xrReleaseSwapchainImage`, so wgpu does not retain
+    /// tracking state while the compositor owns the image.
     pub imported_color_texture: Option<wgpu::Texture>,
     /// Swapchain image index acquired for this frame.
     pub image_index: u32,
@@ -222,16 +227,20 @@ pub fn wait_for_finalize(rx: XrFinalizeReceiver) -> Result<(), RecvTimeoutError>
 /// Runs deferred OpenXR finalize work on the driver thread after the trailing batch's
 /// `Queue::submit` returns.
 ///
-/// For [`XrFinalizeKind::Projection`]: drops the per-frame wgpu image wrapper, takes the queue
-/// access gate, releases the swapchain image, drops the gate, takes the gate again, calls
-/// `xrEndFrame` with a stereo projection layer, drops the gate, clears the `frame_open` flag, and
-/// signals. For [`XrFinalizeKind::Empty`]: takes the gate, calls `xrEndFrame` with no layers,
-/// drops the gate, clears the flag, and signals.
+/// For [`XrFinalizeKind::Projection`]: waits until `submission` is GPU-visible when the batch
+/// contained command buffers, drops the per-frame wgpu image wrapper, takes the queue access
+/// gate, releases the swapchain image, drops the gate, takes the gate again, calls `xrEndFrame`
+/// with a stereo projection layer, drops the gate, clears the `frame_open` flag, and signals.
+/// For [`XrFinalizeKind::Empty`]: takes the gate, calls `xrEndFrame` with no layers, drops the
+/// gate, clears the flag, and signals. Empty frames did not write a swapchain image, so they
+/// do not wait.
 ///
 /// Errors are logged with [`logger::warn!`] and recorded in
 /// [`XrFinalizeWork::error_slot`] for the next `wait_frame` to surface.
 pub(super) fn run_xr_finalize(
     gate: &GpuQueueAccessGate,
+    device: &wgpu::Device,
+    submission: &wgpu::SubmissionIndex,
     work: XrFinalizeWork,
     flight_recorder: Arc<GpuFlightRecorder>,
 ) -> Result<(), xr::sys::Result> {
@@ -244,9 +253,14 @@ pub(super) fn run_xr_finalize(
     } = work;
 
     let result = match kind {
-        XrFinalizeKind::Projection(payload) => {
-            run_projection_finalize(gate, payload, submit_context, &flight_recorder)
-        }
+        XrFinalizeKind::Projection(payload) => run_projection_finalize(
+            gate,
+            device,
+            submission,
+            payload,
+            submit_context,
+            &flight_recorder,
+        ),
         XrFinalizeKind::Empty {
             frame_stream,
             env_blend_mode,
@@ -283,15 +297,36 @@ pub(super) fn run_xr_finalize(
 /// Runs stereo projection finalize work.
 fn run_projection_finalize(
     gate: &GpuQueueAccessGate,
+    device: &wgpu::Device,
+    submission: &wgpu::SubmissionIndex,
     mut payload: Box<XrProjectionFinalize>,
     submit_context: XrFinalizeSubmitContext,
     flight_recorder: &Arc<GpuFlightRecorder>,
 ) -> Result<(), xr::sys::Result> {
+    use super::swapchain_handoff::{
+        ProjectionGpuWaitRequest, SwapchainHandoffPhase, commit_swapchain_handoff,
+        projection_handoff_events, wait_for_projection_writes,
+    };
+
     set_projection_crash_context(&payload, submit_context);
+    // The queue gate stays released across this poll. `Device::poll` waits on the
+    // device fence and does not submit; holding the gate here would deadlock a main
+    // thread blocked in `write_buffer`. The runtime's release barrier is a separate
+    // queue submit, so the copy must already be GPU-visible before that call.
+    let wait = wait_for_projection_writes(&ProjectionGpuWaitRequest {
+        device,
+        submission,
+        command_buffers: submit_context.command_buffers,
+        frame_seq: submit_context.frame_seq,
+        image_index: payload.image_index,
+    });
+    let [gpu_event, release_event, end_event] = projection_handoff_events(wait);
+    let phase = commit_swapchain_handoff(SwapchainHandoffPhase::CpuSubmitted, gpu_event);
     drop(payload.imported_color_texture.take());
     if let Some(depth) = payload.depth.as_mut() {
         drop(depth.imported_depth_texture.take());
     }
+    let phase = commit_swapchain_handoff(phase, release_event);
     record_release_image_started(&payload, flight_recorder);
     let release_res = release_image_with_watchdog(gate, &payload, submit_context, flight_recorder);
     record_release_image_result(&payload, flight_recorder, release_res);
@@ -308,6 +343,7 @@ fn run_projection_finalize(
         record_release_depth_image_result(&payload, depth, flight_recorder, release_depth_res);
         release_depth_res?;
     }
+    commit_swapchain_handoff(phase, end_event);
     record_end_frame_projection_started(&payload, flight_recorder);
     let res = end_frame_projection(gate, &payload, submit_context, Arc::clone(flight_recorder));
     record_end_frame_projection_result(&payload, flight_recorder, res);
