@@ -11,6 +11,7 @@ members = [
   "crates/interprocess",
   "crates/bootstrapper",
   "crates/logger",
+  "crates/renderide-wayland-tablet",
 ]
 
 [profile.dev]
@@ -287,3 +288,9 @@ single_match_else = "deny"
 float_cmp = "deny"
 too_long_first_doc_paragraph = "deny"
 manual_bit_width = "deny"
+
+# winit-wayland 0.31.0-beta.2 binds the tablet protocol but does not create
+# zwp_tablet_pad_v2 child objects. A connected pad aborts the process. The
+# patched copy stubs those objects until pen input is implemented.
+[patch.crates-io]
+winit-wayland = { path = "third_party/winit-wayland" }

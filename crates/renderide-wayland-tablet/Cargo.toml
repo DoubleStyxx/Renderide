@@ -1,0 +1,16 @@
+[package]
+name = "renderide-wayland-tablet"
+version = "0.1.1"
+edition = "2024"
+publish = false
+description = "Regression test for the Wayland tablet-pad launch abort."
+
+[dependencies]
+winit = "0.31.0-beta.2"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+wayland-protocols = { version = "0.32.12", features = ["server"] }
+wayland-server = "0.31.12"
+
+[lints]
+workspace = true
