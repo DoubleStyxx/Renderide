@@ -123,6 +123,14 @@ fn pack_per_draw_vp_uniforms(
     assign_canvas_depth_steps(inputs.draws, canvas_steps);
     let pack_one = |slot: &mut PaddedPerDrawUniforms, draw_index: usize| {
         let item = &inputs.draws[draw_index];
+        // Near/far follow `is_overlay` alone. The projection family also requires
+        // `overlay_proj` to be present before it treats an overlay draw as orthographic.
+        // Those agree for every draw this packer sees: `compute_view_projections` sets
+        // `overlay_proj` from this same draw list, so an overlay item always has one.
+        // The constants below are the clip planes baked into that desktop overlay ortho.
+        // The `None` arm of `canvas_bias_projection` only matches the world-matrix fallback
+        // in `projection_for_world_mesh_draw`; packing does not reach it, so it does not
+        // change this cap.
         let (near, far) = if item.is_overlay {
             (OVERLAY_CAMERA_NEAR_CLIP, OVERLAY_CAMERA_FAR_CLIP)
         } else {

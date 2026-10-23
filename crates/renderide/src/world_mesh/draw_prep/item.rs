@@ -159,8 +159,9 @@ pub struct WorldMeshDrawItem {
     /// rigid world matrix defines a usable plane. The value does not depend on the camera
     /// forward. Siblings within `0.1` mm snap to one anchor before the `0.5` mm quantum, so float
     /// noise cannot split a run. Larger values are farther from the view origin. The closer NDC
-    /// bias cap is sized at this shared distance. `None` keeps farthest-corner ordering for that
-    /// draw, and the cap then falls back to that corner.
+    /// bias cap is sized at this perpendicular distance. Under perspective a fragment at view
+    /// distance `z` is pulled about `(z / P)^2` times that capped pull. `None` keeps
+    /// farthest-corner ordering for that draw, and the cap then falls back to that corner.
     pub canvas_plane_depth: Option<f32>,
     /// `true` when [`Self::batch_key`] is a canvas UI stem.
     ///

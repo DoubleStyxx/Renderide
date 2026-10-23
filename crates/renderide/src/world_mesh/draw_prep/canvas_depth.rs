@@ -17,12 +17,18 @@
 //!
 //! The closer-direction NDC bias (sibling steps, and negative Offset units) is scaled so its
 //! view-space pull at the shared canvas plane stays within [`CANVAS_CLOSER_BIAS_CAP_METERS`].
+//! That distance is the perpendicular distance from the view origin to the plane. The same NDC
+//! delta is then applied to every fragment. Under perspective the pull grows roughly with the
+//! square of view distance, so a fragment at view distance `z` on a tilted canvas moves about
+//! `(z / P)^2` times the pull at the plane distance `P`. When the cap is binding, a fragment at
+//! `1.5 P` is pulled about `4.5` cm. Fragments closer than the plane move less. An orthographic
+//! view moves every fragment of the draw by `ndc_delta * (far - near)`, with no `(z / P)^2`
+//! growth, and the perspective formula overestimates that pull.
+//!
 //! That bias is applied in the depth test for every canvas draw with a step greater than zero
 //! or with negative Offset units, whatever the draw's `_ZWrite`. A canvas that does not write
-//! depth can still paint over opaque geometry up to 2 cm in front, because the test compares
-//! the biased depth with depth that was already written. Perspective fragments closer than the
-//! plane move less. An orthographic view moves every fragment of the draw by the same distance,
-//! `ndc_delta * (far - near)`, and the perspective formula overestimates that pull.
+//! depth can still paint over opaque geometry in front, out to that pull, because the test
+//! compares the biased depth with depth that was already written.
 //!
 //! One canvas is one plane distance. A panel tilted 60° whose plane is 1 m from the view origin
 //! sorts closer than a face-on panel at 1.5 m, including fragments of the tilted panel that
@@ -53,16 +59,17 @@ pub(crate) const CANVAS_PLANE_DEPTH_QUANTUM_METERS: f32 = 5.0e-4;
 /// running neighbor, so a chain of small gaps cannot swallow a larger one.
 pub(crate) const CANVAS_PLANE_SIBLING_SNAP_METERS: f32 = 1.0e-4;
 
-/// Maximum view-space pull of the closer-direction NDC bias, at the shared plane distance.
+/// Maximum view-space pull of the closer-direction NDC bias, at the perpendicular plane distance.
 ///
-/// Every sibling on one snapped plane uses that plane's distance, so a far corner on the same
-/// plane does not shrink the bias further. Sixty-four steps of four D24 quanta at near `0.01`
-/// and a plane `20` m away is about `61` cm toward the camera under perspective. Capping the
-/// pull at `2` cm keeps a long coplanar run from painting over opaque geometry that far in
-/// front. The depth test sees this bias whether or not the draw writes depth. One step near
-/// the camera stays four quanta, because that pull is a fraction of a millimeter. Two steps at
-/// `20` m and near `0.01` stay under the cap and stay distinct. An orthographic pull is
-/// `ndc_delta * (far - near)` and does not grow with distance.
+/// Every sibling on one snapped plane uses that plane's distance `P`, so a far corner on the
+/// same plane does not shrink the bias further. The cap is the pull at `P`, not at every
+/// fragment. Under perspective a fragment at view distance `z` is pulled about `(z / P)^2`
+/// times that amount, about `4.5` cm when `z` is `1.5 P` and the cap is binding at `2` cm.
+/// Sixty-four steps of four D24 quanta at near `0.01` and a plane `20` m away is about `61` cm
+/// toward the camera before the cap. The depth test sees this bias whether or not the draw
+/// writes depth. One step near the camera stays four quanta, because that pull is a fraction
+/// of a millimeter. Two steps at `20` m and near `0.01` stay under the cap and stay distinct.
+/// An orthographic pull is `ndc_delta * (far - near)` at every fragment.
 pub(crate) const CANVAS_CLOSER_BIAS_CAP_METERS: f32 = 0.02;
 
 /// Maximum extra canvas steps applied on top of Unity `Offset` units.
@@ -369,9 +376,11 @@ pub(crate) enum CanvasBiasProjection {
 /// [`CANVAS_CLOSER_BIAS_CAP_METERS`].
 ///
 /// Zero and away-from-camera biases (negative NDC) are unchanged. Non-finite clip planes leave
-/// the bias unchanged. For [`CanvasBiasProjection::Perspective`], `distance` is the shared plane
-/// distance and the cap is the pull there; fragments closer than the plane move less. For
-/// [`CanvasBiasProjection::Orthographic`] the pull does not depend on `distance`.
+/// the bias unchanged. For [`CanvasBiasProjection::Perspective`], `distance` is the perpendicular
+/// plane distance `P` and the cap is the pull there. A fragment at view distance `z` then moves
+/// about `(z / P)^2` times that pull, so `1.5 P` is about `4.5` cm when the cap is `2` cm.
+/// Fragments closer than the plane move less. For [`CanvasBiasProjection::Orthographic`] the
+/// pull does not depend on `distance`.
 #[inline]
 pub(crate) fn cap_closer_ndc_bias(
     ndc_bias: f32,
@@ -480,8 +489,9 @@ pub(crate) fn reverse_z_ndc_closer_shift_meters(
 /// NDC Z bias to bake into one draw's view-projection. Non-canvas draws stay at zero.
 ///
 /// `near` and `far` are the clip planes of the projection this draw will use. The closer
-/// direction is capped at [`CANVAS_CLOSER_BIAS_CAP_METERS`] measured at the shared plane
-/// distance. `projection` selects the perspective or orthographic pull.
+/// direction is capped at [`CANVAS_CLOSER_BIAS_CAP_METERS`] measured at the perpendicular plane
+/// distance. Under perspective, fragments farther than that plane are pulled by about
+/// `(z / P)^2` times the capped amount. `projection` selects the perspective or orthographic pull.
 #[inline]
 pub(crate) fn canvas_ndc_z_bias(
     item: &WorldMeshDrawItem,
