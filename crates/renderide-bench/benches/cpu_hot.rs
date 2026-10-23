@@ -122,6 +122,8 @@ fn shadow_churn(c: &mut Criterion) {
 }
 
 fn camera_clear_load_ops(c: &mut Criterion) {
+    // Times the per-view load-op decision only. The full-target Rgba16Float copy is the real
+    // cost of a seeded Nothing or Depth camera and is not in this group.
     let mut group = c.benchmark_group("camera_clear");
     group.throughput(Throughput::Elements(CAMERA_CLEAR_LOAD_OP_CAMERAS as u64));
     group.bench_function("load_op_checksum", |b| {

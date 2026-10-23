@@ -10,9 +10,7 @@ use std::path::PathBuf;
 use crate::frame_contract::FrameViewClear;
 use crate::shared::CameraClearMode;
 
-use super::clear_load::{
-    forward_color_load_op, forward_depth_load_op, seeds_preserved_scene_color,
-};
+use super::clear_load::{ScenePreserveQuery, forward_clear_loads};
 use super::color_preserve::copy_preserved_scene_color;
 
 const WIDTH: u32 = 64;
@@ -124,15 +122,20 @@ fn render_second_camera(
         mode,
         color: glam::Vec4::ZERO,
     };
-    let seed = seeds_preserved_scene_color(
-        mode,
-        1,
-        true,
-        wgpu::TextureFormat::Rgba8Unorm,
-        wgpu::TextureFormat::Rgba8Unorm,
+    let loads = forward_clear_loads(
+        clear,
+        ScenePreserveQuery {
+            sample_count: 1,
+            has_color_texture: true,
+            surface_format: wgpu::TextureFormat::Rgba8Unorm,
+            scene_color_format: wgpu::TextureFormat::Rgba8Unorm,
+            self_sampling: Some(crate::frame_contract::RenderTextureSelfSampling::Suppress),
+            persistent_depth_target: true,
+        },
     );
-    let color_load = forward_color_load_op(clear, seed);
-    let depth_load = forward_depth_load_op(clear, 1, true);
+    let seed = loads.seed_color;
+    let color_load = loads.color;
+    let depth_load = loads.depth;
 
     renderer.prefill(device, queue);
     renderer.poison_scene_color(device, queue);

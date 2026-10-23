@@ -11,7 +11,7 @@ use crate::render_graph::error::{RenderPassError, SetupError};
 use crate::render_graph::pass::{EncoderPass, PassBuilder};
 use crate::render_graph::resources::{ImportedTextureHandle, TextureAccess, TextureHandle};
 
-use super::clear_load::view_seeds_preserved_scene_color;
+use super::clear_load::forward_clear_loads_for_view;
 
 /// Encoder pass that seeds HDR scene color from the current full-target color texture.
 #[derive(Debug)]
@@ -43,7 +43,7 @@ impl EncoderPass for WorldMeshForwardColorPreservePass {
     }
 
     fn should_record(&self, ctx: &EncoderPassCtx<'_, '_, '_>) -> Result<bool, RenderPassError> {
-        Ok(view_seeds_preserved_scene_color(ctx.frame.view))
+        Ok(forward_clear_loads_for_view(ctx.frame.view).seed_color)
     }
 
     fn record(&self, ctx: &mut EncoderPassCtx<'_, '_, '_>) -> Result<(), RenderPassError> {

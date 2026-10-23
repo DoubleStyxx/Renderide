@@ -9,8 +9,8 @@
 //!    uniforms via the graph upload sink, and stores the prepared state in
 //!    [`WorldMeshForwardPlanSlot`] before any graph pass records.
 //! 2. [`WorldMeshForwardDepthPrepass`] -- **[`RasterPass`]** that clears or loads depth, then fills
-//!    it for conservative opaque draws. Clear-none loads a persistent single-sample depth target.
-//!    Every other clear mode still clears.
+//!    it for conservative opaque draws. Clear-none loads depth only when this view also seeds
+//!    color. Every unseeded view, and every other clear mode, still clears depth.
 //! 3. [`WorldMeshForwardOpaquePass`] -- **[`RasterPass`]** that clears or loads HDR color, loads the
 //!    prepass depth attachment, records pre-skybox opaque and alpha-test phases, then records the
 //!    skybox/background. [`WorldMeshForwardColorPreservePass`] copies a full-target render texture
@@ -109,7 +109,7 @@ use crate::render_graph::resources::{
 use crate::world_mesh::{InstancePlan, WorldMeshPhase};
 
 use attachments::declare_forward_color_depth_attachments;
-use clear_load::{forward_color_load_op, view_seeds_preserved_scene_color};
+use clear_load::forward_clear_loads_for_view;
 use depth_resolve::encode_msaa_depth_resolve_after_clear_only;
 use depth_snapshot::{
     EncodeCtx as DepthSnapshotEncodeCtx, encode_world_mesh_forward_depth_snapshot,
@@ -580,10 +580,7 @@ impl RasterPass for WorldMeshForwardOpaquePass {
         if attachment_index != 0 {
             return None;
         }
-        Some(forward_color_load_op(
-            ctx.frame.view.clear,
-            view_seeds_preserved_scene_color(ctx.frame.view),
-        ))
+        Some(forward_clear_loads_for_view(ctx.frame.view).color)
     }
 
     fn stencil_ops_override(

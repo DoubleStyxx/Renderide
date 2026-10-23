@@ -771,8 +771,9 @@ pub struct GraphPassFrameView<'a> {
     pub color_texture: Option<&'a wgpu::Texture>,
     /// `true` when [`Self::depth_texture`] is the persistent camera depth target.
     ///
-    /// Window, OpenXR, and full render-texture views keep their depth across cameras. A partial
-    /// viewport renders into a scratch depth image that is not copied back, so it stays cleared.
+    /// Window, OpenXR, and full render-texture views own that image. A partial viewport renders
+    /// into a scratch depth image that is not copied back. Clear-none loads the image only when
+    /// this view also seeds color. Every unseeded view still clears depth.
     pub persistent_depth_target: bool,
     /// Post-processing permissions requested by this view.
     pub post_processing: ViewPostProcessing,
