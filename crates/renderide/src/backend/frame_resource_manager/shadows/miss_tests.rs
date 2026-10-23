@@ -7,9 +7,9 @@ use crate::backend::frame_resource_manager::per_view_state::PreparedViewLights;
 use crate::backend::{AssetTransferQueue, HostShadowQuality, ShadowContentRevisionSources};
 use crate::camera::ViewId;
 use crate::gpu::GpuLight;
-use crate::materials::RasterPipelineKind;
-use crate::materials::host_data::{
-    MaterialPropertyLookupIds, MaterialPropertyStore, MaterialPropertyValue,
+use crate::materials::host_data::{MaterialPropertyStore, MaterialPropertyValue};
+use crate::materials::{
+    MaterialCullOverride, RasterFrontFace, RasterPipelineKind, RasterPrimitiveTopology,
 };
 use crate::shared::{LightType, ShadowCastMode};
 use crate::world_mesh::{WorldMeshDrawPlan, WorldMeshPhase};
@@ -26,10 +26,6 @@ struct RevisionMap {
 impl ShadowContentRevisions for RevisionMap {
     fn mesh_upload_generation(&self, mesh_asset_id: i32) -> u64 {
         self.mesh.get(&mesh_asset_id).copied().unwrap_or(0)
-    }
-
-    fn caster_policy_revision(&self, _ids: MaterialPropertyLookupIds) -> u64 {
-        0
     }
 }
 
@@ -203,7 +199,7 @@ fn animated_non_policy_material_property_keeps_the_cache_hit() {
         &mut manager,
         HostShadowQuality::default(),
         &plan,
-        &ShadowContentRevisionSources::new(&transfers, &materials),
+        &ShadowContentRevisionSources::new(&transfers),
     );
     manager.note_shadow_maps_rendered();
 
@@ -214,7 +210,7 @@ fn animated_non_policy_material_property_keeps_the_cache_hit() {
         &mut manager,
         HostShadowQuality::default(),
         &plan,
-        &ShadowContentRevisionSources::new(&transfers, &materials),
+        &ShadowContentRevisionSources::new(&transfers),
     );
     assert!(manager.shadow_frame_plan().plan_reused);
     assert!(!manager.shadow_frame_plan().maps_need_render);
@@ -224,7 +220,65 @@ fn animated_non_policy_material_property_keeps_the_cache_hit() {
         &mut manager,
         HostShadowQuality::default(),
         &plan,
-        &ShadowContentRevisionSources::new(&transfers, &materials),
+        &ShadowContentRevisionSources::new(&transfers),
+    );
+    assert!(!manager.shadow_frame_plan().plan_reused);
+}
+
+#[test]
+fn shadow_plan_misses_when_front_face_topology_or_cull_changes() {
+    let draw = positioned_caster(1, Vec3::ZERO);
+    let (mut manager, plan) = spot_shadow_manager(draw.clone());
+    prepare_with(
+        &mut manager,
+        HostShadowQuality::default(),
+        &plan,
+        &ZeroShadowContentRevisions,
+    );
+    manager.note_shadow_maps_rendered();
+
+    let mut flipped_face = draw.clone();
+    flipped_face.batch_key.front_face = RasterFrontFace::CounterClockwise;
+    prepare_with(
+        &mut manager,
+        HostShadowQuality::default(),
+        &prefetched_plan(vec![flipped_face]),
+        &ZeroShadowContentRevisions,
+    );
+    assert!(!manager.shadow_frame_plan().plan_reused);
+
+    let again = prefetched_plan(vec![draw.clone()]);
+    prepare_with(
+        &mut manager,
+        HostShadowQuality::default(),
+        &again,
+        &ZeroShadowContentRevisions,
+    );
+    manager.note_shadow_maps_rendered();
+    let mut points = draw.clone();
+    points.batch_key.primitive_topology = RasterPrimitiveTopology::PointList;
+    prepare_with(
+        &mut manager,
+        HostShadowQuality::default(),
+        &prefetched_plan(vec![points]),
+        &ZeroShadowContentRevisions,
+    );
+    assert!(!manager.shadow_frame_plan().plan_reused);
+
+    prepare_with(
+        &mut manager,
+        HostShadowQuality::default(),
+        &again,
+        &ZeroShadowContentRevisions,
+    );
+    manager.note_shadow_maps_rendered();
+    let mut front_cull = draw;
+    front_cull.batch_key.render_state.cull_override = MaterialCullOverride::Front;
+    prepare_with(
+        &mut manager,
+        HostShadowQuality::default(),
+        &prefetched_plan(vec![front_cull]),
+        &ZeroShadowContentRevisions,
     );
     assert!(!manager.shadow_frame_plan().plan_reused);
 }

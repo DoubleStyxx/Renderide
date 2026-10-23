@@ -9,7 +9,6 @@ use crate::backend::frame_resource_manager::per_view_state::PreparedViewLights;
 use crate::backend::{AssetTransferQueue, HostShadowQuality, ShadowContentRevisionSources};
 use crate::camera::ViewId;
 use crate::gpu::GpuLight;
-use crate::materials::host_data::{MaterialPropertyStore, MaterialPropertyValue};
 use crate::shared::LightType;
 use crate::world_mesh::draw_prep::WorldMeshDrawCollection;
 use crate::world_mesh::test_fixtures::{DummyDrawItemSpec, dummy_world_mesh_draw_item};
@@ -25,7 +24,6 @@ pub const SHADOW_CHURN_LIGHTS: usize = 30;
 
 struct ProductionShadowRevisions {
     transfers: AssetTransferQueue,
-    materials: MaterialPropertyStore,
 }
 
 /// Owned inputs for repeated shadow-frame planning.
@@ -33,7 +31,7 @@ pub struct ShadowChurnWorkload {
     manager: FrameResourceManager,
     quality: HostShadowQuality,
     plan: WorldMeshDrawPlan,
-    /// Real mesh-upload and caster-policy lookups. Absent for the zero-revision bench.
+    /// Real mesh-upload lookups. Absent for the zero-revision bench.
     production: Option<ProductionShadowRevisions>,
 }
 
@@ -54,11 +52,10 @@ impl ShadowChurnWorkload {
         }
     }
 
-    /// Same grid as [`Self::standard`], with the production mesh and material revision lookups.
+    /// Same grid as [`Self::standard`], with the production mesh-upload revision lookup.
     ///
-    /// Each caster has a resident mesh-upload generation. The material store holds one non-policy
-    /// float. Planning calls [`crate::backend::ShadowContentRevisionSources`], not
-    /// [`super::ZeroShadowContentRevisions`].
+    /// Each caster has a resident mesh-upload generation. Planning calls
+    /// [`crate::backend::ShadowContentRevisionSources`], not [`super::ZeroShadowContentRevisions`].
     #[must_use]
     pub fn standard_with_production_revisions() -> Self {
         let mut workload = Self::standard();
@@ -66,12 +63,7 @@ impl ShadowChurnWorkload {
         for mesh_asset_id in 0..i32::try_from(SHADOW_CHURN_CASTERS).unwrap_or(i32::MAX) {
             transfers.begin_mesh_upload_generation(mesh_asset_id);
         }
-        let mut materials = MaterialPropertyStore::new();
-        materials.set_material(1, 7, MaterialPropertyValue::Float(0.35));
-        workload.production = Some(ProductionShadowRevisions {
-            transfers,
-            materials,
-        });
+        workload.production = Some(ProductionShadowRevisions { transfers });
         workload
     }
 
@@ -89,8 +81,7 @@ impl ShadowChurnWorkload {
             production,
         } = self;
         if let Some(production) = production.as_ref() {
-            let revisions =
-                ShadowContentRevisionSources::new(&production.transfers, &production.materials);
+            let revisions = ShadowContentRevisionSources::new(&production.transfers);
             finish_prepare(manager, *quality, plan, &revisions)
         } else {
             finish_prepare(manager, *quality, plan, &super::ZeroShadowContentRevisions)

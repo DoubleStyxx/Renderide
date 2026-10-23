@@ -380,11 +380,7 @@ impl CompiledRenderGraph {
     }
 }
 
-/// Encodes the debug HUD overlay into its own command buffer for the swapchain path.
-///
-/// Returns `None` when the target isn't the swapchain or the HUD has no visible window for this
-/// frame. In the no-content case, cached input-capture flags are cleared so a hidden HUD does not
-/// block input dispatch to the world.
+/// Encodes the swapchain HUD and drops an armed shadow submit when that encode fails.
 fn encode_hud_or_drop_unsubmitted_shadows(
     mv_ctx: &mut MultiViewExecutionContext<'_>,
     queue_ref: &wgpu::Queue,
@@ -405,6 +401,11 @@ fn encode_hud_or_drop_unsubmitted_shadows(
     }
 }
 
+/// Encodes the debug HUD overlay into its own command buffer for the swapchain path.
+///
+/// Returns `None` when the target isn't the swapchain or the HUD has no visible window for this
+/// frame. In the no-content case, cached input-capture flags are cleared so a hidden HUD does not
+/// block input dispatch to the world.
 fn encode_swapchain_hud_overlay(
     mv_ctx: &mut MultiViewExecutionContext<'_>,
     queue_ref: &wgpu::Queue,

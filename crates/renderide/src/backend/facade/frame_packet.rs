@@ -6,7 +6,7 @@ use crate::backend::frame_resource_manager::ShadowContentRevisions;
 use crate::backend::{AssetTransferQueue, FrameLightViewDesc};
 use crate::gpu_pools::MeshPool;
 use crate::materials::ShaderPermutation;
-use crate::materials::host_data::{MaterialPropertyLookupIds, MaterialPropertyStore};
+use crate::materials::host_data::MaterialPropertyStore;
 use crate::materials::{MaterialPipelinePropertyIds, MaterialRouter};
 use crate::reflection_probes::specular::ReflectionProbeFrameSelection;
 use crate::scene::{RenderSpaceId, SceneApplyReport, SceneCacheFlushReport, SceneCoordinator};
@@ -19,26 +19,18 @@ use crate::world_mesh::{
 use super::draw_preparation::{DrawPreparationExtractDesc, render_context_cache_key};
 use super::{OcclusionSystem, RenderBackend};
 
-/// Asset-transfer and material-store lookups used by production shadow planning.
+/// Mesh-upload generation lookups used by production shadow planning.
 ///
-/// Mesh upload generation comes from the transfer queue. Caster policy does not: depth-only
-/// shadow shaders have an empty fragment entry, so animated material floats must not change
-/// this revision.
+/// Depth-only shadow shaders have an empty fragment entry, so the material property store is
+/// not a shadow-plan input. Cast participation, cast mode, and pipeline kind live on the draw.
 pub(crate) struct ShadowContentRevisionSources<'a> {
     transfers: &'a AssetTransferQueue,
-    materials: &'a MaterialPropertyStore,
 }
 
 impl<'a> ShadowContentRevisionSources<'a> {
-    /// Borrows the transfer queue and material store for one shadow prepare.
-    pub(crate) fn new(
-        transfers: &'a AssetTransferQueue,
-        materials: &'a MaterialPropertyStore,
-    ) -> Self {
-        Self {
-            transfers,
-            materials,
-        }
+    /// Borrows the transfer queue for one shadow prepare.
+    pub(crate) fn new(transfers: &'a AssetTransferQueue) -> Self {
+        Self { transfers }
     }
 }
 
@@ -47,13 +39,6 @@ impl ShadowContentRevisions for ShadowContentRevisionSources<'_> {
         self.transfers
             .current_mesh_upload_generation(mesh_asset_id)
             .unwrap_or(0)
-    }
-
-    fn caster_policy_revision(&self, ids: MaterialPropertyLookupIds) -> u64 {
-        // Policy is cast participation, cast mode, and pipeline kind on the draw item.
-        // Returning `self.materials.mutation_generation(ids)` would miss every animated float.
-        let _ = (self.materials.global_generation(), ids.material_asset_id);
-        0
     }
 }
 
@@ -190,10 +175,7 @@ impl RenderBackend {
         I::IntoIter: Clone,
     {
         let quality = self.shadow_quality();
-        let revisions = ShadowContentRevisionSources::new(
-            &self.asset_transfers,
-            self.materials.material_property_store(),
-        );
+        let revisions = ShadowContentRevisionSources::new(&self.asset_transfers);
         self.frame_services
             .frame_resources
             .prepare_shadow_frame_for_views(quality, views, &revisions);

@@ -3,18 +3,28 @@
 use std::path::Path;
 use std::time::Duration;
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Test-only switch so a published PNG can be checked when the sidecar mtime stamp fails.
+#[cfg(test)]
+static FAIL_ATLAS_SIDECAR_MTIME_STAMP: AtomicBool = AtomicBool::new(false);
+/// Serializes the stamp-failure injection with other PNG write tests.
+#[cfg(test)]
+static ATLAS_SIDECAR_STAMP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 use crate::gpu::GpuContext;
 
 /// Copies the headless primary color texture to CPU memory and writes a PNG atomically.
 pub(super) fn readback_and_write_png_atomically(
     gpu: &GpuContext,
     output_path: &Path,
-    shadow_atlas_passes: (u32, u64),
+    shadow_atlas_passes: Option<(u32, u64)>,
 ) -> Result<(), HeadlessReadbackError> {
     let color_texture = gpu
         .headless_color_texture()
         .ok_or(HeadlessReadbackError::NoOffscreenTexture)?;
-    readback_color_texture(gpu, color_texture, output_path, Some(shadow_atlas_passes))
+    readback_color_texture(gpu, color_texture, output_path, shadow_atlas_passes)
 }
 
 /// Copies one color texture to CPU memory and writes a PNG atomically.
@@ -207,13 +217,22 @@ fn write_png_atomically(
     if shadow_atlas_passes.is_some() {
         // `rename` keeps the temp PNG's mtime, which is earlier than the sidecar write.
         // APFS then reports the sidecar as newer, and the harness rejects the finished pair.
-        align_atlas_pass_sidecar_mtime(output_path)?;
+        // The PNG is already published, so a failed stamp must not fail the headless write.
+        if let Err(err) = align_atlas_pass_sidecar_mtime(output_path) {
+            logger::warn!("shadow atlas pass sidecar mtime stamp failed after PNG publish: {err}");
+        }
     }
     Ok(())
 }
 
 /// Gives the sidecar the PNG's mtime so a finished pair is not newer than the image.
 fn align_atlas_pass_sidecar_mtime(output_path: &Path) -> Result<(), HeadlessReadbackError> {
+    #[cfg(test)]
+    if FAIL_ATLAS_SIDECAR_MTIME_STAMP.load(Ordering::Relaxed) {
+        return Err(HeadlessReadbackError::Io(std::io::Error::other(
+            "injected sidecar mtime failure",
+        )));
+    }
     let png_mtime = std::fs::metadata(output_path)
         .and_then(|meta| meta.modified())
         .map_err(HeadlessReadbackError::Io)?;
@@ -391,5 +410,51 @@ mod tests {
             copy_padded_rows_to_tight(&padded, &layout),
             vec![1, 2, 3, 4, 5, 6, 7, 8]
         );
+    }
+
+    #[test]
+    fn atlas_pass_files_are_written_only_when_a_count_is_supplied() {
+        let _lock = super::ATLAS_SIDECAR_STAMP_LOCK.lock().expect("stamp lock");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let png = dir.path().join("frame.png");
+        let pixels = [9u8, 8, 7, 255];
+        super::write_png_atomically(&pixels, 1, 1, &png, None).expect("png only");
+        assert!(png.is_file());
+        assert!(!png.with_extension("atlas-passes").exists());
+        assert!(!png.with_extension("atlas-pass-log").exists());
+
+        super::write_png_atomically(&pixels, 1, 1, &png, Some((1, 4))).expect("with count");
+        assert_eq!(
+            std::fs::read_to_string(png.with_extension("atlas-passes")).expect("sidecar"),
+            "1 4\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(png.with_extension("atlas-pass-log")).expect("log"),
+            "1 4\n"
+        );
+    }
+
+    #[test]
+    fn published_png_survives_a_failed_sidecar_mtime_stamp() {
+        let _lock = super::ATLAS_SIDECAR_STAMP_LOCK.lock().expect("stamp lock");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let png = dir.path().join("frame.png");
+        let pixels = [1u8, 2, 3, 255];
+        let _guard = FailStampGuard;
+        super::FAIL_ATLAS_SIDECAR_MTIME_STAMP.store(true, super::Ordering::Relaxed);
+        super::write_png_atomically(&pixels, 1, 1, &png, Some((0, 2))).expect("png published");
+        assert!(png.is_file());
+        assert_eq!(
+            std::fs::read_to_string(png.with_extension("atlas-passes")).expect("sidecar"),
+            "0 2\n"
+        );
+    }
+
+    struct FailStampGuard;
+
+    impl Drop for FailStampGuard {
+        fn drop(&mut self) {
+            super::FAIL_ATLAS_SIDECAR_MTIME_STAMP.store(false, super::Ordering::Relaxed);
+        }
     }
 }
