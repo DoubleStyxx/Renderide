@@ -58,6 +58,15 @@ const LIGHTS_SHADOWS: Scenario = Scenario {
     camera_rotation_xyzw: [0.1305262, 0.0, 0.0, 0.9914449],
 };
 
+/// Thirty shadowed point lights. Opt-in: absent from [`DEFAULT_SCENARIOS`] so the default CI
+/// window stays on the unshadowed scenes. The host raises `per_pixel_lights` to 32 and asks for
+/// 128-texel shadow faces.
+const MANY_SHADOWED_POINT_LIGHTS: Scenario = Scenario {
+    name: "many_shadowed_point_lights",
+    camera_position: [0.0, 2.2, -5.5],
+    camera_rotation_xyzw: [0.174_108_13, 0.0, 0.0, 0.984_726_55],
+};
+
 /// Returns the named scenario.
 pub fn by_name(name: &str) -> Option<&'static Scenario> {
     match name {
@@ -66,6 +75,7 @@ pub fn by_name(name: &str) -> Option<&'static Scenario> {
         "pbs_lit_material_matrix" => Some(&PBS_LIT_MATERIAL_MATRIX),
         "many_static_meshes" => Some(&MANY_STATIC_MESHES),
         "lights_shadows" => Some(&LIGHTS_SHADOWS),
+        "many_shadowed_point_lights" => Some(&MANY_SHADOWED_POINT_LIGHTS),
         _ => None,
     }
 }
@@ -157,5 +167,11 @@ mod tests {
             assert!(json.contains("\"method\":\"frames.wait\""), "{json}");
             assert!(json.contains("\"method\":\"stats.query\""), "{json}");
         }
+    }
+
+    #[test]
+    fn many_shadowed_point_lights_is_opt_in() {
+        assert!(by_name("many_shadowed_point_lights").is_some());
+        assert!(!DEFAULT_SCENARIOS.contains(&"many_shadowed_point_lights"));
     }
 }
