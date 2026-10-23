@@ -93,7 +93,7 @@ mod overlay_cull_tests {
             host_camera,
             hi_z: None,
             hi_z_temporal: None,
-            two_phase: None,
+            hysteresis: None,
         }
     }
 
@@ -110,7 +110,7 @@ mod overlay_cull_tests {
             host_camera: &host_camera,
             hi_z: None,
             hi_z_temporal: None,
-            two_phase: None,
+            hysteresis: None,
         };
         let model = Mat4::from_translation(Vec3::new(1234.0, 5678.0, 0.0));
         let geom = MeshCullGeometry {
@@ -245,7 +245,7 @@ mod prepared_space_cull_tests {
             host_camera,
             hi_z: None,
             hi_z_temporal: None,
-            two_phase: None,
+            hysteresis: None,
         }
     }
 
@@ -384,7 +384,7 @@ mod prepared_space_cull_tests {
 }
 
 #[cfg(test)]
-mod two_phase_cull_integration {
+mod hysteresis_cull_integration {
     use std::sync::Arc;
 
     use glam::{Mat4, Vec3};
@@ -396,8 +396,8 @@ mod two_phase_cull_integration {
     };
     use crate::hi_z_cpu::pyramid::total_float_count;
     use crate::hi_z_cpu::{HiZCpuSnapshot, HiZCullData};
-    use crate::occlusion::two_phase::{
-        CasterKey, CasterRef, DepthClip, SpaceMotion, TwoPhaseFrame, VisibilityClass,
+    use crate::occlusion::hysteresis::{
+        CasterKey, CasterRef, DepthClip, SpaceMotion, VisibilityHysteresis, VisibilityClass,
         VisibilityHistory,
     };
     use crate::scene::{RenderSpaceId, SceneCoordinator};
@@ -433,10 +433,10 @@ mod two_phase_cull_integration {
         history: VisibilityHistory,
         motion: &SpaceMotion,
         space_id: RenderSpaceId,
-    ) -> TwoPhaseFrame {
+    ) -> VisibilityHysteresis {
         let mut motions = HashMap::new();
         motions.insert(space_id, *motion);
-        TwoPhaseFrame::new(Arc::new(history), HashMap::new(), motions, Vec::new())
+        VisibilityHysteresis::new(Arc::new(history), HashMap::new(), motions, Vec::new())
     }
 
     struct CullCase<'a> {
@@ -446,7 +446,7 @@ mod two_phase_cull_integration {
         proj: Mat4,
         authoring_view: Mat4,
         snapshot: &'a HiZCpuSnapshot,
-        frame: &'a TwoPhaseFrame,
+        frame: &'a VisibilityHysteresis,
         aabb: (Vec3, Vec3),
         caster: CasterRef,
     }
@@ -468,7 +468,7 @@ mod two_phase_cull_integration {
                 prev_view_by_space: Arc::new(views),
                 depth_viewport_px: (case.snapshot.base_width, case.snapshot.base_height),
             }),
-            two_phase: Some(case.frame),
+            hysteresis: Some(case.frame),
         };
         let mut cache = SpaceCullCache::new();
         cache.cull_geometry_for_caster(
@@ -496,7 +496,10 @@ mod two_phase_cull_integration {
         let view = view_matrix_for_host_world_mesh_space(&scene, space, &host);
         let proj = reverse_z_perspective(1.0, 60_f32.to_radians(), host.clip.near, host.clip.far);
         let previous_vp = proj * view;
-        let snapshot = occluding_pyramid(0.99);
+        // About 1 m of covering depth. The caster sits near 3 m, so the parallax ratio stays
+        // under 8 and a stable camera may still cull. A pyramid at 0.99 is the near plane and
+        // must fail open; that case is a separate test.
+        let snapshot = occluding_pyramid(0.01);
         let aabb = (Vec3::new(-0.15, -0.15, 2.8), Vec3::new(0.15, 0.15, 3.2));
         let key = CasterKey::new(space_id, 0, 1, 0, false);
         let caster = CasterRef {
@@ -588,6 +591,66 @@ mod two_phase_cull_integration {
             })
             .is_ok(),
             "a camera that loses the caster fails open"
+        );
+    }
+
+    #[test]
+    fn extreme_parallax_ratio_keeps_a_previously_occluded_caster() {
+        let space_id = RenderSpaceId(1);
+        let mut scene = SceneCoordinator::new();
+        scene.test_seed_space_identity_worlds(space_id, vec![RenderTransform::default()], vec![-1]);
+        let host = HostCameraFrame::default();
+        let space = scene.space(space_id).expect("seeded space");
+        let view = view_matrix_for_host_world_mesh_space(&scene, space, &host);
+        let proj = reverse_z_perspective(1.0, 60_f32.to_radians(), host.clip.near, host.clip.far);
+        let previous_vp = proj * view;
+        let aabb = (Vec3::new(-0.15, -0.15, 2.8), Vec3::new(0.15, 0.15, 3.2));
+        let key = CasterKey::new(space_id, 0, 1, 0, false);
+        let caster = CasterRef {
+            key,
+            mesh_asset_id: 3,
+        };
+        let stable = desktop_motion(previous_vp, previous_vp, &host);
+        let modest = occluding_pyramid(0.01);
+        let frame = frame_for(VisibilityHistory::default(), &stable, space_id);
+        assert!(cull_caster(CullCase {
+            scene: &scene,
+            space_id,
+            host: &host,
+            proj,
+            authoring_view: view,
+            snapshot: &modest,
+            frame: &frame,
+            aabb,
+            caster,
+        })
+        .is_ok());
+        let history = frame.finish();
+        assert_eq!(
+            history.get(&key).map(|record| record.class),
+            Some(VisibilityClass::Occluded)
+        );
+
+        let near_plane = occluding_pyramid(0.99);
+        let frame = frame_for(history, &stable, space_id);
+        assert!(
+            cull_caster(CullCase {
+                scene: &scene,
+                space_id,
+                host: &host,
+                proj,
+                authoring_view: view,
+                snapshot: &near_plane,
+                frame: &frame,
+                aabb,
+                caster,
+            })
+            .is_ok(),
+            "a covering depth near the camera under-pads if the ratio is clamped, so the draw stays"
+        );
+        assert_eq!(
+            frame.finish().get(&key).map(|record| record.class),
+            Some(VisibilityClass::Visible)
         );
     }
 }

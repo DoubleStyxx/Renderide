@@ -9,9 +9,9 @@ use std::hint::black_box;
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use renderide_bench::{
     BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload, CULL_BATCH,
-    CullWorkload, KeywordVariantCacheWorkload, MATERIAL_UNIFORM_BATCH,
-    MaterialUniformUpdateWorkload, TRANSFORM_BATCH, TWO_PHASE_BATCH, TWO_PHASE_HISTORY_COUNTS,
-    TransformWorkload, TwoPhaseCullWorkload, TwoPhaseHistoryWorkload, WORLD_MATRIX_NODES,
+    CullWorkload, HYSTERESIS_BATCH, HYSTERESIS_HISTORY_COUNTS, HysteresisCullWorkload,
+    HysteresisHistoryWorkload, KeywordVariantCacheWorkload, MATERIAL_UNIFORM_BATCH,
+    MaterialUniformUpdateWorkload, TRANSFORM_BATCH, TransformWorkload, WORLD_MATRIX_NODES,
     WorldMatrixWorkload,
 };
 
@@ -35,23 +35,23 @@ fn culling(c: &mut Criterion) {
     group.finish();
 }
 
-fn two_phase_occlusion(c: &mut Criterion) {
-    let workload = TwoPhaseCullWorkload::standard();
+fn hysteresis_classification(c: &mut Criterion) {
+    let workload = HysteresisCullWorkload::standard();
     {
-        let mut group = c.benchmark_group("two_phase_occlusion");
+        let mut group = c.benchmark_group("hysteresis_classification");
         group.throughput(Throughput::Elements(
-            u64::try_from(TWO_PHASE_BATCH).unwrap_or(0),
+            u64::try_from(HYSTERESIS_BATCH).unwrap_or(0),
         ));
-        group.bench_function("decide_phase", |b| {
+        group.bench_function("decide_visibility", |b| {
             b.iter(|| black_box(workload.kept_count()));
         });
         group.finish();
     }
 
-    let mut history = c.benchmark_group("two_phase_history");
-    for count in TWO_PHASE_HISTORY_COUNTS {
+    let mut history = c.benchmark_group("hysteresis_history");
+    for count in HYSTERESIS_HISTORY_COUNTS {
         for moving in [false, true] {
-            let mut workload = TwoPhaseHistoryWorkload::new(count, moving);
+            let mut workload = HysteresisHistoryWorkload::new(count, moving);
             let _ = workload.step();
             let label = if moving { "moving" } else { "stable" };
             history.throughput(Throughput::Elements(u64::try_from(count).unwrap_or(0)));
@@ -143,7 +143,7 @@ criterion_group!(
     cpu,
     transforms,
     culling,
-    two_phase_occlusion,
+    hysteresis_classification,
     world_matrices,
     buffer_pool,
     material_uniforms,

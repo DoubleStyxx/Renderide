@@ -6,9 +6,9 @@
 //! subsystem owner.
 
 mod cull;
+mod hysteresis;
 mod queue;
 mod sort;
-mod two_phase;
 mod visible_deform;
 
 pub(in crate::runtime) use queue::select_inner_parallelism;

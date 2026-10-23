@@ -13,7 +13,7 @@ mod geometry;
 use crate::camera::{HostCameraFrame, WorldProjectionSet};
 pub use crate::cull_contract::{HiZTemporalState, WorldMeshCullProjParams};
 use crate::hi_z_cpu::HiZCullData;
-use crate::occlusion::two_phase::TwoPhaseFrame;
+use crate::occlusion::hysteresis::VisibilityHysteresis;
 use crate::scene::SceneSpaceRead;
 
 #[cfg(test)]
@@ -35,9 +35,9 @@ pub struct WorldMeshCullInput<'a> {
     pub hi_z: Option<HiZCullData>,
     /// View/projection from the frame that authored [`Self::hi_z`]; required for stable temporal tests.
     pub hi_z_temporal: Option<HiZTemporalState>,
-    /// CPU hysteresis plan for the one-frame-late Hi-Z pyramid. When set, a stale hit is not
-    /// enough to reject a caster.
-    pub two_phase: Option<&'a TwoPhaseFrame>,
+    /// History confirmation for the one-frame-late Hi-Z pyramid. When set, a stale hit is not
+    /// enough to reject a caster. Absent means the previous-frame Hi-Z test on its own.
+    pub hysteresis: Option<&'a VisibilityHysteresis>,
 }
 
 /// Builds [`WorldMeshCullProjParams`] from viewport size and [`HostCameraFrame`].

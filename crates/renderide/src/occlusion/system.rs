@@ -15,7 +15,7 @@ use crate::gpu::OutputDepthMode;
 use crate::hi_z_cpu::HiZCullData;
 use crate::history_texture::HistoryTextureMipViews;
 use crate::occlusion::gpu::{HiZBuildRecord, HiZGpuState, HiZHistoryTarget, encode_hi_z_build};
-use crate::occlusion::two_phase::{CasterKey, CasterRecord, VisibilityHistory, VisibilityScratch};
+use crate::occlusion::hysteresis::{CasterKey, CasterRecord, VisibilityHistory, VisibilityScratch};
 
 /// Depth source, layout, and logical view for [`OcclusionSystem::encode_hi_z_build_pass`].
 pub(crate) struct HiZBuildInput<'a> {

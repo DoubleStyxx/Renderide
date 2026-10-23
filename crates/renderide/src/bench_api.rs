@@ -13,10 +13,11 @@ use rayon::prelude::*;
 
 use crate::camera::reverse_z_perspective;
 use crate::hi_z_cpu::project_world_aabb_uv;
-use crate::occlusion::two_phase::{
-    CasterKey, CasterRecord, CasterRef, DepthClip, OcclusionFacts, PhaseAction, PhaseInputs,
-    PresentCaster, ScreenRect, SpaceMotion, TwoPhaseFrame, VisibilityClass, VisibilityHistory,
-    decide_phase, disocclusion_rects, plan_disocclusion, screen_motion_uv_pad,
+use crate::occlusion::hysteresis::{
+    CasterKey, CasterRecord, CasterRef, DepthClip, HistoryAction, HistoryInputs, OcclusionFacts,
+    PresentCaster, ScreenRect, SpaceMotion, VisibilityClass, VisibilityHistory,
+    VisibilityHysteresis, decide_visibility, disocclusion_rects, plan_disocclusion,
+    screen_motion_uv_pad,
 };
 use crate::render_graph::resources::BufferSizePolicy;
 use crate::render_graph::{BufferKey, TransientPool};
@@ -34,11 +35,20 @@ pub const TRANSFORM_BATCH: usize = 4_096;
 /// World AABBs tested by one [`CullWorkload::visible_count`] sample.
 pub const CULL_BATCH: usize = 8_192;
 
-/// Casters classified by one [`TwoPhaseCullWorkload::kept_count`] sample.
-pub const TWO_PHASE_BATCH: usize = 4_096;
+/// Casters classified by one [`HysteresisCullWorkload::kept_count`] sample.
+pub const HYSTERESIS_BATCH: usize = 4_096;
 
-/// Caster counts timed by [`TwoPhaseHistoryWorkload`].
-pub const TWO_PHASE_HISTORY_COUNTS: [usize; 3] = [10_000, 50_000, 100_000];
+/// Caster counts timed by [`HysteresisHistoryWorkload`].
+///
+/// The first entry is [`crate::occlusion::hysteresis::HISTORY_CASTER_BUDGET`], the production
+/// cutoff. Larger counts measure the uncapped history step that cutoff skips. On a 4-core guest
+/// that step was about 13 ms at 100_000 casters, past an 11.1 ms 90 Hz frame.
+pub const HYSTERESIS_HISTORY_COUNTS: [usize; 4] = [
+    crate::occlusion::hysteresis::HISTORY_CASTER_BUDGET,
+    10_000,
+    50_000,
+    100_000,
+];
 
 /// Screen-motion pad below which the history bench treats the pyramid as still occluding.
 ///
@@ -311,9 +321,9 @@ impl BufferPoolWorkload {
     }
 }
 
-/// Owned two-phase query reused by [`TwoPhaseCullWorkload`].
+/// Owned history-confirmation query reused by [`HysteresisCullWorkload`].
 #[derive(Clone, Debug)]
-struct TwoPhaseQuery {
+struct HysteresisQuery {
     /// Index into the workload's caster records. `None` is a newly revealed caster.
     previous: Option<usize>,
     /// Bounds moved since the stored record.
@@ -328,13 +338,13 @@ struct TwoPhaseQuery {
 
 /// Classifies a fixed mix of stable occluded casters and disoccluded casters.
 #[derive(Clone, Debug)]
-pub struct TwoPhaseCullWorkload {
+pub struct HysteresisCullWorkload {
     records: Vec<CasterRecord>,
-    queries: Vec<TwoPhaseQuery>,
+    queries: Vec<HysteresisQuery>,
 }
 
-impl TwoPhaseCullWorkload {
-    /// Builds [`TWO_PHASE_BATCH`] queries: one quarter stay culled, three quarters must be kept.
+impl HysteresisCullWorkload {
+    /// Builds [`HYSTERESIS_BATCH`] queries: one quarter stay culled, three quarters must be kept.
     #[must_use]
     pub fn standard() -> Self {
         let bounds = Vec3::new(-0.5, -0.5, -2.0);
@@ -352,30 +362,30 @@ impl TwoPhaseCullWorkload {
                 mesh_asset_id: 1,
             },
         ];
-        let queries = (0..TWO_PHASE_BATCH)
+        let queries = (0..HYSTERESIS_BATCH)
             .map(|index| match index % 4 {
-                0 => TwoPhaseQuery {
+                0 => HysteresisQuery {
                     previous: Some(0),
                     caster_moved: false,
                     overlaps_disocclusion: false,
                     hi_z_occludes: true,
                     other_occluder: false,
                 },
-                1 => TwoPhaseQuery {
+                1 => HysteresisQuery {
                     previous: None,
                     caster_moved: false,
                     overlaps_disocclusion: false,
                     hi_z_occludes: true,
                     other_occluder: false,
                 },
-                2 => TwoPhaseQuery {
+                2 => HysteresisQuery {
                     previous: Some(0),
                     caster_moved: false,
                     overlaps_disocclusion: true,
                     hi_z_occludes: true,
                     other_occluder: false,
                 },
-                _ => TwoPhaseQuery {
+                _ => HysteresisQuery {
                     previous: Some(1),
                     caster_moved: false,
                     overlaps_disocclusion: false,
@@ -387,20 +397,20 @@ impl TwoPhaseCullWorkload {
         Self { records, queries }
     }
 
-    /// Number of casters the two-phase test still draws.
+    /// Number of casters history confirmation still draws.
     #[must_use]
     pub fn kept_count(&self) -> u32 {
         let mut kept = 0_u32;
         for query in &self.queries {
             let previous = query.previous.and_then(|index| self.records.get(index));
-            let decision = decide_phase(PhaseInputs {
+            let decision = decide_visibility(HistoryInputs {
                 previous,
                 caster_moved: query.caster_moved,
                 overlaps_disocclusion: query.overlaps_disocclusion,
                 hi_z_occludes: query.hi_z_occludes,
                 other_occluder: query.other_occluder,
             });
-            if decision.action != PhaseAction::Culled {
+            if decision.action != HistoryAction::Culled {
                 kept = kept.saturating_add(1);
             }
         }
@@ -411,8 +421,12 @@ impl TwoPhaseCullWorkload {
 /// History lookup, screen-motion pad, and `finish` over a prebuilt caster set.
 ///
 /// Hi-Z pyramid sampling is not included. A pad under [`HISTORY_CONFIRM_UV`] stands in for a
-/// pyramid that still covers the expanded rectangle.
-pub struct TwoPhaseHistoryWorkload {
+/// pyramid that still covers the expanded rectangle. This is the uncapped cost of
+/// `plan_disocclusion`, the per-caster reprojection, the history lookup, and `finish`.
+/// Production does not run it once the caster count passes
+/// [`crate::occlusion::hysteresis::HISTORY_CASTER_BUDGET`]. The sequential prepared-draw scan
+/// that feeds the plan is a separate, cheaper walk and stops at that same cap.
+pub struct HysteresisHistoryWorkload {
     present: Vec<PresentCaster>,
     previous_vp: Mat4,
     current_vp: Mat4,
@@ -420,7 +434,7 @@ pub struct TwoPhaseHistoryWorkload {
     spare: HashMap<CasterKey, CasterRecord>,
 }
 
-impl TwoPhaseHistoryWorkload {
+impl HysteresisHistoryWorkload {
     /// Builds `count` casters. One quarter start occluded. `moving` separates the cameras.
     #[must_use]
     pub fn new(count: usize, moving: bool) -> Self {
@@ -500,7 +514,7 @@ impl TwoPhaseHistoryWorkload {
                 },
             },
         );
-        let frame = TwoPhaseFrame::new(
+        let frame = VisibilityHysteresis::new(
             Arc::clone(&self.history),
             std::mem::take(&mut self.spare),
             motions,

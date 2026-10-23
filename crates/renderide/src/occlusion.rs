@@ -3,8 +3,8 @@
 
 pub mod gpu;
 mod hook;
+pub(crate) mod hysteresis;
 mod system;
-pub(crate) mod two_phase;
 
 pub use hook::OcclusionGraphHook;
 pub(crate) use system::HiZBuildInput;

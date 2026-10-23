@@ -1,7 +1,7 @@
-//! CPU temporal hysteresis on the one-frame-late Hi-Z pyramid.
+//! CPU visibility hysteresis on the one-frame-late Hi-Z pyramid.
 //!
-//! This is not same-frame two-phase occlusion. The GPU pyramid is still the previous frame's
-//! depth. Rejecting every caster that fails that test pops objects when a camera cut, a moving
+//! The GPU pyramid is still the previous frame's depth. There is no second GPU depth pass.
+//! Rejecting every caster that fails the stale test pops objects when a camera cut, a moving
 //! occluder, or a newly revealed surface disagrees with last frame's depth, and it oscillates
 //! casters whose own previous depth covers their bounds.
 //!
@@ -9,14 +9,25 @@
 //! caster is rejected only when its bounds and mesh are unchanged, its screen rectangle misses
 //! every disocclusion region, and the previous pyramid still covers the rectangle after that
 //! rectangle is expanded by the screen motion between the Hi-Z camera and the current camera.
-//! Large motion and a failed projection fail open and keep the draw. A visible caster becomes
-//! occluded for the *next* frame only when the covering surface is closer in linear view depth
-//! by more than [`other_occluder_margin`].
+//! Large motion, a failed projection, a parallax ratio above [`PARALLAX_SCALE_MAX`], and a
+//! covering depth that is not closer than the caster all fail open and keep the draw. A visible
+//! caster becomes occluded for the *next* frame only when the covering surface is closer in
+//! linear view depth by more than [`other_occluder_margin`].
+//!
+//! Views with more casters than [`HISTORY_CASTER_BUDGET`] skip this pass and use the
+//! previous-frame Hi-Z test directly. The uncapped history step measured about 0.13 µs per
+//! caster on a 4-core guest (100_000 casters was about 13 ms), which is past an 11.1 ms 90 Hz
+//! frame. Above the cap, popping can return. The next view under the cap treats every caster as
+//! newly revealed.
 //!
 //! A previously visible caster that is absent this frame (hidden, removed, or toggled off) and a
 //! mesh swap that leaves the AABB unchanged both emit disocclusion rectangles. A depth
 //! contributor that was not a tracked visible caster can still leave one frame where the stale
 //! pyramid hides whatever was behind it, because this pass has no remembered rectangle for it.
+//!
+//! This targets the one-frame-late popping described in issue #679. There is no checked-in repro
+//! scene, headset capture, or discrete-GPU measurement for that issue, so the pass mitigates the
+//! rejection rather than demonstrating that the issue is closed.
 
 use std::sync::Arc;
 
@@ -45,9 +56,15 @@ const PARALLAX_SCALE_MAX: f32 = 8.0;
 /// Parallax scales below this leave the base pad unchanged.
 const PARALLAX_RESAMPLE_MIN: f32 = 1.05;
 
+/// Largest caster count that still runs history confirmation for one view.
+///
+/// At the measured ~0.13 µs per caster, this cap is about 1.1 ms. See the module docs for the
+/// 90 Hz cutoff.
+pub(crate) const HISTORY_CASTER_BUDGET: usize = 8_192;
+
 /// Stable identity of one occlusion-culled caster across frames.
 ///
-/// Material slots share one key. [`TwoPhaseFrame::finish`] keeps a `Visible` classification when
+/// Material slots share one key. [`VisibilityHysteresis::finish`] keeps a `Visible` classification when
 /// any slot reports one, and unions their bounds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct CasterKey {
@@ -113,29 +130,29 @@ pub(crate) struct CasterRecord {
     pub mesh_asset_id: i32,
 }
 
-/// Which phase produced this frame's draw-or-reject decision.
+/// Draw-or-reject outcome of history confirmation for one caster.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PhaseAction {
-    /// Previously visible or unknown. Drawn, and not rejected by the stale pyramid.
-    FirstPhase,
-    /// Previously occluded, but current-frame confirmation says it may be visible.
-    SecondPhase,
-    /// Previously occluded, and current-frame confirmation still holds.
+pub(crate) enum HistoryAction {
+    /// Previously visible, or no history. Drawn. The stale pyramid does not reject it.
+    DrawRemembered,
+    /// Previously occluded, but this frame's confirmation no longer holds, so it is drawn.
+    Unconfirmed,
+    /// Previously occluded, and this frame's confirmation still holds.
     Culled,
 }
 
-/// Result of [`decide_phase`].
+/// Result of [`decide_visibility`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct PhaseDecision {
-    /// Draw phase, or a confirmed rejection.
-    pub action: PhaseAction,
+pub(crate) struct HistoryDecision {
+    /// Whether the caster is drawn, and which confirmation path said so.
+    pub action: HistoryAction,
     /// Class stored for the next frame when this caster is inside the frustum.
     pub next_class: VisibilityClass,
 }
 
 /// Inputs for one caster's hysteresis decision.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct PhaseInputs<'a> {
+pub(crate) struct HistoryInputs<'a> {
     /// Missing history means the caster is newly revealed.
     pub previous: Option<&'a CasterRecord>,
     /// World bounds or the mesh asset changed since the stored record.
@@ -253,7 +270,7 @@ impl OcclusionFacts {
     }
 }
 
-/// History snapshot plus the cleared map the next [`TwoPhaseFrame::finish`] refills.
+/// History snapshot plus the cleared map the next [`VisibilityHysteresis::finish`] refills.
 pub(crate) struct VisibilityScratch {
     /// Classification published by the previous tested frame.
     pub history: Arc<VisibilityHistory>,
@@ -271,7 +288,7 @@ impl VisibilityHistory {
     /// Builds a history from an existing caster map.
     ///
     /// Only the bench API constructs a history from an outside map. The renderer fills history
-    /// through [`TwoPhaseFrame::finish`].
+    /// through [`VisibilityHysteresis::finish`].
     #[cfg(feature = "bench-api")]
     pub(crate) fn from_casters(casters: HashMap<CasterKey, CasterRecord>) -> Self {
         Self { casters }
@@ -332,7 +349,7 @@ pub(crate) struct PresentCaster {
 }
 
 /// Read-only history plus this frame's motion bounds, disocclusion regions, and update shards.
-pub(crate) struct TwoPhaseFrame {
+pub(crate) struct VisibilityHysteresis {
     history: Arc<VisibilityHistory>,
     motions: HashMap<RenderSpaceId, SpaceMotion>,
     stale_rects: Vec<ScreenRect>,
@@ -340,7 +357,7 @@ pub(crate) struct TwoPhaseFrame {
     spare: HashMap<CasterKey, CasterRecord>,
 }
 
-impl TwoPhaseFrame {
+impl VisibilityHysteresis {
     /// Builds the frame plan consulted by every fine cull in one view.
     ///
     /// `spare` is a cleared map from the previous publication. [`Self::finish`] refills it
@@ -404,7 +421,7 @@ impl TwoPhaseFrame {
             record.mesh_asset_id != caster.mesh_asset_id
                 || bounds_moved((record.aabb_min, record.aabb_max), (aabb_min, aabb_max))
         });
-        let decision = decide_phase(PhaseInputs {
+        let decision = decide_visibility(HistoryInputs {
             previous,
             caster_moved,
             overlaps_disocclusion: rects_hit_disocclusion(facts.rects, &self.stale_rects),
@@ -420,7 +437,7 @@ impl TwoPhaseFrame {
                 mesh_asset_id: caster.mesh_asset_id,
             },
         ));
-        decision.action != PhaseAction::Culled
+        decision.action != HistoryAction::Culled
     }
 
     /// Replaces the view history with the casters tested this frame.
@@ -455,21 +472,21 @@ impl TwoPhaseFrame {
 }
 
 /// Classifies one frustum-visible caster.
-pub(crate) fn decide_phase(inputs: PhaseInputs<'_>) -> PhaseDecision {
+pub(crate) fn decide_visibility(inputs: HistoryInputs<'_>) -> HistoryDecision {
     if inputs.previous.map(|record| record.class) != Some(VisibilityClass::Occluded) {
-        return PhaseDecision {
-            action: PhaseAction::FirstPhase,
-            next_class: next_class_for_visible_set(&inputs),
+        return HistoryDecision {
+            action: HistoryAction::DrawRemembered,
+            next_class: next_class_when_drawn(&inputs),
         };
     }
-    if phase2_rejection_holds(&inputs) {
-        PhaseDecision {
-            action: PhaseAction::Culled,
+    if confirmed_rejection(&inputs) {
+        HistoryDecision {
+            action: HistoryAction::Culled,
             next_class: VisibilityClass::Occluded,
         }
     } else {
-        PhaseDecision {
-            action: PhaseAction::SecondPhase,
+        HistoryDecision {
+            action: HistoryAction::Unconfirmed,
             next_class: VisibilityClass::Visible,
         }
     }
@@ -549,11 +566,19 @@ pub(crate) fn screen_motion_uv_pad(
     pad.is_finite().then_some(pad)
 }
 
+/// `true` when a view with `caster_count` casters may run history confirmation.
+#[inline]
+pub(crate) fn history_within_budget(caster_count: usize) -> bool {
+    caster_count <= HISTORY_CASTER_BUDGET
+}
+
 /// UV pad after widening `base_pad` for a closer occluder's parallax.
 ///
-/// Returns `base_pad` when the covering surface is not closer, or the scale is negligible.
-/// `None` when the scaled pad is not finite. A scale above [`PARALLAX_RESAMPLE_MIN`] is clamped
-/// to [`PARALLAX_SCALE_MAX`].
+/// `Some(base_pad)` when the sample is not occluded, or the closer-surface scale is below
+/// [`PARALLAX_RESAMPLE_MIN`]. `Some(base_pad * scale)` when the caster is between that minimum
+/// and [`PARALLAX_SCALE_MAX`] times farther than the covering surface. `None` when the sample is
+/// occluded and the covering depth is missing, not closer, or farther than the caster by more
+/// than [`PARALLAX_SCALE_MAX`]. Callers treat `None` as "do not cull".
 pub(crate) fn parallax_adjusted_pad(
     base_pad: f32,
     closest_ndc_z: f32,
@@ -564,19 +589,16 @@ pub(crate) fn parallax_adjusted_pad(
     if !occluded {
         return Some(base_pad);
     }
-    let Some(covering_ndc_z) = covering_ndc_z else {
-        return Some(base_pad);
-    };
-    let Some(caster) = view_depth_from_reverse_z(closest_ndc_z, clip) else {
-        return Some(base_pad);
-    };
-    let Some(covering) = view_depth_from_reverse_z(covering_ndc_z, clip) else {
-        return Some(base_pad);
-    };
+    let covering_ndc_z = covering_ndc_z?;
+    let caster = view_depth_from_reverse_z(closest_ndc_z, clip)?;
+    let covering = view_depth_from_reverse_z(covering_ndc_z, clip)?;
     if !covering.is_finite() || covering <= 0.0 || covering >= caster {
-        return Some(base_pad);
+        return None;
     }
-    let scale = (caster / covering).clamp(1.0, PARALLAX_SCALE_MAX);
+    let scale = caster / covering;
+    if !scale.is_finite() || scale > PARALLAX_SCALE_MAX {
+        return None;
+    }
     if scale < PARALLAX_RESAMPLE_MIN {
         return Some(base_pad);
     }
@@ -674,7 +696,7 @@ fn push_padded(rects: &mut Vec<ScreenRect>, rect: Option<ScreenRect>) {
     }
 }
 
-fn next_class_for_visible_set(inputs: &PhaseInputs<'_>) -> VisibilityClass {
+fn next_class_when_drawn(inputs: &HistoryInputs<'_>) -> VisibilityClass {
     if !inputs.caster_moved && !inputs.overlaps_disocclusion && inputs.other_occluder {
         VisibilityClass::Occluded
     } else {
@@ -682,7 +704,7 @@ fn next_class_for_visible_set(inputs: &PhaseInputs<'_>) -> VisibilityClass {
     }
 }
 
-fn phase2_rejection_holds(inputs: &PhaseInputs<'_>) -> bool {
+fn confirmed_rejection(inputs: &HistoryInputs<'_>) -> bool {
     !inputs.caster_moved && !inputs.overlaps_disocclusion && inputs.hi_z_occludes
 }
 
@@ -720,4 +742,4 @@ fn merge_record(
 }
 
 #[cfg(test)]
-include!("two_phase_tests.rs");
+include!("hysteresis_tests.rs");

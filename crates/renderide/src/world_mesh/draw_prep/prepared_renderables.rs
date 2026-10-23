@@ -55,7 +55,7 @@ const PREPARED_EXPAND_PARALLEL_CHUNK_SPACES: usize = 1;
 #[cfg(test)]
 const PREPARED_EXPAND_PARALLEL_MIN_SPACES: usize = PREPARED_EXPAND_PARALLEL_CHUNK_SPACES * 2;
 
-/// World bounds of one prepared caster, used to build two-phase disocclusion rectangles.
+/// World bounds of one prepared caster, used to build hysteresis disocclusion rectangles.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PreparedCasterBounds {
     /// Render space that owns the caster.
@@ -475,14 +475,41 @@ impl FramePreparedRenderables {
         }
     }
 
+    /// Count of world casters accepted by `include_space`, stopping once it passes `limit`.
+    ///
+    /// `None` means the view has more casters than `limit`.
+    pub(crate) fn world_caster_count_at_most(
+        &self,
+        limit: usize,
+        include_space: impl FnMut(RenderSpaceId) -> bool,
+    ) -> Option<usize> {
+        let mut seen = 0usize;
+        let finished = self.each_world_caster(include_space, |_| {
+            seen += 1;
+            seen <= limit
+        });
+        finished.then_some(seen)
+    }
+
     /// Visits one world-space caster per prepared renderer run.
     ///
     /// Overlay and hidden runs are skipped. `include_space` drops casters outside the view.
     pub(crate) fn for_each_world_caster_bounds(
         &self,
-        mut include_space: impl FnMut(RenderSpaceId) -> bool,
+        include_space: impl FnMut(RenderSpaceId) -> bool,
         mut visit: impl FnMut(PreparedCasterBounds),
     ) {
+        self.each_world_caster(include_space, |bounds| {
+            visit(bounds);
+            true
+        });
+    }
+
+    fn each_world_caster(
+        &self,
+        mut include_space: impl FnMut(RenderSpaceId) -> bool,
+        mut visit: impl FnMut(PreparedCasterBounds) -> bool,
+    ) -> bool {
         for run in &self.runs {
             let Some(first) = self.draws.get(run.start as usize) else {
                 continue;
@@ -496,7 +523,7 @@ impl FramePreparedRenderables {
             let Some((aabb_min, aabb_max)) = geometry.world_aabb else {
                 continue;
             };
-            visit(PreparedCasterBounds {
+            if !visit(PreparedCasterBounds {
                 space_id: first.space_id,
                 renderable_index: first.renderable_index,
                 instance_id: first.instance_id.0,
@@ -505,8 +532,11 @@ impl FramePreparedRenderables {
                 mesh_asset_id: first.mesh_asset_id,
                 aabb_min,
                 aabb_max,
-            });
+            }) {
+                return false;
+            }
         }
+        true
     }
 
     /// Dense prepared draw slice backing [`Self::runs`].

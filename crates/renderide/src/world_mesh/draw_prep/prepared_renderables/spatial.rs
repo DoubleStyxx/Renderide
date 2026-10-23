@@ -695,7 +695,7 @@ mod tests {
             host_camera: &host_camera,
             hi_z: None,
             hi_z_temporal: None,
-            two_phase: None,
+            hysteresis: None,
         };
         let mut draws = (0..80)
             .map(|idx| {

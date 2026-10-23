@@ -8,7 +8,7 @@ use crate::materials::RasterFrontFace;
 use crate::scene::{RenderSpaceId, SkinnedMeshRenderer};
 use crate::shared::LayerType;
 
-use crate::occlusion::two_phase::CasterRef;
+use crate::occlusion::hysteresis::CasterRef;
 use crate::world_mesh::culling::{
     CpuCullFailure, MeshCullTarget, SpaceCullCache, mesh_world_geometry_for_cull_with_head,
 };
@@ -166,7 +166,7 @@ fn prepared_run_view_state<'a>(
                 c,
                 None,
                 Some(CasterRef {
-                    key: crate::occlusion::two_phase::CasterKey::new(
+                    key: crate::occlusion::hysteresis::CasterKey::new(
                         first.space_id,
                         first.renderable_index,
                         first.instance_id.0,

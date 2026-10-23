@@ -125,7 +125,7 @@ pub(super) fn queue_view_draws(
         .iter()
         .map(|view| setup.prepared_renderables_for(view.render_context()))
         .collect::<Vec<_>>();
-    let phases = super::two_phase::build_view_occlusion_phases(
+    let plans = super::hysteresis::build_view_hysteresis_plans(
         setup.scene,
         setup.occlusion,
         prepared,
@@ -133,7 +133,7 @@ pub(super) fn queue_view_draws(
         &projection_copies,
         &temporal_copies,
     );
-    let (cull_inputs, cull_projs) = build_view_cull_inputs(prepared, cull_snapshots, &phases);
+    let (cull_inputs, cull_projs) = build_view_cull_inputs(prepared, cull_snapshots, &plans);
     let contexts =
         build_view_draw_collection_contexts(setup, prepared, &dict, &cull_inputs, mesh_lod_bias);
     let shadow_contexts =
@@ -160,10 +160,10 @@ pub(super) fn queue_view_draws(
         inner_parallelism,
         &mut view_draws,
     );
-    for phase in phases.into_iter().flatten() {
+    for plan in plans.into_iter().flatten() {
         setup
             .occlusion
-            .store_visibility_history(phase.view_id, phase.frame.finish());
+            .store_visibility_history(plan.view_id, plan.frame.finish());
     }
     view_draws
 }
@@ -277,7 +277,7 @@ fn max_prepared_draw_count_for_views(
 fn build_view_cull_inputs<'a>(
     prepared: &'a [FrameViewPlan<'_>],
     cull_snapshots: Vec<Option<ViewCullSnapshot>>,
-    phases: &'a [Option<super::two_phase::ViewOcclusionPhase>],
+    plans: &'a [Option<super::hysteresis::ViewHysteresisPlan>],
 ) -> (
     Vec<Option<WorldMeshCullInput<'a>>>,
     Vec<Option<WorldMeshCullProjParams>>,
@@ -294,10 +294,11 @@ fn build_view_cull_inputs<'a>(
             host_camera: &prep.host_camera,
             hi_z: s.hi_z,
             hi_z_temporal: s.hi_z_temporal,
-            two_phase: phases
+            hysteresis: plans
                 .get(index)
-                .and_then(|phase| phase.as_ref())
-                .map(|phase| &phase.frame),
+                .and_then(|plan| plan.as_ref())
+                .filter(|plan| plan.apply)
+                .map(|plan| &plan.frame),
         });
         cull_projs.push(cull_proj);
         cull_inputs.push(culling);

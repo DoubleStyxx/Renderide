@@ -22,7 +22,7 @@ use crate::hi_z_cpu::{
     AabbHiZSample, HiZCullData, hi_z_view_proj_matrices, mesh_fully_occluded_in_hiz,
     sample_aabb_occlusion_with_pad, stereo_hiz_keeps_draw,
 };
-use crate::occlusion::two_phase::{
+use crate::occlusion::hysteresis::{
     CasterRef, DepthClip, OcclusionFacts, ScreenRect, covering_depth_is_other_occluder,
     parallax_adjusted_pad,
 };
@@ -41,8 +41,8 @@ pub(crate) struct PreparedSpaceCull<'a> {
     frustum: SpaceFrustum,
     /// Previous-frame Hi-Z test, when the temporal snapshot applies to this space.
     hi_z: Option<PreparedSpaceHiZ<'a>>,
-    /// Two-phase confirmation for this view. Absent on broadphase and legacy callers.
-    two_phase: Option<&'a crate::occlusion::two_phase::TwoPhaseFrame>,
+    /// History confirmation for this view. Absent on broadphase, overlays, and over-budget views.
+    hysteresis: Option<&'a crate::occlusion::hysteresis::VisibilityHysteresis>,
 }
 
 /// Precomputed homogeneous clip matrices for one space.
@@ -97,7 +97,7 @@ impl<'a> PreparedSpaceCull<'a> {
             space_id,
             frustum: space_frustum(scene, space_id, is_overlay, culling),
             hi_z: None,
-            two_phase: None,
+            hysteresis: None,
         }
     }
 
@@ -119,7 +119,7 @@ impl<'a> PreparedSpaceCull<'a> {
             } else {
                 prepare_space_hi_z(space_id, culling)
             },
-            two_phase: if is_overlay { None } else { culling.two_phase },
+            hysteresis: if is_overlay { None } else { culling.hysteresis },
         }
     }
 
@@ -166,7 +166,7 @@ impl<'a> PreparedSpaceCull<'a> {
     /// pyramid was written. A closer covering surface widens that pad again. No motion bound
     /// means the previous pyramid is not confirmation, so the caster is kept.
     fn occlusion_facts(&self, wmin: Vec3, wmax: Vec3) -> OcclusionFacts {
-        let Some(frame) = self.two_phase else {
+        let Some(frame) = self.hysteresis else {
             return OcclusionFacts::keep();
         };
         let Some(clip) = frame.depth_clip(self.space_id) else {
@@ -303,9 +303,9 @@ impl<'a> SpaceCullCache<'a> {
         )
     }
 
-    /// Runs frustum and two-phase occlusion culling for `geom`.
+    /// Runs frustum and history-based occlusion culling for `geom`.
     ///
-    /// `caster` is recorded in the view's visibility history when a two-phase plan is active.
+    /// `caster` is recorded in the view's visibility history when a hysteresis plan is active.
     /// `None` keeps the draw without updating that history.
     #[expect(
         clippy::too_many_arguments,
@@ -548,7 +548,7 @@ fn occlusion_allows_draw(
     wmin: Vec3,
     wmax: Vec3,
 ) -> bool {
-    let Some(frame) = prepared.two_phase else {
+    let Some(frame) = prepared.hysteresis else {
         return !prepared.hi_z_occludes(wmin, wmax);
     };
     frame.allows_draw(caster, wmin, wmax, prepared.occlusion_facts(wmin, wmax))

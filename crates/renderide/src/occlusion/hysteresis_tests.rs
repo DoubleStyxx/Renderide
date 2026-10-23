@@ -21,8 +21,8 @@ mod tests {
         (Vec3::new(-0.5, -0.5, 2.0), Vec3::new(0.5, 0.5, 3.0))
     }
 
-    fn inputs<'a>(previous: Option<&'a CasterRecord>, occludes: bool) -> PhaseInputs<'a> {
-        PhaseInputs {
+    fn inputs<'a>(previous: Option<&'a CasterRecord>, occludes: bool) -> HistoryInputs<'a> {
+        HistoryInputs {
             previous,
             caster_moved: false,
             overlaps_disocclusion: false,
@@ -52,8 +52,8 @@ mod tests {
 
     #[test]
     fn newly_revealed_caster_is_drawn_even_when_stale_hiz_occludes() {
-        let decision = decide_phase(inputs(None, true));
-        assert_eq!(decision.action, PhaseAction::FirstPhase);
+        let decision = decide_visibility(inputs(None, true));
+        assert_eq!(decision.action, HistoryAction::DrawRemembered);
         assert_eq!(decision.next_class, VisibilityClass::Visible);
     }
 
@@ -63,8 +63,8 @@ mod tests {
         let previous = record(VisibilityClass::Occluded, min, max);
         let mut query = inputs(Some(&previous), true);
         query.overlaps_disocclusion = true;
-        let decision = decide_phase(query);
-        assert_eq!(decision.action, PhaseAction::SecondPhase);
+        let decision = decide_visibility(query);
+        assert_eq!(decision.action, HistoryAction::Unconfirmed);
         assert_eq!(decision.next_class, VisibilityClass::Visible);
     }
 
@@ -74,17 +74,17 @@ mod tests {
         let previous = record(VisibilityClass::Occluded, min, max);
         let mut query = inputs(Some(&previous), true);
         query.hi_z_occludes = false;
-        let decision = decide_phase(query);
-        assert_eq!(decision.action, PhaseAction::SecondPhase);
-        assert_ne!(decision.action, PhaseAction::Culled);
+        let decision = decide_visibility(query);
+        assert_eq!(decision.action, HistoryAction::Unconfirmed);
+        assert_ne!(decision.action, HistoryAction::Culled);
     }
 
     #[test]
     fn stable_occluded_caster_stays_culled() {
         let (min, max) = aabb();
         let previous = record(VisibilityClass::Occluded, min, max);
-        let decision = decide_phase(inputs(Some(&previous), true));
-        assert_eq!(decision.action, PhaseAction::Culled);
+        let decision = decide_visibility(inputs(Some(&previous), true));
+        assert_eq!(decision.action, HistoryAction::Culled);
         assert_eq!(decision.next_class, VisibilityClass::Occluded);
     }
 
@@ -92,8 +92,8 @@ mod tests {
     fn visible_caster_is_not_rejected_by_its_own_depth() {
         let (min, max) = aabb();
         let previous = record(VisibilityClass::Visible, min, max);
-        let decision = decide_phase(inputs(Some(&previous), true));
-        assert_eq!(decision.action, PhaseAction::FirstPhase);
+        let decision = decide_visibility(inputs(Some(&previous), true));
+        assert_eq!(decision.action, HistoryAction::DrawRemembered);
         assert_eq!(decision.next_class, VisibilityClass::Visible);
     }
 
@@ -103,7 +103,7 @@ mod tests {
         let previous = record(VisibilityClass::Occluded, min, max);
         let mut query = inputs(Some(&previous), true);
         query.caster_moved = true;
-        assert_eq!(decide_phase(query).action, PhaseAction::SecondPhase);
+        assert_eq!(decide_visibility(query).action, HistoryAction::Unconfirmed);
     }
 
     #[test]
@@ -112,8 +112,8 @@ mod tests {
         let previous = record(VisibilityClass::Visible, min, max);
         let mut query = inputs(Some(&previous), true);
         query.other_occluder = true;
-        let decision = decide_phase(query);
-        assert_eq!(decision.action, PhaseAction::FirstPhase);
+        let decision = decide_visibility(query);
+        assert_eq!(decision.action, HistoryAction::DrawRemembered);
         assert_eq!(decision.next_class, VisibilityClass::Occluded);
     }
 
@@ -142,10 +142,10 @@ mod tests {
             }),
         ];
         for (name, query) in cases {
-            let decision = decide_phase(query);
+            let decision = decide_visibility(query);
             assert_ne!(
                 decision.action,
-                PhaseAction::Culled,
+                HistoryAction::Culled,
                 "{name} culled a caster the current frame can still show"
             );
         }
@@ -161,7 +161,7 @@ mod tests {
             .casters
             .insert(hidden, record(VisibilityClass::Occluded, min, max));
         let history = Arc::new(history);
-        let frame = TwoPhaseFrame::new(history, HashMap::new(), HashMap::new(), Vec::new());
+        let frame = VisibilityHysteresis::new(history, HashMap::new(), HashMap::new(), Vec::new());
         let facts = OcclusionFacts {
             occluded: true,
             other_occluder: false,
@@ -185,7 +185,7 @@ mod tests {
     fn visible_slot_wins_when_material_slots_share_a_key() {
         let (min, max) = aabb();
         let key = CasterKey::new(RenderSpaceId(1), 3, 9, 4, false);
-        let frame = TwoPhaseFrame::new(
+        let frame = VisibilityHysteresis::new(
             Arc::new(VisibilityHistory::default()),
             HashMap::new(),
             HashMap::new(),
@@ -224,7 +224,7 @@ mod tests {
         );
         spare.clear();
         let capacity = spare.capacity();
-        let frame = TwoPhaseFrame::new(
+        let frame = VisibilityHysteresis::new(
             Arc::new(VisibilityHistory::default()),
             spare,
             HashMap::new(),
@@ -236,7 +236,7 @@ mod tests {
 
     #[test]
     fn parallel_updates_merge_into_one_history() {
-        let frame = TwoPhaseFrame::new(
+        let frame = VisibilityHysteresis::new(
             Arc::new(VisibilityHistory::default()),
             HashMap::new(),
             HashMap::new(),
@@ -380,5 +380,49 @@ mod tests {
                 .any(|mover| mover.space_id == RenderSpaceId(1))
         );
         assert_eq!(movers.len(), 2);
+    }
+
+    #[test]
+    fn history_budget_includes_the_cap_and_rejects_one_past_it() {
+        assert!(history_within_budget(HISTORY_CASTER_BUDGET));
+        assert!(!history_within_budget(HISTORY_CASTER_BUDGET + 1));
+        assert_eq!(HISTORY_CASTER_BUDGET, 8_192);
+    }
+
+    #[test]
+    fn parallax_fails_open_past_eight_and_when_the_cover_is_farther() {
+        let clip = perspective_clip(0.01, 10_000.0);
+        let caster = ndc_from_view_depth(16.0, clip);
+        let close_cover = ndc_from_view_depth(1.0, clip);
+        assert!(
+            parallax_adjusted_pad(0.02, caster, Some(close_cover), true, clip).is_none(),
+            "a depth ratio of 16 must not cull"
+        );
+        let modest_caster = ndc_from_view_depth(10.0, clip);
+        let just_over = ndc_from_view_depth(10.0 / 8.01, clip);
+        assert!(parallax_adjusted_pad(0.02, modest_caster, Some(just_over), true, clip).is_none());
+        let farther = ndc_from_view_depth(40.0, clip);
+        let near_caster = ndc_from_view_depth(5.0, clip);
+        assert!(parallax_adjusted_pad(0.02, near_caster, Some(farther), true, clip).is_none());
+        assert!(parallax_adjusted_pad(0.02, near_caster, Some(0.0), true, clip).is_none());
+        assert!(parallax_adjusted_pad(0.02, near_caster, None, true, clip).is_none());
+    }
+
+    #[test]
+    fn parallax_scales_a_modest_closer_cover_and_ignores_ratio_when_visible() {
+        let clip = perspective_clip(0.01, 10_000.0);
+        let caster = ndc_from_view_depth(10.0, clip);
+        let cover = ndc_from_view_depth(4.0, clip);
+        let scaled =
+            parallax_adjusted_pad(0.02, caster, Some(cover), true, clip).expect("ratio 2.5");
+        assert!((scaled - 0.05).abs() < 1.0e-4);
+        let at_cap = ndc_from_view_depth(10.0 / 8.0, clip);
+        let capped =
+            parallax_adjusted_pad(0.02, caster, Some(at_cap), true, clip).expect("ratio 8");
+        assert!((capped - 0.16).abs() < 1.0e-3);
+        let visible =
+            parallax_adjusted_pad(0.02, caster, Some(ndc_from_view_depth(0.1, clip)), false, clip)
+                .expect("visible samples keep the base pad");
+        assert!((visible - 0.02).abs() < 1.0e-6);
     }
 }

@@ -9,9 +9,9 @@
 
 pub use renderide::bench_api::{
     BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload, CULL_BATCH,
-    CullWorkload, KeywordVariantCacheWorkload, MATERIAL_UNIFORM_BATCH,
-    MaterialUniformUpdateWorkload, TRANSFORM_BATCH, TWO_PHASE_BATCH, TWO_PHASE_HISTORY_COUNTS,
-    TransformWorkload, TwoPhaseCullWorkload, TwoPhaseHistoryWorkload, WORLD_MATRIX_NODES,
+    CullWorkload, HYSTERESIS_BATCH, HYSTERESIS_HISTORY_COUNTS, HysteresisCullWorkload,
+    HysteresisHistoryWorkload, KeywordVariantCacheWorkload, MATERIAL_UNIFORM_BATCH,
+    MaterialUniformUpdateWorkload, TRANSFORM_BATCH, TransformWorkload, WORLD_MATRIX_NODES,
     WorldMatrixWorkload,
 };
 
@@ -19,9 +19,9 @@ pub use renderide::bench_api::{
 mod tests {
     use super::{
         BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload,
-        CULL_BATCH, CullWorkload, KeywordVariantCacheWorkload, MaterialUniformUpdateWorkload,
-        TWO_PHASE_BATCH, TWO_PHASE_HISTORY_COUNTS, TransformWorkload, TwoPhaseCullWorkload,
-        TwoPhaseHistoryWorkload, WORLD_MATRIX_NODES, WorldMatrixWorkload,
+        CULL_BATCH, CullWorkload, HYSTERESIS_BATCH, HYSTERESIS_HISTORY_COUNTS,
+        HysteresisCullWorkload, HysteresisHistoryWorkload, KeywordVariantCacheWorkload,
+        MaterialUniformUpdateWorkload, TransformWorkload, WORLD_MATRIX_NODES, WorldMatrixWorkload,
     };
 
     #[test]
@@ -122,21 +122,23 @@ mod tests {
     }
 
     #[test]
-    fn two_phase_keeps_disoccluded_casters_and_culls_the_stable_quarter() {
-        let kept = TwoPhaseCullWorkload::standard().kept_count();
-        let batch = u32::try_from(TWO_PHASE_BATCH).unwrap_or(u32::MAX);
+    fn hysteresis_keeps_disoccluded_casters_and_culls_the_stable_quarter() {
+        let kept = HysteresisCullWorkload::standard().kept_count();
+        let batch = u32::try_from(HYSTERESIS_BATCH).unwrap_or(u32::MAX);
         assert_eq!(kept, batch / 4 * 3);
     }
 
     #[test]
-    fn two_phase_history_stable_culls_a_quarter_and_motion_keeps_draws() {
+    fn hysteresis_history_stable_culls_a_quarter_and_motion_keeps_draws() {
         let count = 1_000;
-        let mut stable = TwoPhaseHistoryWorkload::new(count, false);
+        let mut stable = HysteresisHistoryWorkload::new(count, false);
         let stable_kept = stable.step();
         assert_eq!(stable_kept, u32::try_from(count / 4 * 3).unwrap_or(0));
-        let mut moving = TwoPhaseHistoryWorkload::new(count, true);
+        let mut moving = HysteresisHistoryWorkload::new(count, true);
         let moving_kept = moving.step();
         assert_eq!(moving_kept, u32::try_from(count).unwrap_or(0));
-        assert!(TWO_PHASE_HISTORY_COUNTS.contains(&10_000));
+        assert_eq!(HYSTERESIS_HISTORY_COUNTS[0], 8_192);
+        assert!(HYSTERESIS_HISTORY_COUNTS.contains(&10_000));
+        assert!(HYSTERESIS_HISTORY_COUNTS.contains(&100_000));
     }
 }

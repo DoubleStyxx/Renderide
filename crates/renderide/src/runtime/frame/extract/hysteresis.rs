@@ -1,16 +1,20 @@
-//! Builds the per-view occlusion hysteresis plan before draw collection.
+//! Builds the per-view visibility-hysteresis plan before draw collection.
 //!
 //! The plan carries the previous classification, a per-space screen-motion bound, and
-//! disocclusion rectangles. It does not run a second GPU depth pass.
+//! disocclusion rectangles. It does not run a second GPU depth pass. Views with more casters
+//! than [`HISTORY_CASTER_BUDGET`] publish an empty history and leave the legacy Hi-Z test in
+//! place.
 
 use glam::{Mat4, Vec3};
+use hashbrown::HashMap;
 
 use crate::camera::{CameraProjectionKind, HostCameraFrame, view_matrix_for_host_world_mesh_space};
 use crate::cull_contract::HiZTemporalState;
 use crate::hi_z_cpu::project_world_aabb_uv;
-use crate::occlusion::two_phase::{
-    CasterKey, DepthClip, MovedCaster, PresentCaster, ScreenRect, SpaceMotion, TwoPhaseFrame,
-    VisibilityScratch, disocclusion_rects, plan_disocclusion,
+use crate::occlusion::hysteresis::{
+    CasterKey, DepthClip, HISTORY_CASTER_BUDGET, MovedCaster, PresentCaster, ScreenRect,
+    SpaceMotion, VisibilityHysteresis, VisibilityScratch, disocclusion_rects,
+    history_within_budget, plan_disocclusion,
 };
 use crate::scene::{RenderSpaceId, SceneCoordinator};
 use crate::world_mesh::draw_prep::PreparedCasterBounds;
@@ -19,22 +23,27 @@ use crate::world_mesh::{FramePreparedRenderables, ViewRenderSpaceScope, WorldMes
 use super::super::view_plan::FrameViewPlan;
 
 /// One view's hysteresis plan, retained until that view's cull has committed its history.
-pub(super) struct ViewOcclusionPhase {
+pub(super) struct ViewHysteresisPlan {
     /// Logical view whose history this plan updates.
     pub view_id: crate::camera::ViewId,
-    /// Plan shared with the view's [`crate::world_mesh::WorldMeshCullInput`].
-    pub frame: TwoPhaseFrame,
+    /// Plan shared with the view's [`crate::world_mesh::WorldMeshCullInput`] when [`Self::apply`]
+    /// is set.
+    pub frame: VisibilityHysteresis,
+    /// `false` when the caster count is above [`HISTORY_CASTER_BUDGET`]. Cull then uses the
+    /// legacy Hi-Z test. [`Self::frame`] is still finished so the spare map is recycled and the
+    /// published history is empty.
+    pub apply: bool,
 }
 
 /// Builds one hysteresis plan per prepared view that has cull inputs.
-pub(super) fn build_view_occlusion_phases(
+pub(super) fn build_view_hysteresis_plans(
     scene: &SceneCoordinator,
     occlusion: &crate::occlusion::OcclusionSystem,
     prepared_views: &[FrameViewPlan<'_>],
     prepared_renderables: &[Option<&FramePreparedRenderables>],
     projections: &[Option<WorldMeshCullProjParams>],
     temporals: &[Option<HiZTemporalState>],
-) -> Vec<Option<ViewOcclusionPhase>> {
+) -> Vec<Option<ViewHysteresisPlan>> {
     prepared_views
         .iter()
         .enumerate()
@@ -43,17 +52,19 @@ pub(super) fn build_view_occlusion_phases(
             let temporal = temporals.get(index).and_then(|temporal| temporal.as_ref());
             let scratch = occlusion.begin_visibility(view.view_id);
             let prepared = prepared_renderables.get(index).copied().flatten();
-            Some(ViewOcclusionPhase {
+            let (frame, apply) = build_frame(
+                scene,
+                prepared,
+                view.render_space_scope,
+                &view.host_camera,
+                proj,
+                temporal,
+                scratch,
+            );
+            Some(ViewHysteresisPlan {
                 view_id: view.view_id,
-                frame: build_frame(
-                    scene,
-                    prepared,
-                    view.render_space_scope,
-                    &view.host_camera,
-                    proj,
-                    temporal,
-                    scratch,
-                ),
+                frame,
+                apply,
             })
         })
         .collect()
@@ -67,7 +78,22 @@ fn build_frame(
     proj: &WorldMeshCullProjParams,
     temporal: Option<&HiZTemporalState>,
     scratch: VisibilityScratch,
-) -> TwoPhaseFrame {
+) -> (VisibilityHysteresis, bool) {
+    let caster_count = prepared.map(|prepared| {
+        prepared
+            .world_caster_count_at_most(HISTORY_CASTER_BUDGET, |space_id| scope.includes(space_id))
+    });
+    let within_budget = match caster_count {
+        None => history_within_budget(0),
+        Some(Some(count)) => history_within_budget(count),
+        Some(None) => false,
+    };
+    if !within_budget {
+        return (
+            VisibilityHysteresis::new(scratch.history, scratch.spare, HashMap::new(), Vec::new()),
+            false,
+        );
+    }
     let mut resolved_motion = Vec::new();
     let mut present = Vec::new();
     if let Some(prepared) = prepared {
@@ -94,7 +120,10 @@ fn build_frame(
         .into_iter()
         .filter_map(|(space_id, motion)| motion.map(|motion| (space_id, motion)))
         .collect();
-    TwoPhaseFrame::new(scratch.history, scratch.spare, motions, stale_rects)
+    (
+        VisibilityHysteresis::new(scratch.history, scratch.spare, motions, stale_rects),
+        true,
+    )
 }
 
 fn note_caster(
@@ -227,7 +256,7 @@ mod tests {
         view_matrix_for_host_world_mesh_space,
     };
     use crate::cull_contract::{HiZTemporalState, WorldMeshCullProjParams};
-    use crate::occlusion::two_phase::screen_motion_uv_pad;
+    use crate::occlusion::hysteresis::screen_motion_uv_pad;
     use crate::scene::{RenderSpaceId, SceneCoordinator};
     use crate::shared::RenderTransform;
 
