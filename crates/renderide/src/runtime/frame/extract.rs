@@ -387,7 +387,7 @@ impl ViewWorldMeshDrawPlans {
 mod tests {
     use hashbrown::HashSet;
 
-    use glam::{Mat4, Vec3};
+    use glam::Mat4;
 
     use crate::camera::{HostCameraFrame, ViewId};
     use crate::mesh_deform::{SkinCacheKey, SkinCacheRendererKind};
@@ -544,7 +544,7 @@ mod tests {
         plan.transform_filter_space = Some(RenderSpaceId(99));
         plan.render_space_scope = ViewRenderSpaceScope::single(RenderSpaceId(99));
 
-        let inputs = desktop_overlay_view_inputs(&plan, 1.25, Vec3::ZERO);
+        let inputs = desktop_overlay_view_inputs(&plan, 1.25);
 
         assert_eq!(inputs.render_context, RenderingContext::UserView);
         assert_eq!(
@@ -552,7 +552,6 @@ mod tests {
             plan.host_camera.head_output_transform
         );
         assert_eq!(inputs.view_origin_world, plan.view_origin_world());
-        assert_eq!(inputs.view_forward_world, Vec3::ZERO);
         assert!(inputs.culling.is_none());
         assert!(inputs.transform_filter.is_none());
         assert!(inputs.transform_filter_space.is_none());
@@ -573,7 +572,7 @@ mod tests {
         plan.render_space_scope = ViewRenderSpaceScope::single(RenderSpaceId(99));
         plan.layer_policy = ViewLayerPolicy::MainView;
 
-        let inputs = shadow_caster_view_inputs(&plan, 1.25, Vec3::Z);
+        let inputs = shadow_caster_view_inputs(&plan, 1.25);
 
         assert_eq!(inputs.render_context, RenderingContext::UserView);
         assert_eq!(
@@ -581,7 +580,6 @@ mod tests {
             plan.host_camera.head_output_transform
         );
         assert_eq!(inputs.view_origin_world, plan.view_origin_world());
-        assert_eq!(inputs.view_forward_world, Vec3::Z);
         assert!(inputs.culling.is_none());
         assert!(inputs.transform_filter.is_some());
         assert_eq!(inputs.transform_filter_space, Some(RenderSpaceId(99)));

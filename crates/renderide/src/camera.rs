@@ -25,12 +25,11 @@ pub(crate) use frame::{
     head_output_from_active_main_space,
 };
 pub use geometry::{CameraClipPlanes, CameraPose, EyeView, OrthographicProjectionSpec, Viewport};
+#[cfg(test)]
+pub(crate) use host_camera_frame::OVERLAY_CAMERA_LOCAL_Z;
 pub(crate) use host_camera_frame::overlay_camera_view_matrix;
 pub use host_camera_frame::{CameraProjectionKind, HostCameraFrame};
-#[cfg(test)]
-pub(crate) use host_camera_frame::{
-    OVERLAY_CAMERA_FAR_CLIP, OVERLAY_CAMERA_LOCAL_Z, OVERLAY_CAMERA_NEAR_CLIP,
-};
+pub(crate) use host_camera_frame::{OVERLAY_CAMERA_FAR_CLIP, OVERLAY_CAMERA_NEAR_CLIP};
 pub use portal::{
     CameraPortalMode, CameraPortalSourceView, CameraPortalSurface,
     host_camera_frame_for_camera_portal,
@@ -49,12 +48,12 @@ pub use secondary::{
     camera_state_screen_space_reflections, host_camera_frame_for_render_texture,
 };
 pub use stereo::StereoViewMatrices;
+pub(crate) use view::overlay_canvas_view_origin;
 pub use view::{
     apply_view_handedness_fix, view_matrix_for_host_world_mesh_space,
     view_matrix_for_world_mesh_render_space, view_matrix_from_render_transform,
     world_to_view_pair_for_skybox,
 };
-pub(crate) use view::{overlay_canvas_view_basis, view_forward_world_for_collection};
 #[cfg(test)]
 pub(crate) use view_id::SecondaryCameraId;
 pub use view_id::ViewId;
@@ -66,21 +65,14 @@ mod tests {
     use openxr::Fovf;
 
     use crate::scene::render_transform_to_matrix;
-    use crate::scene::{RenderSpaceId, SceneCoordinator};
     use crate::shared::{HeadOutputDevice, RenderTransform};
 
-    use super::geometry::EyeView;
-    use super::host_camera_frame::HostCameraFrame;
     use super::projection::{
         DEFAULT_DESKTOP_FOV_DEGREES, DESKTOP_FOV_DEGREES_MAX, DESKTOP_FOV_DEGREES_MIN,
         clamp_desktop_fov_degrees, effective_head_output_clip_planes, reverse_z_orthographic,
         reverse_z_perspective, reverse_z_perspective_openxr_fov,
     };
-    use super::stereo::StereoViewMatrices;
-    use super::view::{
-        head_forward_from_eye_views, view_forward_world_for_collection,
-        view_forward_world_from_view_matrix, view_matrix_from_render_transform,
-    };
+    use super::view::view_matrix_from_render_transform;
 
     fn expected_reverse_z_perspective_cols(
         aspect: f32,
@@ -135,80 +127,6 @@ mod tests {
         assert!(m.z_axis.w == -1.0);
     }
 
-    fn yawed_camera(yaw_radians: f32) -> RenderTransform {
-        RenderTransform {
-            position: Vec3::ZERO,
-            scale: Vec3::ONE,
-            rotation: Quat::from_rotation_y(yaw_radians),
-        }
-    }
-
-    fn eye_looking(yaw_radians: f32) -> EyeView {
-        let view = view_matrix_from_render_transform(&yawed_camera(yaw_radians));
-        EyeView::new(view, Mat4::IDENTITY, Mat4::IDENTITY, Vec3::ZERO)
-    }
-
-    #[test]
-    fn collection_forward_tracks_the_head_not_one_eye() {
-        let scene = SceneCoordinator::new();
-        let left = eye_looking(25.0_f32.to_radians());
-        let right = eye_looking(-15.0_f32.to_radians());
-        let stereo = StereoViewMatrices::new(left, right);
-        let host = HostCameraFrame {
-            vr_active: true,
-            stereo: Some(stereo),
-            ..HostCameraFrame::default()
-        };
-        let forward = view_forward_world_for_collection(&scene, &host);
-        let head = head_forward_from_eye_views(left.view, right.view);
-        let left_only = view_forward_world_from_view_matrix(left.view);
-        assert!(
-            (forward - head).length() < 1.0e-5,
-            "stereo collection forward {forward} is not the head mean {head}"
-        );
-        assert!(
-            (forward - left_only).length() > 0.05,
-            "head forward {forward} collapsed onto the left eye {left_only}"
-        );
-        assert!(forward.z > 0.9, "head still looks mostly +Z, got {forward}");
-
-        let explicit = HostCameraFrame {
-            vr_active: true,
-            stereo: Some(stereo),
-            explicit_view: Some(eye_looking(std::f32::consts::FRAC_PI_2)),
-            ..HostCameraFrame::default()
-        };
-        let explicit_forward = view_forward_world_for_collection(&scene, &explicit);
-        assert!(
-            (explicit_forward - Vec3::X).length() < 1.0e-4,
-            "explicit render-texture view must win over the HMD, got {explicit_forward}"
-        );
-
-        let ignored = HostCameraFrame {
-            vr_active: false,
-            stereo: Some(stereo),
-            ..HostCameraFrame::default()
-        };
-        let ignored_forward = view_forward_world_for_collection(&scene, &ignored);
-        assert!(
-            (ignored_forward - Vec3::NEG_Z).length() < 1.0e-4,
-            "inactive stereo must not override the empty-scene fallback, got {ignored_forward}"
-        );
-
-        let mut desktop = SceneCoordinator::new();
-        desktop.test_seed_space_identity_worlds(
-            RenderSpaceId(1),
-            vec![yawed_camera(0.0)],
-            vec![-1],
-        );
-        let desktop_forward =
-            view_forward_world_for_collection(&desktop, &HostCameraFrame::default());
-        assert!(
-            (desktop_forward - Vec3::Z).length() < 1.0e-4,
-            "desktop collection uses view_transform (+Z), got {desktop_forward}"
-        );
-    }
-
     #[test]
     fn identity_camera_forward_is_positive_z() {
         let tr = RenderTransform {
@@ -216,7 +134,9 @@ mod tests {
             scale: Vec3::ONE,
             rotation: Quat::IDENTITY,
         };
-        let forward = view_forward_world_from_view_matrix(view_matrix_from_render_transform(&tr));
+        let forward = view_matrix_from_render_transform(&tr)
+            .inverse()
+            .transform_vector3(Vec3::new(0.0, 0.0, -1.0));
         assert!(
             (forward - Vec3::Z).length() < 1.0e-5,
             "identity rotation looks along +Z, got {forward}"

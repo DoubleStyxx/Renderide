@@ -821,6 +821,10 @@ fn canvas_and_non_canvas_depth_order_stays_total() {
 
     let items = [canvas_far, canvas_near, world_far, world_near];
     assert_order_sensitive_comparator_is_total(&items);
+    assert!(
+        items[0].camera_distance_sq < items[2].camera_distance_sq,
+        "farthest-corner order would draw the canvas after the world quad"
+    );
     assert_eq!(
         cmp_transparent_intra_run(&items[0], &items[2]),
         Ordering::Less,

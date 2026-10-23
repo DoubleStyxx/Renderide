@@ -156,16 +156,9 @@ pub struct DrawCollectionViewInputs<'a> {
     pub head_output_transform: Mat4,
     /// Camera world position for back-to-front distance sorting of transparent draws.
     ///
-    /// Populate from `HostCameraFrame::view_origin_world()`.
+    /// Populate from `HostCameraFrame::view_origin_world()`. Canvas plane distance uses this
+    /// origin and the draw matrix. It does not use a camera forward.
     pub view_origin_world: Vec3,
-    /// Unit world-space camera forward recorded for this view.
-    ///
-    /// An explicit view wins. VR uses the mean of the two eye forwards (head orientation, not one
-    /// eye and not the render-space root). Desktop uses the active main-space `view_transform`.
-    /// Canvas ordering does not read it: the plane key is the distance to the draw's own plane.
-    /// Collection still records it, and `acknowledge_collected_view_forward` keeps the value
-    /// live so a tilted head cannot silently drop the axis.
-    pub view_forward_world: Vec3,
     /// Optional CPU frustum + Hi-Z cull inputs.
     pub culling: Option<&'a WorldMeshCullInput<'a>>,
     /// Unity-style mesh LOD bias multiplier for relative screen-height selection.
@@ -417,10 +410,11 @@ impl QueuedWorldMeshDraws {
 
     /// Sorts and arranges queued draws, reusing a retained command-list cache when provided.
     pub(crate) fn sort_and_arrange_with_cache(
-        self,
+        mut self,
         parallelism: WorldMeshDrawArrangeParallelism,
         command_cache: Option<&WorldMeshCommandCache>,
     ) -> WorldMeshDrawCollection {
+        super::canvas_depth::snap_canvas_sibling_plane_depths(&mut self.chunks);
         let allow_parallel_sort = parallelism == WorldMeshDrawArrangeParallelism::Full;
         let (items, arrangement) = {
             profiling::scope!("mesh::arrange");
@@ -441,22 +435,12 @@ impl QueuedWorldMeshDraws {
     }
 }
 
-/// Keeps the collected head forward observable.
-///
-/// Canvas plane distance does not use this axis. The read is here so the explicit view, the
-/// stereo eye mean, or `view_transform` is still part of every draw queue.
-#[inline]
-fn acknowledge_collected_view_forward(forward: Vec3) {
-    std::hint::black_box(forward);
-}
-
 /// Queues draws from active spaces with control over inner rayon use.
 pub fn queue_draws_with_parallelism(
     ctx: &DrawCollectionInputs<'_>,
     parallelism: WorldMeshDrawCollectParallelism,
 ) -> QueuedWorldMeshDraws {
     profiling::scope!("mesh::queue_draws");
-    acknowledge_collected_view_forward(ctx.view.view_forward_world);
     let Some(state) = build_prepared_collection_state(ctx) else {
         return queue_draws_without_prepared_snapshot(ctx, parallelism);
     };
@@ -548,9 +532,6 @@ pub(crate) fn queue_prepared_draws_for_views_with_parallelism(
     parallelism: WorldMeshDrawCollectParallelism,
 ) -> Vec<QueuedWorldMeshDraws> {
     profiling::scope!("mesh::queue_prepared_draws_for_views");
-    for ctx in contexts {
-        acknowledge_collected_view_forward(ctx.view.view_forward_world);
-    }
     if contexts.is_empty() {
         return Vec::new();
     }

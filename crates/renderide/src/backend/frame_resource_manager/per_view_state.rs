@@ -67,4 +67,9 @@ pub struct PerViewPerDrawScratch {
     /// this view's sorted draw list. Cleared and refilled by world-mesh forward frame planning;
     /// held here so the boundary Vec does not reallocate as it grows across frames.
     pub material_batch_boundaries: Vec<MaterialBatchBoundary>,
+    /// Canvas sibling depth steps for this view's sorted draws.
+    ///
+    /// Cleared and refilled while packing per-draw view-projections. Retained so a view does not
+    /// allocate a new step buffer every frame.
+    pub canvas_steps: Vec<u32>,
 }

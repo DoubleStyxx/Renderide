@@ -246,7 +246,7 @@ fn canvas_plane_depth_for_candidate(
     rigid_world_matrix: Option<Mat4>,
 ) -> Option<f32> {
     let origin = if is_overlay {
-        crate::camera::overlay_canvas_view_basis().0
+        crate::camera::overlay_canvas_view_origin()
     } else {
         view.view_origin_world
     };
@@ -326,7 +326,6 @@ mod tests {
                 render_context: RenderingContext::UserView,
                 head_output_transform: Mat4::IDENTITY,
                 view_origin_world: Vec3::ZERO,
-                view_forward_world: Vec3::ZERO,
                 culling: None,
                 mesh_lod_bias: 2.0,
                 transform_filter: None,

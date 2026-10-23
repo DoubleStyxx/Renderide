@@ -53,7 +53,8 @@ pub use sort::pack_sort_prefix;
 pub(crate) use sort::sort_draws;
 #[cfg(feature = "bench-api")]
 pub(crate) use sort::{
-    sort_order_sensitive_draws_precomputed, sort_order_sensitive_draws_recomputing_depth,
+    sort_order_sensitive_draws_master, sort_order_sensitive_draws_precomputed,
+    sort_order_sensitive_draws_recomputing_depth,
 };
 
 #[cfg(test)]

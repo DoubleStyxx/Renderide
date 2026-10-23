@@ -4,7 +4,7 @@ use bytemuck::Zeroable;
 use glam::Mat4;
 use rayon::prelude::*;
 
-use crate::camera::HostCameraFrame;
+use crate::camera::{HostCameraFrame, OVERLAY_CAMERA_FAR_CLIP, OVERLAY_CAMERA_NEAR_CLIP};
 use crate::cpu_parallelism::{
     RENDER_COMMAND_CHUNK_DRAWS, admit_render_command_items, current_reference_worker_count,
     record_parallel_admission,
@@ -84,11 +84,12 @@ pub(super) fn pack_and_upload_per_draw_slab(
 
     // Step 2: pack VP uniforms in `slab_layout` order and enqueue the storage-buffer upload.
     let mut uploaded = false;
-    let mut pack_and_upload = |uniforms: &mut Vec<PaddedPerDrawUniforms>| {
+    let mut pack_and_upload = |uniforms: &mut Vec<PaddedPerDrawUniforms>,
+                               canvas_steps: &mut Vec<u32>| {
         uniforms.clear();
         uniforms.resize_with(inputs.draws.len(), PaddedPerDrawUniforms::zeroed);
 
-        pack_per_draw_vp_uniforms(uniforms, &inputs, scene, hc);
+        pack_per_draw_vp_uniforms(uniforms, canvas_steps, &inputs, scene, hc);
 
         {
             profiling::scope!("world_mesh::enqueue_slab_upload");
@@ -111,14 +112,20 @@ pub(super) fn pack_and_upload_per_draw_slab(
 /// depending on whether `compute_per_draw_vp_matrices` returns identical left/right matrices.
 fn pack_per_draw_vp_uniforms(
     uniforms: &mut [PaddedPerDrawUniforms],
+    canvas_steps: &mut Vec<u32>,
     inputs: &SlabPackInputs<'_>,
     scene: &(impl SceneTransformRead + Sync + ?Sized),
     hc: &HostCameraFrame,
 ) {
     profiling::scope!("world_mesh::pack_vp_matrices");
-    let canvas_steps = assign_canvas_depth_steps(inputs.draws);
+    assign_canvas_depth_steps(inputs.draws, canvas_steps);
     let pack_one = |slot: &mut PaddedPerDrawUniforms, draw_index: usize| {
         let item = &inputs.draws[draw_index];
+        let (near, far) = if item.is_overlay {
+            (OVERLAY_CAMERA_NEAR_CLIP, OVERLAY_CAMERA_FAR_CLIP)
+        } else {
+            (hc.clip.near, hc.clip.far)
+        };
         let matrices = compute_per_draw_vp_matrices(
             scene,
             item,
@@ -126,7 +133,12 @@ fn pack_per_draw_vp_uniforms(
             inputs.render_context,
             inputs.world_proj,
             inputs.overlay_proj,
-            canvas_ndc_z_bias(item, canvas_steps.get(draw_index).copied().unwrap_or(0)),
+            canvas_ndc_z_bias(
+                item,
+                canvas_steps.get(draw_index).copied().unwrap_or(0),
+                near,
+                far,
+            ),
         );
         let packed = if matrices.view_proj_left == matrices.view_proj_right {
             PaddedPerDrawUniforms::new_single(matrices.view_proj_left, matrices.model)

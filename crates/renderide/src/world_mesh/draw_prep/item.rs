@@ -157,8 +157,9 @@ pub struct WorldMeshDrawItem {
     ///
     /// `Some` only for canvas UI stems (`ui_unlit`, `ui_textunlit`, `ui_circlesegment`) when the
     /// rigid world matrix defines a usable plane. The value does not depend on the camera
-    /// forward, so tilted coplanar siblings share it. Larger values are farther from the view
-    /// origin. `None` keeps farthest-corner ordering for that draw.
+    /// forward. Siblings within `0.1` mm snap to one anchor before the `0.5` mm quantum, so float
+    /// noise cannot split a run. Larger values are farther from the view origin. `None` keeps
+    /// farthest-corner ordering for that draw.
     pub canvas_plane_depth: Option<f32>,
     /// `true` when [`Self::batch_key`] is a canvas UI stem.
     ///
@@ -170,7 +171,8 @@ pub struct WorldMeshDrawItem {
     /// Canvas stems with [`Self::canvas_plane_depth`] store the quantized plane distance. Every
     /// other transparent draw stores `sqrt(camera_distance_sq)`. The comparator compares these
     /// numbers directly. A canvas-versus-world pair therefore does not use the same order as
-    /// comparing both draws by farthest-corner distance.
+    /// comparing both draws by farthest-corner distance. A large glass pane in front of a canvas
+    /// sorts behind it when the pane's farthest corner is farther than the canvas plane.
     pub transparent_depth_key: f64,
     /// Conservative world-space bounds for visibility tests that run after draw collection.
     ///

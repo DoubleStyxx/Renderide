@@ -127,4 +127,16 @@ mod tests {
         assert_ne!(precomputed, 0);
         assert_eq!(precomputed, recomputed);
     }
+
+    #[test]
+    fn master_farthest_corner_sort_can_disagree_with_the_plane_key() {
+        let workload = TransparentSortWorkload::plane_versus_corner();
+        let precomputed = workload.clone().sort_precomputed();
+        let master = workload.sort_master();
+        assert_ne!(precomputed, 0);
+        assert_ne!(
+            precomputed, master,
+            "canvas plane keys and farthest-corner keys must be able to swap"
+        );
+    }
 }

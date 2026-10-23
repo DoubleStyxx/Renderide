@@ -296,9 +296,10 @@ pub const TRANSPARENT_SORT_10K: usize = 10_240;
 
 /// Unsorted transparent draws, half canvas stems and half world stems.
 ///
-/// Both sort methods use the current plane-distance key. `sort_precomputed` reads the `f64` stored
-/// on the draw. `sort_recomputing_depth` rebuilds that key on every compare, including the canvas
-/// stem-name match, which is what `cmp_transparent_class_tie` did before the key was collected.
+/// `sort_precomputed` reads the `f64` stored on the draw. `sort_recomputing_depth` rebuilds that
+/// key on every compare, including the canvas stem-name match. `sort_master` is the `117a8df5`
+/// farthest-corner comparator: it compares `camera_distance_sq` and does not match canvas stems.
+/// Canvas-versus-world pairs can disagree between `sort_master` and `sort_precomputed`.
 #[derive(Clone, Debug)]
 pub struct TransparentSortWorkload {
     items: Vec<crate::world_mesh::WorldMeshDrawItem>,
@@ -364,6 +365,55 @@ impl TransparentSortWorkload {
         Self { items }
     }
 
+    /// A canvas whose plane is farther than a world draw's farthest corner, while the canvas
+    /// corner itself is nearer.
+    ///
+    /// Master orders the world draw first. The plane key orders the canvas first.
+    #[must_use]
+    pub fn plane_versus_corner() -> Self {
+        use crate::materials::RasterPipelineKind;
+        use crate::world_mesh::draw_prep::{pack_sort_prefix, sync_transparent_depth_key};
+        use crate::world_mesh::test_fixtures::{DummyDrawItemSpec, dummy_world_mesh_draw_item};
+
+        let mut items = Vec::with_capacity(2);
+        for (index, canvas) in [true, false].into_iter().enumerate() {
+            let mut item = dummy_world_mesh_draw_item(DummyDrawItemSpec {
+                material_asset_id: 1,
+                property_block: None,
+                skinned: false,
+                sorting_order: 0,
+                mesh_asset_id: 1,
+                node_id: i32::try_from(index).unwrap_or(0),
+                slot_index: 0,
+                collect_order: index,
+                alpha_blended: true,
+            });
+            if canvas {
+                item.batch_key.pipeline =
+                    RasterPipelineKind::EmbeddedStem(Arc::from("ui_unlit_default"));
+                item.is_canvas_ui = true;
+                item.canvas_plane_depth = Some(9.0);
+                item.camera_distance_sq = 1.0;
+            } else {
+                item.batch_key.pipeline =
+                    RasterPipelineKind::EmbeddedStem(Arc::from("unlit_default"));
+                item.is_canvas_ui = false;
+                item.canvas_plane_depth = None;
+                item.camera_distance_sq = 64.0;
+            }
+            sync_transparent_depth_key(&mut item);
+            item.sort_prefix = pack_sort_prefix(
+                item.is_overlay,
+                item.batch_key.render_queue,
+                item.batch_key.uses_transparent_sorting(),
+                item._opaque_depth_bucket,
+                item.batch_key_hash,
+            );
+            items.push(item);
+        }
+        Self { items }
+    }
+
     /// Sorts a clone with the production precomputed-key comparator.
     #[must_use]
     pub fn sort_precomputed(self) -> u64 {
@@ -376,6 +426,13 @@ impl TransparentSortWorkload {
     pub fn sort_recomputing_depth(self) -> u64 {
         let mut items = self.items;
         crate::world_mesh::draw_prep::sort_order_sensitive_draws_recomputing_depth(&mut items)
+    }
+
+    /// Sorts a clone with the master farthest-corner comparator.
+    #[must_use]
+    pub fn sort_master(self) -> u64 {
+        let mut items = self.items;
+        crate::world_mesh::draw_prep::sort_order_sensitive_draws_master(&mut items)
     }
 }
 

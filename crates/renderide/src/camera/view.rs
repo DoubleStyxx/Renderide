@@ -6,7 +6,7 @@ use crate::scene::render_transform_to_matrix;
 use crate::scene::{RenderSpaceRead, SceneSpaceRead};
 use crate::shared::RenderTransform;
 
-use super::host_camera_frame::{HostCameraFrame, overlay_camera_view_matrix};
+use super::host_camera_frame::HostCameraFrame;
 
 /// Clamps scale for view matrix construction: if any axis is nearly zero, use unit scale.
 pub fn filter_scale_legacy(scale: Vec3) -> Vec3 {
@@ -87,75 +87,13 @@ pub fn world_to_view_pair_for_skybox(
     (view, view)
 }
 
-/// World-space camera forward for a world-to-view matrix.
+/// Overlay-camera origin in overlay-local space.
 ///
-/// View space is right-handed with −Z forward. The returned vector is
-/// `inverse(view) * (0, 0, −1)`, normalized. A zero vector means the view basis is unusable.
+/// Desktop overlay draws are not in the main camera frame. The overlay view is
+/// `translation(0, 0, -10) * scale(1, 1, -1)`, and the inverse of that fixed matrix maps the
+/// view origin to `(0, 0, -10)`. Canvas plane depth uses this constant. Collection does not
+/// invert a view matrix to recover a camera forward.
 #[inline]
-pub(crate) fn view_forward_world_from_view_matrix(view: Mat4) -> Vec3 {
-    unit_direction(view.inverse().transform_vector3(Vec3::new(0.0, 0.0, -1.0)))
-}
-
-/// Camera forward used when collecting one view's draws.
-///
-/// An explicit view wins, so a render-texture camera does not inherit the HMD. While VR stereo
-/// is active the forward is the mean of the two eye view directions: that is the head
-/// orientation, not the left eye and not the render-space root. Desktop and every other
-/// non-stereo view use the active main-space `view_transform`. Identity is the last resort and
-/// looks down world −Z.
-pub(crate) fn view_forward_world_for_collection(
-    scene: &(impl SceneSpaceRead + ?Sized),
-    host_camera: &HostCameraFrame,
-) -> Vec3 {
-    if let Some(view) = host_camera.explicit_world_to_view() {
-        return view_forward_world_from_view_matrix(view);
-    }
-    if let Some(stereo) = host_camera.active_stereo() {
-        let (left, right) = stereo.view_pair();
-        let head = head_forward_from_eye_views(left, right);
-        if head != Vec3::ZERO {
-            return head;
-        }
-    }
-    let view = scene.active_main_space().map_or(Mat4::IDENTITY, |space| {
-        view_matrix_for_world_mesh_render_space(scene, space)
-    });
-    view_forward_world_from_view_matrix(view)
-}
-
-/// Head forward from a stereo pair.
-///
-/// Each eye view contributes its world forward. The sum is normalized, which is the head
-/// direction for the small vergence between the eyes. A zero vector means both views were
-/// unusable.
-#[inline]
-pub(crate) fn head_forward_from_eye_views(left_view: Mat4, right_view: Mat4) -> Vec3 {
-    unit_direction(
-        view_forward_world_from_view_matrix(left_view)
-            + view_forward_world_from_view_matrix(right_view),
-    )
-}
-
-/// Overlay-camera origin and forward in overlay-local space.
-///
-/// Desktop overlay draws are not in the main camera frame, so their canvas plane depth uses this
-/// fixed basis instead of [`view_forward_world_for_collection`].
-pub(crate) fn overlay_canvas_view_basis() -> (Vec3, Vec3) {
-    let view = overlay_camera_view_matrix();
-    let origin = view.inverse().transform_point3(Vec3::ZERO);
-    (origin, view_forward_world_from_view_matrix(view))
-}
-
-/// Returns a unit direction, or zero when `direction` is non-finite or degenerate.
-#[inline]
-fn unit_direction(direction: Vec3) -> Vec3 {
-    if !direction.is_finite() {
-        return Vec3::ZERO;
-    }
-    let length_sq = direction.length_squared();
-    if length_sq <= 1.0e-12 {
-        Vec3::ZERO
-    } else {
-        direction * length_sq.sqrt().recip()
-    }
+pub(crate) fn overlay_canvas_view_origin() -> Vec3 {
+    Vec3::new(0.0, 0.0, super::host_camera_frame::OVERLAY_CAMERA_LOCAL_Z)
 }

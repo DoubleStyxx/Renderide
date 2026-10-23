@@ -72,6 +72,8 @@ pub enum CaseTemplate {
     TiltedCanvasUiQuads,
     /// UI quad that stays behind an opaque quad unless the reverse-Z NDC bias is applied.
     CanvasOffsetBiasQuad,
+    /// Tilted canvas siblings at 18 m. The later child wins by the sibling-step bias.
+    TiltedCanvasDistanceBias,
 }
 
 /// Default golden directory, relative to the workspace root: `crates/renderide-test/goldens/`.
@@ -277,6 +279,24 @@ pub fn canvas_offset_bias_quad() -> IntegrationCase {
     }
 }
 
+/// Tilted parent and child `UI/Unlit` quads at 18 m, yawed 60°.
+///
+/// The child is 0.15 mm farther along the plane normal, still inside one 0.5 mm quantum, so it
+/// takes sibling step 1. That step is about 0.77 mm toward the camera at 18 m (near 0.1, far 100)
+/// and clears the 0.30 mm view-ray gap. One D24 ulp does not. `_OffsetUnits` stays 0, so the
+/// pixel is the sibling step and not the authored offset. Both quads set `_ZWrite` to 1.
+pub fn tilted_canvas_distance_bias() -> IntegrationCase {
+    IntegrationCase {
+        name: "tilted_canvas_distance_bias".to_string(),
+        description: "Tilted UI siblings at 18 m. The later child's depth step must cover it."
+            .to_string(),
+        golden_path: default_goldens_dir().join("tilted_canvas_distance_bias.png"),
+        resolution: (256, 256),
+        tolerance: visual_tolerance(0.9, 24, 0.08, 16, 3, 0.04),
+        template: CaseTemplate::TiltedCanvasDistanceBias,
+    }
+}
+
 /// Optional GLB fixture case. The registry includes it only when the fixture file is present,
 /// so the suite remains useful before a commit-safe model has been added.
 pub fn gltf_textured_static_mesh(path: PathBuf) -> IntegrationCase {
@@ -304,6 +324,7 @@ pub fn registry() -> Vec<IntegrationCase> {
         coplanar_canvas_ui_quads(),
         tilted_canvas_ui_quads(),
         canvas_offset_bias_quad(),
+        tilted_canvas_distance_bias(),
     ];
     let gltf_fixture = default_fixture_path();
     if gltf_fixture.is_file() {

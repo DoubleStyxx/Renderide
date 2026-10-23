@@ -182,6 +182,35 @@ pub(crate) fn sort_order_sensitive_draws_recomputing_depth(items: &mut [WorldMes
     transparent_sort_checksum(items)
 }
 
+/// Sorts with the master farthest-corner comparator (`camera_distance_sq`, no canvas plane key).
+///
+/// This is the tie `cmp_transparent_class_tie` used at `117a8df5`, before canvas stems grew a
+/// plane-distance key. The sort microbench reports it next to the precomputed key so the speedup
+/// is not only against the recompute-per-compare path.
+#[cfg(feature = "bench-api")]
+pub(crate) fn sort_order_sensitive_draws_master(items: &mut [WorldMeshDrawItem]) -> u64 {
+    items.sort_unstable_by(cmp_order_sensitive_draws_master);
+    transparent_sort_checksum(items)
+}
+
+#[cfg(feature = "bench-api")]
+fn cmp_order_sensitive_draws_master(a: &WorldMeshDrawItem, b: &WorldMeshDrawItem) -> Ordering {
+    cmp_order_sensitive_body(a, b, cmp_transparent_intra_run_master)
+}
+
+/// Master transparent tie: farthest-corner distance squared, then the same class tie as today.
+#[cfg(feature = "bench-api")]
+fn cmp_transparent_intra_run_master(a: &WorldMeshDrawItem, b: &WorldMeshDrawItem) -> Ordering {
+    a.sorting_order
+        .cmp(&b.sorting_order)
+        .then_with(|| {
+            b.camera_distance_sq
+                .total_cmp(&a.camera_distance_sq)
+                .then_with(|| transparent_class_tie_after_depth(a, b))
+        })
+        .then(a.collect_order.cmp(&b.collect_order))
+}
+
 #[cfg(feature = "bench-api")]
 fn cmp_order_sensitive_draws_recompute_depth(
     a: &WorldMeshDrawItem,

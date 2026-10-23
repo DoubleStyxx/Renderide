@@ -106,6 +106,9 @@ pub enum SessionTemplate {
     TiltedCanvasUiQuads,
     /// Opaque quad with a slightly farther UI quad whose Offset units must win the depth test.
     CanvasOffsetBiasQuad,
+    /// Tilted canvas at 18 m. The later sibling is 0.15 mm behind on the plane and must win
+    /// by the sibling-step NDC bias.
+    TiltedCanvasDistanceBias,
 }
 
 /// Drives the full session end-to-end. The renderer process is killed on `Err` via [`Drop`] of
@@ -292,6 +295,7 @@ fn template_label(template: &SessionTemplate) -> &'static str {
         SessionTemplate::CoplanarCanvasUiQuads => "CoplanarCanvasUiQuads",
         SessionTemplate::TiltedCanvasUiQuads => "TiltedCanvasUiQuads",
         SessionTemplate::CanvasOffsetBiasQuad => "CanvasOffsetBiasQuad",
+        SessionTemplate::TiltedCanvasDistanceBias => "TiltedCanvasDistanceBias",
     }
 }
 
@@ -322,6 +326,7 @@ fn build_scene_setup(template: SessionTemplate) -> SceneSetup {
         SessionTemplate::CoplanarCanvasUiQuads => coplanar_canvas_ui_quads_setup(),
         SessionTemplate::TiltedCanvasUiQuads => tilted_canvas_ui_quads_setup(),
         SessionTemplate::CanvasOffsetBiasQuad => canvas_offset_bias_quad_setup(),
+        SessionTemplate::TiltedCanvasDistanceBias => tilted_canvas_distance_bias_setup(),
     }
 }
 
@@ -746,6 +751,50 @@ fn canvas_offset_bias_quad_setup() -> SceneSetup {
                 Vec3::new(0.45, 0.45, 1.0),
                 Quat::IDENTITY,
             ),
+            mesh_asset_id: scene_mesh_id(0),
+            material_asset_id: scene_material_id(1),
+            sorting_order: 0,
+        },
+    ];
+    SceneSetup {
+        meshes,
+        materials,
+        scene: SceneSubmission {
+            camera_world_pose: default_camera_world_pose(),
+            renderables,
+            lights: Vec::new(),
+        },
+    }
+}
+
+fn tilted_canvas_distance_bias_setup() -> SceneSetup {
+    let meshes = vec![mesh_asset(
+        0,
+        generate_quad(),
+        centered_bounds(Vec3::new(0.55, 0.55, 0.05)),
+    )];
+    let materials = vec![
+        ui_unlit_color_material(0, [1.0, 0.05, 0.05, 1.0]),
+        ui_unlit_color_material(1, [0.05, 0.2, 1.0, 1.0]),
+    ];
+    // Center is 18 m from the camera at z = -3. A 60° yaw makes a 0.15 mm normal nudge
+    // about 0.30 mm along the view ray: more than one D24 ulp and less than one 4-ulp step.
+    // The pair stays inside one 0.5 mm plane quantum, so the later child gets step 1.
+    let yaw = 60.0_f32.to_radians();
+    let rotation = Quat::from_rotation_y(yaw);
+    let parent = Vec3::new(0.0, 0.0, 15.0);
+    let child = parent + rotation * Vec3::new(0.0, 0.0, 0.00015);
+    let renderables = vec![
+        SceneRenderable {
+            transform_id: 0,
+            pose: transform(parent, Vec3::new(7.0, 7.0, 1.0), rotation),
+            mesh_asset_id: scene_mesh_id(0),
+            material_asset_id: scene_material_id(0),
+            sorting_order: 0,
+        },
+        SceneRenderable {
+            transform_id: 1,
+            pose: transform(child, Vec3::new(2.2, 2.2, 1.0), rotation),
             mesh_asset_id: scene_mesh_id(0),
             material_asset_id: scene_material_id(1),
             sorting_order: 0,

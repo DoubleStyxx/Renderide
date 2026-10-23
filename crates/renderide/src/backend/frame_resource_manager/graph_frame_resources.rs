@@ -100,7 +100,7 @@ impl GraphPerDrawSlabResources for FrameResourceManager {
     fn with_per_view_per_draw_scratch(
         &self,
         view_id: ViewId,
-        f: &mut dyn FnMut(&mut Vec<PaddedPerDrawUniforms>),
+        f: &mut dyn FnMut(&mut Vec<PaddedPerDrawUniforms>, &mut Vec<u32>),
     ) -> bool {
         let Some(scratch_slot) = self.per_view_per_draw_scratch(view_id) else {
             return false;
@@ -108,7 +108,8 @@ impl GraphPerDrawSlabResources for FrameResourceManager {
         let mut scratch_guard = scratch_slot.lock();
         let scratch = &mut *scratch_guard;
         let uniforms = &mut scratch.uniforms;
-        f(uniforms);
+        let canvas_steps = &mut scratch.canvas_steps;
+        f(uniforms, canvas_steps);
         drop(scratch_guard);
         true
     }
