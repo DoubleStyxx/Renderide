@@ -24,6 +24,12 @@ impl Drop for SpawnedRenderer {
     }
 }
 
+/// Must match `SHADOW_ATLAS_PASS_LOG_ENV` in the renderer headless driver.
+///
+/// The suite reads `{png}.atlas-passes` and the append-only pass log. A normal headless run
+/// leaves those files unwritten.
+const SHADOW_ATLAS_PASS_LOG_ENV: &str = "RENDERIDE_SHADOW_ATLAS_PASS_LOG";
+
 /// Spawns the renderer binary with all flags wired up for headless operation.
 pub(super) fn spawn_renderer(
     cfg: &SceneSessionConfig,
@@ -34,6 +40,7 @@ pub(super) fn spawn_renderer(
     let args = renderer_spawn_args(cfg, queue_name);
     cmd.args(&args);
     cmd.env("RENDERIDE_INTERPROCESS_DIR", backing_dir);
+    cmd.env(SHADOW_ATLAS_PASS_LOG_ENV, "1");
 
     if cfg.verbose_renderer {
         cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
