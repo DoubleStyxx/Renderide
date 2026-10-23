@@ -48,6 +48,12 @@ impl StereoStash {
         self.right[slot] = Some(raw);
     }
 
+    /// Drops both eyes for `slot` so a later read cannot pair across frames.
+    fn clear_slot(&mut self, slot: usize) {
+        self.left[slot] = None;
+        self.right[slot] = None;
+    }
+
     /// Takes both halves for `slot` if both have arrived.
     fn take_pair(&mut self, slot: usize) -> Option<(Vec<u8>, Vec<u8>)> {
         if self.left[slot].is_some() && self.right[slot].is_some() {
@@ -136,18 +142,34 @@ fn drain_primary_slot(state: &mut HiZGpuState, slot: usize, shape: ScratchShape)
             let Some(pending) = state.readback.take_primary_pending(slot) else {
                 return;
             };
-            let raw = read_mapped_buffer(pending.buffer());
+            let Some(raw) = read_mapped_buffer(pending.buffer()) else {
+                // Map failure leaves `state.desktop` / `state.stereo` unchanged.
+                // `OcclusionSystem::hi_z_cull_data` keeps the previous pyramid and
+                // returns `None` only when no successful read has landed yet.
+                // Stereo drops both eyes for this slot so a later frame cannot
+                // pair the surviving eye with these bytes.
+                if shape.stereo {
+                    state.stereo_stash.clear_slot(slot);
+                }
+                return;
+            };
             apply_primary_bytes(state, slot, shape, raw);
         }
         Ok(Err(_)) => {
             if let Some(pending) = state.readback.take_primary_pending(slot) {
                 pending.unmap();
             }
+            if shape.stereo {
+                state.stereo_stash.clear_slot(slot);
+            }
         }
         Err(mpsc::TryRecvError::Empty) => {}
         Err(mpsc::TryRecvError::Disconnected) => {
             if let Some(pending) = state.readback.take_primary_pending(slot) {
                 pending.unmap();
+            }
+            if shape.stereo {
+                state.stereo_stash.clear_slot(slot);
             }
         }
     }
@@ -177,19 +199,26 @@ fn drain_secondary_slot(state: &mut HiZGpuState, slot: usize) {
             let Some(pending) = state.readback.take_secondary_pending(slot) else {
                 return;
             };
-            let raw = read_mapped_buffer(pending.buffer());
+            let Some(raw) = read_mapped_buffer(pending.buffer()) else {
+                // Drop the stashed left eye too. Pairing it with a later right
+                // eye would mix two frames.
+                state.stereo_stash.clear_slot(slot);
+                return;
+            };
             state.stereo_stash.set_right(slot, raw);
         }
         Ok(Err(_)) => {
             if let Some(pending) = state.readback.take_secondary_pending(slot) {
                 pending.unmap();
             }
+            state.stereo_stash.clear_slot(slot);
         }
         Err(mpsc::TryRecvError::Empty) => {}
         Err(mpsc::TryRecvError::Disconnected) => {
             if let Some(pending) = state.readback.take_secondary_pending(slot) {
                 pending.unmap();
             }
+            state.stereo_stash.clear_slot(slot);
         }
     }
 }
@@ -210,9 +239,23 @@ fn combine_paired_stereo(state: &mut HiZGpuState, shape: ScratchShape) {
 }
 
 /// Reads and unmaps a completed staging buffer into CPU-owned bytes.
-fn read_mapped_buffer(buf: &wgpu::Buffer) -> Vec<u8> {
+///
+/// `None` means `get_mapped_range` failed. Callers must not substitute an empty
+/// buffer: [`crate::occlusion::OcclusionSystem::hi_z_cull_data`] then keeps the
+/// last successful pyramid (or `None` if this view has never read one back).
+fn read_mapped_buffer(buf: &wgpu::Buffer) -> Option<Vec<u8>> {
     profiling::scope!("hi_z::read_mapped_buffer");
-    let range = buf.slice(..).get_mapped_range().to_vec();
+    let range = match buf.slice(..).get_mapped_range() {
+        Ok(view) => {
+            let bytes = view.to_vec();
+            drop(view);
+            Some(bytes)
+        }
+        Err(err) => {
+            logger::error!("Hi-Z mapped range failed: {err}; keeping the previous pyramid");
+            None
+        }
+    };
     buf.unmap();
     range
 }
@@ -270,4 +313,24 @@ fn unpack_stereo_snapshot(
         left: left?,
         right: right?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StereoStash;
+
+    #[test]
+    fn clear_slot_drops_both_eyes_so_later_reads_cannot_pair() {
+        let mut stash = StereoStash::default();
+        stash.set_left(0, vec![1, 2]);
+        stash.set_right(0, vec![3, 4]);
+        stash.set_left(1, vec![5]);
+
+        stash.clear_slot(0);
+
+        assert!(stash.left[0].is_none());
+        assert!(stash.right[0].is_none());
+        assert!(stash.take_pair(0).is_none());
+        assert_eq!(stash.left[1].as_deref(), Some(&[5][..]));
+    }
 }

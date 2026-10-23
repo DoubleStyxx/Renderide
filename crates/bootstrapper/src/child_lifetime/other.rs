@@ -19,4 +19,7 @@ impl PlatformGroup {
     pub fn register_spawned(&self, _child: &Child) -> io::Result<()> {
         Ok(())
     }
+
+    /// No tracked children on this platform.
+    pub fn disarm(&self) {}
 }

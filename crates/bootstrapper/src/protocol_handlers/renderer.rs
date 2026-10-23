@@ -14,12 +14,18 @@ use crate::renderer_link;
 ///
 /// If a renderer was already registered, the previous process is killed and reaped first.
 pub(super) fn handle_start_renderer(
+    named_executable: Option<&str>,
     renderer_args: &[String],
     outgoing: &mut Publisher,
     config: &ResoBootConfig,
     lifetime: &ChildLifetimeGroup,
     renderer_child: &SharedChildSlot,
 ) -> LoopAction {
+    if let Some(executable) = named_executable {
+        logger::info!(
+            "Host named renderer executable {executable}; forwarding unwrapped arguments to Renderide"
+        );
+    }
     let mut args: Vec<String> = renderer_args.to_vec();
     if let Some(ref level) = config.renderide_log_level {
         args.push("-LogLevel".to_string());
@@ -89,7 +95,7 @@ fn handle_spawned_renderer(
         "Renderer started PID {} cwd={} args={}",
         pid,
         config.renderite_directory.display(),
-        args.join(" ")
+        crate::launch_args::quote_windows_command_line(args)
     );
     let response = format!("RENDERITE_STARTED:{pid}");
     if !outgoing.try_enqueue(response.as_bytes()) {

@@ -113,6 +113,7 @@ impl FrameResourceManager {
                 render_space_scope: ViewRenderSpaceScope::AllActive,
                 layer_policy: ViewLayerPolicy::MainView,
                 has_selective_roots: false,
+                transform_filter_space: None,
                 head_output_transform: glam::Mat4::IDENTITY,
                 render_shadows: true,
                 cull: None,
@@ -343,7 +344,24 @@ where
     !space.is_private()
         || desc
             .layer_policy
-            .shows_private_render_space(desc.has_selective_roots)
+            .shows_private_render_space(selective_roots_apply_to_light_space(desc, space_id))
+}
+
+/// Returns whether this view's selective roots reveal private content in `space_id`.
+///
+/// Draw collection uses the same rule: a filter bound to one space does not opt every other
+/// private space in. An unset filter space applies the view-level flag everywhere in scope.
+fn selective_roots_apply_to_light_space(
+    desc: &FrameLightViewDesc,
+    space_id: RenderSpaceId,
+) -> bool {
+    if desc
+        .transform_filter_space
+        .is_some_and(|filter_space| filter_space != space_id)
+    {
+        return false;
+    }
+    desc.has_selective_roots
 }
 
 fn resolve_lights_for_space_ids<S>(

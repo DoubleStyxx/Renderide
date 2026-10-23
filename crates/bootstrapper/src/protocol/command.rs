@@ -11,8 +11,8 @@ pub enum HostCommand {
     GetText,
     /// Clipboard write (payload after `SETTEXT` prefix).
     SetText(String),
-    /// Spawn renderer with argv-style tokens from the message (whitespace-separated).
-    StartRenderer(Vec<String>),
+    /// Spawn the renderer. `STARTRENDERER <exe> ARGS=...` is unwrapped first.
+    StartRenderer(crate::launch_args::RendererLaunchRequest),
 }
 
 impl HostCommand {
@@ -23,9 +23,9 @@ impl HostCommand {
             Self::Shutdown => String::from("SHUTDOWN"),
             Self::GetText => String::from("GETTEXT"),
             Self::SetText(text) => format!("SETTEXT redacted_len={}", text.len()),
-            Self::StartRenderer(argv) => {
-                let first = argv.first().map_or("<empty>", String::as_str);
-                format!("StartRenderer argc={} first={first}", argv.len())
+            Self::StartRenderer(launch) => {
+                let first = launch.args.first().map_or("<empty>", String::as_str);
+                format!("StartRenderer argc={} first={first}", launch.args.len())
             }
         }
     }
@@ -34,8 +34,9 @@ impl HostCommand {
 /// Parses a UTF-8 message from the Host into a [`HostCommand`].
 ///
 /// Recognized prefixes: `HEARTBEAT`, `SHUTDOWN`, `GETTEXT`, `SETTEXT<payload>`.
-/// Any other input is treated as whitespace-separated argv for [`HostCommand::StartRenderer`];
-/// this catch-all is how `BootstrapperManager` requests a renderer launch.
+/// Any other input is a renderer launch. Tokens follow Windows command-line quoting, and a
+/// `STARTRENDERER <exe> ARGS=...` wrapper is removed before the arguments are forwarded.
+/// This catch-all is how `BootstrapperManager` requests a renderer launch.
 pub fn parse_host_command(s: &str) -> HostCommand {
     match s {
         "HEARTBEAT" => HostCommand::Heartbeat,
@@ -47,12 +48,12 @@ pub fn parse_host_command(s: &str) -> HostCommand {
                 .unwrap_or_default(),
         ),
         _ => {
-            let argv: Vec<String> = s.split_whitespace().map(String::from).collect();
-            let first = argv.first().map_or("<empty>", String::as_str);
+            let launch = crate::launch_args::parse_renderer_launch_message(s);
+            let first = launch.args.first().map_or("<empty>", String::as_str);
             logger::debug!(
                 "Bootstrap message did not match a known command; treating as renderer argv (first token: {first})"
             );
-            HostCommand::StartRenderer(argv)
+            HostCommand::StartRenderer(launch)
         }
     }
 }
