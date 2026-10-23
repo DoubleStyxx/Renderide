@@ -82,4 +82,8 @@ impl PlatformGroup {
         }
         Ok(())
     }
+
+    /// No-op. The job handle stays open until [`Drop`], which is what kill-on-close uses if this
+    /// process is terminated while the child is still running.
+    pub fn disarm(&self) {}
 }
