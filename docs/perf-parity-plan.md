@@ -43,7 +43,7 @@ Camera, resolution, warmup and frame counts are part of the scene definition: S1
 - `renderide-test check-suite`: golden images (correctness, not perf).
 - Allocation checks (per-frame heap) via the PR's own Criterion or test, as required by the issue templates.
 
-Known limits on lavapipe: absolute ms are not comparable across machines; GPU pass times measure a CPU rasteriser; the shared VM adds roughly 5-10% run-to-run noise on sub-millisecond frames (measured, see `docs/perf-baseline-2026-10-23.md` and section 5), so the gate uses repeats and a median.
+Known limits on lavapipe: absolute ms are not comparable across machines; GPU pass times measure a CPU rasteriser; the shared VM adds roughly 5-10% run-to-run noise on sub-millisecond frames (measured, see the baseline doc `docs/perf-baseline-2026-10-23.md`, which lives on PR #141 / branch `gauge/perf-baseline` (not yet on master) at https://github.com/DoubleStyxx/Renderide/blob/gauge/perf-baseline/docs/perf-baseline-2026-10-23.md, and section 5), so the gate uses repeats and a median.
 
 ### Needs a real GPU (and the Unity reference)
 
@@ -129,7 +129,7 @@ Lavapipe reference numbers for the implemented scenes are in section 10.
 
 ## 8. Upcoming feature PRs: scenes, benches, metric, threshold
 
-Thresholds are relative to master measured on the same box in the same session. "Fail" means hold the PR until explained; an intended cost must be stated with its number (per the issue template).
+Thresholds are relative to master measured on the same box in the same session. "Fail" means hold the PR until explained; an intended cost must be stated with its number (per the issue template). Note that `renderide-framebench compare` currently has a single `--threshold` per invocation, so per-metric thresholds in this table need one `compare` invocation per distinct threshold (see section 9, item 3).
 
 | PR / issue | Owner | Scenes (framebench) | Criterion benches | Metric | Threshold | Notes |
 |---|---|---|---|---|---|---|
@@ -147,9 +147,9 @@ Thresholds are relative to master measured on the same box in the same session. 
 
 Use the existing manual workflow (`.github/workflows/frame-bench.yml`, `workflow_dispatch` with `base_ref` / `head_ref`); it builds both refs on one runner, pins to 2 CPUs and compares medians of per-run percentiles. Proposed changes (this branch includes the workflow change, which is additive):
 
-1. **`scenarios` input** (done on this branch): comma-separated list passed as repeated `--scenario`. The workflow now runs the head's `renderide-framebench` against both renderer binaries so a scene that only exists on the head can still run against base.
+1. **`scenarios` input** (done on this branch): comma-separated list of `[a-z0-9_]` names, passed through `env:` (not interpolated into the script) and regex-validated like `threads`, then forwarded as repeated `--scenario`. **Each tree is measured with its own `renderide-framebench` binary** (base on base's, head on head's), as before. A scenario that the base tree does not define (checked against its `scenario.rs`) is run on head only; `compare` then shows it as `missing` (base N/A) and it cannot fail the gate. If none of the requested scenarios exist on base, the relative gate is skipped and the summary says so.
 2. **Default gate set**: `unlit_sphere,multi_primitive_unlit,many_static_meshes,lights_shadows`. The tiny scenes catch gross regressions; S1/S2 (milliseconds) are the ones with a usable signal.
-3. **Thresholds**: `--gate cpu_frame_ms.p50 --gate cpu_frame_ms.p95 --threshold 10` for scenes under 1 ms (noise 5-10%), `--threshold 5` for S1/S2. Also gate on `draw_calls.p50` and `upload_bytes.p50` with threshold 0 (these are deterministic; any change must be explained).
+3. **Thresholds**: `--gate cpu_frame_ms.p50 --gate cpu_frame_ms.p95 --threshold 10` for scenes under 1 ms (noise 5-10%), `--threshold 5` for S1/S2. Also gate on `draw_calls.p50` and `upload_bytes.p50` with threshold 0 (these are deterministic; any change must be explained). **Limitation:** `renderide-framebench compare` takes ONE `--threshold` that applies to every `--gate` metric of that invocation (and to all scenarios in the report); it has no per-metric or per-scenario thresholds. Until per-metric support exists (follow-up: accept `--gate metric=percent` in `compare.rs`), run `compare` more than once with different `--gate`/`--threshold` pairs (timing metrics at 5-10, `draw_calls.p50`/`upload_bytes.p50` at 0) and fail if any invocation fails; the table in section 8 gives the intended threshold per metric, not what a single invocation can express.
 4. **Repeat policy**: `runs=5`; re-dispatch once before treating a failure as real (the first run after idle is slow). Add `workflow_dispatch` input `repeat_on_fail` later if needed.
 5. **Criterion** is a separate, non-gating job: `cargo bench -p renderide-bench` for base and head back to back, base twice, report only (Criterion noise on shared runners is 5-20%). Promote to a gate only for benches with a stable spread below 3%.
 6. **When to run**: manually on PRs labelled `perf` and on every PR touching `crates/renderide/src/{world_mesh,render_graph,passes,gpu,materials,occlusion}`; the repo's `pull_request` trigger stays off until runner noise is characterised (open question for Prism).
@@ -170,7 +170,7 @@ Measured 2026-10-23 12:0x-12:3x MDT by Gauge Drone. Machine: shared 8-vCPU Linux
 
 Reading: the S5 pair is the intended regression guard: 256 behind-the-camera avatars cost nothing in draw calls on either tree (17 vs 271-273 draws), so any change that makes the off-screen share draw again will show in `draw_calls` immediately (deterministic, gate at 0%). S1 draw counts differ between resolutions because of frustum/Hi-Z culling. Criterion reference (same box): `culling/homogeneous_clip_aabb` ~49-51 us, `culling/skinned_homogeneous_clip_aabb` ~52 us, `shadow_churn/static_repaint` ~120-130 us, `shadow_churn/cold_plan` ~4.2-4.5 ms, `keyword_variants/compose` ~34 ms (real per-variant naga-oil compose cost on the warmup worker, not a frame hitch), `transparent_sort/precomputed_10k` ~1.73 ms.
 
-Multi-thread lock behaviour is not visible in framebench or Criterion; the `gauge/lock-contention-bench` branch adds `renderide-lockbench` (`cargo run --release -p renderide-lockbench -- --threads 2,4,8`) for A/B-ing lock crates; use it whenever a dependency bump touches `parking_lot` or the GPU queue gate.
+Multi-thread lock behaviour is not visible in framebench or Criterion; the `gauge/lock-contention-bench` branch adds `renderide-lockbench` (`cargo run --release --manifest-path crates/renderide-lockbench/Cargo.toml -- --threads 2,4,8`, a standalone package outside the workspace) for A/B-ing lock crates; use it whenever a dependency bump touches `parking_lot` or the GPU queue gate.
 
 ### Exact commands for Styxx on a real GPU
 ```

@@ -43,7 +43,7 @@ name: Frame bench
         required: false
         type: string
       scenarios:
-        description: Comma-separated framebench scenarios. Empty uses the built-in defaults (unlit_sphere, multi_primitive_unlit).
+        description: Comma-separated framebench scenario names ([a-z0-9_]). Empty uses the built-in defaults. Each tree runs with its own framebench binary; scenarios missing on base run on head only (base N/A).
         default: ""
         required: false
         type: string
@@ -113,6 +113,10 @@ jobs:
           fi
 
       - name: Measure and compare
+        env:
+          # Passed through the environment (never interpolated into the script text) and
+          # validated below.
+          INPUT_SCENARIOS: ${{ inputs.scenarios }}
         run: |
           set -euo pipefail
           threads="${{ inputs.threads }}"
@@ -121,13 +125,14 @@ jobs:
           warmup="${{ inputs.warmup }}"
           frames="${{ inputs.frames }}"
           resolution="${{ inputs.resolution }}"
-          scenarios="${{ inputs.scenarios }}"
-          scenario_args=()
+          scenarios="${INPUT_SCENARIOS// /}"
+          scenario_list=()
           if [[ -n "$scenarios" ]]; then
+            if ! [[ "$scenarios" =~ ^[a-z0-9_]+(,[a-z0-9_]+)*$ ]]; then
+              echo "scenarios must be a comma-separated list of [a-z0-9_] names" >&2
+              exit 1
+            fi
             IFS=',' read -r -a scenario_list <<< "$scenarios"
-            for scenario in "${scenario_list[@]}"; do
-              scenario_args+=(--scenario "${scenario// /}")
-            done
           fi
           if ! [[ "$threads" =~ ^[1-9][0-9]*$ ]]; then
             echo "threads must be a positive integer" >&2
@@ -154,15 +159,23 @@ jobs:
               || return 1
           }
 
+          # Each tree is measured with ITS OWN renderide-framebench binary. Reports from different
+          # trees are only ever compared through the JSON schema (checked by `compare`).
+          # usage: run_tree <target dir> <out json> [scenario ...]
           run_tree() {
-            local tree="$1"
-            local target="$2"
-            local out="$3"
+            local target="$1"
+            local out="$2"
+            shift 2
+            local args=()
+            local scenario
+            for scenario in "$@"; do
+              args+=(--scenario "$scenario")
+            done
             taskset -c "$cpuset" \
-              "$RUNNER_TEMP/target-head/release/renderide-framebench" run \
+              "$target/release/renderide-framebench" run \
               --renderer "$target/release/renderide-renderer" \
               --resolution "$resolution" \
-              "${scenario_args[@]}" \
+              "${args[@]}" \
               --warmup "$warmup" \
               --frames "$frames" \
               --runs "$runs" \
@@ -170,11 +183,16 @@ jobs:
               --output "$out"
           }
 
+          # A scenario exists in a tree when its framebench scenario table defines it.
+          tree_has_scenario() {
+            grep -Eq "^[[:space:]]*name: \"$2\"," "$1/crates/renderide-framebench/src/scenario.rs" 2>/dev/null
+          }
+
           if ! build_tree "head" "$RUNNER_TEMP/target-head"; then
             echo "candidate tree failed to build" >&2
             exit 1
           fi
-          run_tree "head" "$RUNNER_TEMP/target-head" "$RUNNER_TEMP/framebench/head.json"
+          run_tree "$RUNNER_TEMP/target-head" "$RUNNER_TEMP/framebench/head.json" "${scenario_list[@]}"
 
           set +e
           build_tree "base" "$RUNNER_TEMP/target-base"
@@ -196,7 +214,30 @@ jobs:
             echo "baseline tree failed to build" >&2
             exit 1
           fi
-          run_tree "base" "$RUNNER_TEMP/target-base" "$RUNNER_TEMP/framebench/base.json"
+
+          # Base runs on base's own binary. Scenarios the base tree does not define are measured
+          # on head only and show as `missing` (N/A) in the comparison, which never fails.
+          base_scenarios=()
+          for scenario in "${scenario_list[@]}"; do
+            if tree_has_scenario "base" "$scenario"; then
+              base_scenarios+=("$scenario")
+            else
+              echo "base has no scenario \`$scenario\`: head only, base N/A" >&2
+            fi
+          done
+          if [[ "${#scenario_list[@]}" -gt 0 && "${#base_scenarios[@]}" -eq 0 ]]; then
+            {
+              echo "# frame-bench-lavapipe"
+              echo
+              echo "None of the requested scenarios exist on base ref \`${{ inputs.base_ref }}\`."
+              echo "Head was measured; relative gate skipped (base N/A)."
+              echo
+              echo "result: pass"
+            } | tee "$summary"
+            cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          run_tree "$RUNNER_TEMP/target-base" "$RUNNER_TEMP/framebench/base.json" "${base_scenarios[@]}"
 
           set +e
           taskset -c "$cpuset" \
