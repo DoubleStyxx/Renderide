@@ -14,7 +14,7 @@
 //! - `rwlock`: `N-1` readers and one writer that writes every ~50 us (registry-style read-mostly data).
 //! - `condvar`: producer/consumer round trips through `Mutex` plus `Condvar` (completion latency).
 //!
-//! Usage: `cargo run --release -p renderide-lockbench -- [--threads 2,4,8] [--millis 1000] [--samples 5]`.
+//! Usage (from the repository root; this package is excluded from the workspace): `cargo run --release --manifest-path crates/renderide-lockbench/Cargo.toml -- [--threads 2,4,8] [--millis 1000] [--samples 5]`.
 #![expect(clippy::print_stdout, reason = "this binary's output is its report")]
 #![expect(clippy::print_stderr, reason = "usage errors go to stderr")]
 

@@ -8,11 +8,13 @@ members = [
   "crates/renderide-bench",
   "crates/renderide-control-client",
   "crates/renderide-framebench",
-  "crates/renderide-lockbench",
   "crates/interprocess",
   "crates/bootstrapper",
   "crates/logger",
 ]
+# Standalone tool package with its own Cargo.lock: it links two parking_lot majors side by side and
+# must not add them to the workspace lockfile. Run it with --manifest-path (see its README).
+exclude = ["crates/renderide-lockbench"]
 
 # `cc` stays at 1.2.63 in Cargo.lock. 1.9.0 makes Windows `cl.exe` treat `/WX-`
 # as a source file while building `libmimalloc-sys` (CI clippy, MSVC 14.51).
