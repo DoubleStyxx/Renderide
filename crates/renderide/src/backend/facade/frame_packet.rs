@@ -2,7 +2,8 @@
 
 use hashbrown::{HashMap, HashSet};
 
-use crate::backend::FrameLightViewDesc;
+use crate::backend::frame_resource_manager::ShadowContentRevisions;
+use crate::backend::{AssetTransferQueue, FrameLightViewDesc};
 use crate::gpu_pools::MeshPool;
 use crate::materials::ShaderPermutation;
 use crate::materials::host_data::MaterialPropertyStore;
@@ -17,6 +18,29 @@ use crate::world_mesh::{
 
 use super::draw_preparation::{DrawPreparationExtractDesc, render_context_cache_key};
 use super::{OcclusionSystem, RenderBackend};
+
+/// Mesh-upload generation lookups used by production shadow planning.
+///
+/// Depth-only shadow shaders have an empty fragment entry, so the material property store is
+/// not a shadow-plan input. Cast participation, cast mode, and pipeline kind live on the draw.
+pub(crate) struct ShadowContentRevisionSources<'a> {
+    transfers: &'a AssetTransferQueue,
+}
+
+impl<'a> ShadowContentRevisionSources<'a> {
+    /// Borrows the transfer queue for one shadow prepare.
+    pub(crate) fn new(transfers: &'a AssetTransferQueue) -> Self {
+        Self { transfers }
+    }
+}
+
+impl ShadowContentRevisions for ShadowContentRevisionSources<'_> {
+    fn mesh_upload_generation(&self, mesh_asset_id: i32) -> u64 {
+        self.transfers
+            .current_mesh_upload_generation(mesh_asset_id)
+            .unwrap_or(0)
+    }
+}
 
 /// Immutable backend-owned extraction snapshot produced by [`RenderBackend::extract_frame_shared`].
 ///
@@ -148,10 +172,13 @@ impl RenderBackend {
     pub(crate) fn prepare_shadow_frame_for_views<'a, I>(&mut self, views: I)
     where
         I: IntoIterator<Item = (crate::camera::ViewId, &'a WorldMeshDrawPlan)>,
+        I::IntoIter: Clone,
     {
+        let quality = self.shadow_quality();
+        let revisions = ShadowContentRevisionSources::new(&self.asset_transfers);
         self.frame_services
             .frame_resources
-            .prepare_shadow_frame_for_views(self.shadow_quality(), views);
+            .prepare_shadow_frame_for_views(quality, views, &revisions);
     }
 
     /// Drains completed Hi-Z readbacks into CPU snapshots at the top of the tick.

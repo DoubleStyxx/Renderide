@@ -1,6 +1,6 @@
 //! OpenXR action set, interaction profile bindings, and per-frame VR controller sampling.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use parking_lot::Mutex;
 
@@ -218,8 +218,6 @@ pub struct OpenxrInput {
     actions: OpenxrInputActions,
     left_space: xr::Space,
     right_space: xr::Space,
-    left_palm_ext_space: xr::Space,
-    right_palm_ext_space: xr::Space,
     tracker_spaces: Vec<TrackerPoseSpace>,
     left_hand_tracker: Option<xr::HandTracker>,
     right_hand_tracker: Option<xr::HandTracker>,
@@ -258,8 +256,6 @@ impl OpenxrInput {
             actions: parts.actions,
             left_space: parts.left_space,
             right_space: parts.right_space,
-            left_palm_ext_space: parts.left_palm_ext_space,
-            right_palm_ext_space: parts.right_palm_ext_space,
             tracker_spaces: parts.tracker_spaces,
             left_hand_tracker: parts.left_hand_tracker,
             right_hand_tracker: parts.right_hand_tracker,
@@ -269,6 +265,19 @@ impl OpenxrInput {
         }
     }
 
+    /// Maps the runtime's current interaction profile onto the pose profile used for grip→raw.
+    ///
+    /// Touch Pro (`/interaction_profiles/facebook/touch_controller_pro`) and Touch Plus
+    /// (`/interaction_profiles/meta/touch_controller_plus`) both map to [`ActiveControllerProfile::Touch`].
+    /// On a native runtime such as WiVRn, a picked-up Quest 3 reports Touch Plus (WiVRn issue 408),
+    /// so it receives the Quest 2 Facebook grip component and the host-space 45° correction. That
+    /// assumes Plus and Pro grips match the Quest 2 component. Not headset-verified.
+    ///
+    /// Pico 4 and Pico Neo 3 stay on their own profiles. Native OpenXR uses
+    /// `/interaction_profiles/bytedance/pico4_controller` and `.../pico_neo3_controller`
+    /// (`XR_BD_controller_interaction`). Those profiles pass the OpenXR grip through as the raw
+    /// node and use the Windows MR bound-hand offset. WiVRn can also emulate Touch for a Pico 4
+    /// (WiVRn issue 580); this mapping does not. Index and Pico are untested on a headset.
     fn detect_profile(
         &self,
         session: &xr::Session<xr::Vulkan>,
@@ -424,12 +433,8 @@ impl OpenxrInput {
         session.sync_actions(&[xr::ActiveActionSet::new(&self.action_set)])?;
         let left_loc = self.left_space.locate(stage, predicted_time)?;
         let right_loc = self.right_space.locate(stage, predicted_time)?;
-        let left_palm_ext_loc = self.left_palm_ext_space.locate(stage, predicted_time)?;
-        let right_palm_ext_loc = self.right_palm_ext_space.locate(stage, predicted_time)?;
         let left_grip_pose = pose_from_location(&left_loc);
         let right_grip_pose = pose_from_location(&right_loc);
-        let left_palm_ext_pose = pose_from_location(&left_palm_ext_loc);
-        let right_palm_ext_pose = pose_from_location(&right_palm_ext_loc);
 
         let left_openxr_hand = sample_openxr_hand(
             self.left_hand_tracker.as_ref(),
@@ -451,28 +456,11 @@ impl OpenxrInput {
         let right_profile = self.active_profile(session, self.right_user_path, Chirality::Right);
         log_profile_transition(Chirality::Left, left_profile);
         log_profile_transition(Chirality::Right, right_profile);
-        Self::log_palm_ext_pose_missing_with_fallback_throttled(
-            Chirality::Left,
-            left_palm_ext_pose,
-            left_grip_pose,
-        );
-        Self::log_palm_ext_pose_missing_with_fallback_throttled(
-            Chirality::Right,
-            right_palm_ext_pose,
-            right_grip_pose,
-        );
-        let left_frame = resolve_controller_frame(
-            left_profile,
-            Chirality::Left,
-            left_grip_pose,
-            left_palm_ext_pose,
-        );
-        let right_frame = resolve_controller_frame(
-            right_profile,
-            Chirality::Right,
-            right_grip_pose,
-            right_palm_ext_pose,
-        );
+        // Only the grip space is located. An untracked grip yields no controller frame, including
+        // when a palm pose would still be valid. Aim spaces are not created.
+        let left_frame = resolve_controller_frame(left_profile, Chirality::Left, left_grip_pose);
+        let right_frame =
+            resolve_controller_frame(right_profile, Chirality::Right, right_grip_pose);
         let mut controllers = Vec::with_capacity(2);
         if let Some(left_host_profile) = self.host_profile_for_sample(Chirality::Left, left_profile)
         {
@@ -511,29 +499,6 @@ impl OpenxrInput {
             trackers,
             hands: hand_states,
         })
-    }
-
-    /// Logs at most once every 300 frames per hand when `palm_ext` is unavailable but grip is valid.
-    fn log_palm_ext_pose_missing_with_fallback_throttled(
-        side: Chirality,
-        palm_ext_pose: Option<(Vec3, Quat)>,
-        grip_pose: Option<(Vec3, Quat)>,
-    ) {
-        if palm_ext_pose.is_some() || grip_pose.is_none() {
-            return;
-        }
-        static LEFT: AtomicU32 = AtomicU32::new(0);
-        static RIGHT: AtomicU32 = AtomicU32::new(0);
-        let slot = match side {
-            Chirality::Left => &LEFT,
-            Chirality::Right => &RIGHT,
-        };
-        let n = slot.fetch_add(1, Ordering::Relaxed);
-        if n % 300 == 0 {
-            logger::debug!(
-                "OpenXR {side:?}: palm_ext pose invalid or untracked; resolving controller frame from grip fallback for IPC"
-            );
-        }
     }
 
     /// Logs once (at trace level) if stereo view array order may not match left-then-right pose ordering.

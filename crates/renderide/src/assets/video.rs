@@ -18,9 +18,13 @@ mod clock;
 #[cfg(feature = "video-textures")]
 mod cpu_copy;
 #[cfg(feature = "video-textures")]
+mod mpegts;
+#[cfg(feature = "video-textures")]
 mod ready;
 #[cfg(feature = "video-textures")]
 mod source;
+#[cfg(any(test, feature = "video-textures"))]
+mod ts_continuity;
 
 #[cfg(feature = "video-textures")]
 pub(crate) use sink::WgpuGstVideoSink;

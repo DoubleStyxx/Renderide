@@ -81,7 +81,10 @@ struct SuiteOpts {
     /// Case name to run. Repeat to run a subset; omitted means every registered case.
     #[arg(long = "case", value_name = "NAME")]
     case: Vec<String>,
-    /// Maximum number of cases to run concurrently. Defaults to the selected case count.
+    /// Maximum number of cases to run concurrently.
+    ///
+    /// Defaults to the selected case count, capped at the machine's available parallelism, so a
+    /// full suite does not spawn more renderer processes than there are cores.
     #[arg(long)]
     jobs: Option<usize>,
     /// Test-output root. Defaults to the workspace target/renderide-test-out directory.
@@ -151,6 +154,14 @@ fn run_update_suite_command(opts: &SuiteOpts) -> Result<(), HarnessError> {
     }
 }
 
+/// Caps an omitted `--jobs` at one renderer process per available core.
+fn default_suite_jobs(case_count: usize) -> usize {
+    let cores = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1);
+    case_count.max(1).min(cores.max(1))
+}
+
 fn suite_config_from_opts(opts: &SuiteOpts) -> Result<SuiteConfig, HarnessError> {
     let cases = select_cases(&opts.case)?;
     let case_count = cases.len();
@@ -164,7 +175,10 @@ fn suite_config_from_opts(opts: &SuiteOpts) -> Result<SuiteConfig, HarnessError>
     runner.verbose_renderer = opts.verbose_renderer;
     runner.output_root = opts.output_root.clone().unwrap_or_else(default_output_root);
 
-    let jobs = opts.jobs.unwrap_or_else(|| case_count.max(1)).max(1);
+    let jobs = opts
+        .jobs
+        .unwrap_or_else(|| default_suite_jobs(case_count))
+        .max(1);
     Ok(SuiteConfig {
         cases,
         runner,
@@ -280,7 +294,20 @@ mod cli_tests {
 
     use clap::{CommandFactory, Parser, error::ErrorKind};
 
-    use super::{BuildProfile, Cli, default_renderer_path, resolve_renderer_path};
+    use super::{
+        BuildProfile, Cli, default_renderer_path, default_suite_jobs, resolve_renderer_path,
+    };
+
+    #[test]
+    fn default_suite_jobs_stays_within_available_parallelism() {
+        let cores = std::thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(1);
+        assert_eq!(default_suite_jobs(0), 1);
+        assert_eq!(default_suite_jobs(1), 1);
+        assert_eq!(default_suite_jobs(10_000), cores);
+        assert!(default_suite_jobs(cores.saturating_add(1)) <= cores);
+    }
 
     #[test]
     fn cli_exposes_only_suite_subcommands() {

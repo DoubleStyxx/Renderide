@@ -4,13 +4,8 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use bytemuck::Zeroable;
-use glam::Mat4;
-use rayon::prelude::*;
 
-use crate::cpu_parallelism::{
-    RENDER_COMMAND_CHUNK_DRAWS, admit_render_command_items, current_reference_worker_count,
-    record_parallel_admission,
-};
+use crate::cpu_parallelism::{RENDER_COMMAND_CHUNK_DRAWS, current_reference_worker_count};
 use crate::frame_upload_batch::GraphUploadSink;
 use crate::gpu::{
     GpuLimits, GpuShadowView, MAX_SHADOW_VIEWS, SHADOW_VIEW_KIND_POINT, SHADOW_VIEW_KIND_SPOT,
@@ -19,7 +14,6 @@ use crate::graph_inputs::{
     FrameGlobalPassSplitWorkload, FrameGlobalResourcePass, FrameGlobalSplitPassEncodeParams,
     ShadowAtlasEncodeParams,
 };
-use crate::materials::{MaterialPipelineDesc, ShaderPermutation};
 use crate::mesh_deform::PER_DRAW_UNIFORM_STRIDE;
 use crate::passes::{
     ShadowDepthDrawBatch, WorldMeshForwardEncodeRefs, WorldMeshForwardPipelineState,
@@ -31,7 +25,10 @@ use crate::world_mesh::WorldMeshPhase;
 use super::super::frame_gpu_error::FrameGpuInitError;
 use super::super::frame_resource_manager::{ShadowCasterSet, ShadowFramePlan, ShadowRenderView};
 use super::super::per_draw_resources::PerDrawResources;
-use super::super::shadow_atlas_budget::clamp_shadow_atlas_resolution;
+use super::super::shadow_atlas_budget::{
+    SHADOW_ATLAS_MAX_BYTES, ShadowAtlasExtent, ShadowAtlasGrantLog, ShadowAtlasResidency,
+    advance_shadow_atlas_residency, note_shadow_atlas_grant, shadow_atlas_extent_bytes,
+};
 use super::super::shadow_atlas_format::{
     select_shadow_atlas_binding_format, select_shadow_atlas_format,
 };
@@ -68,7 +65,7 @@ struct PaddedShadowCasterDraw {
 impl PaddedShadowCasterDraw {
     #[inline]
     fn new(item: &crate::world_mesh::WorldMeshDrawItem) -> Self {
-        let model = shadow_caster_model(item);
+        let model = shadow_encode::shadow_caster_model(item);
         Self {
             model: model.to_cols_array(),
             normal_matrix: SHADOW_NORMAL_MATRIX_IDENTITY,
@@ -267,6 +264,10 @@ pub(super) struct ShadowAtlasResources {
     layer_scratch: parking_lot::Mutex<Vec<PaddedShadowLayerUniforms>>,
     resolution: u32,
     layers: u32,
+    shrink_resolution: u32,
+    shrink_layers: u32,
+    shrink_frames: u32,
+    grant_log: ShadowAtlasGrantLog,
     version: u64,
 }
 
@@ -313,7 +314,7 @@ impl ShadowAtlasResources {
             .ok_or(FrameGpuInitError::ShadowAtlasBindingFormatUnavailable)?;
         let renderable = render_format.is_some();
         let (texture, atlas_view, layer_views) =
-            create_shadow_texture(device, resolution, 1, format, renderable);
+            shadow_encode::create_shadow_texture(device, resolution, 1, format, renderable);
         Ok(Self {
             texture,
             atlas_view,
@@ -331,6 +332,10 @@ impl ShadowAtlasResources {
             layer_scratch: parking_lot::Mutex::new(Vec::new()),
             resolution,
             layers: 1,
+            shrink_resolution: 0,
+            shrink_layers: 0,
+            shrink_frames: 0,
+            grant_log: ShadowAtlasGrantLog::default(),
             version: 1,
         })
     }
@@ -347,34 +352,44 @@ impl ShadowAtlasResources {
         let _ = self
             .per_draw
             .ensure_draw_slot_capacity(device, requested_draw_slots);
-        let layers = requested_layers
-            .max(1)
-            .min(limits.wgpu.max_texture_array_layers.max(1));
-        self.ensure_layer_uniform_capacity(device, layers as usize);
+        let next = advance_shadow_atlas_residency(
+            ShadowAtlasResidency {
+                extent: ShadowAtlasExtent {
+                    resolution: self.resolution,
+                    layers: self.layers,
+                },
+                shrink_resolution: self.shrink_resolution,
+                shrink_layers: self.shrink_layers,
+                shrink_frames: self.shrink_frames,
+            },
+            requested_resolution,
+            requested_layers,
+            limits,
+            self.format,
+        );
+        self.log_shadow_atlas_grant(requested_resolution, requested_layers, next.extent);
+        self.shrink_resolution = next.shrink_resolution;
+        self.shrink_layers = next.shrink_layers;
+        self.shrink_frames = next.shrink_frames;
+        self.ensure_layer_uniform_capacity(device, next.extent.layers as usize);
         if !self.renderable {
             return self.sync_result(false);
         }
-        let requested_resolution =
-            clamp_shadow_texture_resolution(limits, requested_resolution, layers, self.format);
-        let grown_layers = self.layers.max(layers);
-        let grown_resolution = self.resolution.max(requested_resolution);
-        let budgeted_grown_resolution =
-            clamp_shadow_texture_resolution(limits, grown_resolution, grown_layers, self.format);
-        let (next_resolution, next_layers) = if budgeted_grown_resolution == grown_resolution {
-            (grown_resolution, grown_layers)
-        } else {
-            (requested_resolution, layers)
-        };
-        if next_resolution == self.resolution && next_layers == self.layers {
+        if next.extent.resolution == self.resolution && next.extent.layers == self.layers {
             return self.sync_result(false);
         }
-        let (texture, atlas_view, layer_views) =
-            create_shadow_texture(device, next_resolution, next_layers, self.format, true);
+        let (texture, atlas_view, layer_views) = shadow_encode::create_shadow_texture(
+            device,
+            next.extent.resolution,
+            next.extent.layers,
+            self.format,
+            true,
+        );
         self.texture = texture;
         self.atlas_view = atlas_view;
         self.layer_views = layer_views;
-        self.resolution = next_resolution;
-        self.layers = next_layers;
+        self.resolution = next.extent.resolution;
+        self.layers = next.extent.layers;
         self.version = self.version.saturating_add(1);
         self.sync_result(true)
     }
@@ -455,6 +470,46 @@ impl ShadowAtlasResources {
         ShadowResourceSyncResult {
             changed,
             resolution: self.resolution,
+        }
+    }
+
+    fn log_shadow_atlas_grant(
+        &mut self,
+        requested_resolution: u32,
+        requested_layers: u32,
+        granted: ShadowAtlasExtent,
+    ) {
+        let decision = note_shadow_atlas_grant(
+            self.grant_log,
+            requested_resolution,
+            requested_layers,
+            granted,
+        );
+        self.grant_log = decision.state;
+        if !decision.log {
+            return;
+        }
+        let bytes = shadow_atlas_extent_bytes(granted, self.format);
+        if decision.warn {
+            logger::warn!(
+                "shadow atlas granted {}x{} ({} bytes) instead of requested {}x{}; cap is {} bytes",
+                granted.resolution,
+                granted.layers,
+                bytes,
+                requested_resolution.max(1),
+                requested_layers.max(1),
+                SHADOW_ATLAS_MAX_BYTES,
+            );
+        } else {
+            logger::info!(
+                "shadow atlas granted {}x{} ({} bytes) instead of requested {}x{}; cap is {} bytes",
+                granted.resolution,
+                granted.layers,
+                bytes,
+                requested_resolution.max(1),
+                requested_layers.max(1),
+                SHADOW_ATLAS_MAX_BYTES,
+            );
         }
     }
 
@@ -543,110 +598,16 @@ fn clamp_shadow_resolution(limits: &GpuLimits, requested: u32) -> u32 {
     requested.clamp(1, limits.wgpu.max_texture_dimension_2d.max(1))
 }
 
-fn clamp_shadow_texture_resolution(
-    limits: &GpuLimits,
-    requested: u32,
-    layers: u32,
-    format: wgpu::TextureFormat,
-) -> u32 {
-    clamp_shadow_atlas_resolution(limits, requested, layers, format)
-}
-
-fn create_shadow_texture(
-    device: &wgpu::Device,
-    resolution: u32,
-    layers: u32,
-    format: wgpu::TextureFormat,
-    renderable: bool,
-) -> (
-    Arc<wgpu::Texture>,
-    Arc<wgpu::TextureView>,
-    Vec<Arc<wgpu::TextureView>>,
-) {
-    let usage = if renderable {
-        wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT
-    } else {
-        wgpu::TextureUsages::TEXTURE_BINDING
-    };
-    let texture = Arc::new(device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("shadow_depth_atlas"),
-        size: wgpu::Extent3d {
-            width: resolution,
-            height: resolution,
-            depth_or_array_layers: layers,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format,
-        usage,
-        view_formats: &[],
-    }));
-    let atlas_view =
-        Arc::new(texture.create_view(&shadow_atlas_array_view_descriptor(layers, format)));
-    crate::profiling::note_resource_churn!(TextureView, "backend::shadow_depth_atlas_array");
-    let layer_views = if renderable {
-        let mut layer_views = Vec::with_capacity(layers as usize);
-        for layer in 0..layers {
-            layer_views.push(Arc::new(
-                texture.create_view(&shadow_atlas_layer_view_descriptor(layer, format)),
-            ));
-            crate::profiling::note_resource_churn!(
-                TextureView,
-                "backend::shadow_depth_atlas_layer"
-            );
-        }
-        layer_views
-    } else {
-        Vec::new()
-    };
-    (texture, atlas_view, layer_views)
-}
-
-fn shadow_atlas_array_view_descriptor(
-    layers: u32,
-    format: wgpu::TextureFormat,
-) -> wgpu::TextureViewDescriptor<'static> {
-    wgpu::TextureViewDescriptor {
-        label: Some("shadow_depth_atlas_array"),
-        format: Some(format),
-        dimension: Some(wgpu::TextureViewDimension::D2Array),
-        usage: Some(wgpu::TextureUsages::TEXTURE_BINDING),
-        aspect: wgpu::TextureAspect::DepthOnly,
-        base_mip_level: 0,
-        mip_level_count: Some(1),
-        base_array_layer: 0,
-        array_layer_count: Some(layers),
-    }
-}
-
-fn shadow_atlas_layer_view_descriptor(
-    layer: u32,
-    format: wgpu::TextureFormat,
-) -> wgpu::TextureViewDescriptor<'static> {
-    wgpu::TextureViewDescriptor {
-        label: Some("shadow_depth_atlas_layer"),
-        format: Some(format),
-        dimension: Some(wgpu::TextureViewDimension::D2),
-        usage: Some(wgpu::TextureUsages::RENDER_ATTACHMENT),
-        aspect: wgpu::TextureAspect::DepthOnly,
-        base_mip_level: 0,
-        mip_level_count: Some(1),
-        base_array_layer: layer,
-        array_layer_count: Some(1),
-    }
-}
-
 impl FrameGpuResources {
     /// Records all planned shadow atlas layers for this frame.
     pub(in crate::backend) fn encode_shadow_atlas(
         &self,
         plan: &ShadowFramePlan,
         params: ShadowAtlasEncodeParams<'_, '_, '_>,
-    ) {
+    ) -> bool {
         profiling::scope!("shadows::encode_atlas");
         if plan.render_views.is_empty() || !self.shadows.renderable() {
-            return;
+            return false;
         }
         self.prepare_shadow_atlas_uploads(plan, params.gpu_limits, params.uploads);
         self.record_shadow_atlas_layers(
@@ -661,7 +622,7 @@ impl FrameGpuResources {
                 gpu_limits: params.gpu_limits,
                 profiler: params.profiler,
             },
-        );
+        )
     }
 
     /// Returns split-recording workload for the current atlas when parallel recording is useful.
@@ -711,10 +672,10 @@ impl FrameGpuResources {
         plan: &ShadowFramePlan,
         layer_range: std::ops::Range<usize>,
         params: FrameGlobalSplitPassEncodeParams<'_, '_>,
-    ) {
+    ) -> bool {
         profiling::scope!("shadows::record_atlas_layers");
         if plan.render_views.is_empty() || !self.shadows.renderable() {
-            return;
+            return false;
         }
         let mut encode_refs = WorldMeshForwardEncodeRefs {
             materials: params.materials,
@@ -726,7 +687,7 @@ impl FrameGpuResources {
             video_texture_pool: params.asset_resources.video_texture_pool(),
             skin_cache: params.skin_cache,
         };
-        let pipeline = shadow_pipeline_state(self.shadows.format());
+        let pipeline = shadow_encode::shadow_pipeline_state(self.shadows.format());
         let mut ctx = ShadowLayerEncodeContext {
             device: params.device,
             encoder: params.encoder,
@@ -735,12 +696,15 @@ impl FrameGpuResources {
             gpu_limits: params.gpu_limits,
             profiler: params.profiler,
         };
+        let mut recorded = false;
         for layer_idx in layer_range {
             let Some(layer) = shadow_layer_plan(plan, layer_idx) else {
                 continue;
             };
             self.encode_shadow_view(&layer, &mut ctx);
+            recorded = true;
         }
+        recorded
     }
 
     fn encode_shadow_view(
@@ -754,10 +718,11 @@ impl FrameGpuResources {
         };
         let caster_set = layer.caster_set;
         if caster_set.draws.is_empty() {
-            clear_shadow_layer(ctx.encoder, layer_view, ctx.profiler);
+            shadow_encode::clear_shadow_layer(ctx.encoder, layer_view, ctx.profiler);
             return;
         }
-        let Some(layer_uniform_offset) = shadow_layer_uniform_offset(view.layer) else {
+        let Some(layer_uniform_offset) = shadow_encode::shadow_layer_uniform_offset(view.layer)
+        else {
             return;
         };
         let pass_query = ctx
@@ -837,7 +802,7 @@ impl FrameGpuResources {
                 let Some(slots) = uniforms.get_mut(start..end) else {
                     continue;
                 };
-                pack_shadow_uniforms(slots, caster_set, gpu_limits);
+                shadow_encode::pack_shadow_uniforms(slots, caster_set, gpu_limits);
             }
             uploads.write_buffer(
                 self.shadow_per_draw_storage(),
@@ -869,109 +834,7 @@ impl FrameGpuResources {
     }
 }
 
-fn clear_shadow_layer(
-    encoder: &mut wgpu::CommandEncoder,
-    layer_view: &wgpu::TextureView,
-    profiler: Option<&crate::profiling::GpuProfilerHandle>,
-) {
-    let pass_query = profiler.map(|p| p.begin_pass_query("shadows::atlas_clear", encoder));
-    let timestamp_writes = crate::profiling::render_pass_timestamp_writes(pass_query.as_ref());
-    {
-        let _rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("shadow_atlas_clear"),
-            color_attachments: &[],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: layer_view,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
-            }),
-            occlusion_query_set: None,
-            timestamp_writes,
-            multiview_mask: None,
-        });
-    }
-    if let Some(query) = pass_query
-        && let Some(p) = profiler
-    {
-        p.end_query(encoder, query);
-    }
-}
-
-fn pack_shadow_uniforms(
-    uniforms: &mut [PaddedShadowCasterDraw],
-    caster_set: &ShadowCasterSet,
-    gpu_limits: &GpuLimits,
-) {
-    let admission =
-        admit_render_command_items(caster_set.draws.len(), current_reference_worker_count());
-    record_parallel_admission(
-        "shadow_slab_pack",
-        caster_set.draws.len(),
-        caster_set.draws.len(),
-        admission,
-    );
-    let slab_layout = &caster_set.instance_plan.slab_layout;
-    let pack_one = |slot: &mut PaddedShadowCasterDraw, draw_idx: usize| {
-        let item = &caster_set.draws[draw_idx];
-        *slot = PaddedShadowCasterDraw::new(item);
-    };
-    if caster_set.draws.len() >= SHADOW_SLAB_PARALLEL_MIN_DRAWS && admission.is_parallel() {
-        uniforms
-            .par_chunks_mut(SHADOW_SLAB_PARALLEL_CHUNK_DRAWS)
-            .with_min_len(SHADOW_SLAB_PARALLEL_CHUNKS_PER_TASK)
-            .zip(
-                slab_layout
-                    .par_chunks(SHADOW_SLAB_PARALLEL_CHUNK_DRAWS)
-                    .with_min_len(SHADOW_SLAB_PARALLEL_CHUNKS_PER_TASK),
-            )
-            .for_each(|(slots, layout)| {
-                profiling::scope!("shadows::pack_slab::worker");
-                for (slot, &draw_idx) in slots.iter_mut().zip(layout.iter()) {
-                    pack_one(slot, draw_idx);
-                }
-            });
-    } else {
-        for (slot, &draw_idx) in uniforms.iter_mut().zip(slab_layout.iter()) {
-            pack_one(slot, draw_idx);
-        }
-    }
-    if !gpu_limits.supports_base_instance {
-        debug_assert_eq!(
-            uniforms.len(),
-            slab_layout.len(),
-            "downlevel shadow slabs still pack one slot per singleton draw group"
-        );
-    }
-}
-
-fn shadow_layer_uniform_offset(layer: u32) -> Option<u32> {
-    layer.checked_mul(PER_DRAW_UNIFORM_STRIDE as u32)
-}
-
-fn shadow_caster_model(item: &crate::world_mesh::WorldMeshDrawItem) -> Mat4 {
-    if item.world_space_deformed {
-        Mat4::IDENTITY
-    } else {
-        item.rigid_world_matrix.unwrap_or(Mat4::IDENTITY)
-    }
-}
-
-fn shadow_pipeline_state(format: wgpu::TextureFormat) -> WorldMeshForwardPipelineState {
-    WorldMeshForwardPipelineState {
-        use_multiview: false,
-        pass_desc: MaterialPipelineDesc {
-            surface_format: wgpu::TextureFormat::Rgba8Unorm,
-            depth_stencil_format: Some(format),
-            sample_count: 1,
-            multiview_mask: None,
-        },
-        shader_perm: ShaderPermutation::default(),
-        front_face_flip: false,
-    }
-}
+mod shadow_encode;
 
 #[cfg(test)]
 mod tests;
