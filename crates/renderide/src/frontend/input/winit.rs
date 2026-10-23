@@ -7,13 +7,15 @@
 mod event_transition;
 mod key_map;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use winit::dpi::{LogicalSize, PhysicalPosition};
+use winit::data_transfer::{DataTransferId, TypeHint};
+use winit::dpi::LogicalSize;
 use winit::event::{
     ButtonSource, DeviceEvent, ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta,
     PointerKind, PointerSource, WindowEvent,
 };
+use winit::event_loop::{ActiveEventLoop, DndAction};
 use winit::window::Window;
 
 use self::event_transition::{
@@ -29,6 +31,7 @@ use super::accumulator::WindowInputAccumulator;
 pub fn apply_window_event(
     acc: &mut WindowInputAccumulator,
     window: &dyn Window,
+    event_loop: &dyn ActiveEventLoop,
     event: &WindowEvent,
 ) {
     match event {
@@ -88,11 +91,59 @@ pub fn apply_window_event(
             profiling::scope!("frontend::window_event", "ime");
             acc.push_ime_commit(s.as_str());
         }
-        WindowEvent::DragDropped { paths, position } => {
+        WindowEvent::DragEntered { id, position } => {
+            profiling::scope!("frontend::window_event", "drag_entered");
+            if let Some(position) = position {
+                acc.set_cursor_from_physical(*position, window.scale_factor());
+            }
+            acc.track_file_drop(id.into_raw());
+            accept_uri_file_drop(event_loop, *id);
+        }
+        WindowEvent::DragPosition { position, .. } => {
+            acc.set_cursor_from_physical(*position, window.scale_factor());
+        }
+        WindowEvent::DragDropped { id, .. } => {
             profiling::scope!("frontend::window_event", "dropped_file");
-            apply_drag_dropped_paths(acc, window.scale_factor(), paths, *position);
+            acc.track_file_drop(id.into_raw());
+            if !acc.file_drop_has_paths(id.into_raw()) {
+                accept_uri_file_drop(event_loop, *id);
+            }
+            acc.commit_file_drop(id.into_raw());
+        }
+        WindowEvent::DataTransferReceived { id, value, .. } => {
+            profiling::scope!("frontend::window_event", "data_transfer");
+            match value.try_as_file_paths() {
+                Ok(paths) => {
+                    let paths = paths
+                        .iter()
+                        .map(|path| path_to_string_lossy(path))
+                        .collect();
+                    acc.store_file_drop_paths(id.into_raw(), paths);
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(err) => logger::debug!("dropped data is not a file list: {err}"),
+            }
+        }
+        WindowEvent::DragLeft { id } => {
+            acc.cancel_file_drop(id.into_raw());
         }
         _ => {}
+    }
+}
+
+fn accept_uri_file_drop(event_loop: &dyn ActiveEventLoop, id: DataTransferId) {
+    let Ok(transfer) = event_loop.data_transfer(id) else {
+        return;
+    };
+    if !transfer.has_type(&TypeHint::UriList) {
+        return;
+    }
+    if let Err(err) = event_loop.set_valid_dnd_actions(id, &[DndAction::Copy]) {
+        logger::debug!("file drop could not be accepted: {err}");
+        return;
+    }
+    if let Err(err) = event_loop.fetch_data_transfer(id, &TypeHint::UriList) {
+        logger::debug!("file drop uri list could not be fetched: {err}");
     }
 }
 
@@ -155,11 +206,12 @@ fn apply_mouse_pointer_left(
     }
 }
 
+#[cfg(test)]
 fn apply_drag_dropped_paths(
     acc: &mut WindowInputAccumulator,
     scale_factor: f64,
-    paths: &[PathBuf],
-    position: PhysicalPosition<f64>,
+    paths: &[std::path::PathBuf],
+    position: winit::dpi::PhysicalPosition<f64>,
 ) {
     acc.set_cursor_from_physical(position, scale_factor);
     for path in paths {
@@ -287,6 +339,7 @@ mod tests {
             position: PhysicalPosition::new(28.0, 14.0),
             primary: true,
             button: ButtonSource::Mouse(button),
+            is_macos_activation_click: false,
         }
     }
 

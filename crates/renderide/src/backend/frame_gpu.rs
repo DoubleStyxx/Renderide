@@ -503,7 +503,7 @@ impl FrameGpuResources {
             reflection_probe_array_view,
             reflection_probe_sampler,
             reflection_probe_metadata_buffer,
-        ) = create_reflection_probe_specular_fallback(device);
+        ) = create_reflection_probe_specular_fallback(device)?;
         let (ibl_dfg_lut_texture, ibl_dfg_lut_view) = create_ibl_dfg_lut(device, queue);
         let light_cookies = LightCookieAtlasResources::new(device, queue, Arc::clone(&limits));
         let shadows = ShadowAtlasResources::new(device, Arc::clone(&limits))?;

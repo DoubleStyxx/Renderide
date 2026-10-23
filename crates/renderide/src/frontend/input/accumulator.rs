@@ -13,6 +13,13 @@ use winit::window::Window;
 
 use crate::shared::Key;
 
+/// One file drag whose path list may arrive before or after the drop commits.
+struct FileDropInFlight {
+    id: i64,
+    paths: Vec<String>,
+    committed: bool,
+}
+
 /// Holds window / pointer / keyboard state between winit events and host lock-step [`InputState`] snapshots.
 ///
 /// Mouse and scroll deltas accumulate until [`Self::take_input_state`] (called when sending
@@ -54,8 +61,11 @@ pub struct WindowInputAccumulator {
     text_typing_buffer: String,
     /// Text committed since the last HUD input snapshot.
     hud_text_buffer: String,
-    /// Paths from [`WindowEvent::DragDropped`](winit::event::WindowEvent::DragDropped) coalesced until take.
+    /// Paths from a completed file drop, coalesced until take.
     pending_drop_paths: Vec<String>,
+    /// In-flight file drop. winit delivers the path list asynchronously, so it can arrive before
+    /// or after the drop commits.
+    file_drop: Option<FileDropInFlight>,
     /// Last cursor position in physical pixels (for drop-point reporting).
     last_cursor_pixel: IVec2,
     keyboard_modifiers: ModifiersState,
@@ -82,6 +92,7 @@ impl Default for WindowInputAccumulator {
             text_typing_buffer: String::new(),
             hud_text_buffer: String::new(),
             pending_drop_paths: Vec::new(),
+            file_drop: None,
             last_cursor_pixel: IVec2::ZERO,
             keyboard_modifiers: ModifiersState::empty(),
             fullscreen: false,
@@ -105,6 +116,83 @@ impl WindowInputAccumulator {
     /// Records a file dropped onto the window; paths are batched into the next [`InputState`].
     pub fn push_dropped_file_path(&mut self, path_str: String) {
         self.pending_drop_paths.push(path_str);
+    }
+
+    /// Starts tracking a file drag. A repeated id keeps any paths already received.
+    pub(crate) fn track_file_drop(&mut self, id: i64) {
+        if self.file_drop.as_ref().is_some_and(|drop| drop.id == id) {
+            return;
+        }
+        self.file_drop = Some(FileDropInFlight {
+            id,
+            paths: Vec::new(),
+            committed: false,
+        });
+    }
+
+    /// True when this drag already has a path list waiting for the drop to commit.
+    pub(crate) fn file_drop_has_paths(&self, id: i64) -> bool {
+        self.file_drop
+            .as_ref()
+            .is_some_and(|drop| drop.id == id && !drop.paths.is_empty())
+    }
+
+    /// Stores paths for `id`. If the drop already committed, publishes them immediately.
+    pub(crate) fn store_file_drop_paths(&mut self, id: i64, paths: Vec<String>) {
+        let same_drop = self.file_drop.as_ref().is_some_and(|drop| drop.id == id);
+        if !same_drop {
+            self.file_drop = Some(FileDropInFlight {
+                id,
+                paths,
+                committed: false,
+            });
+            return;
+        }
+        let committed = self.file_drop.as_ref().is_some_and(|drop| drop.committed);
+        if committed {
+            self.publish_file_drop_paths(paths);
+            return;
+        }
+        if let Some(drop) = self.file_drop.as_mut() {
+            drop.paths = paths;
+        }
+    }
+
+    /// Marks the drop committed. Publishes immediately when the path list is already stored.
+    pub(crate) fn commit_file_drop(&mut self, id: i64) {
+        let ready = self.file_drop_has_paths(id);
+        if ready {
+            let paths = self
+                .file_drop
+                .take()
+                .map(|drop| drop.paths)
+                .unwrap_or_default();
+            self.publish_file_drop_paths(paths);
+            return;
+        }
+        if let Some(drop) = self.file_drop.as_mut()
+            && drop.id == id
+        {
+            drop.committed = true;
+        }
+    }
+
+    /// Drops an in-flight drag that left the window before it committed.
+    pub(crate) fn cancel_file_drop(&mut self, id: i64) {
+        if self
+            .file_drop
+            .as_ref()
+            .is_some_and(|drop| drop.id == id && !drop.committed)
+        {
+            self.file_drop = None;
+        }
+    }
+
+    fn publish_file_drop_paths(&mut self, paths: Vec<String>) {
+        self.file_drop = None;
+        for path in paths {
+            self.push_dropped_file_path(path);
+        }
     }
 
     /// Records the current winit keyboard modifier state.
@@ -344,6 +432,63 @@ mod tests {
         w.set_window_position_from_logical(Vec2::new(100.0, 200.0), 2.0);
         assert_eq!(w.last_cursor_pixel.x, 200);
         assert_eq!(w.last_cursor_pixel.y, 400);
+    }
+
+    #[test]
+    fn file_drop_publishes_paths_when_they_arrive_before_commit() {
+        let mut w = WindowInputAccumulator::default();
+        w.track_file_drop(7);
+        w.store_file_drop_paths(7, vec!["a.txt".to_string(), "b.txt".to_string()]);
+        w.commit_file_drop(7);
+
+        let input = w.take_input_state(false);
+        let drag = input
+            .window
+            .and_then(|window| window.drag_and_drop_event)
+            .expect("drag event");
+        assert_eq!(
+            drag.paths,
+            vec![Some("a.txt".to_string()), Some("b.txt".to_string())]
+        );
+    }
+
+    #[test]
+    fn file_drop_publishes_paths_when_they_arrive_after_commit() {
+        let mut w = WindowInputAccumulator::default();
+        w.track_file_drop(7);
+        w.commit_file_drop(7);
+        let before = w.take_input_state(false);
+        assert!(
+            before
+                .window
+                .and_then(|window| window.drag_and_drop_event)
+                .is_none()
+        );
+
+        w.store_file_drop_paths(7, vec!["late.txt".to_string()]);
+        let input = w.take_input_state(false);
+        let drag = input
+            .window
+            .and_then(|window| window.drag_and_drop_event)
+            .expect("drag event");
+        assert_eq!(drag.paths, vec![Some("late.txt".to_string())]);
+    }
+
+    #[test]
+    fn file_drop_cancel_before_commit_discards_paths() {
+        let mut w = WindowInputAccumulator::default();
+        w.track_file_drop(7);
+        w.store_file_drop_paths(7, vec!["gone.txt".to_string()]);
+        w.cancel_file_drop(7);
+        w.commit_file_drop(7);
+
+        let input = w.take_input_state(false);
+        assert!(
+            input
+                .window
+                .and_then(|window| window.drag_and_drop_event)
+                .is_none()
+        );
     }
 
     #[test]
