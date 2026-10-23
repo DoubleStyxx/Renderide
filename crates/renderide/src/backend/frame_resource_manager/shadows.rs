@@ -195,6 +195,7 @@ impl FrameResourceManager {
         R: ShadowContentRevisions,
     {
         profiling::scope!("render::prepare_shadow_frame");
+        self.shadow_plan_cache.begin_atlas_pass_frame();
         clear_shadow_assignments(self);
         let views = views.into_iter();
         if !shadow_atlas_rendering_supported(self.limits.as_deref()) {
@@ -216,6 +217,15 @@ impl FrameResourceManager {
     /// in for that submit.
     pub(crate) fn note_shadow_maps_rendered(&self) {
         self.shadow_plan_cache.note_current_rendered();
+        self.shadow_plan_cache.record_atlas_pass();
+    }
+
+    /// Atlas submits for the current prepare, then the total since this manager was created.
+    ///
+    /// The first value is 0 when this prepare skipped the atlas and 1 after
+    /// [`Self::note_shadow_maps_rendered`]. Headless readback writes both beside the PNG.
+    pub(crate) fn shadow_atlas_pass_counts(&self) -> (u32, u64) {
+        self.shadow_plan_cache.atlas_pass_counts()
     }
 
     /// Forces the next shadow pass to redraw after the atlas texture is replaced.

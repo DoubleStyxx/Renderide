@@ -3,12 +3,14 @@ use std::sync::Arc;
 use glam::Vec3;
 use hashbrown::HashMap;
 
-use crate::backend::HostShadowQuality;
 use crate::backend::frame_resource_manager::per_view_state::PreparedViewLights;
+use crate::backend::{AssetTransferQueue, HostShadowQuality, ShadowContentRevisionSources};
 use crate::camera::ViewId;
 use crate::gpu::GpuLight;
 use crate::materials::RasterPipelineKind;
-use crate::materials::host_data::MaterialPropertyLookupIds;
+use crate::materials::host_data::{
+    MaterialPropertyLookupIds, MaterialPropertyStore, MaterialPropertyValue,
+};
 use crate::shared::{LightType, ShadowCastMode};
 use crate::world_mesh::{WorldMeshDrawPlan, WorldMeshPhase};
 
@@ -19,7 +21,6 @@ use super::{positioned_caster, prefetched_plan, shadowed_light, spot_shadow_mana
 
 struct RevisionMap {
     mesh: HashMap<i32, u64>,
-    property: u64,
 }
 
 impl ShadowContentRevisions for RevisionMap {
@@ -27,8 +28,8 @@ impl ShadowContentRevisions for RevisionMap {
         self.mesh.get(&mesh_asset_id).copied().unwrap_or(0)
     }
 
-    fn material_property_revision(&self, _ids: MaterialPropertyLookupIds) -> u64 {
-        self.property
+    fn caster_policy_revision(&self, _ids: MaterialPropertyLookupIds) -> u64 {
+        0
     }
 }
 
@@ -173,38 +174,58 @@ fn shadow_plan_misses_when_cast_mode_pipeline_or_material_changes() {
 }
 
 #[test]
-fn shadow_plan_misses_when_property_revision_or_mesh_generation_changes() {
+fn shadow_plan_misses_when_mesh_generation_changes() {
     let draw = positioned_caster(1, Vec3::ZERO);
     let (mut manager, plan) = spot_shadow_manager(draw);
     let base = RevisionMap {
         mesh: HashMap::new(),
-        property: 1,
     };
     prepare_with(&mut manager, HostShadowQuality::default(), &plan, &base);
     manager.note_shadow_maps_rendered();
-    let property_edit = RevisionMap {
-        mesh: HashMap::new(),
-        property: 2,
-    };
-    prepare_with(
-        &mut manager,
-        HostShadowQuality::default(),
-        &plan,
-        &property_edit,
-    );
-    assert!(!manager.shadow_frame_plan().plan_reused);
-
-    prepare_with(
-        &mut manager,
-        HostShadowQuality::default(),
-        &plan,
-        &property_edit,
-    );
-    manager.note_shadow_maps_rendered();
     let mut mesh = HashMap::new();
     mesh.insert(1, 7);
-    let uploaded = RevisionMap { mesh, property: 2 };
+    let uploaded = RevisionMap { mesh };
     prepare_with(&mut manager, HostShadowQuality::default(), &plan, &uploaded);
+    assert!(!manager.shadow_frame_plan().plan_reused);
+}
+
+#[test]
+fn animated_non_policy_material_property_keeps_the_cache_hit() {
+    let draw = positioned_caster(1, Vec3::ZERO);
+    let ids = draw.lookup_ids;
+    let (mut manager, plan) = spot_shadow_manager(draw);
+    let mut transfers = AssetTransferQueue::new();
+    let mut materials = MaterialPropertyStore::new();
+    // A color/roughness float. Caster policy does not read the property store.
+    materials.set_material(ids.material_asset_id, 7, MaterialPropertyValue::Float(0.2));
+    let before = materials.mutation_generation(ids);
+    prepare_with(
+        &mut manager,
+        HostShadowQuality::default(),
+        &plan,
+        &ShadowContentRevisionSources::new(&transfers, &materials),
+    );
+    manager.note_shadow_maps_rendered();
+
+    materials.set_material(ids.material_asset_id, 7, MaterialPropertyValue::Float(0.85));
+    let after = materials.mutation_generation(ids);
+    assert_ne!(before, after);
+    prepare_with(
+        &mut manager,
+        HostShadowQuality::default(),
+        &plan,
+        &ShadowContentRevisionSources::new(&transfers, &materials),
+    );
+    assert!(manager.shadow_frame_plan().plan_reused);
+    assert!(!manager.shadow_frame_plan().maps_need_render);
+
+    transfers.begin_mesh_upload_generation(1);
+    prepare_with(
+        &mut manager,
+        HostShadowQuality::default(),
+        &plan,
+        &ShadowContentRevisionSources::new(&transfers, &materials),
+    );
     assert!(!manager.shadow_frame_plan().plan_reused);
 }
 

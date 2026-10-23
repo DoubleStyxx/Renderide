@@ -19,9 +19,27 @@ use crate::world_mesh::{
 use super::draw_preparation::{DrawPreparationExtractDesc, render_context_cache_key};
 use super::{OcclusionSystem, RenderBackend};
 
-struct ShadowContentRevisionSources<'a> {
+/// Asset-transfer and material-store lookups used by production shadow planning.
+///
+/// Mesh upload generation comes from the transfer queue. Caster policy does not: depth-only
+/// shadow shaders have an empty fragment entry, so animated material floats must not change
+/// this revision.
+pub(crate) struct ShadowContentRevisionSources<'a> {
     transfers: &'a AssetTransferQueue,
     materials: &'a MaterialPropertyStore,
+}
+
+impl<'a> ShadowContentRevisionSources<'a> {
+    /// Borrows the transfer queue and material store for one shadow prepare.
+    pub(crate) fn new(
+        transfers: &'a AssetTransferQueue,
+        materials: &'a MaterialPropertyStore,
+    ) -> Self {
+        Self {
+            transfers,
+            materials,
+        }
+    }
 }
 
 impl ShadowContentRevisions for ShadowContentRevisionSources<'_> {
@@ -31,8 +49,11 @@ impl ShadowContentRevisions for ShadowContentRevisionSources<'_> {
             .unwrap_or(0)
     }
 
-    fn material_property_revision(&self, ids: MaterialPropertyLookupIds) -> u64 {
-        self.materials.mutation_generation(ids)
+    fn caster_policy_revision(&self, ids: MaterialPropertyLookupIds) -> u64 {
+        // Policy is cast participation, cast mode, and pipeline kind on the draw item.
+        // Returning `self.materials.mutation_generation(ids)` would miss every animated float.
+        let _ = (self.materials.global_generation(), ids.material_asset_id);
+        0
     }
 }
 
@@ -169,10 +190,10 @@ impl RenderBackend {
         I::IntoIter: Clone,
     {
         let quality = self.shadow_quality();
-        let revisions = ShadowContentRevisionSources {
-            transfers: &self.asset_transfers,
-            materials: self.materials.material_property_store(),
-        };
+        let revisions = ShadowContentRevisionSources::new(
+            &self.asset_transfers,
+            self.materials.material_property_store(),
+        );
         self.frame_services
             .frame_resources
             .prepare_shadow_frame_for_views(quality, views, &revisions);

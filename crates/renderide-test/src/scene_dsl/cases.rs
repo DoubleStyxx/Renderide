@@ -190,14 +190,14 @@ pub fn custom_shader_property_update() -> IntegrationCase {
 /// Hard spot shadow on a PBS cube and floor.
 ///
 /// The companion golden is the static frame. The compared golden is the same scene after the
-/// cube moves. The session rejects a static recapture that is not pixel-identical before that
-/// move. Windows CI uses DX12 WARP, which keeps this scene clear-black, so the case is not in
-/// the default suite there.
+/// cube moves. The session rejects a static recapture unless it is a lit pixel match with zero
+/// atlas passes. Windows CI uses DX12 WARP, which does not render this scene, so the case is
+/// not in the default suite there.
 pub fn shadowed_caster_move() -> IntegrationCase {
     IntegrationCase {
         name: "shadowed_caster_move".to_string(),
         description:
-            "PBS floor and cube under a hard spot shadow on lavapipe. plain.png is the static frame. The harness requires the next static frame to match it exactly, then actual.png is the frame after the cube moves."
+            "PBS floor and cube under a hard spot shadow on lavapipe. plain.png is the static frame. The harness requires the next static frame to match it exactly and to record zero shadow-atlas passes, then actual.png is the frame after the cube moves and the pass log must show one atlas submit."
                 .to_string(),
         golden_path: default_goldens_dir().join("shadowed_caster_move.png"),
         resolution: (256, 256),
@@ -253,8 +253,11 @@ pub fn registry() -> Vec<IntegrationCase> {
         custom_shader_property_update(),
         exotic_shader_pair(),
     ];
-    // DX12 WARP records an unlit gray slab, then the post-move frame stays clear-black for the
-    // whole case timeout. The golden was captured on lavapipe and still runs on Linux and macOS.
+    // WARP limitation, not a shadow-cache diff. Windows CI is DX12 Microsoft Basic Render Driver
+    // (Vulkan reports ERROR_INCOMPATIBLE_DRIVER). On that adapter the static frame was a 48-color
+    // gray slab and the post-move frame stayed clear-black for the case timeout, while unshadowed
+    // PBS goldens passed. The case does not exist on master, so there is no master WARP image.
+    // Lavapipe still runs it on Linux and macOS.
     #[cfg(not(windows))]
     cases.push(shadowed_caster_move());
     let gltf_fixture = default_fixture_path();

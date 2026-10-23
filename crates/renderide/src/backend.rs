@@ -40,6 +40,8 @@ pub(crate) use facade::ExtractedFrameShared;
     reason = "intentional public re-export of attach result error type"
 )]
 pub use facade::RenderBackendAttachError;
+#[cfg(any(test, feature = "bench-api"))]
+pub(crate) use facade::ShadowContentRevisionSources;
 pub use facade::{RenderBackend, RenderBackendAttachDesc};
 pub use frame_gpu_bindings::FrameGpuBindingsError;
 pub use frame_resource_manager::FrameResourceManager;

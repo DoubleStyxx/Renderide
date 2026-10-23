@@ -9,11 +9,12 @@ use crate::gpu::GpuContext;
 pub(super) fn readback_and_write_png_atomically(
     gpu: &GpuContext,
     output_path: &Path,
+    shadow_atlas_passes: (u32, u64),
 ) -> Result<(), HeadlessReadbackError> {
     let color_texture = gpu
         .headless_color_texture()
         .ok_or(HeadlessReadbackError::NoOffscreenTexture)?;
-    readback_color_texture(gpu, color_texture, output_path)
+    readback_color_texture(gpu, color_texture, output_path, Some(shadow_atlas_passes))
 }
 
 /// Copies one color texture to CPU memory and writes a PNG atomically.
@@ -21,6 +22,7 @@ fn readback_color_texture(
     gpu: &GpuContext,
     color_texture: &wgpu::Texture,
     output_path: &Path,
+    shadow_atlas_passes: Option<(u32, u64)>,
 ) -> Result<(), HeadlessReadbackError> {
     let layout = compute_readback_layout(color_texture.size(), gpu.limits().max_buffer_size())?;
     let readback = create_readback_buffer(gpu, &layout);
@@ -34,7 +36,13 @@ fn readback_color_texture(
     };
     readback.unmap();
 
-    write_png_atomically(&tight, layout.width, layout.height, output_path)
+    write_png_atomically(
+        &tight,
+        layout.width,
+        layout.height,
+        output_path,
+        shadow_atlas_passes,
+    )
 }
 
 /// Copies an arbitrary color texture to a PNG. Used by the dev-only `capture.png` method.
@@ -44,7 +52,7 @@ pub(crate) fn readback_texture_png(
     color_texture: &wgpu::Texture,
     output_path: &Path,
 ) -> Result<(), HeadlessReadbackError> {
-    readback_color_texture(gpu, color_texture, output_path)
+    readback_color_texture(gpu, color_texture, output_path, None)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -178,6 +186,7 @@ fn write_png_atomically(
     width: u32,
     height: u32,
     output_path: &Path,
+    shadow_atlas_passes: Option<(u32, u64)>,
 ) -> Result<(), HeadlessReadbackError> {
     if let Some(parent) = output_path.parent()
         && !parent.as_os_str().is_empty()
@@ -190,7 +199,32 @@ fn write_png_atomically(
     buffer
         .save_with_format(&tmp_path, image::ImageFormat::Png)
         .map_err(|e| HeadlessReadbackError::Encode(format!("{e:?}")))?;
+    if let Some(passes) = shadow_atlas_passes {
+        // Publish the pass count before the PNG rename so a stable PNG has its stat.
+        publish_atlas_pass_record(output_path, passes)?;
+    }
     std::fs::rename(&tmp_path, output_path).map_err(HeadlessReadbackError::Io)
+}
+
+/// Writes `this_frame total` beside the PNG and appends the same line to the pass log.
+///
+/// `this_frame` is 0 when the atlas was skipped and 1 when it was submitted. The log keeps
+/// earlier frames after a later cache hit overwrites the sidecar.
+fn publish_atlas_pass_record(
+    output_path: &Path,
+    passes: (u32, u64),
+) -> Result<(), HeadlessReadbackError> {
+    let line = format!("{} {}\n", passes.0, passes.1);
+    let sidecar = output_path.with_extension("atlas-passes");
+    let tmp = sidecar.with_extension("atlas-passes.tmp");
+    std::fs::write(&tmp, &line).map_err(HeadlessReadbackError::Io)?;
+    std::fs::rename(&tmp, &sidecar).map_err(HeadlessReadbackError::Io)?;
+    let mut log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(output_path.with_extension("atlas-pass-log"))
+        .map_err(HeadlessReadbackError::Io)?;
+    std::io::Write::write_all(&mut log, line.as_bytes()).map_err(HeadlessReadbackError::Io)
 }
 
 /// Failures while copying the offscreen color texture back to CPU and writing the PNG.

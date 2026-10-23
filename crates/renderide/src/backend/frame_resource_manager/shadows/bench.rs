@@ -5,10 +5,11 @@
 
 use glam::{Mat4, Vec3};
 
-use crate::backend::HostShadowQuality;
 use crate::backend::frame_resource_manager::per_view_state::PreparedViewLights;
+use crate::backend::{AssetTransferQueue, HostShadowQuality, ShadowContentRevisionSources};
 use crate::camera::ViewId;
 use crate::gpu::GpuLight;
+use crate::materials::host_data::{MaterialPropertyStore, MaterialPropertyValue};
 use crate::shared::LightType;
 use crate::world_mesh::draw_prep::WorldMeshDrawCollection;
 use crate::world_mesh::test_fixtures::{DummyDrawItemSpec, dummy_world_mesh_draw_item};
@@ -22,11 +23,18 @@ pub const SHADOW_CHURN_CASTERS: usize = 4_096;
 /// Shadowed point lights in [`ShadowChurnWorkload::standard`].
 pub const SHADOW_CHURN_LIGHTS: usize = 30;
 
+struct ProductionShadowRevisions {
+    transfers: AssetTransferQueue,
+    materials: MaterialPropertyStore,
+}
+
 /// Owned inputs for repeated shadow-frame planning.
 pub struct ShadowChurnWorkload {
     manager: FrameResourceManager,
     quality: HostShadowQuality,
     plan: WorldMeshDrawPlan,
+    /// Real mesh-upload and caster-policy lookups. Absent for the zero-revision bench.
+    production: Option<ProductionShadowRevisions>,
 }
 
 impl ShadowChurnWorkload {
@@ -42,27 +50,68 @@ impl ShadowChurnWorkload {
             manager,
             quality: churn_quality(),
             plan: draw_plan(churn_casters()),
+            production: None,
         }
+    }
+
+    /// Same grid as [`Self::standard`], with the production mesh and material revision lookups.
+    ///
+    /// Each caster has a resident mesh-upload generation. The material store holds one non-policy
+    /// float. Planning calls [`crate::backend::ShadowContentRevisionSources`], not
+    /// [`super::ZeroShadowContentRevisions`].
+    #[must_use]
+    pub fn standard_with_production_revisions() -> Self {
+        let mut workload = Self::standard();
+        let mut transfers = AssetTransferQueue::new();
+        for mesh_asset_id in 0..i32::try_from(SHADOW_CHURN_CASTERS).unwrap_or(i32::MAX) {
+            transfers.begin_mesh_upload_generation(mesh_asset_id);
+        }
+        let mut materials = MaterialPropertyStore::new();
+        materials.set_material(1, 7, MaterialPropertyValue::Float(0.35));
+        workload.production = Some(ProductionShadowRevisions {
+            transfers,
+            materials,
+        });
+        workload
     }
 
     /// Plans one shadow frame and returns the view count mixed with the reuse bit.
     ///
     /// The reuse bit keeps the cached path observable to criterion without changing the view count
-    /// the planner reports.
+    /// the planner reports. [`Self::standard`] uses zero revisions.
+    /// [`Self::standard_with_production_revisions`] performs the production lookups on every call,
+    /// including a cache hit.
     pub fn prepare(&mut self) -> u64 {
-        self.manager.prepare_shadow_frame_for_views(
-            self.quality,
-            [(ViewId::Main, &self.plan)],
-            &super::ZeroShadowContentRevisions,
-        );
-        let planned = self.manager.shadow_frame_plan();
-        let views = planned.render_views.len() as u64;
-        let reused = u64::from(planned.plan_reused);
-        // Stands in for a successful GPU submit. The measured work is the CPU planner on the
-        // following cache hit, not the shadow atlas pass.
-        self.manager.note_shadow_maps_rendered();
-        views + (reused << 32)
+        let Self {
+            manager,
+            quality,
+            plan,
+            production,
+        } = self;
+        if let Some(production) = production.as_ref() {
+            let revisions =
+                ShadowContentRevisionSources::new(&production.transfers, &production.materials);
+            finish_prepare(manager, *quality, plan, &revisions)
+        } else {
+            finish_prepare(manager, *quality, plan, &super::ZeroShadowContentRevisions)
+        }
     }
+}
+
+fn finish_prepare(
+    manager: &mut FrameResourceManager,
+    quality: HostShadowQuality,
+    plan: &WorldMeshDrawPlan,
+    revisions: &impl super::ShadowContentRevisions,
+) -> u64 {
+    manager.prepare_shadow_frame_for_views(quality, [(ViewId::Main, plan)], revisions);
+    let planned = manager.shadow_frame_plan();
+    let views = planned.render_views.len() as u64;
+    let reused = u64::from(planned.plan_reused);
+    // Stands in for a successful GPU submit. The measured work is the CPU planner on the
+    // following cache hit, not the shadow atlas pass.
+    manager.note_shadow_maps_rendered();
+    views + (reused << 32)
 }
 
 fn churn_quality() -> HostShadowQuality {

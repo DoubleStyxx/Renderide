@@ -112,6 +112,11 @@ fn shadow_churn(c: &mut Criterion) {
             criterion::BatchSize::LargeInput,
         );
     });
+    let mut revision_workload = ShadowChurnWorkload::standard_with_production_revisions();
+    let _ = revision_workload.prepare();
+    group.bench_function("static_repaint_revisions", |b| {
+        b.iter(|| black_box(revision_workload.prepare()));
+    });
     group.finish();
 }
 

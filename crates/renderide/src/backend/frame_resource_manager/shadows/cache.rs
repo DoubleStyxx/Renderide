@@ -5,7 +5,7 @@
 //! that case is the steady-state cost behind multi-light frame-time drops.
 
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::backend::HostShadowQuality;
 use crate::camera::ViewId;
@@ -23,6 +23,10 @@ use super::shadow_draw_casts;
 pub(in crate::backend::frame_resource_manager) struct ShadowPlanCache {
     fingerprint: u64,
     rendered_fingerprint: AtomicU64,
+    /// Atlas submits for the prepare that is in progress. Reset at the start of each prepare.
+    atlas_passes_this_frame: AtomicU32,
+    /// Successful shadow-atlas submits since the manager was created.
+    atlas_passes_total: AtomicU64,
     assignments: Vec<CachedShadowAssignment>,
     /// Reused buffer for restoring light assignments without a per-frame allocation.
     assignment_scratch: Vec<CachedShadowAssignment>,
@@ -33,6 +37,8 @@ impl Default for ShadowPlanCache {
         Self {
             fingerprint: 0,
             rendered_fingerprint: AtomicU64::new(0),
+            atlas_passes_this_frame: AtomicU32::new(0),
+            atlas_passes_total: AtomicU64::new(0),
             assignments: Vec::new(),
             assignment_scratch: Vec::new(),
         }
@@ -71,6 +77,25 @@ impl ShadowPlanCache {
         }
     }
 
+    /// Clears the per-frame atlas-pass count at the start of shadow planning.
+    pub(super) fn begin_atlas_pass_frame(&self) {
+        self.atlas_passes_this_frame.store(0, Ordering::Relaxed);
+    }
+
+    /// Counts one submitted shadow atlas. One logical pass, not one per layer.
+    pub(super) fn record_atlas_pass(&self) {
+        self.atlas_passes_this_frame.store(1, Ordering::Relaxed);
+        self.atlas_passes_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Per-frame atlas submits, then the process total.
+    pub(super) fn atlas_pass_counts(&self) -> (u32, u64) {
+        (
+            self.atlas_passes_this_frame.load(Ordering::Relaxed),
+            self.atlas_passes_total.load(Ordering::Relaxed),
+        )
+    }
+
     /// Forgets a successful draw so the next submission re-renders the atlas.
     pub(in crate::backend::frame_resource_manager) fn clear_rendered(&self) {
         self.rendered_fingerprint.store(0, Ordering::Relaxed);
@@ -91,15 +116,19 @@ impl ShadowPlanCache {
     }
 }
 
-/// Mesh upload generation and material property revision visible to shadow planning.
+/// Mesh upload generation and shadow caster-policy revision visible to shadow planning.
 ///
-/// Production passes the asset-transfer queue and the material property store. Tests and the
+/// Production passes the asset-transfer queue and the material property store. The policy
+/// revision stays put when a non-policy material float animates. Tests and the zero-revision
 /// planner bench pass [`ZeroShadowContentRevisions`].
 pub(crate) trait ShadowContentRevisions {
     /// Generation of the resident mesh buffers for `mesh_asset_id`.
     fn mesh_upload_generation(&self, mesh_asset_id: i32) -> u64;
-    /// Property-store revision for the draw's material and property blocks.
-    fn material_property_revision(&self, ids: MaterialPropertyLookupIds) -> u64;
+    /// Caster-policy revision for the draw.
+    ///
+    /// This is not [`crate::materials::host_data::MaterialPropertyStore::mutation_generation`].
+    /// Whether the draw casts, its cast mode, and its pipeline kind live on the draw item.
+    fn caster_policy_revision(&self, ids: MaterialPropertyLookupIds) -> u64;
 }
 
 /// Revisions that never change. Used when the caller has no upload or material store.
@@ -113,7 +142,7 @@ impl ShadowContentRevisions for ZeroShadowContentRevisions {
         0
     }
 
-    fn material_property_revision(&self, _ids: MaterialPropertyLookupIds) -> u64 {
+    fn caster_policy_revision(&self, _ids: MaterialPropertyLookupIds) -> u64 {
         0
     }
 }
@@ -245,16 +274,12 @@ fn hash_light(fp: &mut Fingerprint, light: &GpuLight) {
 
 /// Hashes one shadow caster.
 ///
-/// The depth-only shadow shaders (`world_mesh_shadow_caster.wgsl` and the radial variant) do
-/// not sample material property blocks or alpha clip: `fs_main` is empty.
-/// [`crate::passes::WorldMeshForwardDepthPrepassPipelineKey::for_shadow_draw`] also ignores
-/// [`RasterPipelineKind`]; its variant is front face, cull, topology, and double-sided, which
-/// are hashed below. Pipeline identity, material asset id, and property revision are still
-/// part of the key because [`super::shadow_draw_casts`] follows the pipeline's caster policy,
-/// and a material swap or in-place property edit must not reuse a map recorded for a different
-/// caster. Mesh upload generation is required for a different reason: encode reads the live
-/// mesh-pool buffers for `mesh_asset_id`, so a re-upload that keeps the same asset id and
-/// index count still has to miss.
+/// Caster policy in this key is whether the draw casts, its cast mode, and its pipeline kind.
+/// Those fields live on the draw. Depth-only shadow shaders (`world_mesh_shadow_caster.wgsl`
+/// and the radial variant) have an empty `fs_main` and do not sample material property blocks,
+/// so [`ShadowContentRevisions::caster_policy_revision`] must stay stable when a non-policy
+/// float animates. Material asset id stays in the key so a material swap still misses. Mesh
+/// upload generation stays because encode reads the live mesh-pool buffers for `mesh_asset_id`.
 fn hash_caster(item: &WorldMeshDrawItem, revisions: &impl ShadowContentRevisions) -> u64 {
     let mut fp = Fingerprint::new();
     fp.mix_u64(item.instance_id.0);
@@ -264,10 +289,11 @@ fn hash_caster(item: &WorldMeshDrawItem, revisions: &impl ShadowContentRevisions
     fp.mix_u64(revisions.mesh_upload_generation(item.mesh_asset_id));
     fp.mix_u64(u64::from(item.first_index));
     fp.mix_u64(u64::from(item.index_count));
+    fp.mix_u64(u64::from(shadow_draw_casts(item)));
     fp.mix_u64(shadow_cast_mode_key(item.shadow_cast_mode));
     hash_pipeline(&mut fp, &item.batch_key.pipeline);
     fp.mix_u64(signed_key(item.batch_key.material_asset_id));
-    fp.mix_u64(revisions.material_property_revision(item.lookup_ids));
+    fp.mix_u64(revisions.caster_policy_revision(item.lookup_ids));
     fp.mix_u64(u64::from(item.skinned));
     fp.mix_u64(u64::from(item.world_space_deformed));
     fp.mix_u64(u64::from(item.blendshape_deformed));

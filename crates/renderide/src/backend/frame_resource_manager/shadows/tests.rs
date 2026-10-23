@@ -468,6 +468,7 @@ fn static_shadow_plan_is_reused_and_skips_redraw_after_encode() {
     ));
 
     manager.note_shadow_maps_rendered();
+    assert_eq!(manager.shadow_atlas_pass_counts(), (1, 1));
     manager.prepare_shadow_frame_for_views(
         HostShadowQuality::default(),
         [(ViewId::Main, &draw_plan)],
@@ -475,6 +476,7 @@ fn static_shadow_plan_is_reused_and_skips_redraw_after_encode() {
     );
     assert!(manager.shadow_frame_plan().plan_reused);
     assert!(!manager.shadow_frame_plan().maps_need_render);
+    assert_eq!(manager.shadow_atlas_pass_counts(), (0, 1));
     assert_eq!(
         manager.per_view_lights.get(ViewId::Main).unwrap().lights[0].shadow_view_count,
         1

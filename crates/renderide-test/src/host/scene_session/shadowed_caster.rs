@@ -1,9 +1,8 @@
 //! Shadowed PBS captures.
 //!
 //! `ShadowedCasterMove` records a static hard-shadow frame, requires the next static frame to
-//! match it pixel for pixel, then moves the cube. The pixel check is the atlas-skip evidence:
-//! after the first stable frame the planner reuses the shadow map, and a deterministic renderer
-//! must keep writing the same image. `ManyShadowedPointLights` is the opt-in frame bench for the
+//! match it pixel for pixel with zero atlas passes, then moves the cube. The pass log must show
+//! one atlas submit for that move. `ManyShadowedPointLights` is the opt-in frame bench for the
 //! many-local-light case and is not a golden.
 
 use std::path::Path;
@@ -27,6 +26,12 @@ use super::{
 };
 
 const SPOT_RESOLUTION: i32 = 256;
+/// Spot intensity kept below the blow-out that painted the upper frame white.
+const SPOT_INTENSITY: f32 = 2.4;
+/// Unshadowed fill. High enough to lift the floor, low enough that the spot shadow stays visible.
+const FILL_INTENSITY: f32 = 0.22;
+/// Floor extent in world units. The camera sits inside this quad so the foreground is not clear-black.
+const FLOOR_EXTENT: f32 = 18.0;
 const POINT_RESOLUTION: i32 = 128;
 const POINT_LIGHT_COUNT: i32 = 30;
 const CUBE_INDEX: usize = 1;
@@ -78,7 +83,13 @@ pub(super) fn scene_setup() -> SceneSetup {
                 Vec3::ONE,
                 Quat::from_rotation_arc(Vec3::Z, aim),
             ),
-            state: shadowed_spot_light([1.0, 0.92, 0.78], 10.0, 6.0, 60.0, SPOT_RESOLUTION),
+            state: shadowed_spot_light(
+                [1.0, 0.92, 0.78],
+                SPOT_INTENSITY,
+                6.0,
+                60.0,
+                SPOT_RESOLUTION,
+            ),
         },
         SceneLight {
             transform_id: 3,
@@ -87,13 +98,13 @@ pub(super) fn scene_setup() -> SceneSetup {
                 Vec3::ONE,
                 Quat::from_rotation_arc(Vec3::Z, Vec3::new(0.15, -1.0, 0.35).normalize()),
             ),
-            state: directional_light([0.75, 0.82, 1.0], 0.55),
+            state: directional_light([0.75, 0.82, 1.0], FILL_INTENSITY),
         },
     ];
     scene.camera_world_pose = transform(
-        Vec3::new(0.2, 1.2, -3.2),
+        Vec3::new(0.15, 1.55, -2.4),
         Vec3::ONE,
-        Quat::from_rotation_x(0.22),
+        Quat::from_rotation_x(0.62),
     );
     SceneSetup {
         meshes: caster_meshes(),
@@ -158,11 +169,13 @@ pub(super) fn recapture_after_move(
 ) -> Result<(), HarnessError> {
     let plain_path = recapture.output_path.with_file_name("plain.png");
     std::fs::copy(recapture.output_path, &plain_path)?;
+    copy_atlas_pass_sidecar(recapture.output_path, &plain_path)?;
     logger::info!(
         "Session: copied static shadow PNG to {}",
         plain_path.display()
     );
-    wait_until_static_frames_match(&mut recapture, &plain_path)?;
+    let static_total = wait_until_static_frames_match(&mut recapture, &plain_path)?;
+    let log_offset = atlas_pass_log_len(recapture.output_path)?;
 
     let mut moved = recapture.setup.scene.clone();
     moved.renderables[CUBE_INDEX].pose = transform(
@@ -173,6 +186,7 @@ pub(super) fn recapture_after_move(
     recapture.scene.rewrite(&moved, recapture.lockstep)?;
     wait_for_fresh_png(&mut recapture)?;
     assert_pixels_changed(&plain_path, recapture.output_path)?;
+    assert_move_recorded_one_atlas_pass(recapture.output_path, static_total, log_offset)?;
     Ok(())
 }
 
@@ -191,7 +205,7 @@ fn floor_renderable() -> SceneRenderable {
         transform_id: 0,
         pose: transform(
             Vec3::ZERO,
-            Vec3::new(3.4, 3.4, 1.0),
+            Vec3::new(FLOOR_EXTENT, FLOOR_EXTENT, 1.0),
             Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
         ),
         mesh_asset_id: scene_mesh_id(0),
@@ -238,9 +252,10 @@ fn wait_for_fresh_png(recapture: &mut ShadowMoveRecapture<'_>) -> Result<(), Har
 fn wait_until_static_frames_match(
     recapture: &mut ShadowMoveRecapture<'_>,
     plain_path: &Path,
-) -> Result<(), HarnessError> {
+) -> Result<u64, HarnessError> {
     let mut last_diffs = 0usize;
     let mut last_colors = 0usize;
+    let mut last_passes = String::from("missing");
     for attempt in 1..=STATIC_MATCH_ATTEMPTS {
         wait_for_fresh_png(recapture)?;
         last_diffs = pixel_diff_count(plain_path, recapture.output_path)?;
@@ -248,25 +263,149 @@ fn wait_until_static_frames_match(
             let settled = crate::image_io::load_rgba(plain_path)?;
             crate::golden::reject_flat_image(&settled, plain_path)?;
             last_colors = unique_color_count(&settled);
-            if last_colors >= MIN_SETTLED_UNIQUE_COLORS {
-                logger::info!(
-                    "Session: static shadow frames matched on attempt {attempt} ({last_colors} colors, {})",
-                    plain_path.display()
-                );
-                return Ok(());
+            match read_atlas_pass_sidecar(recapture.output_path) {
+                Ok(sample)
+                    if last_colors >= MIN_SETTLED_UNIQUE_COLORS && sample.this_frame == 0 =>
+                {
+                    copy_atlas_pass_sidecar(recapture.output_path, plain_path)?;
+                    logger::info!(
+                        "Session: static shadow frames matched on attempt {attempt} ({last_colors} colors, 0 atlas passes, total {}, {})",
+                        sample.total,
+                        plain_path.display()
+                    );
+                    return Ok(sample.total);
+                }
+                Ok(sample) => {
+                    last_passes =
+                        format!("this_frame {} total {}", sample.this_frame, sample.total);
+                    logger::info!(
+                        "Session: static shadow frame {attempt} matched in {last_colors} colors with {last_passes}; waiting for a skipped atlas"
+                    );
+                }
+                Err(err) => {
+                    last_passes = err.to_string();
+                    logger::info!(
+                        "Session: static shadow frame {attempt} matched pixels but the atlas stat was not ready ({last_passes})"
+                    );
+                }
             }
-            logger::info!(
-                "Session: static shadow frame {attempt} matched in {last_colors} colors; waiting for a lit frame"
-            );
         } else {
             logger::info!(
                 "Session: static shadow frame {attempt} differed in {last_diffs} pixels; waiting for the atlas to settle"
             );
         }
         std::fs::copy(recapture.output_path, plain_path)?;
+        copy_atlas_pass_sidecar(recapture.output_path, plain_path)?;
     }
     Err(HarnessError::ImageCompare(format!(
-        "static shadow recapture was not a lit cache hit after {STATIC_MATCH_ATTEMPTS} frames (last pixel diff {last_diffs}, unique colors {last_colors}; need {MIN_SETTLED_UNIQUE_COLORS})"
+        "static shadow recapture was not a lit cache hit after {STATIC_MATCH_ATTEMPTS} frames (last pixel diff {last_diffs}, unique colors {last_colors}, atlas passes {last_passes}; need {MIN_SETTLED_UNIQUE_COLORS} colors and 0 atlas passes)"
+    )))
+}
+
+struct AtlasPassSample {
+    this_frame: u32,
+    total: u64,
+}
+
+fn atlas_pass_sidecar(png: &Path) -> std::path::PathBuf {
+    png.with_extension("atlas-passes")
+}
+
+fn atlas_pass_log(png: &Path) -> std::path::PathBuf {
+    png.with_extension("atlas-pass-log")
+}
+
+fn read_atlas_pass_sidecar(png: &Path) -> Result<AtlasPassSample, HarnessError> {
+    let sidecar = atlas_pass_sidecar(png);
+    let png_mtime = std::fs::metadata(png)?.modified()?;
+    let side_mtime = std::fs::metadata(&sidecar)?.modified()?;
+    if side_mtime > png_mtime {
+        return Err(HarnessError::ImageCompare(
+            "shadow atlas pass sidecar is newer than the PNG".to_string(),
+        ));
+    }
+    let text = std::fs::read_to_string(&sidecar)?;
+    parse_atlas_pass_line(text.trim()).ok_or_else(|| {
+        HarnessError::ImageCompare(format!(
+            "unreadable shadow atlas pass sidecar {}",
+            sidecar.display()
+        ))
+    })
+}
+
+fn atlas_pass_log_len(png: &Path) -> Result<u64, HarnessError> {
+    match std::fs::metadata(atlas_pass_log(png)) {
+        Ok(meta) => Ok(meta.len()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn read_atlas_pass_log_since(
+    png: &Path,
+    offset: u64,
+) -> Result<Vec<AtlasPassSample>, HarnessError> {
+    let bytes = std::fs::read(atlas_pass_log(png))?;
+    let start = usize::try_from(offset).unwrap_or(0).min(bytes.len());
+    let text = String::from_utf8_lossy(&bytes[start..]);
+    let ends_with_newline = text.ends_with('\n');
+    let raw_lines: Vec<&str> = text.lines().collect();
+    let mut samples = Vec::new();
+    for (index, line) in raw_lines.iter().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        match parse_atlas_pass_line(line) {
+            Some(sample) => samples.push(sample),
+            None if !ends_with_newline && index + 1 == raw_lines.len() => {}
+            None => {
+                return Err(HarnessError::ImageCompare(format!(
+                    "unreadable shadow atlas pass log line {line:?}"
+                )));
+            }
+        }
+    }
+    Ok(samples)
+}
+
+fn parse_atlas_pass_line(line: &str) -> Option<AtlasPassSample> {
+    let mut parts = line.split_whitespace();
+    let this_frame = parts.next()?.parse().ok()?;
+    let total = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(AtlasPassSample { this_frame, total })
+}
+
+fn copy_atlas_pass_sidecar(from_png: &Path, to_png: &Path) -> Result<(), HarnessError> {
+    let from = atlas_pass_sidecar(from_png);
+    if from.is_file() {
+        std::fs::copy(from, atlas_pass_sidecar(to_png))?;
+    }
+    Ok(())
+}
+
+fn assert_move_recorded_one_atlas_pass(
+    png: &Path,
+    static_total: u64,
+    log_offset: u64,
+) -> Result<(), HarnessError> {
+    let samples = read_atlas_pass_log_since(png, log_offset)?;
+    let renders = samples
+        .iter()
+        .filter(|sample| sample.this_frame == 1)
+        .count();
+    let total = samples.last().map(|sample| sample.total);
+    let expected = static_total.saturating_add(1);
+    if renders == 1 && total == Some(expected) {
+        logger::info!(
+            "Session: caster move submitted one shadow atlas pass (total {static_total} -> {expected})"
+        );
+        return Ok(());
+    }
+    Err(HarnessError::ImageCompare(format!(
+        "moving the caster should submit one shadow atlas pass (static total {static_total}, renders after the move {renders}, last total {total:?})"
     )))
 }
 
@@ -310,6 +449,35 @@ fn assert_pixels_changed(before: &Path, after: &Path) -> Result<(), HarnessError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn atlas_pass_line_parses_two_integers() {
+        let sample = parse_atlas_pass_line("0 12");
+        assert_eq!(
+            sample.map(|sample| (sample.this_frame, sample.total)),
+            Some((0, 12))
+        );
+        assert!(parse_atlas_pass_line("1").is_none());
+        assert!(parse_atlas_pass_line("1 2 extra").is_none());
+    }
+
+    #[test]
+    fn atlas_pass_log_keeps_the_move_after_a_later_cache_hit() -> Result<(), HarnessError> {
+        let dir = std::env::temp_dir().join(format!("shadow-atlas-log-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
+        let png = dir.join("frame.png");
+        std::fs::write(&png, b"png")?;
+        std::fs::write(atlas_pass_log(&png), "0 4\n1 5\n0 5\n")?;
+        let samples = read_atlas_pass_log_since(&png, 4)?;
+        assert_eq!(samples.len(), 2);
+        assert_eq!(samples[0].this_frame, 1);
+        assert_eq!(samples[0].total, 5);
+        assert_eq!(samples[1].this_frame, 0);
+        assert_eq!(samples[1].total, 5);
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
 
     #[test]
     fn unique_color_count_rejects_a_two_tone_slab() {

@@ -260,9 +260,12 @@ impl<'a> HeadlessDriver<'a> {
         if self.gpu.headless_color_texture().is_none() {
             return;
         }
-        if let Err(e) =
-            readback::readback_and_write_png_atomically(&self.gpu, &self.params.output_path)
-        {
+        let atlas_passes = self.runtime.shadow_atlas_pass_counts();
+        if let Err(e) = readback::readback_and_write_png_atomically(
+            &self.gpu,
+            &self.params.output_path,
+            atlas_passes,
+        ) {
             logger::warn!("Headless PNG write failed: {e}");
         } else {
             self.frames_written = self.frames_written.saturating_add(1);
