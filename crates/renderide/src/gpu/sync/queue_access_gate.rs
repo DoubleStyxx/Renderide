@@ -39,8 +39,9 @@
 //! Each poll holds wgpu-core's snatch and fence read locks only for that maintain,
 //! then drops them before the completion callback and before `poll` returns.
 //! `destroy()` can stall on the snatch write lock for that brief section, not for
-//! the 500 ms wait budget. The wait's own comment records the residual device-lost
-//! path inside one `get_fence_value`.
+//! the 500 ms wait budget. The residual device-lost path is a `get_fence_value`
+//! per ~50 us slice for up to the 500 ms budget. `upload_arena` and occlusion
+//! already call `device.poll(PollType::Poll)` with the same exposure.
 
 use std::sync::Arc;
 

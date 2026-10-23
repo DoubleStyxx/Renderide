@@ -56,7 +56,7 @@ pub fn init_wgpu_openxr(
 
     let (xr_system_id, environment_blend_mode, reqs) =
         probe_head_set_and_vulkan_requirements(&xr_instance)?;
-    let headset_metadata = query_headset_metadata(&xr_instance, xr_system_id);
+    let (headset_metadata, runtime_name) = query_headset_metadata(&xr_instance, xr_system_id);
     logger::info!(
         "OpenXR system: id={:?} environment_blend_mode={:?} vulkan_min={} vulkan_max={}",
         xr_system_id,
@@ -101,10 +101,7 @@ pub fn init_wgpu_openxr(
         })?;
 
     let wait_query = VrSwapchainGpuWaitQuery {
-        runtime_name: headset_metadata
-            .headset_manufacturer
-            .as_deref()
-            .unwrap_or("<unknown>"),
+        runtime_name: &runtime_name,
         adapter_name: &wgpu_exposed.info.name,
         driver: &wgpu_exposed.info.driver,
         driver_info: &wgpu_exposed.info.driver_info,
@@ -150,10 +147,11 @@ fn log_swapchain_gpu_wait(
     decision.log_session_start(query);
 }
 
+/// Host headset metadata, and the OpenXR runtime name the GPU-wait `auto` mode matches.
 fn query_headset_metadata(
     xr_instance: &xr::Instance,
     xr_system_id: xr::SystemId,
-) -> HeadsetMetadata {
+) -> (HeadsetMetadata, String) {
     let instance_properties = match xr_instance.properties() {
         Ok(properties) => Some(properties),
         Err(error) => {
@@ -199,5 +197,5 @@ fn query_headset_metadata(
         metadata.connection_type,
     );
 
-    metadata
+    (metadata, runtime_name.to_owned())
 }

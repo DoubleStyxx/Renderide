@@ -167,9 +167,11 @@ pub(super) fn note_empty_projection_finalize(
 /// as [`ProjectionGpuWait::TimedOut`] when the channel times out.
 ///
 /// `Poll` still calls `get_fence_value` (`vkGetSemaphoreCounterValue` on the
-/// timeline semaphore). That query uses the same lost-device mapping, so one
-/// non-blocking poll can still reach `handle_error_fatal`. That is a single
-/// query, not a 500 ms wait inside `vkWaitSemaphores`.
+/// timeline semaphore). That query uses the same lost-device mapping, so each
+/// poll can still reach `handle_error_fatal`. The pump issues a `get_fence_value`
+/// per ~50 us slice for up to the 500 ms budget. `upload_arena` and occlusion
+/// already call `device.poll(PollType::Poll)` with the same exposure.
+/// This is not a 500 ms wait inside `vkWaitSemaphores`.
 ///
 /// # Locks held by each poll
 ///
@@ -225,6 +227,81 @@ fn resolve_projection_gpu_wait(
     pump_until_submitted_work_done(request)
 }
 
+/// One observation from a single iteration of the projection GPU wait.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WaitPumpSignal {
+    /// `GpuDeviceHealth` reports lost before this iteration polls.
+    DeviceLostBeforePoll,
+    /// The wait budget elapsed before this iteration polls.
+    BudgetExceeded,
+    /// `Device::poll(Poll)` returned an error.
+    PollFailed,
+    /// The completion callback sent on the channel.
+    WorkVisible,
+    /// This slice elapsed and the channel is still open.
+    SliceTimedOut,
+    /// The completion sender was dropped.
+    ChannelDisconnected {
+        /// `GpuDeviceHealth::is_lost` after the disconnect.
+        device_lost: bool,
+    },
+}
+
+/// Transition for one [`WaitPumpSignal`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WaitPumpAction {
+    /// Observe another slice.
+    PollAgain,
+    /// Submitted work is GPU-visible.
+    Visible,
+    /// Skip further polls and release.
+    DeviceLost,
+    /// Release and record a timeout.
+    TimedOut(WaitTimeoutKind),
+}
+
+/// Why the pump gave up without taking the device-lost path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WaitTimeoutKind {
+    /// The 500 ms budget elapsed.
+    BudgetExceeded,
+    /// `Device::poll(Poll)` failed.
+    PollFailed,
+    /// The completion channel disconnected while the device was still healthy.
+    ChannelDisconnected,
+}
+
+/// Pure transition for the wait pump.
+///
+/// The GPU loop only collects a [`WaitPumpSignal`]. Timeout, a loss that arrives
+/// between polls, and a disconnected completion channel are decided here.
+fn decide_wait_pump(signal: WaitPumpSignal) -> WaitPumpAction {
+    match signal {
+        WaitPumpSignal::DeviceLostBeforePoll => WaitPumpAction::DeviceLost,
+        WaitPumpSignal::BudgetExceeded => WaitPumpAction::TimedOut(WaitTimeoutKind::BudgetExceeded),
+        WaitPumpSignal::PollFailed => WaitPumpAction::TimedOut(WaitTimeoutKind::PollFailed),
+        WaitPumpSignal::WorkVisible => WaitPumpAction::Visible,
+        WaitPumpSignal::SliceTimedOut => WaitPumpAction::PollAgain,
+        WaitPumpSignal::ChannelDisconnected { device_lost: true } => WaitPumpAction::DeviceLost,
+        WaitPumpSignal::ChannelDisconnected { device_lost: false } => {
+            WaitPumpAction::TimedOut(WaitTimeoutKind::ChannelDisconnected)
+        }
+    }
+}
+
+/// Flight-recorder detail for a timeout transition.
+fn wait_timeout_detail(kind: WaitTimeoutKind, poll_error: Option<&str>) -> String {
+    match kind {
+        WaitTimeoutKind::BudgetExceeded => {
+            "on_submitted_work_done exceeded the wait budget".to_owned()
+        }
+        WaitTimeoutKind::ChannelDisconnected => {
+            "on_submitted_work_done channel disconnected".to_owned()
+        }
+        WaitTimeoutKind::PollFailed => poll_error.unwrap_or("device poll failed").to_owned(),
+    }
+}
+
 /// Polls until the completion callback fires, the device is lost, or the budget expires.
 fn pump_until_submitted_work_done(
     request: &ProjectionGpuWaitRequest<'_>,
@@ -236,36 +313,57 @@ fn pump_until_submitted_work_done(
 
     let deadline = Instant::now() + SWAPCHAIN_GPU_VISIBILITY_TIMEOUT;
     loop {
-        if request.device_health.is_lost() {
+        let (signal, poll_error) = next_wait_pump_signal(request, &receiver, deadline);
+        if let Some(done) = finish_wait_pump(request, signal, poll_error.as_deref()) {
+            return done;
+        }
+    }
+}
+
+/// Collects the next pump observation. Does not choose the outcome.
+fn next_wait_pump_signal(
+    request: &ProjectionGpuWaitRequest<'_>,
+    receiver: &std::sync::mpsc::Receiver<()>,
+    deadline: Instant,
+) -> (WaitPumpSignal, Option<String>) {
+    if request.device_health.is_lost() {
+        return (WaitPumpSignal::DeviceLostBeforePoll, None);
+    }
+    if Instant::now() >= deadline {
+        return (WaitPumpSignal::BudgetExceeded, None);
+    }
+    if let Err(error) = request.device.poll(wgpu::PollType::Poll) {
+        return (WaitPumpSignal::PollFailed, Some(error.to_string()));
+    }
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let slice = remaining.min(SWAPCHAIN_GPU_POLL_SLICE);
+    let signal = match receiver.recv_timeout(slice) {
+        Ok(()) => WaitPumpSignal::WorkVisible,
+        Err(RecvTimeoutError::Timeout) => WaitPumpSignal::SliceTimedOut,
+        Err(RecvTimeoutError::Disconnected) => WaitPumpSignal::ChannelDisconnected {
+            device_lost: request.device_health.is_lost(),
+        },
+    };
+    (signal, None)
+}
+
+/// Applies [`decide_wait_pump`] and logs a terminal outcome.
+fn finish_wait_pump(
+    request: &ProjectionGpuWaitRequest<'_>,
+    signal: WaitPumpSignal,
+    poll_error: Option<&str>,
+) -> Option<(ProjectionGpuWait, Option<String>)> {
+    match decide_wait_pump(signal) {
+        WaitPumpAction::PollAgain => None,
+        WaitPumpAction::Visible => Some((ProjectionGpuWait::Visible, None)),
+        WaitPumpAction::DeviceLost => {
             log_swapchain_gpu_wait_device_lost(request);
-            return (ProjectionGpuWait::DeviceLost, None);
+            Some((ProjectionGpuWait::DeviceLost, None))
         }
-        if Instant::now() >= deadline {
-            let detail = "on_submitted_work_done exceeded the wait budget";
-            log_swapchain_gpu_wait_timeout(request, detail);
-            return (ProjectionGpuWait::TimedOut, Some(detail.to_owned()));
-        }
-
-        if let Err(error) = request.device.poll(wgpu::PollType::Poll) {
-            let detail = error.to_string();
+        WaitPumpAction::TimedOut(kind) => {
+            let detail = wait_timeout_detail(kind, poll_error);
             log_swapchain_gpu_wait_timeout(request, &detail);
-            return (ProjectionGpuWait::TimedOut, Some(detail));
-        }
-
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let slice = remaining.min(SWAPCHAIN_GPU_POLL_SLICE);
-        match receiver.recv_timeout(slice) {
-            Ok(()) => return (ProjectionGpuWait::Visible, None),
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => {
-                if request.device_health.is_lost() {
-                    log_swapchain_gpu_wait_device_lost(request);
-                    return (ProjectionGpuWait::DeviceLost, None);
-                }
-                let detail = "on_submitted_work_done channel disconnected";
-                log_swapchain_gpu_wait_timeout(request, detail);
-                return (ProjectionGpuWait::TimedOut, Some(detail.to_owned()));
-            }
+            Some((ProjectionGpuWait::TimedOut, Some(detail)))
         }
     }
 }
@@ -395,11 +493,54 @@ mod tests {
     use std::time::Instant;
 
     use super::{
-        LavapipeGpu, ProjectionGpuWait, ProjectionGpuWaitRequest, lavapipe_device,
-        projection_finalize_requires_gpu_wait, submit_clear, wait_for_projection_writes,
+        LavapipeGpu, ProjectionGpuWait, ProjectionGpuWaitRequest, WaitPumpAction, WaitPumpSignal,
+        WaitTimeoutKind, decide_wait_pump, lavapipe_device, projection_finalize_requires_gpu_wait,
+        submit_clear, wait_for_projection_writes, wait_timeout_detail,
     };
     use crate::gpu::flight_recorder::GpuFlightRecorder;
     use crate::gpu::sync::device_health::GpuDeviceHealth;
+
+    #[test]
+    fn wait_pump_budget_expiry_is_a_timeout() {
+        assert_eq!(
+            decide_wait_pump(WaitPumpSignal::BudgetExceeded),
+            WaitPumpAction::TimedOut(WaitTimeoutKind::BudgetExceeded)
+        );
+        assert_eq!(
+            wait_timeout_detail(WaitTimeoutKind::BudgetExceeded, None),
+            "on_submitted_work_done exceeded the wait budget"
+        );
+    }
+
+    #[test]
+    fn wait_pump_slice_timeout_then_mid_loop_device_loss() {
+        assert_eq!(
+            decide_wait_pump(WaitPumpSignal::SliceTimedOut),
+            WaitPumpAction::PollAgain
+        );
+        assert_eq!(
+            decide_wait_pump(WaitPumpSignal::DeviceLostBeforePoll),
+            WaitPumpAction::DeviceLost
+        );
+    }
+
+    #[test]
+    fn wait_pump_disconnect_follows_device_health() {
+        assert_eq!(
+            decide_wait_pump(WaitPumpSignal::ChannelDisconnected { device_lost: true }),
+            WaitPumpAction::DeviceLost
+        );
+        let disconnected =
+            decide_wait_pump(WaitPumpSignal::ChannelDisconnected { device_lost: false });
+        assert_eq!(
+            disconnected,
+            WaitPumpAction::TimedOut(WaitTimeoutKind::ChannelDisconnected)
+        );
+        assert_eq!(
+            wait_timeout_detail(WaitTimeoutKind::ChannelDisconnected, None),
+            "on_submitted_work_done channel disconnected"
+        );
+    }
 
     #[test]
     fn only_batches_that_submitted_writes_require_a_gpu_wait() {
