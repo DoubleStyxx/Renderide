@@ -46,6 +46,21 @@ fn select_view_proj(draw: PerDrawUniforms, view_idx: u32) -> mat4x4<f32> {
     return draw.view_proj_right;
 }
 
+/// Previous rigid model packed into `particle_padding[0..4]` by the object-velocity pass.
+fn previous_model(draw: PerDrawUniforms) -> mat4x4<f32> {
+    return mat4x4<f32>(
+        draw.particle_padding[0],
+        draw.particle_padding[1],
+        draw.particle_padding[2],
+        draw.particle_padding[3],
+    );
+}
+
+/// `true` when [`previous_model`] was written for this draw.
+fn previous_model_valid(draw: PerDrawUniforms) -> bool {
+    return draw.particle_padding[4].x > 0.5;
+}
+
 /// `true` when the bound position stream has already been transformed into world space.
 fn position_stream_is_world_space(draw: PerDrawUniforms) -> bool {
     return draw._pad.x > 0.5 * POSITION_STREAM_WORLD_SPACE_FLAG;

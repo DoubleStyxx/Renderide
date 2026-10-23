@@ -48,6 +48,12 @@ fn world_matrices(c: &mut Criterion) {
     group.bench_function("reverse_chain_recompute", |b| {
         b.iter(|| black_box(reverse.recompute()));
     });
+    let mut history = WorldMatrixWorkload::standard();
+    let _ = history.recompute();
+    let _ = history.publish_motion_history();
+    group.bench_function("motion_history_publish", |b| {
+        b.iter(|| black_box(history.publish_motion_history()));
+    });
     group.finish();
 }
 

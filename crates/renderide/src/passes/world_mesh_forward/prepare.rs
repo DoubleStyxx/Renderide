@@ -391,6 +391,9 @@ fn prepared_forward_view_from_pack(
         overlay_view_proj,
         precomputed_batches,
     } = packed;
+    let has_rigid_object_motion = draws
+        .iter()
+        .any(|draw| draw.previous_rigid_world_matrix.is_some());
     let ForwardViewFinalizeInputs {
         pipeline,
         helper_needs,
@@ -414,6 +417,7 @@ fn prepared_forward_view_from_pack(
             skybox,
             overlay_view_proj,
             viewport_px,
+            has_rigid_object_motion,
         }),
         hud_outputs,
     }

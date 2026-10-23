@@ -12,8 +12,8 @@ mod shader;
 
 pub(crate) use fullscreen::{
     FullscreenPipelineVariantDesc, FullscreenRenderPipelineDesc, FullscreenShaderVariants,
-    create_fullscreen_render_pipeline, fullscreen_pipeline_variant, raster_stereo_mask_override,
-    stereo_mask_or_template,
+    create_fullscreen_render_pipeline, fullscreen_pipeline_variant, multiview_mask,
+    raster_stereo_mask_override, stereo_mask_or_template,
 };
 pub(crate) use samplers::{
     create_d2_array_view, create_linear_clamp_sampler, create_uniform_buffer,

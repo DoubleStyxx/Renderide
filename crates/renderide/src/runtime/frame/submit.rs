@@ -6,11 +6,23 @@ use super::super::offscreen_tasks::camera::zero_camera_render_task_results;
 use super::super::offscreen_tasks::reflection_probe::reflection_probe_render_task_count;
 use super::super::{RendererRuntime, lockstep};
 use super::skinned_bounds::answer_skinned_realtime_bounds;
+use crate::config::RendererSettingsHandle;
 use crate::crash_context::{self, TickPhase};
 use crate::gpu_pools::MeshPool;
 use crate::ipc::SharedMemoryAccessor;
 use crate::scene::SceneCoordinator;
 use crate::shared::FrameSubmitData;
+
+/// Returns whether this frame should snapshot previous rigid world matrices.
+///
+/// A poisoned settings lock disables history for the frame rather than propagating the poison
+/// into the render thread.
+fn rigid_object_motion_history_enabled(settings: &RendererSettingsHandle) -> bool {
+    settings.read().is_ok_and(|settings| {
+        let post = &settings.post_processing;
+        post.enabled && post.motion_blur.is_effectively_enabled()
+    })
+}
 
 impl RendererRuntime {
     /// Applies a host frame submit to lock-step, output state, camera fields, scene caches, and
@@ -81,6 +93,10 @@ impl RendererRuntime {
             }
             {
                 profiling::scope!("scene::frame_submit_flush_world_caches");
+                self.scene
+                    .set_rigid_motion_history_enabled(rigid_object_motion_history_enabled(
+                        &self.config.settings,
+                    ));
                 match self.scene.flush_world_caches() {
                     Ok(report) => self.backend.note_scene_cache_flush_report(&report),
                     Err(e) => {
@@ -126,25 +142,19 @@ impl RendererRuntime {
         } else if reflection_probe_task_count > 0 {
             failed_reflection_probe_tasks = true;
         }
-        if !apply_failed && let Some(report) = scene_apply_report.as_ref() {
-            self.log_successful_scene_apply(&data, report);
-        }
-        self.finish_frame_submit_readback_queues(FrameSubmitReadbackQueueDecision {
+        self.finish_processed_frame_submit(FinishFrameSubmit {
             data: &data,
+            start,
             reflection_probe_task_count,
+            apply_failed,
+            scene_apply_report: scene_apply_report.as_ref(),
             queue_camera_tasks,
             queue_reflection_probe_tasks,
             failed_reflection_probe_tasks,
             failed_camera_tasks,
+            rendered_reflection_probes,
+            onchanges_reflection_probe_requests,
         });
-        self.queue_onchanges_reflection_probe_requests(onchanges_reflection_probe_requests);
-        self.frontend
-            .enqueue_rendered_reflection_probes(rendered_reflection_probes);
-        if apply_failed {
-            self.finish_failed_frame_submit_apply();
-        }
-        self.derive_host_camera_after_frame_submit();
-        self.trace_frame_submit_processed(&data, reflection_probe_task_count, start);
     }
 
     fn begin_frame_submit_application(&mut self, data: &FrameSubmitData, received_at: Instant) {
@@ -175,6 +185,34 @@ impl RendererRuntime {
             crate::camera::head_output_from_active_main_space(&self.scene);
         self.host_camera.eye_world_position =
             crate::camera::eye_world_position_from_active_main_space(&self.scene);
+    }
+
+    fn finish_processed_frame_submit(&mut self, finish: FinishFrameSubmit<'_>) {
+        if !finish.apply_failed
+            && let Some(report) = finish.scene_apply_report
+        {
+            self.log_successful_scene_apply(finish.data, report);
+        }
+        self.finish_frame_submit_readback_queues(FrameSubmitReadbackQueueDecision {
+            data: finish.data,
+            reflection_probe_task_count: finish.reflection_probe_task_count,
+            queue_camera_tasks: finish.queue_camera_tasks,
+            queue_reflection_probe_tasks: finish.queue_reflection_probe_tasks,
+            failed_reflection_probe_tasks: finish.failed_reflection_probe_tasks,
+            failed_camera_tasks: finish.failed_camera_tasks,
+        });
+        self.queue_onchanges_reflection_probe_requests(finish.onchanges_reflection_probe_requests);
+        self.frontend
+            .enqueue_rendered_reflection_probes(finish.rendered_reflection_probes);
+        if finish.apply_failed {
+            self.finish_failed_frame_submit_apply();
+        }
+        self.derive_host_camera_after_frame_submit();
+        self.trace_frame_submit_processed(
+            finish.data,
+            finish.reflection_probe_task_count,
+            finish.start,
+        );
     }
 
     fn log_successful_scene_apply(
@@ -245,6 +283,20 @@ impl RendererRuntime {
             start.elapsed().as_secs_f64() * 1000.0
         );
     }
+}
+
+struct FinishFrameSubmit<'a> {
+    data: &'a FrameSubmitData,
+    start: Instant,
+    reflection_probe_task_count: usize,
+    apply_failed: bool,
+    scene_apply_report: Option<&'a crate::scene::SceneApplyReport>,
+    queue_camera_tasks: bool,
+    queue_reflection_probe_tasks: bool,
+    failed_reflection_probe_tasks: bool,
+    failed_camera_tasks: u64,
+    rendered_reflection_probes: Vec<crate::shared::ReflectionProbeChangeRenderResult>,
+    onchanges_reflection_probe_requests: Vec<crate::scene::ReflectionProbeOnChangesRenderRequest>,
 }
 
 struct FrameSubmitReadbackQueueDecision<'a> {

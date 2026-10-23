@@ -42,6 +42,7 @@ mod candidate;
 mod filter_masks;
 mod layer_policy;
 mod lod;
+mod object_motion;
 pub(super) mod prepared;
 #[cfg(test)]
 mod scene_walk;

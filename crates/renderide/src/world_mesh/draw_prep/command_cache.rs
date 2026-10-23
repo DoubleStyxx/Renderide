@@ -298,6 +298,7 @@ fn hash_world_mesh_draw_item<H: Hasher>(item: &WorldMeshDrawItem, hasher: &mut H
     item._opaque_depth_bucket.hash(hasher);
     item.sort_prefix.hash(hasher);
     hash_mat4_option(item.rigid_world_matrix, hasher);
+    hash_mat4_option(item.previous_rigid_world_matrix, hasher);
     hash_reflection_probe_selection(item, hasher);
     hash_vec4_option(item.ui_rect_clip_local, hasher);
 }

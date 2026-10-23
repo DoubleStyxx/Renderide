@@ -145,6 +145,30 @@ impl PaddedPerDrawUniforms {
         self
     }
 
+    /// Packs a previous rigid model into unused per-draw padding for the object-velocity pass.
+    ///
+    /// Columns occupy `_pad2[0..4]`. `_pad2[4].x` is `1.0` when `previous` is `Some`. Shaders that
+    /// do not read this padding are unchanged, and the struct size stays 512 bytes.
+    #[inline]
+    #[must_use]
+    pub fn with_previous_model(mut self, previous: Option<Mat4>) -> Self {
+        let Some(previous) = previous else {
+            return self;
+        };
+        let columns = previous.to_cols_array();
+        for column in 0..4 {
+            let base = column * 4;
+            self._pad2[column] = [
+                columns[base],
+                columns[base + 1],
+                columns[base + 2],
+                columns[base + 3],
+            ];
+        }
+        self._pad2[4][0] = 1.0;
+        self
+    }
+
     /// Unpacks reflection-probe selection metadata.
     #[cfg(test)]
     #[inline]

@@ -95,6 +95,10 @@ pub struct SceneCoordinator {
     light_cache: LightCache,
     world_flush_scratch: WorldCacheFlushScratch,
     apply_scratch: SceneApplyScratch,
+    /// When set, [`Self::flush_world_caches`] publishes previous world matrices for spaces that
+    /// requested rigid object motion. The render thread sets this from motion-blur settings
+    /// before the flush so draw collection can read the snapshot afterward.
+    rigid_motion_history_enabled: bool,
 }
 
 #[derive(Default)]
@@ -165,6 +169,48 @@ impl SceneCoordinator {
             light_cache: LightCache::new(),
             world_flush_scratch: WorldCacheFlushScratch::default(),
             apply_scratch: SceneApplyScratch::default(),
+            rigid_motion_history_enabled: false,
+        }
+    }
+
+    /// Enables or disables publishing of previous rigid world matrices on the next flush.
+    pub(crate) fn set_rigid_motion_history_enabled(&mut self, enabled: bool) {
+        self.rigid_motion_history_enabled = enabled;
+    }
+
+    /// Returns whether this frame's flush published rigid object-motion history.
+    pub(crate) fn rigid_motion_history_enabled(&self) -> bool {
+        self.rigid_motion_history_enabled
+    }
+
+    /// Previous solved world matrix for a dense transform, when object-motion history has one.
+    pub(crate) fn previous_world_matrix(
+        &self,
+        id: RenderSpaceId,
+        transform_index: usize,
+    ) -> Option<Mat4> {
+        self.world_caches
+            .get(&id)?
+            .previous_world_matrix(transform_index)
+    }
+
+    fn rigid_motion_history_requested(&self) -> bool {
+        self.rigid_motion_history_enabled
+            && self
+                .spaces
+                .values()
+                .any(|space| space.requests_rigid_object_motion)
+    }
+
+    fn publish_rigid_motion_history(&mut self) {
+        for cache in self.world_caches.values_mut() {
+            cache.publish_previous_world_matrices();
+        }
+    }
+
+    fn seal_rigid_motion_history(&mut self) {
+        for cache in self.world_caches.values_mut() {
+            cache.seal_motion_history();
         }
     }
 
@@ -368,6 +414,10 @@ impl SceneCoordinator {
         use rayon::prelude::*;
 
         let mut report = SceneCacheFlushReport::default();
+        let publish_history = self.rigid_motion_history_requested();
+        if publish_history {
+            self.publish_rigid_motion_history();
+        }
         self.world_flush_scratch.dirty_spaces.clear();
         self.world_flush_scratch
             .dirty_spaces
@@ -388,6 +438,9 @@ impl SceneCoordinator {
         }
 
         if work.is_empty() {
+            if publish_history {
+                self.seal_rigid_motion_history();
+            }
             return Ok(report);
         }
         let work_units = {
@@ -448,6 +501,9 @@ impl SceneCoordinator {
 
         if let Some(e) = first_err {
             return Err(e);
+        }
+        if publish_history {
+            self.seal_rigid_motion_history();
         }
         Ok(report)
     }

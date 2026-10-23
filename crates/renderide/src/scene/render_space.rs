@@ -239,6 +239,11 @@ pub(in crate::scene) struct RenderSpaceState {
     pub(in crate::scene) render_material_overrides: Vec<RenderMaterialOverrideEntry>,
     /// Host `BlitToDisplay` renderables; dense by host `renderable_index`.
     pub(in crate::scene) blit_to_displays: Vec<BlitToDisplayEntry>,
+    /// Sticky: some static renderer in this space has requested [`crate::shared::MotionVectorMode::Object`].
+    ///
+    /// Not cleared when a later row uses camera or no-motion mode. While set, and while rigid
+    /// motion history is enabled, the world-cache flush publishes previous matrices for the space.
+    pub(in crate::scene) requests_rigid_object_motion: bool,
 }
 
 impl RenderSpaceState {
@@ -306,6 +311,7 @@ impl Default for RenderSpaceState {
             render_transform_overrides: Vec::new(),
             render_material_overrides: Vec::new(),
             blit_to_displays: Vec::new(),
+            requests_rigid_object_motion: false,
         }
     }
 }

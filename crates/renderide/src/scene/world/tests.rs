@@ -454,3 +454,31 @@ fn parallel_partial_rebuild_matches_serial_incremental_for_large_dirty_subtree()
         assert!(parallel.computed[i] && serial.computed[i]);
     }
 }
+
+#[test]
+fn motion_history_publish_reuses_storage_and_keeps_the_pre_solve_pose() {
+    let mut cache = WorldTransformCache::default();
+    let mut nodes = vec![
+        translation_xform(0.0, 0.0, 0.0),
+        translation_xform(1.0, 0.0, 0.0),
+    ];
+    let parents = vec![-1, 0];
+    compute_world_matrices_for_space(0, &nodes, &parents, &mut cache).expect("initial solve");
+    cache.seal_motion_history();
+    cache.publish_previous_world_matrices();
+    let capacity = cache.previous_world_matrix_capacity();
+    assert!(capacity >= nodes.len());
+    let settled = cache.world_matrices[1];
+    assert_eq!(cache.previous_world_matrix(1), Some(settled));
+
+    nodes[1] = translation_xform(3.0, 0.0, 0.0);
+    cache.computed[1] = false;
+    cache.local_dirty[1] = true;
+    cache.publish_previous_world_matrices();
+    assert_eq!(cache.previous_world_matrix_capacity(), capacity);
+    let previous = cache.previous_world_matrix(1).expect("previous pose");
+    compute_world_matrices_for_space(0, &nodes, &parents, &mut cache).expect("moved solve");
+    assert_ne!(cache.world_matrices[1], previous);
+    cache.publish_previous_world_matrices();
+    assert_eq!(cache.previous_world_matrix_capacity(), capacity);
+}

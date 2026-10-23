@@ -120,6 +120,13 @@ pub(crate) fn apply_mesh_renderables_update_extracted(
             );
         }
     }
+    if plans
+        .iter()
+        .flatten()
+        .any(MeshRendererStateApplyPlan::requests_object_motion)
+    {
+        space.requests_rigid_object_motion = true;
+    }
     apply_static_mesh_state_plans(
         &mut space.static_mesh_renderers,
         plans,

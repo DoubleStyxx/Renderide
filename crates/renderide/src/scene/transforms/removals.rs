@@ -60,6 +60,15 @@ pub fn apply_transform_removals_ordered(
             if idx < cache.hierarchy.visit_epoch.len() {
                 cache.hierarchy.visit_epoch.swap_remove(idx);
             }
+            if idx < cache.previous_world_matrices.len() {
+                cache.previous_world_matrices.swap_remove(idx);
+            }
+            if idx < cache.previous_valid.len() {
+                cache.previous_valid.swap_remove(idx);
+            }
+            if idx < cache.motion_history_ready.len() {
+                cache.motion_history_ready.swap_remove(idx);
+            }
         }
         out.push(TransformRemovalEvent {
             removed_index: removed_id,

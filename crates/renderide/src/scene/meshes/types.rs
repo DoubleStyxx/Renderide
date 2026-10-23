@@ -158,6 +158,11 @@ impl MeshRendererStateApplyPlan {
         }
     }
 
+    /// Returns whether this plan asks for rigid object motion vectors.
+    pub(crate) fn requests_object_motion(&self) -> bool {
+        self.motion_vector_mode == MotionVectorMode::Object
+    }
+
     /// Applies this decoded plan to one renderer.
     pub(crate) fn apply_to<S: MeshRendererStateSink>(self, drawable: &mut S) {
         drawable.set_mesh_visual_header(

@@ -16,6 +16,7 @@ use crate::world_mesh::materials::{
 
 use super::super::item::{MaterialStackOrder, WorldMeshDrawItem};
 use super::DrawCollectionInputs;
+use super::object_motion::{RigidMotionQuery, previous_for_draw};
 
 /// View-local material-slot draw candidate shared by scene-walk and prepared collection.
 pub(super) struct DrawCandidate {
@@ -146,10 +147,9 @@ pub(super) fn evaluate_draw_candidate(
         opaque_depth_bucket,
         batch_key_hash,
     );
-    let reflection_probes = match (ctx.view.reflection_probes, candidate.world_aabb) {
-        (Some(selection), Some(aabb)) => selection.select(candidate.space_id, aabb),
-        _ => ReflectionProbeDrawSelection::default(),
-    };
+    let reflection_probes = reflection_probes_for_candidate(ctx, &candidate);
+    let previous_rigid_world_matrix =
+        previous_rigid_world_matrix(ctx, &candidate, rigid_world_matrix);
     Some(WorldMeshDrawItem {
         space_id: candidate.space_id,
         node_id: candidate.node_id,
@@ -176,10 +176,43 @@ pub(super) fn evaluate_draw_candidate(
         _opaque_depth_bucket: opaque_depth_bucket,
         sort_prefix,
         rigid_world_matrix,
+        previous_rigid_world_matrix,
         reflection_probes,
         ui_rect_clip_local,
         particle_draw: candidate.particle_draw,
     })
+}
+
+/// Selects specular probes for one candidate when the view has a selection and the draw has bounds.
+fn reflection_probes_for_candidate(
+    ctx: &DrawCollectionInputs<'_>,
+    candidate: &DrawCandidate,
+) -> ReflectionProbeDrawSelection {
+    match (ctx.view.reflection_probes, candidate.world_aabb) {
+        (Some(selection), Some(aabb)) => selection.select(candidate.space_id, aabb),
+        _ => ReflectionProbeDrawSelection::default(),
+    }
+}
+
+/// Resolves the previous rigid matrix for one candidate, or `None` to keep camera velocity.
+fn previous_rigid_world_matrix(
+    ctx: &DrawCollectionInputs<'_>,
+    candidate: &DrawCandidate,
+    rigid_world_matrix: Option<Mat4>,
+) -> Option<Mat4> {
+    previous_for_draw(
+        ctx.scene_assets.scene,
+        RigidMotionQuery {
+            space_id: candidate.space_id,
+            node_id: candidate.node_id,
+            renderable_index: candidate.renderable_index,
+            skinned: candidate.skinned,
+            is_overlay: candidate.is_overlay,
+            world_space_deformed: candidate.world_space_deformed,
+            particle_kind: candidate.particle_draw.kind,
+            current: rigid_world_matrix,
+        },
+    )
 }
 
 /// Returns the transparent back-to-front sort metric for a draw candidate.

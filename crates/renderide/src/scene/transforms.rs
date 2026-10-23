@@ -180,6 +180,11 @@ fn ensure_world_cache_matches_node_count(
     cache.local_dirty.resize(space.nodes.len(), true);
     cache.degenerate_scales.resize(space.nodes.len(), false);
     cache.hierarchy.visit_epoch.resize(space.nodes.len(), 0);
+    cache
+        .previous_world_matrices
+        .resize(space.nodes.len(), glam::Mat4::IDENTITY);
+    cache.previous_valid.resize(space.nodes.len(), false);
+    cache.motion_history_ready.resize(space.nodes.len(), false);
     *invalidate_world = true;
 }
 
@@ -200,6 +205,9 @@ fn grow_transform_buffers_to_target(
         cache.local_dirty.push(true);
         cache.degenerate_scales.push(false);
         cache.hierarchy.visit_epoch.push(0);
+        cache.previous_world_matrices.push(glam::Mat4::IDENTITY);
+        cache.previous_valid.push(false);
+        cache.motion_history_ready.push(false);
     }
     if space.nodes.len() != nodes_before {
         *invalidate_world = true;
