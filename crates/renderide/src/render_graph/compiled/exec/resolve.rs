@@ -417,6 +417,8 @@ impl CompiledRenderGraph {
                     view_id,
                     sample_count: layout.sample_count,
                     post_processing: layout.post_processing,
+                    color_texture: None,
+                    persistent_depth_target: true,
                 })
             }
             FrameViewTarget::ExternalMultiview(ext) => Ok(ResolvedView {
@@ -431,20 +433,27 @@ impl CompiledRenderGraph {
                 view_id,
                 sample_count: layout.sample_count,
                 post_processing: layout.post_processing,
+                color_texture: None,
+                persistent_depth_target: true,
             }),
-            FrameViewTarget::OffscreenRt(ext) => Ok(ResolvedView {
-                depth_texture: ext.depth_texture,
-                depth_view: ext.depth_view,
-                backbuffer: Some(ext.color_view),
-                surface_format: layout.surface_format,
-                viewport_px: layout.viewport_px,
-                multiview_stereo: layout.multiview_stereo,
-                offscreen_write_target: ext.write_target,
-                view_winding,
-                view_id,
-                sample_count: layout.sample_count,
-                post_processing: layout.post_processing,
-            }),
+            FrameViewTarget::OffscreenRt(ext) => {
+                let full_target = ext.copy_to_color.is_none();
+                Ok(ResolvedView {
+                    depth_texture: ext.depth_texture,
+                    depth_view: ext.depth_view,
+                    backbuffer: Some(ext.color_view),
+                    surface_format: layout.surface_format,
+                    viewport_px: layout.viewport_px,
+                    multiview_stereo: layout.multiview_stereo,
+                    offscreen_write_target: ext.write_target,
+                    view_winding,
+                    view_id,
+                    sample_count: layout.sample_count,
+                    post_processing: layout.post_processing,
+                    color_texture: full_target.then_some(ext.color_texture),
+                    persistent_depth_target: full_target,
+                })
+            }
         }
     }
 
@@ -476,6 +485,8 @@ impl CompiledRenderGraph {
                     view_id,
                     sample_count: layout.sample_count,
                     post_processing: layout.post_processing,
+                    color_texture: None,
+                    persistent_depth_target: true,
                     offscreen_color_copy: None,
                 })
             }
@@ -491,27 +502,36 @@ impl CompiledRenderGraph {
                 view_id,
                 sample_count: layout.sample_count,
                 post_processing: layout.post_processing,
+                color_texture: None,
+                persistent_depth_target: true,
                 offscreen_color_copy: None,
             }),
-            FrameViewTarget::OffscreenRt(ext) => Ok(OwnedResolvedView {
-                depth_texture: (*ext.depth_texture).clone(),
-                depth_view: (*ext.depth_view).clone(),
-                backbuffer: Some((*ext.color_view).clone()),
-                surface_format: layout.surface_format,
-                viewport_px: layout.viewport_px,
-                multiview_stereo: layout.multiview_stereo,
-                offscreen_write_target: ext.write_target,
-                view_winding,
-                view_id,
-                sample_count: layout.sample_count,
-                post_processing: layout.post_processing,
-                offscreen_color_copy: ext.copy_to_color.map(|copy| ResolvedOffscreenColorCopy {
-                    source_texture: (*ext.color_texture).clone(),
-                    destination_texture: (*copy.destination_texture).clone(),
-                    destination_origin_px: copy.destination_origin_px,
-                    extent_px: copy.extent_px,
-                }),
-            }),
+            FrameViewTarget::OffscreenRt(ext) => {
+                let full_target = ext.copy_to_color.is_none();
+                Ok(OwnedResolvedView {
+                    depth_texture: (*ext.depth_texture).clone(),
+                    depth_view: (*ext.depth_view).clone(),
+                    backbuffer: Some((*ext.color_view).clone()),
+                    surface_format: layout.surface_format,
+                    viewport_px: layout.viewport_px,
+                    multiview_stereo: layout.multiview_stereo,
+                    offscreen_write_target: ext.write_target,
+                    view_winding,
+                    view_id,
+                    sample_count: layout.sample_count,
+                    post_processing: layout.post_processing,
+                    color_texture: full_target.then(|| (*ext.color_texture).clone()),
+                    persistent_depth_target: full_target,
+                    offscreen_color_copy: ext.copy_to_color.map(|copy| {
+                        ResolvedOffscreenColorCopy {
+                            source_texture: (*ext.color_texture).clone(),
+                            destination_texture: (*copy.destination_texture).clone(),
+                            destination_origin_px: copy.destination_origin_px,
+                            extent_px: copy.extent_px,
+                        }
+                    }),
+                })
+            }
         }
     }
 }

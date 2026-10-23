@@ -22,10 +22,12 @@ pub(crate) use post_processing::{
 };
 pub(crate) use scene_color_compose::{SceneColorComposeGraphResources, SceneColorComposePass};
 pub(crate) use world_mesh_forward::ForwardMsaaResources;
+#[cfg(feature = "bench-api")]
+pub(crate) use world_mesh_forward::{CAMERA_CLEAR_LOAD_OP_CAMERAS, camera_clear_load_op_checksum};
 pub(crate) use world_mesh_forward::{
     GTAO_VIEW_NORMAL_FORMAT, MaterialBatchBoundary, PreparedWorldMeshForwardFrame,
     ShadowDepthDrawBatch, WorldMeshDepthSnapshotPass, WorldMeshDesktopOverlayGraphResources,
-    WorldMeshDesktopOverlayPass, WorldMeshForwardDepthPrepass,
+    WorldMeshDesktopOverlayPass, WorldMeshForwardColorPreservePass, WorldMeshForwardDepthPrepass,
     WorldMeshForwardDepthPrepassGraphResources, WorldMeshForwardDepthPrepassPipelineKey,
     WorldMeshForwardDepthResolvePass, WorldMeshForwardEncodeRefs, WorldMeshForwardGraphResources,
     WorldMeshForwardGtaoDepthResolvePass, WorldMeshForwardInstancePlanCache,

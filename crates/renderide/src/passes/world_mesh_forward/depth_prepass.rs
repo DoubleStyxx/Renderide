@@ -27,6 +27,7 @@ use crate::shared::ShadowCastMode;
 use crate::world_mesh::{MeshPassKind, WorldMeshDrawItem};
 
 use super::attachments::declare_forward_depth_attachment;
+use super::clear_load::forward_depth_load_op;
 use super::depth_like_pipeline::{DepthLikePipelineSpec, create_depth_like_pipeline};
 use super::encode::{DepthPrepassDrawBatch, draw_depth_prepass_subset};
 use super::{WorldMeshForwardPipelineState, WorldMeshForwardPlanSlot};
@@ -504,6 +505,8 @@ impl RasterPass for WorldMeshForwardDepthPrepass {
         b.read_optional_blackboard::<WorldMeshForwardPlanSlot>();
         {
             let mut r = b.raster();
+            // Shared-graph default. [`Self::depth_load_op_override`] loads persistent
+            // single-sample depth when the camera clear mode is nothing.
             let depth_ops = wgpu::Operations {
                 load: wgpu::LoadOp::Clear(crate::gpu::MAIN_FORWARD_DEPTH_CLEAR),
                 store: wgpu::StoreOp::Store,
@@ -535,6 +538,14 @@ impl RasterPass for WorldMeshForwardDepthPrepass {
             .get::<WorldMeshForwardPlanSlot>()
             .is_some_and(|prepared| prepared.pipeline.use_multiview);
         stereo_mask_or_template(use_multiview, template.multiview_mask)
+    }
+
+    fn depth_load_op_override(&self, ctx: &RasterPassCtx<'_, '_>) -> Option<wgpu::LoadOp<f32>> {
+        Some(forward_depth_load_op(
+            ctx.frame.view.clear,
+            ctx.frame.view.sample_count,
+            ctx.frame.view.persistent_depth_target,
+        ))
     }
 
     fn record(

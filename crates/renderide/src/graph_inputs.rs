@@ -764,6 +764,16 @@ pub struct GraphPassFrameView<'a> {
     pub msaa_depth_resolve: Option<Arc<MsaaDepthResolveResources>>,
     /// Background clear/skybox behavior for this view.
     pub clear: FrameViewClear,
+    /// Full-target offscreen color texture when this view can copy it into HDR scene color.
+    ///
+    /// `None` for the swapchain, multiview, and partial-viewport scratch targets. Those paths
+    /// cannot preserve the previous color by loading the HDR transient.
+    pub color_texture: Option<&'a wgpu::Texture>,
+    /// `true` when [`Self::depth_texture`] is the persistent camera depth target.
+    ///
+    /// Window, OpenXR, and full render-texture views keep their depth across cameras. A partial
+    /// viewport renders into a scratch depth image that is not copied back, so it stays cleared.
+    pub persistent_depth_target: bool,
     /// Post-processing permissions requested by this view.
     pub post_processing: ViewPostProcessing,
 }

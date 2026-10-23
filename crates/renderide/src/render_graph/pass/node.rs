@@ -303,6 +303,29 @@ impl PassNode {
         }
     }
 
+    /// Runtime color load override for raster passes. Other pass kinds keep the template load.
+    pub(crate) fn color_load_op_override(
+        &self,
+        ctx: &RasterPassCtx<'_, '_>,
+        attachment_index: usize,
+    ) -> Option<wgpu::LoadOp<wgpu::Color>> {
+        match self {
+            Self::Raster(p) => p.color_load_op_override(ctx, attachment_index),
+            Self::Compute(_) | Self::Encoder(_) => None,
+        }
+    }
+
+    /// Runtime depth load override for raster passes. Other pass kinds keep the template load.
+    pub(crate) fn depth_load_op_override(
+        &self,
+        ctx: &RasterPassCtx<'_, '_>,
+    ) -> Option<wgpu::LoadOp<f32>> {
+        match self {
+            Self::Raster(p) => p.depth_load_op_override(ctx),
+            Self::Compute(_) | Self::Encoder(_) => None,
+        }
+    }
+
     /// Dispatches `post_submit` to the correct inner trait.
     pub(crate) fn post_submit(
         &mut self,

@@ -8,18 +8,20 @@
 //! the default command.
 
 pub use renderide::bench_api::{
-    BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload, CULL_BATCH,
-    CullWorkload, KeywordVariantCacheWorkload, MATERIAL_UNIFORM_BATCH,
-    MaterialUniformUpdateWorkload, SHADOW_CHURN_CASTERS, SHADOW_CHURN_LIGHTS, ShadowChurnWorkload,
-    TRANSFORM_BATCH, TransformWorkload, WORLD_MATRIX_NODES, WorldMatrixWorkload,
+    BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload,
+    CAMERA_CLEAR_LOAD_OP_CAMERAS, CULL_BATCH, CullWorkload, KeywordVariantCacheWorkload,
+    MATERIAL_UNIFORM_BATCH, MaterialUniformUpdateWorkload, SHADOW_CHURN_CASTERS,
+    SHADOW_CHURN_LIGHTS, ShadowChurnWorkload, TRANSFORM_BATCH, TransformWorkload,
+    WORLD_MATRIX_NODES, WorldMatrixWorkload, camera_clear_load_op_checksum,
 };
 
 #[cfg(test)]
 mod tests {
     use super::{
         BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload,
-        CULL_BATCH, CullWorkload, KeywordVariantCacheWorkload, MaterialUniformUpdateWorkload,
-        TransformWorkload, WORLD_MATRIX_NODES, WorldMatrixWorkload,
+        CAMERA_CLEAR_LOAD_OP_CAMERAS, CULL_BATCH, CullWorkload, KeywordVariantCacheWorkload,
+        MaterialUniformUpdateWorkload, TransformWorkload, WORLD_MATRIX_NODES, WorldMatrixWorkload,
+        camera_clear_load_op_checksum,
     };
 
     #[test]
@@ -117,5 +119,13 @@ mod tests {
         assert_eq!(workload.cache_hit(), hit);
         let composed = workload.compose();
         assert!(composed > 0);
+    }
+
+    #[test]
+    fn camera_clear_load_op_checksum_is_stable() {
+        let first = camera_clear_load_op_checksum(CAMERA_CLEAR_LOAD_OP_CAMERAS);
+        let second = camera_clear_load_op_checksum(CAMERA_CLEAR_LOAD_OP_CAMERAS);
+        assert_eq!(first, second);
+        assert_ne!(first, 0);
     }
 }

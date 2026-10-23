@@ -35,6 +35,14 @@ pub use crate::materials::KeywordVariantCacheWorkload;
 pub use crate::materials::{
     BIND_GROUP_BATCH, BindGroupChurnWorkload, MATERIAL_UNIFORM_BATCH, MaterialUniformUpdateWorkload,
 };
+/// Cameras folded by one [`camera_clear_load_op_checksum`] sample.
+pub const CAMERA_CLEAR_LOAD_OP_CAMERAS: usize = crate::passes::CAMERA_CLEAR_LOAD_OP_CAMERAS;
+
+/// Allocation-free checksum of per-camera color and depth load ops.
+#[must_use]
+pub fn camera_clear_load_op_checksum(cameras: usize) -> u32 {
+    crate::passes::camera_clear_load_op_checksum(cameras)
+}
 
 /// Sibling group width for [`WorldMatrixWorkload`]. Index 0 of each group is a root.
 const WORLD_MATRIX_GROUP: usize = 32;
