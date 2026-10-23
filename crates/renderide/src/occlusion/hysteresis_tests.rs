@@ -2,7 +2,7 @@
 mod tests {
     use std::sync::Arc;
 
-    use glam::Mat4;
+    use glam::Vec3;
     use rayon::prelude::*;
 
     use super::*;
@@ -292,7 +292,8 @@ mod tests {
     fn screen_motion_pad_is_zero_when_stable_and_open_when_unbounded() {
         let near = 0.01;
         let far = 100.0;
-        let view = Mat4::look_at_rh(Vec3::new(0.0, 0.0, -5.0), Vec3::ZERO, Vec3::Y);
+        let view =
+            glam::camera::rh::view::look_at_mat4(Vec3::new(0.0, 0.0, -5.0), Vec3::ZERO, Vec3::Y);
         let narrow = reverse_z_perspective(1.0, 90.0_f32.to_radians(), near, far) * view;
         let wide = reverse_z_perspective(1.0, 60.0_f32.to_radians(), near, far) * view;
         let min = Vec3::splat(-0.25);
@@ -302,7 +303,11 @@ mod tests {
         let changed = screen_motion_uv_pad(narrow, wide, min, max).expect("fov projection");
         assert!(changed > 0.01);
         let behind = reverse_z_perspective(1.0, 90.0_f32.to_radians(), near, far)
-            * Mat4::look_at_rh(Vec3::new(0.0, 0.0, 5.0), Vec3::new(0.0, 0.0, 10.0), Vec3::Y);
+            * glam::camera::rh::view::look_at_mat4(
+                Vec3::new(0.0, 0.0, 5.0),
+                Vec3::new(0.0, 0.0, 10.0),
+                Vec3::Y,
+            );
         assert!(screen_motion_uv_pad(narrow, behind, min, max).is_none());
     }
 

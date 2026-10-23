@@ -572,7 +572,7 @@ mod hysteresis_cull_integration {
         let history = frame.finish();
 
         let away = proj
-            * Mat4::look_at_rh(
+            * glam::camera::rh::view::look_at_mat4(
                 Vec3::new(0.0, 0.0, 10.0),
                 Vec3::new(0.0, 0.0, 20.0),
                 Vec3::Y,

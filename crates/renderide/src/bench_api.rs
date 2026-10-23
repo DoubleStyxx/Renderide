@@ -570,9 +570,17 @@ fn project_screen(view_proj: Mat4, min: Vec3, max: Vec3) -> Option<ScreenRect> {
 
 fn history_view_projections(moving: bool) -> (Mat4, Mat4) {
     let projection = reverse_z_perspective(1.0, 70.0_f32.to_radians(), 0.05, 200.0);
-    let previous = Mat4::look_at_rh(Vec3::new(0.0, 1.5, 12.0), Vec3::new(0.0, 1.5, 0.0), Vec3::Y);
+    let previous = glam::camera::rh::view::look_at_mat4(
+        Vec3::new(0.0, 1.5, 12.0),
+        Vec3::new(0.0, 1.5, 0.0),
+        Vec3::Y,
+    );
     let current = if moving {
-        Mat4::look_at_rh(Vec3::new(2.0, 1.5, 12.0), Vec3::new(2.0, 1.5, 0.0), Vec3::Y)
+        glam::camera::rh::view::look_at_mat4(
+            Vec3::new(2.0, 1.5, 12.0),
+            Vec3::new(2.0, 1.5, 0.0),
+            Vec3::Y,
+        )
     } else {
         previous
     };

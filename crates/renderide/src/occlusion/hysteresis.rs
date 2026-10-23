@@ -517,7 +517,9 @@ pub(crate) fn bounds_moved(previous: (Vec3, Vec3), current: (Vec3, Vec3)) -> boo
 
 /// Linear view-space depth for a reverse-Z NDC z, using the projection's near and far.
 ///
-/// Perspective uses `far * near / (ndc_z * (far - near) + near)`. Orthographic uses
+/// NDC z is the renderer's reverse-Z interval `[0, 1]`: `1` at the near plane and `0` at the far
+/// plane, matching [`crate::camera::reverse_z_perspective`]. Perspective uses
+/// `far * near / (ndc_z * (far - near) + near)`. Orthographic uses
 /// `far - ndc_z * (far - near)`. `None` when the clip or the depth is not usable.
 pub(crate) fn view_depth_from_reverse_z(ndc_z: f32, clip: DepthClip) -> Option<f32> {
     if !ndc_z.is_finite() || !clip.near.is_finite() || !clip.far.is_finite() {
