@@ -20,18 +20,24 @@
 //! "is written by a camera" because repeat is valid authorable behavior for sampled render
 //! textures.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use std::sync::Arc;
 
 use crate::assets::texture::estimate_gpu_texture_bytes;
 use crate::gpu::GpuLimits;
 use crate::gpu_pools::VramResourceKind;
+use crate::gpu_pools::budget::VramAccounting;
 use crate::gpu_pools::impl_gpu_resource;
-use crate::gpu_pools::resource_pool::{
-    GpuResourcePool, UntrackedAccess, impl_resident_pool_facade,
-};
+use crate::gpu_pools::resource_pool::{GpuResourcePool, UntrackedAccess};
 use crate::gpu_pools::sampler_state::SamplerState;
 use crate::shared::SetRenderTextureFormat;
+
+/// Planning passes with the double-buffer flag off before the history image is released.
+///
+/// A 1080p `Rgba16Float` history image is about 16.6 MB. Three passes hide a one-frame flag
+/// flicker without keeping that image for the rest of the session.
+pub(crate) const DOUBLE_BUFFER_HISTORY_IDLE_FRAMES: u8 = 3;
 
 static NEXT_RENDER_TEXTURE_VIEW_GENERATION: AtomicU64 = AtomicU64::new(1);
 
@@ -63,8 +69,12 @@ pub struct GpuRenderTexture {
     /// Second color image allocated the first time a camera double-buffers this texture.
     ///
     /// Absent until that flag is set, so render textures that never double-buffer keep a single
-    /// color allocation. Once created it is reused; each frame swaps it with the published image.
+    /// color allocation. While it is present, each rendered frame swaps it with the published
+    /// image. After `DOUBLE_BUFFER_HISTORY_IDLE_FRAMES` planning passes with the flag off, the
+    /// image is retired and this is `None` again until the flag returns.
     previous_color: Option<RenderTextureColorImage>,
+    /// Planning passes since an enabled camera last had the double-buffer flag set.
+    history_idle_frames: u8,
     /// Optional depth texture (always allocated for scene draws in [`Self::new_from_format`]).
     pub depth_texture: Option<Arc<wgpu::Texture>>,
     /// View over `depth_texture` when present.
@@ -158,6 +168,7 @@ impl GpuRenderTexture {
             color_view: published.view,
             color_view_generation: published.view_generation,
             previous_color: None,
+            history_idle_frames: 0,
             depth_texture,
             depth_view,
             wgpu_color_format,
@@ -210,7 +221,7 @@ impl GpuRenderTexture {
 
     /// Allocates the second color image the first time double buffering is requested.
     ///
-    /// Returns `true` only on that first allocation. Later calls reuse the image.
+    /// Returns `true` only on that allocation. Later calls reuse the image until idle release.
     fn ensure_previous_color(&mut self, device: &wgpu::Device) -> bool {
         if self.previous_color.is_some() {
             return false;
@@ -247,6 +258,38 @@ impl GpuRenderTexture {
             &mut self.color_view_generation,
             &mut previous.view_generation,
         );
+    }
+
+    /// Removes the history image and subtracts its bytes from the resident total.
+    fn take_previous_color(&mut self) -> Option<RetiredRenderTextureHistory> {
+        let previous = self.previous_color.take()?;
+        let bytes = estimate_gpu_texture_bytes(self.wgpu_color_format, self.width, self.height, 1);
+        self.resident_bytes = self.resident_bytes.saturating_sub(bytes);
+        self.history_idle_frames = 0;
+        Some(RetiredRenderTextureHistory {
+            bytes,
+            texture: previous.texture,
+            view: previous.view,
+        })
+    }
+}
+
+/// History color image kept alive until delayed removal drops it.
+#[derive(Debug)]
+pub(crate) struct RetiredRenderTextureHistory {
+    /// Color-image bytes subtracted from the pool when this history was released.
+    bytes: u64,
+    /// History color storage.
+    texture: Arc<wgpu::Texture>,
+    /// Full-mip view of `texture`.
+    view: Arc<wgpu::TextureView>,
+}
+
+impl RetiredRenderTextureHistory {
+    /// Bytes the pool stopped accounting for when this image left the resident texture.
+    pub(crate) fn resident_bytes(&self) -> u64 {
+        debug_assert!(self.texture.size().width > 0 || self.view.texture().size().width > 0);
+        self.bytes
     }
 }
 
@@ -326,15 +369,54 @@ pub(crate) fn swap_ping_pong<T>(current: &mut T, previous: &mut T) {
 pub struct RenderTexturePool {
     /// Shared resident GPU resource table.
     inner: GpuResourcePool<GpuRenderTexture, UntrackedAccess>,
+    /// Asset ids that currently own a history image. Grown only when a history image is created.
+    history_ids: Vec<i32>,
+    /// Scratch filled by one idle-history pass and restored after the caller retires it.
+    retired_history_scratch: Vec<RetiredRenderTextureHistory>,
 }
 
-impl_resident_pool_facade!(
-    RenderTexturePool,
-    GpuRenderTexture,
-    VramResourceKind::Texture,
-);
+impl Default for RenderTexturePool {
+    #[inline]
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl RenderTexturePool {
+    /// Creates an empty pool.
+    #[inline]
+    pub fn new() -> Self {
+        Self {
+            inner: GpuResourcePool::new(UntrackedAccess::new(VramResourceKind::Texture)),
+            history_ids: Vec::new(),
+            retired_history_scratch: Vec::new(),
+        }
+    }
+
+    /// VRAM accounting for resident render textures.
+    #[inline]
+    pub fn accounting(&self) -> &VramAccounting {
+        self.inner.accounting()
+    }
+
+    /// Inserts or replaces a resource. Returns `true` if an entry was replaced.
+    #[inline]
+    pub fn insert(&mut self, resource: GpuRenderTexture) -> bool {
+        self.inner.insert(resource)
+    }
+
+    /// Removes and returns a resource by host asset id when it was present.
+    #[inline]
+    pub(crate) fn take(&mut self, asset_id: i32) -> Option<GpuRenderTexture> {
+        self.inner.take(asset_id)
+    }
+
+    /// Borrows a resident resource by host asset id.
+    #[inline]
+    pub fn get(&self, asset_id: i32) -> Option<&GpuRenderTexture> {
+        self.inner.get(asset_id)
+    }
+
     /// Number of resident render texture entries.
     #[inline]
     pub fn len(&self) -> usize {
@@ -355,11 +437,105 @@ impl RenderTexturePool {
             let before = texture.resident_bytes;
             let allocated = texture.ensure_previous_color(device);
             texture.swap_published_color();
+            texture.history_idle_frames = 0;
             (before, texture.resident_bytes, allocated)
         };
         self.inner.account_resident_delta(before, after);
+        if !self.history_ids.contains(&asset_id) {
+            self.history_ids.push(asset_id);
+        }
         Some(allocated)
     }
+
+    /// Ages history images and returns the scratch vec holding any that reached the idle limit.
+    ///
+    /// The caller retires the returned images, drains the vec, and passes it back to
+    /// [`Self::finish_history_retirement`] so the next pass reuses the allocation.
+    pub(crate) fn begin_history_retirement(
+        &mut self,
+        flagged: &[i32],
+    ) -> Vec<RetiredRenderTextureHistory> {
+        let mut retired = std::mem::take(&mut self.retired_history_scratch);
+        retired.clear();
+        self.age_idle_histories(flagged, &mut retired);
+        retired
+    }
+
+    /// Restores the scratch vec from [`Self::begin_history_retirement`].
+    pub(crate) fn finish_history_retirement(&mut self, scratch: Vec<RetiredRenderTextureHistory>) {
+        self.retired_history_scratch = scratch;
+    }
+
+    /// Increments idle history images and moves those past the limit into `retired`.
+    fn age_idle_histories(
+        &mut self,
+        flagged: &[i32],
+        retired: &mut Vec<RetiredRenderTextureHistory>,
+    ) {
+        let mut index = 0;
+        while index < self.history_ids.len() {
+            let asset_id = self.history_ids[index];
+            match self.idle_history_decision(asset_id, flagged) {
+                IdleHistoryDecision::Missing => {
+                    self.history_ids.swap_remove(index);
+                }
+                IdleHistoryDecision::Keep => index += 1,
+                IdleHistoryDecision::Release {
+                    before,
+                    after,
+                    history,
+                } => {
+                    self.inner.account_resident_delta(before, after);
+                    retired.push(history);
+                    self.history_ids.swap_remove(index);
+                }
+            }
+        }
+    }
+
+    /// Decides whether one history image stays, leaves, or is already gone.
+    fn idle_history_decision(&mut self, asset_id: i32, flagged: &[i32]) -> IdleHistoryDecision {
+        let Some(texture) = self.inner.get_mut(asset_id) else {
+            return IdleHistoryDecision::Missing;
+        };
+        if texture.previous_color.is_none() {
+            return IdleHistoryDecision::Missing;
+        }
+        if flagged.contains(&asset_id) {
+            texture.history_idle_frames = 0;
+            return IdleHistoryDecision::Keep;
+        }
+        texture.history_idle_frames = texture.history_idle_frames.saturating_add(1);
+        if texture.history_idle_frames < DOUBLE_BUFFER_HISTORY_IDLE_FRAMES {
+            return IdleHistoryDecision::Keep;
+        }
+        let before = texture.resident_bytes;
+        let Some(history) = texture.take_previous_color() else {
+            return IdleHistoryDecision::Missing;
+        };
+        IdleHistoryDecision::Release {
+            before,
+            after: texture.resident_bytes,
+            history,
+        }
+    }
+}
+
+/// What one idle pass should do with a tracked history image.
+enum IdleHistoryDecision {
+    /// The pool entry or its history image is already gone.
+    Missing,
+    /// The history image stays resident.
+    Keep,
+    /// The history image left the pool and must be retired.
+    Release {
+        /// Resident bytes before the history image was removed.
+        before: u64,
+        /// Resident bytes after the history image was removed.
+        after: u64,
+        /// Image the caller enqueues for delayed destruction.
+        history: RetiredRenderTextureHistory,
+    },
 }
 
 #[cfg(test)]

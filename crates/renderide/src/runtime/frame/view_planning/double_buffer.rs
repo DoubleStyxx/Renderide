@@ -1,17 +1,37 @@
 //! Double-buffered secondary-camera write policy.
 //!
 //! The second color image is allocated by the render-texture pool. This module decides whether a
-//! camera may sample last frame's contents, whether that texture is ready to swap, and performs
-//! the once-per-frame swap before view planning snapshots color handles.
+//! camera may sample last frame's contents and swaps that texture only after the camera is known
+//! to render, so a skipped camera does not publish an unwritten image.
+
+use std::sync::Arc;
+
+use glam::Mat4;
 
 use crate::backend::RenderBackend;
-use crate::camera::{CameraRenderRect, camera_state_double_buffered};
-use crate::gpu::GpuContext;
+use crate::camera::{
+    CameraRenderRect, camera_state_double_buffered, camera_state_enabled,
+    host_camera_frame_for_render_texture,
+};
 use crate::gpu_pools::RenderTexturePool;
 use crate::gpu_pools::pools::render_texture::claim_double_buffer_swap;
 use crate::graph_inputs::RenderTextureSelfSampling;
-use crate::render_graph::OffscreenWriteTarget;
+use crate::render_graph::{
+    FrameViewClear, OffscreenWriteTarget, RenderPathProfile, ViewPostProcessing,
+};
+use crate::scene::RenderSpaceId;
 use crate::shared::{CameraState, RenderRect};
+use crate::world_mesh::{CameraTransformDrawFilter, draw_filter_from_camera_entry};
+
+use super::super::super::RendererRuntime;
+use super::super::view_plan::{
+    FrameViewPlan, FrameViewPlanParams, FrameViewPlanTarget, OffscreenColorCopy,
+    OffscreenTargetHandles,
+};
+use super::{
+    ResidentSecondaryRenderTexture, camera_render_space_scope, secondary_camera_layer_policy,
+    secondary_camera_render_context, secondary_camera_shadows_enabled, secondary_camera_view_id,
+};
 
 /// Write target for a secondary camera. Double buffering samples the previous color image.
 ///
@@ -29,9 +49,6 @@ pub(super) fn secondary_camera_write_target(rt_id: i32, flags: u16) -> Offscreen
 }
 
 /// `true` when this render texture can accept a secondary camera, including a resolved viewport.
-///
-/// Double buffering swaps before the view snapshots color handles. Skip the swap when the camera
-/// will not render, so a missing depth target or empty viewport does not publish an unwritten image.
 pub(super) fn secondary_render_texture_ready(
     pool: &RenderTexturePool,
     rt_id: i32,
@@ -46,14 +63,20 @@ pub(super) fn secondary_render_texture_ready(
     CameraRenderRect::resolve(viewport, (texture.width, texture.height)).is_some()
 }
 
+/// Records an enabled double-buffered camera even when that camera will not render this pass.
+fn note_double_buffer_flag(flagged: &mut Vec<i32>, state: CameraState) {
+    if camera_state_double_buffered(state.flags) {
+        let _claimed = claim_double_buffer_swap(flagged, state.render_texture_asset_id);
+    }
+}
+
 /// Swaps a ready double-buffered render texture once per planning pass.
 ///
-/// The published color image becomes this frame's write target. The previous image keeps the
-/// contents completed last frame. Textures that are not double-buffered, or that this camera will
-/// not render, are left unchanged.
+/// Call only after the camera has a resident target, a resolved viewport, scratch for a partial
+/// viewport, and a world matrix. The published color image becomes this frame's write target.
 pub(super) fn swap_double_buffer(
     backend: &mut RenderBackend,
-    gpu: &GpuContext,
+    device: &wgpu::Device,
     state: CameraState,
     claimed: &mut Vec<i32>,
 ) {
@@ -67,5 +90,234 @@ pub(super) fn swap_double_buffer(
     if !claim_double_buffer_swap(claimed, rt_id) {
         return;
     }
-    let _allocated = backend.begin_double_buffered_render_texture(gpu.device().as_ref(), rt_id);
+    let _allocated = backend.begin_double_buffered_render_texture(device, rt_id);
+}
+
+/// Replaces the snapshotted color handles with the image published after the swap.
+fn refresh_published_color(
+    pool: &RenderTexturePool,
+    rt_id: i32,
+    rt: &mut ResidentSecondaryRenderTexture,
+) {
+    let Some(texture) = pool.get(rt_id) else {
+        return;
+    };
+    rt.color_texture = Arc::clone(&texture.color_texture);
+    rt.color_view = Arc::clone(&texture.color_view);
+}
+
+/// Owned inputs for one secondary camera that is going to render.
+struct SecondaryCameraPlanInput {
+    /// Copied host camera row.
+    state: CameraState,
+    /// Host renderable index used for the view id.
+    renderable_index: i32,
+    /// Render-context world matrix.
+    world_m: Mat4,
+    /// Resolved viewport extent in pixels.
+    viewport_px: (u32, u32),
+    /// Selective or exclude filter for the camera.
+    filter: CameraTransformDrawFilter,
+    /// `true` when the camera's render space is an overlay.
+    overlay: bool,
+    /// Post-swap color and depth handles.
+    handles: OffscreenTargetHandles,
+}
+
+/// Builds one secondary render-texture view, or skips the camera.
+///
+/// Secondary cameras use the render-context world matrix, not the bare hierarchy matrix. For
+/// overlay render spaces (userspace world: dash camera, interactive-camera mirrors, avatar
+/// previews) that multiplies in `head_output_transform` so the camera follows the user's head,
+/// matching how `world_mesh` draws in the same space are positioned. Without this the secondary
+/// camera sits at userspace-local coords while its selective-render meshes track the user, so
+/// any movement away from origin shifts the dash UI out of the camera's view.
+///
+/// The double-buffer swap runs only after every skip has been decided, and the color handles are
+/// read again after the swap so the plan writes the published image.
+pub(super) fn plan_secondary_rt_camera<'a>(
+    runtime: &mut RendererRuntime,
+    device: &wgpu::Device,
+    sid: RenderSpaceId,
+    cam_idx: usize,
+    swapped: &mut Vec<i32>,
+    flagged: &mut Vec<i32>,
+) -> Option<FrameViewPlan<'a>> {
+    let (state, transform_id, renderable_index, filter, overlay) = {
+        let space = runtime.scene.space(sid)?;
+        let entry = space.cameras().get(cam_idx)?;
+        if !camera_state_enabled(entry.state.flags) {
+            return None;
+        }
+        let filter = draw_filter_from_camera_entry(entry);
+        (
+            entry.state,
+            entry.transform_id,
+            entry.renderable_index,
+            filter,
+            space.is_overlay(),
+        )
+    };
+    note_double_buffer_flag(flagged, state);
+    let rt_id = state.render_texture_asset_id;
+    let mut rt = runtime.resident_secondary_render_texture(rt_id, sid, cam_idx)?;
+    let Some(render_rect) = CameraRenderRect::resolve(state.viewport, rt.extent_px) else {
+        logger::trace!(
+            "secondary camera: render texture asset {rt_id} viewport {:?} resolved empty; skipping",
+            state.viewport
+        );
+        return None;
+    };
+    let scratch = if render_rect.is_full_target(rt.extent_px) {
+        None
+    } else {
+        let Some(scratch) = runtime.backend.secondary_render_rect_scratch(
+            device,
+            render_rect.extent_px,
+            rt.color_format,
+            rt.depth_format,
+        ) else {
+            logger::trace!(
+                "secondary camera: render texture asset {rt_id} viewport {:?} scratch unavailable; skipping",
+                state.viewport
+            );
+            return None;
+        };
+        Some(scratch)
+    };
+    let world_m = runtime.scene.world_matrix_for_render_context(
+        sid,
+        transform_id as usize,
+        secondary_camera_render_context(),
+        runtime.host_camera.head_output_transform,
+    )?;
+    if camera_state_double_buffered(state.flags) {
+        swap_double_buffer(&mut runtime.backend, device, state, swapped);
+        refresh_published_color(runtime.backend.render_texture_pool(), rt_id, &mut rt);
+    }
+    let handles = assemble_secondary_rt_handles(
+        secondary_camera_write_target(rt_id, state.flags),
+        rt,
+        render_rect,
+        scratch,
+    );
+    Some(secondary_camera_frame_plan(
+        runtime,
+        sid,
+        cam_idx,
+        SecondaryCameraPlanInput {
+            state,
+            renderable_index,
+            world_m,
+            viewport_px: render_rect.extent_px,
+            filter,
+            overlay,
+            handles,
+        },
+    ))
+}
+
+/// Builds graph handles for a resolved rect, allocating partial-viewport scratch when needed.
+pub(super) fn secondary_rt_handles_for_rect(
+    backend: &mut RenderBackend,
+    device: &wgpu::Device,
+    write_target: OffscreenWriteTarget,
+    rt: ResidentSecondaryRenderTexture,
+    render_rect: CameraRenderRect,
+) -> Option<OffscreenTargetHandles> {
+    let scratch = if render_rect.is_full_target(rt.extent_px) {
+        None
+    } else {
+        Some(backend.secondary_render_rect_scratch(
+            device,
+            render_rect.extent_px,
+            rt.color_format,
+            rt.depth_format,
+        )?)
+    };
+    Some(assemble_secondary_rt_handles(
+        write_target,
+        rt,
+        render_rect,
+        scratch,
+    ))
+}
+
+/// Builds graph handles from a post-swap color snapshot and scratch acquired before the swap.
+fn assemble_secondary_rt_handles(
+    write_target: OffscreenWriteTarget,
+    rt: ResidentSecondaryRenderTexture,
+    render_rect: CameraRenderRect,
+    scratch: Option<crate::backend::SecondaryRtScratchTargets>,
+) -> OffscreenTargetHandles {
+    let Some(scratch) = scratch else {
+        return OffscreenTargetHandles::new(
+            write_target,
+            rt.color_texture.as_ref().clone(),
+            rt.color_view.as_ref().clone(),
+            rt.depth_texture.as_ref().clone(),
+            rt.depth_view.as_ref().clone(),
+            rt.extent_px,
+            rt.color_format,
+        );
+    };
+    OffscreenTargetHandles::new(
+        write_target,
+        scratch.color_texture.as_ref().clone(),
+        scratch.color_view.as_ref().clone(),
+        scratch.depth_texture.as_ref().clone(),
+        scratch.depth_view.as_ref().clone(),
+        render_rect.extent_px,
+        rt.color_format,
+    )
+    .with_copy_to_color(OffscreenColorCopy {
+        destination_texture: rt.color_texture.as_ref().clone(),
+        destination_origin_px: render_rect.origin_px,
+        extent_px: render_rect.extent_px,
+    })
+}
+
+/// Finishes the [`FrameViewPlan`] for a camera that already has post-swap handles.
+fn secondary_camera_frame_plan<'a>(
+    runtime: &RendererRuntime,
+    sid: RenderSpaceId,
+    cam_idx: usize,
+    input: SecondaryCameraPlanInput,
+) -> FrameViewPlan<'a> {
+    let has_selective_roots = input.filter.has_selective_roots();
+    let mut host_camera = host_camera_frame_for_render_texture(
+        &runtime.host_camera,
+        &input.state,
+        input.viewport_px,
+        input.world_m,
+    );
+    // Selective secondary cameras (dashboards, in-world UI panels, mirrors on specific
+    // subtrees) render tens of draws, not thousands. Hi-Z snapshots + occlusion temporal
+    // cost a per-camera readback path with negligible payoff at that scale -- skip them.
+    if has_selective_roots {
+        host_camera.suppress_occlusion_temporal = true;
+    }
+    let post_processing = if input.overlay && has_selective_roots {
+        ViewPostProcessing::disabled()
+    } else {
+        ViewPostProcessing::from_camera_state(&input.state)
+    };
+    let mut plan = FrameViewPlan::new(
+        &host_camera,
+        FrameViewPlanParams {
+            render_context: secondary_camera_render_context(),
+            frame_time_seconds: runtime.tick_state.frame_time_seconds(),
+            view_id: secondary_camera_view_id(sid, input.renderable_index, cam_idx),
+            viewport_px: input.viewport_px,
+            clear: FrameViewClear::from_camera_state(&input.state),
+            profile: RenderPathProfile::secondary_camera(post_processing),
+            target: FrameViewPlanTarget::offscreen(input.handles),
+        },
+    );
+    plan.draw_filter = Some(input.filter);
+    plan.transform_filter_space = Some(sid);
+    plan.render_space_scope = camera_render_space_scope(has_selective_roots, sid);
+    plan.layer_policy = secondary_camera_layer_policy(input.state.flags);
+    plan.render_shadows = secondary_camera_shadows_enabled(input.state.flags);
+    plan
 }

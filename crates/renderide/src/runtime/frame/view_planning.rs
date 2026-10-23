@@ -11,10 +11,10 @@ mod portal_plan;
 use std::sync::{Arc, LazyLock};
 
 use crate::camera::{
-    CameraPortalMode, CameraPortalSourceView, CameraPortalSurface, CameraRenderRect, EyeView,
-    ViewId, Viewport, WorldProjectionSet, camera_state_enabled, camera_state_render_private_ui,
+    CameraPortalMode, CameraPortalSourceView, CameraPortalSurface, EyeView, ViewId, Viewport,
+    WorldProjectionSet, camera_state_enabled, camera_state_render_private_ui,
     camera_state_render_shadows, host_camera_frame_for_camera_portal,
-    host_camera_frame_for_render_texture, view_matrix_for_world_mesh_render_space,
+    view_matrix_for_world_mesh_render_space,
 };
 use crate::diagnostics::log_once::KeyedLogOnce;
 use crate::gpu::GpuContext;
@@ -28,15 +28,14 @@ use crate::scene::{
     camera_portal_has_far_clip_value, camera_portal_portal_mode,
 };
 use crate::shared::{CameraClearMode, RenderingContext};
-use crate::world_mesh::{ViewLayerPolicy, ViewRenderSpaceScope, draw_filter_from_camera_entry};
+use crate::world_mesh::{ViewLayerPolicy, ViewRenderSpaceScope};
 
 use super::super::RendererRuntime;
 use super::render::PrimaryViewRequest;
 use super::view_plan::{
-    FrameViewPlan, FrameViewPlanParams, FrameViewPlanTarget, OffscreenColorCopy,
-    OffscreenTargetHandles, ViewFamilyPlan,
+    FrameViewPlan, FrameViewPlanParams, FrameViewPlanTarget, OffscreenTargetHandles, ViewFamilyPlan,
 };
-use double_buffer::{secondary_camera_write_target, swap_double_buffer};
+use double_buffer::{plan_secondary_rt_camera, secondary_rt_handles_for_rect};
 #[cfg(test)]
 use portal_plan::camera_portal_stereo_render_rects;
 use portal_plan::{CameraPortalSourceViewPlan, CameraPortalSourceViewPlans, CameraPortalViewTask};
@@ -283,50 +282,6 @@ struct ResidentSecondaryRenderTexture {
     depth_format: wgpu::TextureFormat,
 }
 
-/// Builds graph target handles for a resolved camera render rect.
-fn secondary_rt_handles_for_rect(
-    backend: &mut crate::backend::RenderBackend,
-    gpu: &GpuContext,
-    write_target: OffscreenWriteTarget,
-    rt: ResidentSecondaryRenderTexture,
-    render_rect: CameraRenderRect,
-) -> Option<OffscreenTargetHandles> {
-    if render_rect.is_full_target(rt.extent_px) {
-        return Some(OffscreenTargetHandles::new(
-            write_target,
-            rt.color_texture.as_ref().clone(),
-            rt.color_view.as_ref().clone(),
-            rt.depth_texture.as_ref().clone(),
-            rt.depth_view.as_ref().clone(),
-            rt.extent_px,
-            rt.color_format,
-        ));
-    }
-
-    let scratch = backend.secondary_render_rect_scratch(
-        gpu.device().as_ref(),
-        render_rect.extent_px,
-        rt.color_format,
-        rt.depth_format,
-    )?;
-    Some(
-        OffscreenTargetHandles::new(
-            write_target,
-            scratch.color_texture.as_ref().clone(),
-            scratch.color_view.as_ref().clone(),
-            scratch.depth_texture.as_ref().clone(),
-            scratch.depth_view.as_ref().clone(),
-            render_rect.extent_px,
-            rt.color_format,
-        )
-        .with_copy_to_color(OffscreenColorCopy {
-            destination_texture: rt.color_texture.as_ref().clone(),
-            destination_origin_px: render_rect.origin_px,
-            extent_px: render_rect.extent_px,
-        }),
-    )
-}
-
 impl RendererRuntime {
     /// Snapshots the GPU handles for a resident secondary render texture.
     fn resident_secondary_render_texture(
@@ -496,13 +451,21 @@ impl RendererRuntime {
     /// so a frame with secondary cameras does not allocate a fresh `Vec` for the sort each tick.
     fn collect_secondary_rt_views<'a>(&mut self, gpu: &GpuContext) -> Vec<FrameViewPlan<'a>> {
         let mut tasks = std::mem::take(&mut self.tick_state.secondary_view_tasks_scratch);
-        let mut double_buffered =
+        let mut swapped =
             std::mem::take(&mut self.tick_state.double_buffered_render_texture_scratch);
+        let mut flagged = std::mem::take(&mut self.tick_state.double_buffer_flag_scratch);
         tasks.clear();
-        double_buffered.clear();
-        let result = self.collect_secondary_rt_views_using(gpu, &mut tasks, &mut double_buffered);
+        swapped.clear();
+        flagged.clear();
+        let result = self.collect_secondary_rt_views_using(
+            gpu.device().as_ref(),
+            &mut tasks,
+            &mut swapped,
+            &mut flagged,
+        );
         self.tick_state.secondary_view_tasks_scratch = tasks;
-        self.tick_state.double_buffered_render_texture_scratch = double_buffered;
+        self.tick_state.double_buffered_render_texture_scratch = swapped;
+        self.tick_state.double_buffer_flag_scratch = flagged;
         result
     }
 
@@ -654,7 +617,7 @@ impl RendererRuntime {
         };
         let Some(target_handles) = secondary_rt_handles_for_rect(
             &mut self.backend,
-            gpu,
+            gpu.device().as_ref(),
             camera_portal_write_target(task.render_texture_id),
             rt,
             source_plan.render_rect,
@@ -785,108 +748,28 @@ impl RendererRuntime {
         )
     }
 
-    /// Inner helper that consumes the supplied scratch `tasks` buffer; split out so the outer
-    /// caller can keep the scratch field reachable across the immutable borrow taken here.
+    /// Inner helper that consumes the supplied scratch buffers.
     ///
-    /// Secondary cameras use the render-context world matrix, not the bare hierarchy matrix. For
-    /// overlay render spaces (userspace world: dash camera, interactive-camera mirrors, avatar
-    /// previews) that multiplies in `head_output_transform` so the camera follows the user's head,
-    /// matching how `world_mesh` draws in the same space are positioned. Without this the secondary
-    /// camera sits at userspace-local coords while its selective-render meshes track the user, so
-    /// any movement away from origin shifts the dash UI out of the camera's view.
+    /// `swapped` records textures already exchanged this pass. `flagged` records textures whose
+    /// enabled cameras still have the double-buffer flag, including cameras that do not render.
     fn collect_secondary_rt_views_using<'a>(
         &mut self,
-        gpu: &GpuContext,
+        device: &wgpu::Device,
         tasks: &mut Vec<(RenderSpaceId, f32, usize)>,
-        double_buffered: &mut Vec<i32>,
+        swapped: &mut Vec<i32>,
+        flagged: &mut Vec<i32>,
     ) -> Vec<FrameViewPlan<'a>> {
         collect_secondary_rt_view_tasks(&self.scene, tasks);
 
         let mut views: Vec<FrameViewPlan<'a>> = Vec::with_capacity(tasks.len());
         for (sid, _, cam_idx) in tasks.drain(..) {
-            let Some(space) = self.scene.space(sid) else {
-                continue;
-            };
-            let Some(entry) = space.cameras().get(cam_idx) else {
-                continue;
-            };
-            if !camera_state_enabled(entry.state.flags) {
-                continue;
+            if let Some(plan) =
+                plan_secondary_rt_camera(self, device, sid, cam_idx, swapped, flagged)
+            {
+                views.push(plan);
             }
-            let rt_id = entry.state.render_texture_asset_id;
-            swap_double_buffer(&mut self.backend, gpu, entry.state, double_buffered);
-            let Some(rt) = self.resident_secondary_render_texture(rt_id, sid, cam_idx) else {
-                continue;
-            };
-            let Some(render_rect) = CameraRenderRect::resolve(entry.state.viewport, rt.extent_px)
-            else {
-                logger::trace!(
-                    "secondary camera: render texture asset {rt_id} viewport {:?} resolved empty; skipping",
-                    entry.state.viewport
-                );
-                continue;
-            };
-            let viewport_px = render_rect.extent_px;
-            let write_target = secondary_camera_write_target(rt_id, entry.state.flags);
-            let Some(rt_handles) = secondary_rt_handles_for_rect(
-                &mut self.backend,
-                gpu,
-                write_target,
-                rt,
-                render_rect,
-            ) else {
-                logger::trace!(
-                    "secondary camera: render texture asset {rt_id} viewport {:?} scratch unavailable; skipping",
-                    entry.state.viewport
-                );
-                continue;
-            };
-            let Some(world_m) = self.scene.world_matrix_for_render_context(
-                sid,
-                entry.transform_id as usize,
-                secondary_camera_render_context(),
-                self.host_camera.head_output_transform,
-            ) else {
-                continue;
-            };
-            let mut hc = host_camera_frame_for_render_texture(
-                &self.host_camera,
-                &entry.state,
-                viewport_px,
-                world_m,
-            );
-            let filter = draw_filter_from_camera_entry(entry);
-            let has_selective_roots = filter.has_selective_roots();
-            // Selective secondary cameras (dashboards, in-world UI panels, mirrors on specific
-            // subtrees) render tens of draws, not thousands. Hi-Z snapshots + occlusion temporal
-            // cost a per-camera readback path with negligible payoff at that scale -- skip them.
-            if has_selective_roots {
-                hc.suppress_occlusion_temporal = true;
-            }
-            let post_processing = if space.is_overlay() && has_selective_roots {
-                ViewPostProcessing::disabled()
-            } else {
-                ViewPostProcessing::from_camera_state(&entry.state)
-            };
-            let mut plan = FrameViewPlan::new(
-                &hc,
-                FrameViewPlanParams {
-                    render_context: secondary_camera_render_context(),
-                    frame_time_seconds: self.tick_state.frame_time_seconds(),
-                    view_id: secondary_camera_view_id(sid, entry.renderable_index, cam_idx),
-                    viewport_px,
-                    clear: FrameViewClear::from_camera_state(&entry.state),
-                    profile: RenderPathProfile::secondary_camera(post_processing),
-                    target: FrameViewPlanTarget::offscreen(rt_handles),
-                },
-            );
-            plan.draw_filter = Some(filter);
-            plan.transform_filter_space = Some(sid);
-            plan.render_space_scope = camera_render_space_scope(has_selective_roots, sid);
-            plan.layer_policy = secondary_camera_layer_policy(entry.state.flags);
-            plan.render_shadows = secondary_camera_shadows_enabled(entry.state.flags);
-            views.push(plan);
         }
+        self.backend.retire_idle_double_buffer_histories(flagged);
         views
     }
 

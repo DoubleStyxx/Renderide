@@ -340,6 +340,12 @@ impl RenderBackend {
             .begin_double_buffered_frame(device, asset_id)
     }
 
+    /// Releases double-buffer history images left idle with the flag off.
+    pub(crate) fn retire_idle_double_buffer_histories(&mut self, flagged: &[i32]) {
+        self.asset_transfers
+            .retire_idle_double_buffer_histories(flagged);
+    }
+
     /// Returns a reusable scratch target for a partial secondary camera viewport.
     pub(crate) fn secondary_render_rect_scratch(
         &mut self,

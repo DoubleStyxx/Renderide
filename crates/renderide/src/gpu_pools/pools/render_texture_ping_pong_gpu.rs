@@ -460,3 +460,123 @@ fn second_swap_reuses_history(
         "the next frame samples the image written last frame"
     );
 }
+
+fn open_texture_device() -> Option<wgpu::Device> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
+    let adapter = adapters.into_iter().next()?;
+    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("render-texture-history-lifetime"),
+        ..Default::default()
+    }))
+    .ok()
+    .map(|(device, _queue)| device)
+}
+
+fn render_texture_extent(device: &wgpu::Device, asset_id: i32, extent: i32) -> GpuRenderTexture {
+    let mut fmt = render_texture_format(TextureWrapMode::Clamp, TextureWrapMode::Clamp);
+    fmt.asset_id = asset_id;
+    fmt.size = glam::IVec2::new(extent, extent);
+    GpuRenderTexture::new_from_format(device, &limits(), &fmt)
+        .expect("render texture fits the synthetic limit")
+}
+
+/// Ages one planning pass and restores the scratch vec after dropping released images.
+fn retire_idle_count(pool: &mut RenderTexturePool, flagged: &[i32]) -> usize {
+    let mut retired = pool.begin_history_retirement(flagged);
+    let released = retired.len();
+    retired.clear();
+    pool.finish_history_retirement(retired);
+    released
+}
+
+/// History is released on the Nth flag-off pass and allocated again when double buffering returns.
+#[test]
+fn history_releases_after_idle_frames_and_is_recreated() {
+    let Some(device) = open_texture_device() else {
+        logger::info!("history idle test skipped: no adapter");
+        return;
+    };
+    let mut pool = RenderTexturePool::new();
+    pool.insert(render_texture_extent(&device, 7, EXTENT as i32));
+    let color_bytes =
+        estimate_gpu_texture_bytes(wgpu::TextureFormat::Rgba16Float, EXTENT, EXTENT, 1);
+    let base = pool.accounting().texture_resident_bytes();
+    assert!(
+        pool.begin_double_buffered_frame(&device, 7)
+            .expect("resident")
+    );
+    assert_eq!(
+        pool.accounting().texture_resident_bytes(),
+        base + color_bytes
+    );
+    assert_eq!(pool.history_ids.len(), 1);
+    let history_capacity = pool.history_ids.capacity();
+
+    let idle = usize::from(super::DOUBLE_BUFFER_HISTORY_IDLE_FRAMES);
+    for _ in 0..idle - 1 {
+        assert_eq!(retire_idle_count(&mut pool, &[]), 0);
+        assert!(pool.get(7).expect("resident").has_previous_color());
+    }
+    assert_eq!(pool.history_ids.capacity(), history_capacity);
+    assert_eq!(retire_idle_count(&mut pool, &[]), 1);
+    assert!(!pool.get(7).expect("resident").has_previous_color());
+    assert_eq!(pool.accounting().texture_resident_bytes(), base);
+    assert!(pool.history_ids.is_empty());
+    let scratch_capacity = pool.retired_history_scratch.capacity();
+
+    for _ in 0..idle {
+        assert_eq!(retire_idle_count(&mut pool, &[]), 0);
+    }
+    assert_eq!(pool.retired_history_scratch.capacity(), scratch_capacity);
+
+    assert!(
+        pool.begin_double_buffered_frame(&device, 7)
+            .expect("resident")
+    );
+    assert!(pool.get(7).expect("resident").has_previous_color());
+    assert_eq!(
+        pool.accounting().texture_resident_bytes(),
+        base + color_bytes
+    );
+    for _ in 0..=idle {
+        assert_eq!(retire_idle_count(&mut pool, &[7]), 0);
+        assert!(pool.get(7).expect("resident").has_previous_color());
+    }
+}
+
+/// Replacing the render texture drops the old history. The next one matches the new extent.
+#[test]
+fn resize_drops_history_and_reallocates_at_the_new_extent() {
+    let Some(device) = open_texture_device() else {
+        logger::info!("history resize test skipped: no adapter");
+        return;
+    };
+    let mut pool = RenderTexturePool::new();
+    pool.insert(render_texture_extent(&device, 7, 4));
+    assert!(
+        pool.begin_double_buffered_frame(&device, 7)
+            .expect("resident")
+    );
+    assert!(pool.get(7).expect("resident").has_previous_color());
+
+    pool.insert(render_texture_extent(&device, 7, 8));
+    let replaced = pool.get(7).expect("resident");
+    assert!(!replaced.has_previous_color());
+    assert_eq!((replaced.width, replaced.height), (8, 8));
+
+    assert!(
+        pool.begin_double_buffered_frame(&device, 7)
+            .expect("resident")
+    );
+    let texture = pool.get(7).expect("resident");
+    assert!(texture.has_previous_color());
+    assert_eq!(pool.history_ids.len(), 1);
+    let size = texture
+        .previous_color
+        .as_ref()
+        .expect("new history")
+        .texture
+        .size();
+    assert_eq!((size.width, size.height), (8, 8));
+}
