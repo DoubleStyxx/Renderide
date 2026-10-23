@@ -8,6 +8,9 @@
 /// Scenario names the runner accepts when `--scenario` is omitted.
 pub const DEFAULT_SCENARIOS: [&str; 2] = ["unlit_sphere", "multi_primitive_unlit"];
 
+/// Extra scenarios selectable with `--scenario`. They are not in the default CI gate set.
+pub const EXTRA_SCENARIOS: [&str; 3] = ["pbs_lit_material_matrix", "many_static_meshes", "lights_shadows"];
+
 /// Transport name recorded in every report. The socket is not implemented.
 pub const CONTROL_TRANSPORT: &str = "localhost-tcp-jsonrpc";
 
@@ -37,11 +40,32 @@ const MULTI_PRIMITIVE_UNLIT: Scenario = Scenario {
     camera_rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
 };
 
+const PBS_LIT_MATERIAL_MATRIX: Scenario = Scenario {
+    name: "pbs_lit_material_matrix",
+    camera_position: [0.0, 0.0, -4.0],
+    camera_rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+};
+
+const MANY_STATIC_MESHES: Scenario = Scenario {
+    name: "many_static_meshes",
+    camera_position: [0.0, 0.0, -24.0],
+    camera_rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+};
+
+const LIGHTS_SHADOWS: Scenario = Scenario {
+    name: "lights_shadows",
+    camera_position: [0.0, 6.0, -14.0],
+    camera_rotation_xyzw: [0.1305262, 0.0, 0.0, 0.9914449],
+};
+
 /// Returns the named scenario.
 pub fn by_name(name: &str) -> Option<&'static Scenario> {
     match name {
         "unlit_sphere" => Some(&UNLIT_SPHERE),
         "multi_primitive_unlit" => Some(&MULTI_PRIMITIVE_UNLIT),
+        "pbs_lit_material_matrix" => Some(&PBS_LIT_MATERIAL_MATRIX),
+        "many_static_meshes" => Some(&MANY_STATIC_MESHES),
+        "lights_shadows" => Some(&LIGHTS_SHADOWS),
         _ => None,
     }
 }

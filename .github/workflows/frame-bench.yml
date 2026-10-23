@@ -42,6 +42,11 @@ name: Frame bench
         default: "256x256"
         required: false
         type: string
+      scenarios:
+        description: Comma-separated framebench scenarios. Empty uses the built-in defaults (unlit_sphere, multi_primitive_unlit).
+        default: ""
+        required: false
+        type: string
       threads:
         description: RAYON_NUM_THREADS and taskset CPU count.
         default: "2"
@@ -116,6 +121,14 @@ jobs:
           warmup="${{ inputs.warmup }}"
           frames="${{ inputs.frames }}"
           resolution="${{ inputs.resolution }}"
+          scenarios="${{ inputs.scenarios }}"
+          scenario_args=()
+          if [[ -n "$scenarios" ]]; then
+            IFS=',' read -r -a scenario_list <<< "$scenarios"
+            for scenario in "${scenario_list[@]}"; do
+              scenario_args+=(--scenario "${scenario// /}")
+            done
+          fi
           if ! [[ "$threads" =~ ^[1-9][0-9]*$ ]]; then
             echo "threads must be a positive integer" >&2
             exit 1
@@ -146,9 +159,10 @@ jobs:
             local target="$2"
             local out="$3"
             taskset -c "$cpuset" \
-              "$target/release/renderide-framebench" run \
+              "$RUNNER_TEMP/target-head/release/renderide-framebench" run \
               --renderer "$target/release/renderide-renderer" \
               --resolution "$resolution" \
+              "${scenario_args[@]}" \
               --warmup "$warmup" \
               --frames "$frames" \
               --runs "$runs" \

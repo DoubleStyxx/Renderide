@@ -29,7 +29,8 @@ use super::{
 pub struct BenchDriveConfig {
     /// Path to the `renderide-renderer` binary.
     pub renderer_path: PathBuf,
-    /// `unlit_sphere` or `multi_primitive_unlit`.
+    /// `unlit_sphere`, `multi_primitive_unlit`, `pbs_lit_material_matrix`, `many_static_meshes`,
+    /// or `lights_shadows`.
     pub scenario: String,
     /// Raw per-frame JSON path the renderer writes when the measured window completes.
     pub report_path: PathBuf,
@@ -131,6 +132,9 @@ pub fn drive_bench(cfg: &BenchDriveConfig) -> Result<(), HarnessError> {
 fn scenario_template(name: &str) -> Result<SessionTemplate, HarnessError> {
     match name {
         "unlit_sphere" => Ok(SessionTemplate::Sphere),
+        "pbs_lit_material_matrix" => Ok(SessionTemplate::PbsLitMaterialMatrix),
+        "many_static_meshes" => Ok(SessionTemplate::ManyStaticMeshes),
+        "lights_shadows" => Ok(SessionTemplate::LightsShadows),
         "multi_primitive_unlit" => {
             let checker = checker_rgba(256, 256, 8, [245, 245, 245, 255], [24, 34, 54, 255]);
             let uv_ramp = uv_ramp_rgba(256, 256);

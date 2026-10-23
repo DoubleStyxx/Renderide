@@ -33,6 +33,7 @@ use super::ipc_setup::{DEFAULT_QUEUE_CAPACITY_BYTES, connect_session};
 use super::lockstep::{FrameSubmitScalars, LockstepDriver};
 
 mod bench_drive;
+mod bench_scenes;
 mod config;
 mod consts;
 mod custom_property;
@@ -79,6 +80,10 @@ pub enum SessionTemplate {
     },
     /// PBS material matrix lit by regular scene lights.
     PbsLitMaterialMatrix,
+    /// Frame-bench only: a 40x40 grid of 1,600 unlit draws sharing one mesh and material.
+    ManyStaticMeshes,
+    /// Frame-bench only: 64 lit spheres on a floor with one shadowed directional and four shadowed point lights.
+    LightsShadows,
     /// Alpha-test quads driven by a generated alpha mask.
     AlphaCutoutMaskedQuads {
         /// Alpha mask RGBA8 pixels.
@@ -279,6 +284,8 @@ fn template_label(template: &SessionTemplate) -> &'static str {
         SessionTemplate::Torus { .. } => "Torus",
         SessionTemplate::MultiPrimitiveUnlitGrid { .. } => "MultiPrimitiveUnlitGrid",
         SessionTemplate::PbsLitMaterialMatrix => "PbsLitMaterialMatrix",
+        SessionTemplate::ManyStaticMeshes => "ManyStaticMeshes",
+        SessionTemplate::LightsShadows => "LightsShadows",
         SessionTemplate::AlphaCutoutMaskedQuads { .. } => "AlphaCutoutMaskedQuads",
         SessionTemplate::GltfTexturedStaticMesh { .. } => "GltfTexturedStaticMesh",
         SessionTemplate::CustomShaderPropertyUpdate => "CustomShaderPropertyUpdate",
@@ -299,6 +306,8 @@ fn build_scene_setup(template: SessionTemplate) -> SceneSetup {
             texture_size,
         } => multi_primitive_unlit_grid_setup(checker_rgba, uv_ramp_rgba, texture_size),
         SessionTemplate::PbsLitMaterialMatrix => pbs_lit_material_matrix_setup(),
+        SessionTemplate::ManyStaticMeshes => bench_scenes::many_static_meshes_setup(),
+        SessionTemplate::LightsShadows => bench_scenes::lights_shadows_setup(),
         SessionTemplate::AlphaCutoutMaskedQuads {
             mask_rgba,
             texture_size,
