@@ -1,0 +1,206 @@
+{
+  "schema": 1,
+  "scale": "relative",
+  "git_sha": "aafcb72035fa2bc24b860cb2c6c3d4ece5aa49c3",
+  "renderer_commit": "aafcb720",
+  "mode": "headless",
+  "resolution": [
+    256,
+    256
+  ],
+  "warmup_frames": 10,
+  "measured_frames": 20,
+  "runs": 5,
+  "adapter": {
+    "name": "llvmpipe (LLVM 19.1.7, 256 bits)",
+    "backend": "Vulkan",
+    "device_type": "Cpu",
+    "driver": "llvmpipe",
+    "driver_info": "Mesa 25.0.7-2+deb13u1 (LLVM 19.1.7)"
+  },
+  "timestamp_query": true,
+  "control_api": {
+    "implemented": false,
+    "transport": "localhost-tcp-jsonrpc",
+    "methods": [
+      "camera.set_pose",
+      "frames.wait",
+      "stats.query"
+    ]
+  },
+  "scenarios": [
+    {
+      "name": "unlit_sphere",
+      "cpu_frame_ms": {
+        "p50": 0.24198450000000002,
+        "p95": 0.27542679999999997,
+        "p99": 0.29319773999999993
+      },
+      "draw_calls": {
+        "p50": 1.0,
+        "p95": 1.0,
+        "p99": 1.0
+      },
+      "upload_count": {
+        "p50": 5.0,
+        "p95": 5.0,
+        "p99": 5.0
+      },
+      "upload_bytes": {
+        "p50": 1632.0,
+        "p95": 1632.0,
+        "p99": 1632.0
+      },
+      "gpu_passes_ms": {
+        "ClusteredLight": {
+          "p50": 0.0084055,
+          "p95": 0.013331350000000004,
+          "p99": 0.014256499999999998
+        },
+        "HiZBuild": {
+          "p50": 0.0064285,
+          "p95": 0.011945700000000005,
+          "p99": 0.016286749999999996
+        },
+        "SceneColorCompose": {
+          "p50": 0.429704,
+          "p95": 0.5050688500000002,
+          "p99": 0.6632411199999997
+        },
+        "WorldMeshForwardDepthPrepass": {
+          "p50": 0.2466805,
+          "p95": 0.30126390000000003,
+          "p99": 0.31613639999999993
+        },
+        "WorldMeshForwardOpaque": {
+          "p50": 0.6398029999999999,
+          "p95": 0.7355740500000001,
+          "p99": 0.7921370799999999
+        }
+      },
+      "per_run_cpu_frame_ms_p95": [
+        0.28297295000000006,
+        0.2767407,
+        0.27542679999999997,
+        0.27103225000000003,
+        0.26916924999999997
+      ],
+      "script": [
+        {
+          "method": "camera.set_pose",
+          "position": [
+            0.0,
+            0.0,
+            -3.0
+          ],
+          "rotation_xyzw": [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        },
+        {
+          "method": "frames.wait",
+          "warmup_frames": 10,
+          "measured_frames": 20
+        },
+        {
+          "method": "stats.query"
+        }
+      ]
+    },
+    {
+      "name": "multi_primitive_unlit",
+      "cpu_frame_ms": {
+        "p50": 0.263632,
+        "p95": 0.3125441,
+        "p99": 0.32452096
+      },
+      "draw_calls": {
+        "p50": 4.0,
+        "p95": 4.0,
+        "p99": 4.0
+      },
+      "upload_count": {
+        "p50": 5.0,
+        "p95": 5.0,
+        "p99": 5.0
+      },
+      "upload_bytes": {
+        "p50": 3168.0,
+        "p95": 3168.0,
+        "p99": 3168.0
+      },
+      "gpu_passes_ms": {
+        "ClusteredLight": {
+          "p50": 0.007844,
+          "p95": 0.013859000000000002,
+          "p99": 0.015865399999999995
+        },
+        "HiZBuild": {
+          "p50": 0.005364000000000001,
+          "p95": 0.010005950000000001,
+          "p99": 0.01062839
+        },
+        "SceneColorCompose": {
+          "p50": 0.4134595,
+          "p95": 0.6173582000000002,
+          "p99": 0.72698981
+        },
+        "WorldMeshForwardDepthPrepass": {
+          "p50": 0.1147785,
+          "p95": 0.15841315000000022,
+          "p99": 0.3787271299999996
+        },
+        "WorldMeshForwardOpaque": {
+          "p50": 0.350882,
+          "p95": 0.4422551000000001,
+          "p99": 0.5552230199999998
+        },
+        "WorldMeshForwardTransparentSequence": {
+          "p50": 0.8565294999999999,
+          "p95": 1.14618975,
+          "p99": 1.1814042500000002
+        }
+      },
+      "per_run_cpu_frame_ms_p95": [
+        0.3880517500000002,
+        0.31607280000000004,
+        0.29572775,
+        0.29123265000000004,
+        0.3125441
+      ],
+      "script": [
+        {
+          "method": "camera.set_pose",
+          "position": [
+            0.0,
+            0.0,
+            -4.2
+          ],
+          "rotation_xyzw": [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        },
+        {
+          "method": "frames.wait",
+          "warmup_frames": 10,
+          "measured_frames": 20
+        },
+        {
+          "method": "stats.query"
+        }
+      ]
+    }
+  ],
+  "notes": [
+    "Absolute milliseconds are not a gate and are not comparable across machines, adapters, or lavapipe versus a discrete GPU.",
+    "Published percentiles are the median across runs of each run's percentile.",
+    "gpu_passes_ms is null when TIMESTAMP_QUERY is unavailable or a run failed to read it.",
+    "control_api.implemented is false. camera.set_pose, frames.wait, and stats.query are applied in process."
+  ]
+}
