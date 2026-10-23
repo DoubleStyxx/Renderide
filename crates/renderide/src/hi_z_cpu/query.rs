@@ -49,32 +49,50 @@ pub fn hi_z_view_proj_matrices(
     vec![prev.world_proj * prev_view]
 }
 
-/// Returns `true` when the axis-aligned world bounds are **fully occluded** by `snapshot` for `view_proj`.
+/// Screen-space occlusion sample for one AABB against one Hi-Z pyramid.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AabbHiZSample {
+    /// Previous-frame pyramid fully covers the projected rectangle.
+    pub occluded: bool,
+    /// Closest reverse-Z NDC z of the AABB (larger is closer).
+    pub closest_ndc_z: f32,
+    /// Farthest reverse-Z depth stored in the sampled rectangle, when the query produced one.
+    pub covering_depth: Option<f32>,
+    /// Projected UV minimum.
+    pub uv_min: (f32, f32),
+    /// Projected UV maximum.
+    pub uv_max: (f32, f32),
+}
+
+/// Projects `world_min`/`world_max` and returns the unclamped UV rectangle.
 ///
-/// Conservative: if **any** corner has `clip.w <= 0` (straddles the near plane / behind the camera),
-/// returns `false` (keep the draw). Compares the AABB **closest** depth (maximum NDC Z in reverse-Z)
-/// to the farthest depth stored in a padded projected-rectangle query. The query starts at the mip
-/// matching the projected footprint size, walks back to mip0, and fails open when the rectangle
-/// would require too many samples.
-pub fn mesh_fully_occluded_in_hiz(
+/// `None` when the box straddles the near plane or the projection is non-finite. Callers must
+/// keep the draw in that case.
+pub(crate) fn project_world_aabb_uv(
+    view_proj: Mat4,
+    world_min: Vec3,
+    world_max: Vec3,
+) -> Option<((f32, f32), (f32, f32))> {
+    let footprint = project_aabb_to_screen(view_proj, world_min, world_max)?;
+    Some((footprint.uv_min, footprint.uv_max))
+}
+
+/// Samples `snapshot` at the projected AABB.
+///
+/// `None` means the projection is not a reliable full-occlusion test, so the caller keeps the
+/// draw. The occlusion bit matches [`mesh_fully_occluded_in_hiz`].
+pub(crate) fn sample_aabb_occlusion(
     snapshot: &HiZCpuSnapshot,
     view_proj: Mat4,
     world_min: Vec3,
     world_max: Vec3,
-) -> bool {
-    let Some(footprint) = project_aabb_to_screen(view_proj, world_min, world_max) else {
-        return false;
-    };
-    let Some(rect) = HiZUvRect::from_raw(footprint.uv_min, footprint.uv_max) else {
-        return false;
-    };
-
+) -> Option<AabbHiZSample> {
+    let footprint = project_aabb_to_screen(view_proj, world_min, world_max)?;
+    let rect = HiZUvRect::from_raw(footprint.uv_min, footprint.uv_max)?;
     let threshold = footprint.max_ndc_z + HI_Z_BIAS + HI_Z_OCCLUSION_MARGIN;
     if !threshold.is_finite() {
-        return false;
+        return None;
     }
-
-    // Reverse-Z: farther = smaller NDC Z. Fully occluded if the closest AABB point is still farther than the occluder.
     let query = sample_hiz_rect(snapshot, rect, threshold);
     if query.occluded && hiz_trace_enabled() {
         logger::trace!(
@@ -88,7 +106,30 @@ pub fn mesh_fully_occluded_in_hiz(
             query.reason,
         );
     }
-    query.occluded
+    Some(AabbHiZSample {
+        occluded: query.occluded,
+        closest_ndc_z: footprint.max_ndc_z,
+        covering_depth: query.farthest_depth,
+        uv_min: footprint.uv_min,
+        uv_max: footprint.uv_max,
+    })
+}
+
+/// Returns `true` when the axis-aligned world bounds are **fully occluded** by `snapshot` for `view_proj`.
+///
+/// Conservative: if **any** corner has `clip.w <= 0` (straddles the near plane / behind the camera),
+/// returns `false` (keep the draw). Compares the AABB **closest** depth (maximum NDC Z in reverse-Z)
+/// to the farthest depth stored in a padded projected-rectangle query. The query starts at the mip
+/// matching the projected footprint size, walks back to mip0, and fails open when the rectangle
+/// would require too many samples.
+pub fn mesh_fully_occluded_in_hiz(
+    snapshot: &HiZCpuSnapshot,
+    view_proj: Mat4,
+    world_min: Vec3,
+    world_max: Vec3,
+) -> bool {
+    sample_aabb_occlusion(snapshot, view_proj, world_min, world_max)
+        .is_some_and(|sample| sample.occluded)
 }
 
 /// Stereo Hi-Z policy: keep the draw unless **both** eyes report full occlusion (matches frustum OR across eyes).

@@ -55,6 +55,25 @@ const PREPARED_EXPAND_PARALLEL_CHUNK_SPACES: usize = 1;
 #[cfg(test)]
 const PREPARED_EXPAND_PARALLEL_MIN_SPACES: usize = PREPARED_EXPAND_PARALLEL_CHUNK_SPACES * 2;
 
+/// World bounds of one prepared caster, used to build two-phase disocclusion rectangles.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PreparedCasterBounds {
+    /// Render space that owns the caster.
+    pub space_id: RenderSpaceId,
+    /// Static or skinned renderer index.
+    pub renderable_index: usize,
+    /// Renderer-local id.
+    pub instance_id: u64,
+    /// Scene node id.
+    pub node_id: i32,
+    /// `true` when the caster comes from the skinned renderer list.
+    pub skinned: bool,
+    /// World AABB minimum.
+    pub aabb_min: glam::Vec3,
+    /// World AABB maximum.
+    pub aabb_max: glam::Vec3,
+}
+
 /// One fully-resolved draw slot (renderer x material slot mapped to a submesh range) for the current frame.
 ///
 /// All fields here are functions of `(scene, mesh_pool, render_context)` and are therefore safe
@@ -451,6 +470,39 @@ impl FramePreparedRenderables {
             }
             self.cached_space_draw_ranges
                 .insert(space_id, start..cursor);
+        }
+    }
+
+    /// Visits one world-space caster per prepared renderer run.
+    ///
+    /// Overlay and hidden runs are skipped. `include_space` drops casters outside the view.
+    pub(crate) fn for_each_world_caster_bounds(
+        &self,
+        mut include_space: impl FnMut(RenderSpaceId) -> bool,
+        mut visit: impl FnMut(PreparedCasterBounds),
+    ) {
+        for run in &self.runs {
+            let Some(first) = self.draws.get(run.start as usize) else {
+                continue;
+            };
+            if first.is_overlay || first.is_hidden || !include_space(first.space_id) {
+                continue;
+            }
+            let Some(geometry) = first.cull_geometry else {
+                continue;
+            };
+            let Some((aabb_min, aabb_max)) = geometry.world_aabb else {
+                continue;
+            };
+            visit(PreparedCasterBounds {
+                space_id: first.space_id,
+                renderable_index: first.renderable_index,
+                instance_id: first.instance_id.0,
+                node_id: first.node_id,
+                skinned: first.skinned,
+                aabb_min,
+                aabb_max,
+            });
         }
     }
 

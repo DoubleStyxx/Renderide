@@ -4,6 +4,7 @@
 pub mod gpu;
 mod hook;
 mod system;
+pub(crate) mod two_phase;
 
 pub use hook::OcclusionGraphHook;
 pub(crate) use system::HiZBuildInput;

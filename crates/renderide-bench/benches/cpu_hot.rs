@@ -10,8 +10,8 @@ use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use renderide_bench::{
     BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload, CULL_BATCH,
     CullWorkload, KeywordVariantCacheWorkload, MATERIAL_UNIFORM_BATCH,
-    MaterialUniformUpdateWorkload, TRANSFORM_BATCH, TransformWorkload, WORLD_MATRIX_NODES,
-    WorldMatrixWorkload,
+    MaterialUniformUpdateWorkload, TRANSFORM_BATCH, TWO_PHASE_BATCH, TransformWorkload,
+    TwoPhaseCullWorkload, WORLD_MATRIX_NODES, WorldMatrixWorkload,
 };
 
 fn transforms(c: &mut Criterion) {
@@ -30,6 +30,16 @@ fn culling(c: &mut Criterion) {
     group.throughput(Throughput::Elements(CULL_BATCH as u64));
     group.bench_function("homogeneous_clip_aabb", |b| {
         b.iter(|| black_box(workload.visible_count()));
+    });
+    group.finish();
+}
+
+fn two_phase_occlusion(c: &mut Criterion) {
+    let workload = TwoPhaseCullWorkload::standard();
+    let mut group = c.benchmark_group("two_phase_occlusion");
+    group.throughput(Throughput::Elements(TWO_PHASE_BATCH as u64));
+    group.bench_function("visibility_history", |b| {
+        b.iter(|| black_box(workload.kept_count()));
     });
     group.finish();
 }
@@ -114,6 +124,7 @@ criterion_group!(
     cpu,
     transforms,
     culling,
+    two_phase_occlusion,
     world_matrices,
     buffer_pool,
     material_uniforms,

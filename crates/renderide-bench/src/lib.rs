@@ -10,8 +10,8 @@
 pub use renderide::bench_api::{
     BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload, CULL_BATCH,
     CullWorkload, KeywordVariantCacheWorkload, MATERIAL_UNIFORM_BATCH,
-    MaterialUniformUpdateWorkload, TRANSFORM_BATCH, TransformWorkload, WORLD_MATRIX_NODES,
-    WorldMatrixWorkload,
+    MaterialUniformUpdateWorkload, TRANSFORM_BATCH, TWO_PHASE_BATCH, TransformWorkload,
+    TwoPhaseCullWorkload, WORLD_MATRIX_NODES, WorldMatrixWorkload,
 };
 
 #[cfg(test)]
@@ -19,7 +19,8 @@ mod tests {
     use super::{
         BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload,
         CULL_BATCH, CullWorkload, KeywordVariantCacheWorkload, MaterialUniformUpdateWorkload,
-        TransformWorkload, WORLD_MATRIX_NODES, WorldMatrixWorkload,
+        TWO_PHASE_BATCH, TransformWorkload, TwoPhaseCullWorkload, WORLD_MATRIX_NODES,
+        WorldMatrixWorkload,
     };
 
     #[test]
@@ -117,5 +118,12 @@ mod tests {
         assert_eq!(workload.cache_hit(), hit);
         let composed = workload.compose();
         assert!(composed > 0);
+    }
+
+    #[test]
+    fn two_phase_keeps_disoccluded_casters_and_culls_the_stable_quarter() {
+        let kept = TwoPhaseCullWorkload::standard().kept_count();
+        let batch = u32::try_from(TWO_PHASE_BATCH).unwrap_or(u32::MAX);
+        assert_eq!(kept, batch / 4 * 3);
     }
 }

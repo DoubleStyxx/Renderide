@@ -6,6 +6,9 @@
 
 use glam::{Mat4, Quat, Vec3};
 
+use crate::occlusion::two_phase::{
+    CasterRecord, PhaseAction, PhaseInputs, VisibilityClass, decide_phase,
+};
 use crate::render_graph::resources::BufferSizePolicy;
 use crate::render_graph::{BufferKey, TransientPool};
 use crate::scene::{
@@ -20,6 +23,9 @@ pub const TRANSFORM_BATCH: usize = 4_096;
 
 /// World AABBs tested by one [`CullWorkload::visible_count`] sample.
 pub const CULL_BATCH: usize = 8_192;
+
+/// Casters classified by one [`TwoPhaseCullWorkload::kept_count`] sample.
+pub const TWO_PHASE_BATCH: usize = 4_096;
 
 /// Hierarchy nodes solved by one [`WorldMatrixWorkload::recompute`] sample.
 pub const WORLD_MATRIX_NODES: usize = 4_096;
@@ -283,6 +289,108 @@ impl BufferPoolWorkload {
             self.pool.release_buffer(*id);
         }
         checksum
+    }
+}
+
+/// Owned two-phase query reused by [`TwoPhaseCullWorkload`].
+#[derive(Clone, Debug)]
+struct TwoPhaseQuery {
+    /// Index into the workload's caster records. `None` is a newly revealed caster.
+    previous: Option<usize>,
+    /// Hi-Z camera still matches.
+    camera_stable: bool,
+    /// Bounds moved since the stored record.
+    caster_moved: bool,
+    /// Screen rect hits a moved occluder.
+    overlaps_disocclusion: bool,
+    /// Previous pyramid reports full occlusion.
+    hi_z_occludes: bool,
+    /// Covering depth is a separate occluder.
+    other_occluder: bool,
+}
+
+/// Classifies a fixed mix of stable occluded casters and disoccluded casters.
+#[derive(Clone, Debug)]
+pub struct TwoPhaseCullWorkload {
+    records: Vec<CasterRecord>,
+    queries: Vec<TwoPhaseQuery>,
+}
+
+impl TwoPhaseCullWorkload {
+    /// Builds [`TWO_PHASE_BATCH`] queries: one quarter stay culled, three quarters must be kept.
+    #[must_use]
+    pub fn standard() -> Self {
+        let bounds = Vec3::new(-0.5, -0.5, -2.0);
+        let records = vec![
+            CasterRecord {
+                class: VisibilityClass::Occluded,
+                aabb_min: bounds,
+                aabb_max: Vec3::new(0.5, 0.5, -1.0),
+            },
+            CasterRecord {
+                class: VisibilityClass::Visible,
+                aabb_min: bounds,
+                aabb_max: Vec3::new(0.5, 0.5, -1.0),
+            },
+        ];
+        let queries = (0..TWO_PHASE_BATCH)
+            .map(|index| match index % 4 {
+                0 => TwoPhaseQuery {
+                    previous: Some(0),
+                    camera_stable: true,
+                    caster_moved: false,
+                    overlaps_disocclusion: false,
+                    hi_z_occludes: true,
+                    other_occluder: false,
+                },
+                1 => TwoPhaseQuery {
+                    previous: None,
+                    camera_stable: true,
+                    caster_moved: false,
+                    overlaps_disocclusion: false,
+                    hi_z_occludes: true,
+                    other_occluder: false,
+                },
+                2 => TwoPhaseQuery {
+                    previous: Some(0),
+                    camera_stable: true,
+                    caster_moved: false,
+                    overlaps_disocclusion: true,
+                    hi_z_occludes: true,
+                    other_occluder: false,
+                },
+                _ => TwoPhaseQuery {
+                    previous: Some(1),
+                    camera_stable: false,
+                    caster_moved: false,
+                    overlaps_disocclusion: false,
+                    hi_z_occludes: true,
+                    other_occluder: false,
+                },
+            })
+            .collect();
+        Self { records, queries }
+    }
+
+    /// Number of casters the two-phase test still draws.
+    #[must_use]
+    pub fn kept_count(&self) -> u32 {
+        let mut kept = 0_u32;
+        for query in &self.queries {
+            let previous = query.previous.and_then(|index| self.records.get(index));
+            let decision = decide_phase(PhaseInputs {
+                previous,
+                camera_stable: query.camera_stable,
+                caster_moved: query.caster_moved,
+                overlaps_disocclusion: query.overlaps_disocclusion,
+                hi_z_occludes: query.hi_z_occludes,
+                other_occluder: query.other_occluder,
+            });
+            if decision.action != PhaseAction::Culled {
+                kept = kept.saturating_add(1);
+            }
+        }
+        kept
     }
 }
 

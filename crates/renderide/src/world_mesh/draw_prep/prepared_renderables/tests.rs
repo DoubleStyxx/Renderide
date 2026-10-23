@@ -279,6 +279,7 @@ fn spatial_query_uses_bvh_for_large_spaces_and_filters_frustum() {
         host_camera: &host_camera,
         hi_z: None,
         hi_z_temporal: None,
+        two_phase: None,
     };
     let mut draws = Vec::new();
     for idx in 0..80 {
@@ -312,6 +313,7 @@ fn spatial_query_keeps_small_spaces_on_linear_path() {
         host_camera: &host_camera,
         hi_z: None,
         hi_z_temporal: None,
+        two_phase: None,
     };
     let draws = (0..8)
         .map(|idx| {
@@ -343,6 +345,7 @@ fn spatial_query_counts_rejected_material_slots() {
         host_camera: &host_camera,
         hi_z: None,
         hi_z_temporal: None,
+        two_phase: None,
     };
     let outside_slot0 =
         prepared_draw_with_bounds(0, Vec3::new(2.0, -0.5, -0.5), Vec3::new(3.0, 0.5, 0.5));
@@ -375,6 +378,7 @@ fn spatial_query_keeps_overlay_runs_conservative() {
         host_camera: &host_camera,
         hi_z: None,
         hi_z_temporal: None,
+        two_phase: None,
     };
     let draws = (0..80)
         .map(|idx| {
@@ -415,6 +419,7 @@ fn spatial_query_preserves_run_order_across_multiple_spaces() {
         host_camera: &host_camera,
         hi_z: None,
         hi_z_temporal: None,
+        two_phase: None,
     };
     let mut prepared = FramePreparedRenderables::empty(RenderingContext::UserView);
     let mut first_draw = prepared_draw_with_bounds(
@@ -461,6 +466,7 @@ fn spatial_query_dedups_duplicate_space_queries_in_prepared_order() {
         host_camera: &host_camera,
         hi_z: None,
         hi_z_temporal: None,
+        two_phase: None,
     };
     let first = prepared_draw_with_bounds(
         0,

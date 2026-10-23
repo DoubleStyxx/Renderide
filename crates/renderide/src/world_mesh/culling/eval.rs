@@ -17,9 +17,14 @@ use super::geometry::MeshCullGeometry;
 use super::geometry::{MeshCullTarget, mesh_world_geometry_for_cull};
 use super::{HiZTemporalState, WorldMeshCullInput};
 use crate::camera::{overlay_camera_view_matrix, view_matrix_for_world_mesh_render_space};
-use crate::hi_z_cpu::HiZCullData;
 use crate::hi_z_cpu::snapshot::HiZCpuSnapshot;
-use crate::hi_z_cpu::{hi_z_view_proj_matrices, mesh_fully_occluded_in_hiz, stereo_hiz_keeps_draw};
+use crate::hi_z_cpu::{
+    AabbHiZSample, HiZCullData, hi_z_view_proj_matrices, mesh_fully_occluded_in_hiz,
+    sample_aabb_occlusion, stereo_hiz_keeps_draw,
+};
+use crate::occlusion::two_phase::{
+    CasterKey, OcclusionFacts, ScreenRect, covering_depth_is_other_occluder,
+};
 
 /// Clip matrices for one render space, built once and reused across every AABB in that space.
 ///
@@ -29,10 +34,14 @@ use crate::hi_z_cpu::{hi_z_view_proj_matrices, mesh_fully_occluded_in_hiz, stere
 /// per-call path, including "missing space stays visible" and stereo OR.
 #[derive(Clone, Copy)]
 pub(crate) struct PreparedSpaceCull<'a> {
+    /// Render space this plan was built for.
+    space_id: RenderSpaceId,
     /// Frustum half-spaces for this space.
     frustum: SpaceFrustum,
     /// Previous-frame Hi-Z test, when the temporal snapshot applies to this space.
     hi_z: Option<PreparedSpaceHiZ<'a>>,
+    /// Two-phase confirmation for this view. Absent on broadphase and legacy callers.
+    two_phase: Option<&'a crate::occlusion::two_phase::TwoPhaseFrame>,
 }
 
 /// Precomputed homogeneous clip matrices for one space.
@@ -84,8 +93,10 @@ impl<'a> PreparedSpaceCull<'a> {
         S: SceneSpaceRead + ?Sized,
     {
         Self {
+            space_id,
             frustum: space_frustum(scene, space_id, is_overlay, culling),
             hi_z: None,
+            two_phase: None,
         }
     }
 
@@ -100,12 +111,14 @@ impl<'a> PreparedSpaceCull<'a> {
         S: SceneSpaceRead + ?Sized,
     {
         Self {
+            space_id,
             frustum: space_frustum(scene, space_id, is_overlay, culling),
             hi_z: if is_overlay {
                 None
             } else {
                 prepare_space_hi_z(space_id, culling)
             },
+            two_phase: if is_overlay { None } else { culling.two_phase },
         }
     }
 
@@ -145,6 +158,55 @@ impl<'a> PreparedSpaceCull<'a> {
             }
         }
     }
+
+    /// Hi-Z coverage used by the two-phase confirmation. Missing pyramids do not occlude.
+    fn occlusion_facts(&self, wmin: Vec3, wmax: Vec3) -> OcclusionFacts {
+        match self.hi_z {
+            None => OcclusionFacts::keep(),
+            Some(PreparedSpaceHiZ::Desktop {
+                snapshot,
+                view_proj,
+            }) => facts_from_mono(sample_aabb_occlusion(snapshot, view_proj, wmin, wmax)),
+            Some(PreparedSpaceHiZ::Stereo {
+                left,
+                right,
+                left_vp,
+                right_vp,
+            }) => facts_from_stereo(
+                sample_aabb_occlusion(left, left_vp, wmin, wmax),
+                sample_aabb_occlusion(right, right_vp, wmin, wmax),
+            ),
+        }
+    }
+}
+
+fn facts_from_mono(sample: Option<AabbHiZSample>) -> OcclusionFacts {
+    OcclusionFacts {
+        occluded: sample.is_some_and(|sample| sample.occluded),
+        other_occluder: sample.is_some_and(sample_is_other_occluder),
+        rects: [sample.and_then(sample_rect), None],
+    }
+}
+
+fn facts_from_stereo(left: Option<AabbHiZSample>, right: Option<AabbHiZSample>) -> OcclusionFacts {
+    OcclusionFacts {
+        occluded: left.is_some_and(|sample| sample.occluded)
+            && right.is_some_and(|sample| sample.occluded),
+        other_occluder: left.is_some_and(sample_is_other_occluder)
+            && right.is_some_and(sample_is_other_occluder),
+        rects: [left.and_then(sample_rect), right.and_then(sample_rect)],
+    }
+}
+
+fn sample_is_other_occluder(sample: AabbHiZSample) -> bool {
+    sample.occluded
+        && sample
+            .covering_depth
+            .is_some_and(|depth| covering_depth_is_other_occluder(sample.closest_ndc_z, depth))
+}
+
+fn sample_rect(sample: AabbHiZSample) -> Option<ScreenRect> {
+    ScreenRect::from_uv(sample.uv_min, sample.uv_max)
 }
 
 /// Reuses one [`PreparedSpaceCull`] across the renderer runs in a collection chunk.
@@ -173,6 +235,7 @@ impl<'a> SpaceCullCache<'a> {
     }
 
     /// Runs frustum and Hi-Z culling for `geom`, reusing a prepared space when one exists.
+    #[cfg(test)]
     pub(crate) fn cull_geometry<S>(
         &mut self,
         geom: MeshCullGeometry,
@@ -185,12 +248,45 @@ impl<'a> SpaceCullCache<'a> {
     where
         S: SceneSpaceRead + ?Sized,
     {
+        self.cull_geometry_for_caster(
+            geom,
+            scene,
+            space_id,
+            is_overlay,
+            culling,
+            ui_rect_clip_local,
+            None,
+        )
+    }
+
+    /// Runs frustum and two-phase occlusion culling for `geom`.
+    ///
+    /// `caster` is recorded in the view's visibility history when a two-phase plan is active.
+    /// `None` keeps the draw without updating that history.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "caster is the one extra identity on the existing per-draw cull signature"
+    )]
+    pub(crate) fn cull_geometry_for_caster<S>(
+        &mut self,
+        geom: MeshCullGeometry,
+        scene: &S,
+        space_id: RenderSpaceId,
+        is_overlay: bool,
+        culling: &'a WorldMeshCullInput<'_>,
+        ui_rect_clip_local: Option<Vec4>,
+        caster: Option<CasterKey>,
+    ) -> Result<Option<Mat4>, CpuCullFailure>
+    where
+        S: SceneSpaceRead + ?Sized,
+    {
         let slot = self.slot_index(scene, space_id, is_overlay, culling);
         mesh_cpu_cull_with_prepared(
             geom,
             is_overlay,
             &self.slots[slot].prepared,
             ui_rect_clip_local,
+            caster,
         )
     }
 
@@ -339,6 +435,7 @@ pub(crate) fn mesh_draw_passes_cpu_cull<S>(
     culling: &WorldMeshCullInput<'_>,
     render_context: RenderingContext,
     ui_rect_clip_local: Option<Vec4>,
+    caster: Option<CasterKey>,
 ) -> Result<Option<Mat4>, CpuCullFailure>
 where
     S: crate::scene::SceneTransformRead + ?Sized,
@@ -351,6 +448,7 @@ where
         is_overlay,
         culling,
         ui_rect_clip_local,
+        caster,
     )
 }
 
@@ -367,12 +465,13 @@ pub(crate) fn mesh_cpu_cull_with_geometry<S>(
     is_overlay: bool,
     culling: &WorldMeshCullInput<'_>,
     ui_rect_clip_local: Option<Vec4>,
+    caster: Option<CasterKey>,
 ) -> Result<Option<Mat4>, CpuCullFailure>
 where
     S: SceneSpaceRead + ?Sized,
 {
     let prepared = PreparedSpaceCull::with_hi_z(scene, space_id, is_overlay, culling);
-    mesh_cpu_cull_with_prepared(geom, is_overlay, &prepared, ui_rect_clip_local)
+    mesh_cpu_cull_with_prepared(geom, is_overlay, &prepared, ui_rect_clip_local, caster)
 }
 
 /// Frustum, Hi-Z, and overlay rect tests against a space cull plan built once for many draws.
@@ -381,6 +480,7 @@ fn mesh_cpu_cull_with_prepared(
     is_overlay: bool,
     prepared: &PreparedSpaceCull<'_>,
     ui_rect_clip_local: Option<Vec4>,
+    caster: Option<CasterKey>,
 ) -> Result<Option<Mat4>, CpuCullFailure> {
     if is_overlay {
         return cull_overlay_draw(ui_rect_clip_local, &geom, prepared);
@@ -392,10 +492,28 @@ fn mesh_cpu_cull_with_prepared(
     if !prepared.aabb_visible(wmin, wmax) {
         return Err(CpuCullFailure::Frustum);
     }
-    if prepared.hi_z_occludes(wmin, wmax) {
+    if !occlusion_allows_draw(prepared, caster, wmin, wmax) {
         return Err(CpuCullFailure::HiZ);
     }
     Ok(geom.rigid_world_matrix)
+}
+
+fn occlusion_allows_draw(
+    prepared: &PreparedSpaceCull<'_>,
+    caster: Option<CasterKey>,
+    wmin: Vec3,
+    wmax: Vec3,
+) -> bool {
+    let Some(frame) = prepared.two_phase else {
+        return !prepared.hi_z_occludes(wmin, wmax);
+    };
+    frame.allows_draw(
+        prepared.space_id,
+        caster,
+        wmin,
+        wmax,
+        prepared.occlusion_facts(wmin, wmax),
+    )
 }
 
 /// Cull decision for overlay-layer draws: optional `_RectClip` projection check, then accept.
@@ -564,6 +682,7 @@ mod overlay_cull_tests {
             host_camera,
             hi_z: None,
             hi_z_temporal: None,
+            two_phase: None,
         }
     }
 
@@ -580,6 +699,7 @@ mod overlay_cull_tests {
             host_camera: &host_camera,
             hi_z: None,
             hi_z_temporal: None,
+            two_phase: None,
         };
         let model = Mat4::from_translation(Vec3::new(1234.0, 5678.0, 0.0));
         let geom = MeshCullGeometry {
@@ -588,9 +708,15 @@ mod overlay_cull_tests {
             front_face_world_matrix: Some(model),
         };
 
-        let Ok(accepted) =
-            mesh_cpu_cull_with_geometry(geom, &scene, RenderSpaceId(999), true, &culling, None)
-        else {
+        let Ok(accepted) = mesh_cpu_cull_with_geometry(
+            geom,
+            &scene,
+            RenderSpaceId(999),
+            true,
+            &culling,
+            None,
+            None,
+        ) else {
             panic!("overlay items should skip frustum/Hi-Z rejection");
         };
 
@@ -618,6 +744,7 @@ mod overlay_cull_tests {
             true,
             &culling,
             Some(rect),
+            None,
         );
         assert!(matches!(res, Err(CpuCullFailure::UiRectMask)));
     }
@@ -642,6 +769,7 @@ mod overlay_cull_tests {
             true,
             &culling,
             Some(rect),
+            None,
         );
         assert!(matches!(res, Ok(Some(m)) if m == model));
     }
@@ -660,8 +788,15 @@ mod overlay_cull_tests {
             front_face_world_matrix: Some(model),
         };
 
-        let res =
-            mesh_cpu_cull_with_geometry(geom, &scene, RenderSpaceId(999), true, &culling, None);
+        let res = mesh_cpu_cull_with_geometry(
+            geom,
+            &scene,
+            RenderSpaceId(999),
+            true,
+            &culling,
+            None,
+            None,
+        );
         assert!(matches!(res, Ok(Some(m)) if m == model));
     }
 }
@@ -699,6 +834,7 @@ mod prepared_space_cull_tests {
             host_camera,
             hi_z: None,
             hi_z_temporal: None,
+            two_phase: None,
         }
     }
 
@@ -768,7 +904,8 @@ mod prepared_space_cull_tests {
                 front_face_world_matrix: Some(Mat4::IDENTITY),
             };
             let cached = cache.cull_geometry(geom, &scene, space_id, false, &culling, None);
-            let direct = mesh_cpu_cull_with_geometry(geom, &scene, space_id, false, &culling, None);
+            let direct =
+                mesh_cpu_cull_with_geometry(geom, &scene, space_id, false, &culling, None, None);
             assert_eq!(cached, direct);
         }
     }

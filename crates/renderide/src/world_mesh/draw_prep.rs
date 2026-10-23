@@ -21,6 +21,8 @@ mod command_cache;
 mod filter;
 pub(crate) mod item;
 mod prepared_renderables;
+
+pub(crate) use prepared_renderables::PreparedCasterBounds;
 mod render_world;
 mod sort;
 

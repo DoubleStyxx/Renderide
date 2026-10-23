@@ -109,7 +109,31 @@ pub(super) fn queue_view_draws(
         max_prepared_draw_count,
         setup.inner_parallelism,
     );
-    let (cull_inputs, cull_projs) = build_view_cull_inputs(prepared, cull_snapshots);
+    let projection_copies = cull_snapshots
+        .iter()
+        .map(|snapshot| snapshot.as_ref().map(|snapshot| snapshot.proj))
+        .collect::<Vec<_>>();
+    let temporal_copies = cull_snapshots
+        .iter()
+        .map(|snapshot| {
+            snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.hi_z_temporal.clone())
+        })
+        .collect::<Vec<_>>();
+    let prepared_renderables = prepared
+        .iter()
+        .map(|view| setup.prepared_renderables_for(view.render_context()))
+        .collect::<Vec<_>>();
+    let phases = super::two_phase::build_view_occlusion_phases(
+        setup.scene,
+        setup.occlusion,
+        prepared,
+        &prepared_renderables,
+        &projection_copies,
+        &temporal_copies,
+    );
+    let (cull_inputs, cull_projs) = build_view_cull_inputs(prepared, cull_snapshots, &phases);
     let contexts =
         build_view_draw_collection_contexts(setup, prepared, &dict, &cull_inputs, mesh_lod_bias);
     let shadow_contexts =
@@ -136,6 +160,11 @@ pub(super) fn queue_view_draws(
         inner_parallelism,
         &mut view_draws,
     );
+    for phase in phases.into_iter().flatten() {
+        setup
+            .occlusion
+            .store_visibility_history(phase.view_id, phase.frame.finish());
+    }
     view_draws
 }
 
@@ -248,6 +277,7 @@ fn max_prepared_draw_count_for_views(
 fn build_view_cull_inputs<'a>(
     prepared: &'a [FrameViewPlan<'_>],
     cull_snapshots: Vec<Option<ViewCullSnapshot>>,
+    phases: &'a [Option<super::two_phase::ViewOcclusionPhase>],
 ) -> (
     Vec<Option<WorldMeshCullInput<'a>>>,
     Vec<Option<WorldMeshCullProjParams>>,
@@ -264,6 +294,10 @@ fn build_view_cull_inputs<'a>(
             host_camera: &prep.host_camera,
             hi_z: s.hi_z,
             hi_z_temporal: s.hi_z_temporal,
+            two_phase: phases
+                .get(cull_inputs.len())
+                .and_then(|phase| phase.as_ref())
+                .map(|phase| &phase.frame),
         });
         cull_projs.push(cull_proj);
         cull_inputs.push(culling);

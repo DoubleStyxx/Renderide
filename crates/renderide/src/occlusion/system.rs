@@ -15,6 +15,7 @@ use crate::gpu::OutputDepthMode;
 use crate::hi_z_cpu::HiZCullData;
 use crate::history_texture::HistoryTextureMipViews;
 use crate::occlusion::gpu::{HiZBuildRecord, HiZGpuState, HiZHistoryTarget, encode_hi_z_build};
+use crate::occlusion::two_phase::VisibilityHistory;
 
 /// Depth source, layout, and logical view for [`OcclusionSystem::encode_hi_z_build_pass`].
 pub(crate) struct HiZBuildInput<'a> {
@@ -36,6 +37,8 @@ pub struct OcclusionSystem {
     main: Arc<Mutex<HiZGpuState>>,
     /// Per logical secondary-camera view pyramids (single-view desktop layout each).
     offscreen: Mutex<HashMap<ViewId, Arc<Mutex<HiZGpuState>>>>,
+    /// Per-view two-phase classification from the previous tested frame.
+    visibility: Mutex<HashMap<ViewId, Arc<VisibilityHistory>>>,
 }
 
 impl Default for OcclusionSystem {
@@ -50,6 +53,7 @@ impl OcclusionSystem {
         Self {
             main: Arc::new(Mutex::new(HiZGpuState::default())),
             offscreen: Mutex::new(HashMap::new()),
+            visibility: Mutex::new(HashMap::new()),
         }
     }
 
@@ -123,7 +127,7 @@ impl OcclusionSystem {
     /// Main-view state persists for the life of the renderer; secondary views are removed when
     /// the view graph changes.
     pub(crate) fn retire_view(&self, view: ViewId) -> bool {
-        match view {
+        let removed = match view {
             ViewId::Main => false,
             ViewId::MainOverlay
             | ViewId::SecondaryCamera(_)
@@ -131,7 +135,25 @@ impl OcclusionSystem {
             | ViewId::CameraRenderTask(_)
             | ViewId::Camera360RenderTaskFace(_)
             | ViewId::ReflectionProbeRenderTask(_) => self.offscreen.lock().remove(&view).is_some(),
-        }
+        };
+        self.visibility.lock().remove(&view);
+        removed
+    }
+
+    /// Previous-frame two-phase classification for `view`.
+    ///
+    /// Missing history is an empty snapshot: every caster is treated as newly revealed.
+    pub(crate) fn visibility_history(&self, view: ViewId) -> Arc<VisibilityHistory> {
+        self.visibility
+            .lock()
+            .get(&view)
+            .cloned()
+            .unwrap_or_else(|| Arc::new(VisibilityHistory::default()))
+    }
+
+    /// Stores the classification produced by this frame's fine cull.
+    pub(crate) fn store_visibility_history(&self, view: ViewId, history: VisibilityHistory) {
+        self.visibility.lock().insert(view, Arc::new(history));
     }
 
     /// Number of live secondary-view Hi-Z slots.
