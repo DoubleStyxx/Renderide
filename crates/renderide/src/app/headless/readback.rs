@@ -41,7 +41,9 @@ fn readback_color_texture(
     let slice = readback.slice(..);
     await_buffer_map(slice, gpu.device())?;
     let tight = {
-        let view = slice.get_mapped_range();
+        let view = slice
+            .get_mapped_range()
+            .map_err(|err| HeadlessReadbackError::Map(err.to_string()))?;
         copy_padded_rows_to_tight(&view, &layout)
     };
     readback.unmap();

@@ -13,6 +13,9 @@ members = [
   "crates/logger",
 ]
 
+# `cc` stays at 1.2.63 in Cargo.lock. 1.9.0 makes Windows `cl.exe` treat `/WX-`
+# as a source file while building `libmimalloc-sys` (CI clippy, MSVC 14.51).
+
 [profile.dev]
 opt-level = 1
 incremental = true
