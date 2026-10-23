@@ -198,7 +198,11 @@ mod tests {
         CAMERA_CLEAR_LOAD_OP_CAMERAS, ScenePreserveQuery, camera_clear_load_op_checksum,
         forward_clear_loads, preserves_scene_color, preserves_scene_depth,
     };
-    use crate::frame_contract::{FrameViewClear, RenderTextureSelfSampling};
+    use crate::camera::CameraRenderRect;
+    use crate::frame_contract::{FrameViewClear, OffscreenWriteTarget, RenderTextureSelfSampling};
+    use crate::render_graph::compiled::{
+        ClearLoadViewSource, FrameViewTargetKind, clear_load_inputs_from_view,
+    };
     use crate::shared::CameraClearMode;
 
     const HDR: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -352,18 +356,65 @@ mod tests {
     }
 
     #[test]
-    fn partial_viewport_nothing_clears_color_and_depth() {
-        // Partial viewports render through a scratch and copy a color rect back. Stacking still clears.
-        assert_unseeded_pair(
-            "partial viewport",
-            query(
-                1,
-                false,
-                HDR,
-                Some(RenderTextureSelfSampling::Suppress),
-                false,
+    fn partial_viewport_rect_alone_clears_color_and_depth() {
+        let extent = (64, 32);
+        let full_viewport = CameraRenderRect {
+            origin_px: (0, 0),
+            extent_px: extent,
+        };
+        let partial_viewport = CameraRenderRect {
+            origin_px: (16, 0),
+            extent_px: (32, 32),
+        };
+        let full = ClearLoadViewSource {
+            kind: FrameViewTargetKind::OffscreenRt,
+            viewport: full_viewport,
+            target_extent_px: extent,
+            copies_partial_color: false,
+            sample_count: 1,
+            surface_format: HDR,
+            scene_color_format: HDR,
+            write_target: OffscreenWriteTarget::host_render_texture_with_self_sampling(
+                7,
+                RenderTextureSelfSampling::Suppress,
             ),
+        };
+        let partial = ClearLoadViewSource {
+            viewport: partial_viewport,
+            ..full
+        };
+        assert_eq!(
+            ClearLoadViewSource {
+                viewport: full.viewport,
+                ..partial
+            },
+            full,
+            "partial and full views must differ only by the viewport rect"
         );
+
+        let full_loads = forward_clear_loads(
+            clear(CameraClearMode::Nothing),
+            preserve_query(clear_load_inputs_from_view(full)),
+        );
+        assert!(full_loads.seed_color);
+        assert!(matches!(full_loads.color, wgpu::LoadOp::Load));
+        assert!(matches!(full_loads.depth, wgpu::LoadOp::Load));
+
+        let partial_inputs = clear_load_inputs_from_view(partial);
+        assert_unseeded_pair("partial viewport", preserve_query(partial_inputs));
+    }
+
+    fn preserve_query(
+        inputs: crate::render_graph::compiled::ClearLoadDecisionInputs,
+    ) -> ScenePreserveQuery {
+        ScenePreserveQuery {
+            sample_count: inputs.sample_count,
+            has_color_texture: inputs.has_color_texture,
+            surface_format: inputs.surface_format,
+            scene_color_format: inputs.scene_color_format,
+            self_sampling: inputs.self_sampling,
+            persistent_depth_target: inputs.persistent_depth_target,
+        }
     }
 
     #[test]

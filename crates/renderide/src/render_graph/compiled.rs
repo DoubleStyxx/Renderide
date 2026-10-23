@@ -29,13 +29,17 @@ pub(super) use merge_cache::{
 mod dot;
 
 pub(crate) use exec::CommandEncodingHudSnapshot;
+#[cfg(test)]
+pub(crate) use exec::{ClearLoadDecisionInputs, ClearLoadViewSource, clear_load_inputs_from_view};
 pub(crate) use frame_view::{
     ExternalFrameTargets, ExternalOffscreenTargets, FrameGlobalView, FrameView, FrameViewLayout,
     FrameViewResourceHints, FrameViewTarget, OffscreenColorCopyTarget, RenderPathProfile,
     ViewFamilyGraphRequirements, ViewPostProcessing,
 };
 #[cfg(test)]
-pub(crate) use frame_view::{RenderPathProfileId, RenderPathSampleCountPolicy};
+pub(crate) use frame_view::{
+    FrameViewTargetKind, RenderPathProfileId, RenderPathSampleCountPolicy,
+};
 pub(super) use resource::{
     CompileStats, CompiledBufferResource, CompiledPassInfo, CompiledTextureResource,
     ResourceLifetime, ResourceLifetimeLane, ResourceLifetimeSegment,
