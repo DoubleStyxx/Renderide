@@ -35,7 +35,8 @@ pub struct WorldMeshCullInput<'a> {
     pub hi_z: Option<HiZCullData>,
     /// View/projection from the frame that authored [`Self::hi_z`]; required for stable temporal tests.
     pub hi_z_temporal: Option<HiZTemporalState>,
-    /// Current-frame two-phase plan. When set, a stale Hi-Z hit is not enough to reject a caster.
+    /// CPU hysteresis plan for the one-frame-late Hi-Z pyramid. When set, a stale hit is not
+    /// enough to reject a caster.
     pub two_phase: Option<&'a TwoPhaseFrame>,
 }
 

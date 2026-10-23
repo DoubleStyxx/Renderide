@@ -87,8 +87,28 @@ pub(crate) fn sample_aabb_occlusion(
     world_min: Vec3,
     world_max: Vec3,
 ) -> Option<AabbHiZSample> {
+    sample_aabb_occlusion_with_pad(snapshot, view_proj, world_min, world_max, 0.0)
+}
+
+/// Like [`sample_aabb_occlusion`], expanding the screen rectangle by `uv_pad` before the pyramid test.
+///
+/// The closest NDC z stays the unpadded AABB. `None` when `uv_pad` is not a finite non-negative pad
+/// or the projection is not a reliable full-occlusion test.
+pub(crate) fn sample_aabb_occlusion_with_pad(
+    snapshot: &HiZCpuSnapshot,
+    view_proj: Mat4,
+    world_min: Vec3,
+    world_max: Vec3,
+    uv_pad: f32,
+) -> Option<AabbHiZSample> {
+    if !uv_pad.is_finite() || uv_pad < 0.0 {
+        return None;
+    }
     let footprint = project_aabb_to_screen(view_proj, world_min, world_max)?;
-    let rect = HiZUvRect::from_raw(footprint.uv_min, footprint.uv_max)?;
+    let rect = HiZUvRect::from_raw(
+        (footprint.uv_min.0 - uv_pad, footprint.uv_min.1 - uv_pad),
+        (footprint.uv_max.0 + uv_pad, footprint.uv_max.1 + uv_pad),
+    )?;
     let threshold = footprint.max_ndc_z + HI_Z_BIAS + HI_Z_OCCLUSION_MARGIN;
     if !threshold.is_finite() {
         return None;

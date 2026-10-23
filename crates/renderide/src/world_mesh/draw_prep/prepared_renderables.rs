@@ -68,6 +68,8 @@ pub(crate) struct PreparedCasterBounds {
     pub node_id: i32,
     /// `true` when the caster comes from the skinned renderer list.
     pub skinned: bool,
+    /// Mesh asset drawn for this caster. A swap with the same AABB is still a new surface.
+    pub mesh_asset_id: i32,
     /// World AABB minimum.
     pub aabb_min: glam::Vec3,
     /// World AABB maximum.
@@ -500,6 +502,7 @@ impl FramePreparedRenderables {
                 instance_id: first.instance_id.0,
                 node_id: first.node_id,
                 skinned: first.skinned,
+                mesh_asset_id: first.mesh_asset_id,
                 aabb_min,
                 aabb_max,
             });

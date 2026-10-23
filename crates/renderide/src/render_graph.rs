@@ -64,9 +64,9 @@
 //!    clustered lights, then forward (see [`default_graph_tests`] / [`build_main_graph`]); frame-global
 //!    deform runs before per-view passes at execute time ([`CompiledRenderGraph::execute_multi_view`]).
 //! 6. **HiZ** -- [`passes::HiZBuildPass`] after pre-transparent depth is written. The CPU readback
-//!    is still the previous frame's pyramid. Two-phase occlusion ([`crate::occlusion::two_phase`])
-//!    draws the previously visible set without that stale rejection, and rejects the previously
-//!    occluded set only when the current frame still confirms the occlusion.
+//!    is still the previous frame's pyramid. [`crate::occlusion::two_phase`] is temporal hysteresis
+//!    on that pyramid: previously visible casters stay drawn, and a previously occluded caster is
+//!    rejected only when a motion-expanded retest still agrees. It is not a same-frame GPU cull.
 //! 7. **SceneColorCompose** -- [`passes::SceneColorComposePass`] copies HDR scene color into the swapchain
 //!    / XR / offscreen output (hook for future post-processing).
 //! 8. **FrameEnd** -- submit, optional debug HUD composite, present, Hi-Z frame bookkeeping.

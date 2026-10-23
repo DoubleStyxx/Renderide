@@ -20,10 +20,11 @@ use crate::camera::{overlay_camera_view_matrix, view_matrix_for_world_mesh_rende
 use crate::hi_z_cpu::snapshot::HiZCpuSnapshot;
 use crate::hi_z_cpu::{
     AabbHiZSample, HiZCullData, hi_z_view_proj_matrices, mesh_fully_occluded_in_hiz,
-    sample_aabb_occlusion, stereo_hiz_keeps_draw,
+    sample_aabb_occlusion_with_pad, stereo_hiz_keeps_draw,
 };
 use crate::occlusion::two_phase::{
-    CasterKey, OcclusionFacts, ScreenRect, covering_depth_is_other_occluder,
+    CasterRef, DepthClip, OcclusionFacts, ScreenRect, covering_depth_is_other_occluder,
+    parallax_adjusted_pad,
 };
 
 /// Clip matrices for one render space, built once and reused across every AABB in that space.
@@ -159,50 +160,93 @@ impl<'a> PreparedSpaceCull<'a> {
         }
     }
 
-    /// Hi-Z coverage used by the two-phase confirmation. Missing pyramids do not occlude.
+    /// Hi-Z coverage used by the hysteresis confirmation. Missing pyramids do not occlude.
+    ///
+    /// The query rectangle is the caster's footprint expanded by the screen motion since the
+    /// pyramid was written. A closer covering surface widens that pad again. No motion bound
+    /// means the previous pyramid is not confirmation, so the caster is kept.
     fn occlusion_facts(&self, wmin: Vec3, wmax: Vec3) -> OcclusionFacts {
+        let Some(frame) = self.two_phase else {
+            return OcclusionFacts::keep();
+        };
+        let Some(clip) = frame.depth_clip(self.space_id) else {
+            return OcclusionFacts::keep();
+        };
+        let Some(pad) = frame.motion_pad(self.space_id, wmin, wmax) else {
+            return OcclusionFacts::keep();
+        };
         match self.hi_z {
             None => OcclusionFacts::keep(),
             Some(PreparedSpaceHiZ::Desktop {
                 snapshot,
                 view_proj,
-            }) => facts_from_mono(sample_aabb_occlusion(snapshot, view_proj, wmin, wmax)),
+            }) => facts_from_mono(
+                confirm_sample(snapshot, view_proj, wmin, wmax, pad, clip),
+                clip,
+            ),
             Some(PreparedSpaceHiZ::Stereo {
                 left,
                 right,
                 left_vp,
                 right_vp,
             }) => facts_from_stereo(
-                sample_aabb_occlusion(left, left_vp, wmin, wmax),
-                sample_aabb_occlusion(right, right_vp, wmin, wmax),
+                confirm_sample(left, left_vp, wmin, wmax, pad, clip),
+                confirm_sample(right, right_vp, wmin, wmax, pad, clip),
+                clip,
             ),
         }
     }
 }
 
-fn facts_from_mono(sample: Option<AabbHiZSample>) -> OcclusionFacts {
+fn confirm_sample(
+    snapshot: &HiZCpuSnapshot,
+    view_proj: Mat4,
+    min: Vec3,
+    max: Vec3,
+    base_pad: f32,
+    clip: DepthClip,
+) -> Option<AabbHiZSample> {
+    let first = sample_aabb_occlusion_with_pad(snapshot, view_proj, min, max, base_pad)?;
+    let adjusted = parallax_adjusted_pad(
+        base_pad,
+        first.closest_ndc_z,
+        first.covering_depth,
+        first.occluded,
+        clip,
+    )?;
+    if (adjusted - base_pad).abs() <= f32::EPSILON {
+        return Some(first);
+    }
+    sample_aabb_occlusion_with_pad(snapshot, view_proj, min, max, adjusted)
+}
+
+fn facts_from_mono(sample: Option<AabbHiZSample>, clip: DepthClip) -> OcclusionFacts {
     OcclusionFacts {
         occluded: sample.is_some_and(|sample| sample.occluded),
-        other_occluder: sample.is_some_and(sample_is_other_occluder),
+        other_occluder: sample.is_some_and(|sample| sample_is_other_occluder(sample, clip)),
         rects: [sample.and_then(sample_rect), None],
     }
 }
 
-fn facts_from_stereo(left: Option<AabbHiZSample>, right: Option<AabbHiZSample>) -> OcclusionFacts {
+fn facts_from_stereo(
+    left: Option<AabbHiZSample>,
+    right: Option<AabbHiZSample>,
+    clip: DepthClip,
+) -> OcclusionFacts {
     OcclusionFacts {
         occluded: left.is_some_and(|sample| sample.occluded)
             && right.is_some_and(|sample| sample.occluded),
-        other_occluder: left.is_some_and(sample_is_other_occluder)
-            && right.is_some_and(sample_is_other_occluder),
+        other_occluder: left.is_some_and(|sample| sample_is_other_occluder(sample, clip))
+            && right.is_some_and(|sample| sample_is_other_occluder(sample, clip)),
         rects: [left.and_then(sample_rect), right.and_then(sample_rect)],
     }
 }
 
-fn sample_is_other_occluder(sample: AabbHiZSample) -> bool {
+fn sample_is_other_occluder(sample: AabbHiZSample, clip: DepthClip) -> bool {
     sample.occluded
-        && sample
-            .covering_depth
-            .is_some_and(|depth| covering_depth_is_other_occluder(sample.closest_ndc_z, depth))
+        && sample.covering_depth.is_some_and(|depth| {
+            covering_depth_is_other_occluder(sample.closest_ndc_z, depth, clip)
+        })
 }
 
 fn sample_rect(sample: AabbHiZSample) -> Option<ScreenRect> {
@@ -275,7 +319,7 @@ impl<'a> SpaceCullCache<'a> {
         is_overlay: bool,
         culling: &'a WorldMeshCullInput<'_>,
         ui_rect_clip_local: Option<Vec4>,
-        caster: Option<CasterKey>,
+        caster: Option<CasterRef>,
     ) -> Result<Option<Mat4>, CpuCullFailure>
     where
         S: SceneSpaceRead + ?Sized,
@@ -435,7 +479,7 @@ pub(crate) fn mesh_draw_passes_cpu_cull<S>(
     culling: &WorldMeshCullInput<'_>,
     render_context: RenderingContext,
     ui_rect_clip_local: Option<Vec4>,
-    caster: Option<CasterKey>,
+    caster: Option<CasterRef>,
 ) -> Result<Option<Mat4>, CpuCullFailure>
 where
     S: crate::scene::SceneTransformRead + ?Sized,
@@ -465,7 +509,7 @@ pub(crate) fn mesh_cpu_cull_with_geometry<S>(
     is_overlay: bool,
     culling: &WorldMeshCullInput<'_>,
     ui_rect_clip_local: Option<Vec4>,
-    caster: Option<CasterKey>,
+    caster: Option<CasterRef>,
 ) -> Result<Option<Mat4>, CpuCullFailure>
 where
     S: SceneSpaceRead + ?Sized,
@@ -480,7 +524,7 @@ fn mesh_cpu_cull_with_prepared(
     is_overlay: bool,
     prepared: &PreparedSpaceCull<'_>,
     ui_rect_clip_local: Option<Vec4>,
-    caster: Option<CasterKey>,
+    caster: Option<CasterRef>,
 ) -> Result<Option<Mat4>, CpuCullFailure> {
     if is_overlay {
         return cull_overlay_draw(ui_rect_clip_local, &geom, prepared);
@@ -500,20 +544,14 @@ fn mesh_cpu_cull_with_prepared(
 
 fn occlusion_allows_draw(
     prepared: &PreparedSpaceCull<'_>,
-    caster: Option<CasterKey>,
+    caster: Option<CasterRef>,
     wmin: Vec3,
     wmax: Vec3,
 ) -> bool {
     let Some(frame) = prepared.two_phase else {
         return !prepared.hi_z_occludes(wmin, wmax);
     };
-    frame.allows_draw(
-        prepared.space_id,
-        caster,
-        wmin,
-        wmax,
-        prepared.occlusion_facts(wmin, wmax),
-    )
+    frame.allows_draw(caster, wmin, wmax, prepared.occlusion_facts(wmin, wmax))
 }
 
 /// Cull decision for overlay-layer draws: optional `_RectClip` projection check, then accept.
@@ -968,6 +1006,215 @@ mod prepared_space_cull_tests {
         eprintln!(
             "frustum boxes={} once={once_elapsed:?} reused={reused_elapsed:?} visible={once_visible}",
             boxes.len()
+        );
+    }
+}
+
+#[cfg(test)]
+mod two_phase_cull_integration {
+    use std::sync::Arc;
+
+    use glam::{Mat4, Vec3};
+    use hashbrown::HashMap;
+
+    use super::{CpuCullFailure, SpaceCullCache};
+    use crate::camera::{
+        HostCameraFrame, reverse_z_perspective, view_matrix_for_host_world_mesh_space,
+    };
+    use crate::hi_z_cpu::pyramid::total_float_count;
+    use crate::hi_z_cpu::{HiZCpuSnapshot, HiZCullData};
+    use crate::occlusion::two_phase::{
+        CasterKey, CasterRef, DepthClip, SpaceMotion, TwoPhaseFrame, VisibilityClass,
+        VisibilityHistory,
+    };
+    use crate::scene::{RenderSpaceId, SceneCoordinator};
+    use crate::shared::RenderTransform;
+    use crate::world_mesh::culling::{
+        HiZTemporalState, MeshCullGeometry, WorldMeshCullInput, WorldMeshCullProjParams,
+    };
+
+    fn occluding_pyramid(depth: f32) -> HiZCpuSnapshot {
+        let mip_levels = 1;
+        let texels = total_float_count(32, 32, mip_levels);
+        HiZCpuSnapshot {
+            base_width: 32,
+            base_height: 32,
+            mip_levels,
+            mips: Arc::from(vec![depth; texels]),
+        }
+    }
+
+    fn desktop_motion(previous: Mat4, current: Mat4, host: &HostCameraFrame) -> SpaceMotion {
+        SpaceMotion {
+            mono: Some((previous, current)),
+            stereo: None,
+            clip: DepthClip {
+                near: host.clip.near,
+                far: host.clip.far,
+                orthographic: false,
+            },
+        }
+    }
+
+    fn frame_for(
+        history: VisibilityHistory,
+        motion: &SpaceMotion,
+        space_id: RenderSpaceId,
+    ) -> TwoPhaseFrame {
+        let mut motions = HashMap::new();
+        motions.insert(space_id, *motion);
+        TwoPhaseFrame::new(Arc::new(history), HashMap::new(), motions, Vec::new())
+    }
+
+    struct CullCase<'a> {
+        scene: &'a SceneCoordinator,
+        space_id: RenderSpaceId,
+        host: &'a HostCameraFrame,
+        proj: Mat4,
+        authoring_view: Mat4,
+        snapshot: &'a HiZCpuSnapshot,
+        frame: &'a TwoPhaseFrame,
+        aabb: (Vec3, Vec3),
+        caster: CasterRef,
+    }
+
+    fn cull_caster(case: CullCase<'_>) -> Result<Option<Mat4>, CpuCullFailure> {
+        let mut views = HashMap::new();
+        views.insert(case.space_id, case.authoring_view);
+        let projection = WorldMeshCullProjParams {
+            world_proj: case.proj,
+            overlay_proj: Mat4::IDENTITY,
+            vr_stereo: None,
+        };
+        let culling = WorldMeshCullInput {
+            proj: projection,
+            host_camera: case.host,
+            hi_z: Some(HiZCullData::Desktop(case.snapshot.clone())),
+            hi_z_temporal: Some(HiZTemporalState {
+                prev_cull: projection,
+                prev_view_by_space: Arc::new(views),
+                depth_viewport_px: (case.snapshot.base_width, case.snapshot.base_height),
+            }),
+            two_phase: Some(case.frame),
+        };
+        let mut cache = SpaceCullCache::new();
+        cache.cull_geometry_for_caster(
+            MeshCullGeometry {
+                world_aabb: Some(case.aabb),
+                rigid_world_matrix: None,
+                front_face_world_matrix: None,
+            },
+            case.scene,
+            case.space_id,
+            false,
+            &culling,
+            None,
+            Some(case.caster),
+        )
+    }
+
+    #[test]
+    fn multi_frame_hysteresis_keeps_small_motion_and_fails_open_on_a_cut() {
+        let space_id = RenderSpaceId(1);
+        let mut scene = SceneCoordinator::new();
+        scene.test_seed_space_identity_worlds(space_id, vec![RenderTransform::default()], vec![-1]);
+        let host = HostCameraFrame::default();
+        let space = scene.space(space_id).expect("seeded space");
+        let view = view_matrix_for_host_world_mesh_space(&scene, space, &host);
+        let proj = reverse_z_perspective(1.0, 60_f32.to_radians(), host.clip.near, host.clip.far);
+        let previous_vp = proj * view;
+        let snapshot = occluding_pyramid(0.99);
+        let aabb = (Vec3::new(-0.15, -0.15, 2.8), Vec3::new(0.15, 0.15, 3.2));
+        let key = CasterKey::new(space_id, 0, 1, 0, false);
+        let caster = CasterRef {
+            key,
+            mesh_asset_id: 3,
+        };
+
+        let stable = desktop_motion(previous_vp, previous_vp, &host);
+        let frame = frame_for(VisibilityHistory::default(), &stable, space_id);
+        assert!(
+            cull_caster(CullCase {
+                scene: &scene,
+                space_id,
+                host: &host,
+                proj,
+                authoring_view: view,
+                snapshot: &snapshot,
+                frame: &frame,
+                aabb,
+                caster,
+            })
+            .is_ok(),
+            "the first frame draws a caster with no history"
+        );
+        let history = frame.finish();
+        assert_eq!(
+            history.get(&key).map(|record| record.class),
+            Some(VisibilityClass::Occluded)
+        );
+
+        let frame = frame_for(history, &stable, space_id);
+        assert!(matches!(
+            cull_caster(CullCase {
+                scene: &scene,
+                space_id,
+                host: &host,
+                proj,
+                authoring_view: view,
+                snapshot: &snapshot,
+                frame: &frame,
+                aabb,
+                caster,
+            }),
+            Err(CpuCullFailure::HiZ)
+        ));
+        let history = frame.finish();
+
+        let nudged = proj * (Mat4::from_translation(Vec3::new(0.002, 0.0, 0.0)) * view);
+        let nudged_motion = desktop_motion(previous_vp, nudged, &host);
+        let frame = frame_for(history, &nudged_motion, space_id);
+        assert!(
+            matches!(
+                cull_caster(CullCase {
+                    scene: &scene,
+                    space_id,
+                    host: &host,
+                    proj,
+                    authoring_view: view,
+                    snapshot: &snapshot,
+                    frame: &frame,
+                    aabb,
+                    caster,
+                }),
+                Err(CpuCullFailure::HiZ)
+            ),
+            "a small head translation still culls against a fully covering pyramid"
+        );
+        let history = frame.finish();
+
+        let away = proj
+            * Mat4::look_at_rh(
+                Vec3::new(0.0, 0.0, 10.0),
+                Vec3::new(0.0, 0.0, 20.0),
+                Vec3::Y,
+            );
+        let away_motion = desktop_motion(previous_vp, away, &host);
+        let frame = frame_for(history, &away_motion, space_id);
+        assert!(
+            cull_caster(CullCase {
+                scene: &scene,
+                space_id,
+                host: &host,
+                proj,
+                authoring_view: view,
+                snapshot: &snapshot,
+                frame: &frame,
+                aabb,
+                caster,
+            })
+            .is_ok(),
+            "a camera that loses the caster fails open"
         );
     }
 }

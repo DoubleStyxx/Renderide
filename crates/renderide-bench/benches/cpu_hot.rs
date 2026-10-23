@@ -10,8 +10,9 @@ use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use renderide_bench::{
     BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload, CULL_BATCH,
     CullWorkload, KeywordVariantCacheWorkload, MATERIAL_UNIFORM_BATCH,
-    MaterialUniformUpdateWorkload, TRANSFORM_BATCH, TWO_PHASE_BATCH, TransformWorkload,
-    TwoPhaseCullWorkload, WORLD_MATRIX_NODES, WorldMatrixWorkload,
+    MaterialUniformUpdateWorkload, TRANSFORM_BATCH, TWO_PHASE_BATCH, TWO_PHASE_HISTORY_COUNTS,
+    TransformWorkload, TwoPhaseCullWorkload, TwoPhaseHistoryWorkload, WORLD_MATRIX_NODES,
+    WorldMatrixWorkload,
 };
 
 fn transforms(c: &mut Criterion) {
@@ -36,12 +37,30 @@ fn culling(c: &mut Criterion) {
 
 fn two_phase_occlusion(c: &mut Criterion) {
     let workload = TwoPhaseCullWorkload::standard();
-    let mut group = c.benchmark_group("two_phase_occlusion");
-    group.throughput(Throughput::Elements(TWO_PHASE_BATCH as u64));
-    group.bench_function("visibility_history", |b| {
-        b.iter(|| black_box(workload.kept_count()));
-    });
-    group.finish();
+    {
+        let mut group = c.benchmark_group("two_phase_occlusion");
+        group.throughput(Throughput::Elements(
+            u64::try_from(TWO_PHASE_BATCH).unwrap_or(0),
+        ));
+        group.bench_function("decide_phase", |b| {
+            b.iter(|| black_box(workload.kept_count()));
+        });
+        group.finish();
+    }
+
+    let mut history = c.benchmark_group("two_phase_history");
+    for count in TWO_PHASE_HISTORY_COUNTS {
+        for moving in [false, true] {
+            let mut workload = TwoPhaseHistoryWorkload::new(count, moving);
+            let _ = workload.step();
+            let label = if moving { "moving" } else { "stable" };
+            history.throughput(Throughput::Elements(u64::try_from(count).unwrap_or(0)));
+            history.bench_function(format!("{count}_{label}"), |b| {
+                b.iter(|| black_box(workload.step()));
+            });
+        }
+    }
+    history.finish();
 }
 
 fn world_matrices(c: &mut Criterion) {

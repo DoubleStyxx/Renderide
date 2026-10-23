@@ -4,13 +4,23 @@
 //! transient-pool, material-uniform, bind-group, and keyword-variant cache bookkeeping the frame
 //! loop uses, and they never open a wgpu device.
 
-use glam::{Mat4, Quat, Vec3};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
+use glam::{Mat4, Quat, Vec3};
+use hashbrown::HashMap;
+use rayon::prelude::*;
+
+use crate::camera::reverse_z_perspective;
+use crate::hi_z_cpu::project_world_aabb_uv;
 use crate::occlusion::two_phase::{
-    CasterRecord, PhaseAction, PhaseInputs, VisibilityClass, decide_phase,
+    CasterKey, CasterRecord, CasterRef, DepthClip, OcclusionFacts, PhaseAction, PhaseInputs,
+    PresentCaster, ScreenRect, SpaceMotion, TwoPhaseFrame, VisibilityClass, VisibilityHistory,
+    decide_phase, disocclusion_rects, plan_disocclusion, screen_motion_uv_pad,
 };
 use crate::render_graph::resources::BufferSizePolicy;
 use crate::render_graph::{BufferKey, TransientPool};
+use crate::scene::RenderSpaceId;
 use crate::scene::{
     WorldTransformCache, compute_world_matrices_for_space, render_matrix_has_degenerate_scale,
     render_transform_has_degenerate_scale, render_transform_to_matrix,
@@ -26,6 +36,15 @@ pub const CULL_BATCH: usize = 8_192;
 
 /// Casters classified by one [`TwoPhaseCullWorkload::kept_count`] sample.
 pub const TWO_PHASE_BATCH: usize = 4_096;
+
+/// Caster counts timed by [`TwoPhaseHistoryWorkload`].
+pub const TWO_PHASE_HISTORY_COUNTS: [usize; 3] = [10_000, 50_000, 100_000];
+
+/// Screen-motion pad below which the history bench treats the pyramid as still occluding.
+///
+/// The bench does not sample a Hi-Z pyramid. This stand-in keeps the timed path on
+/// `plan_disocclusion`, the per-caster reprojection, the history lookup, and `finish`.
+const HISTORY_CONFIRM_UV: f32 = 0.02;
 
 /// Hierarchy nodes solved by one [`WorldMatrixWorkload::recompute`] sample.
 pub const WORLD_MATRIX_NODES: usize = 4_096;
@@ -297,8 +316,6 @@ impl BufferPoolWorkload {
 struct TwoPhaseQuery {
     /// Index into the workload's caster records. `None` is a newly revealed caster.
     previous: Option<usize>,
-    /// Hi-Z camera still matches.
-    camera_stable: bool,
     /// Bounds moved since the stored record.
     caster_moved: bool,
     /// Screen rect hits a moved occluder.
@@ -326,18 +343,19 @@ impl TwoPhaseCullWorkload {
                 class: VisibilityClass::Occluded,
                 aabb_min: bounds,
                 aabb_max: Vec3::new(0.5, 0.5, -1.0),
+                mesh_asset_id: 1,
             },
             CasterRecord {
                 class: VisibilityClass::Visible,
                 aabb_min: bounds,
                 aabb_max: Vec3::new(0.5, 0.5, -1.0),
+                mesh_asset_id: 1,
             },
         ];
         let queries = (0..TWO_PHASE_BATCH)
             .map(|index| match index % 4 {
                 0 => TwoPhaseQuery {
                     previous: Some(0),
-                    camera_stable: true,
                     caster_moved: false,
                     overlaps_disocclusion: false,
                     hi_z_occludes: true,
@@ -345,7 +363,6 @@ impl TwoPhaseCullWorkload {
                 },
                 1 => TwoPhaseQuery {
                     previous: None,
-                    camera_stable: true,
                     caster_moved: false,
                     overlaps_disocclusion: false,
                     hi_z_occludes: true,
@@ -353,7 +370,6 @@ impl TwoPhaseCullWorkload {
                 },
                 2 => TwoPhaseQuery {
                     previous: Some(0),
-                    camera_stable: true,
                     caster_moved: false,
                     overlaps_disocclusion: true,
                     hi_z_occludes: true,
@@ -361,10 +377,9 @@ impl TwoPhaseCullWorkload {
                 },
                 _ => TwoPhaseQuery {
                     previous: Some(1),
-                    camera_stable: false,
                     caster_moved: false,
                     overlaps_disocclusion: false,
-                    hi_z_occludes: true,
+                    hi_z_occludes: false,
                     other_occluder: false,
                 },
             })
@@ -380,7 +395,6 @@ impl TwoPhaseCullWorkload {
             let previous = query.previous.and_then(|index| self.records.get(index));
             let decision = decide_phase(PhaseInputs {
                 previous,
-                camera_stable: query.camera_stable,
                 caster_moved: query.caster_moved,
                 overlaps_disocclusion: query.overlaps_disocclusion,
                 hi_z_occludes: query.hi_z_occludes,
@@ -392,6 +406,162 @@ impl TwoPhaseCullWorkload {
         }
         kept
     }
+}
+
+/// History lookup, screen-motion pad, and `finish` over a prebuilt caster set.
+///
+/// Hi-Z pyramid sampling is not included. A pad under [`HISTORY_CONFIRM_UV`] stands in for a
+/// pyramid that still covers the expanded rectangle.
+pub struct TwoPhaseHistoryWorkload {
+    present: Vec<PresentCaster>,
+    previous_vp: Mat4,
+    current_vp: Mat4,
+    history: Arc<VisibilityHistory>,
+    spare: HashMap<CasterKey, CasterRecord>,
+}
+
+impl TwoPhaseHistoryWorkload {
+    /// Builds `count` casters. One quarter start occluded. `moving` separates the cameras.
+    #[must_use]
+    pub fn new(count: usize, moving: bool) -> Self {
+        let (previous_vp, current_vp) = history_view_projections(moving);
+        let mut side = 1_usize;
+        while side.saturating_mul(side) < count.max(1) {
+            side = side.saturating_add(1);
+        }
+        let mut casters = HashMap::with_capacity(count);
+        let mut present = Vec::with_capacity(count);
+        for index in 0..count {
+            let column = index % side;
+            let row = index / side;
+            let x = f32::from(u16::try_from(column).unwrap_or(0)).mul_add(0.45, -8.0);
+            let z = f32::from(u16::try_from(row).unwrap_or(0)).mul_add(0.45, -4.0);
+            let aabb_min = Vec3::new(x, 0.0, z);
+            let aabb_max = aabb_min + Vec3::splat(0.2);
+            let node_id = i32::try_from(index).unwrap_or(i32::MAX);
+            let key = CasterKey::new(
+                RenderSpaceId(1),
+                index,
+                u64::try_from(index).unwrap_or(u64::MAX),
+                node_id,
+                false,
+            );
+            let class = if index % 4 == 0 {
+                VisibilityClass::Occluded
+            } else {
+                VisibilityClass::Visible
+            };
+            casters.insert(
+                key,
+                CasterRecord {
+                    class,
+                    aabb_min,
+                    aabb_max,
+                    mesh_asset_id: 1,
+                },
+            );
+            present.push(PresentCaster {
+                key,
+                mesh_asset_id: 1,
+                aabb_min,
+                aabb_max,
+                space_id: RenderSpaceId(1),
+            });
+        }
+        Self {
+            present,
+            previous_vp,
+            current_vp,
+            history: Arc::new(VisibilityHistory::from_casters(casters)),
+            spare: HashMap::new(),
+        }
+    }
+
+    /// Plans disocclusion, reprojects every caster, records the decision, and publishes history.
+    ///
+    /// The published map's allocation is recycled into the spare for the next call, matching
+    /// [`crate::occlusion::OcclusionSystem::store_visibility_history`].
+    #[must_use]
+    pub fn step(&mut self) -> u32 {
+        let movers = plan_disocclusion(&self.history, &self.present, |_| true);
+        let current_vp = self.current_vp;
+        let previous_vp = self.previous_vp;
+        let stale = disocclusion_rects(&movers, |min, max| project_screen(current_vp, min, max));
+        let mut motions = HashMap::new();
+        motions.insert(
+            RenderSpaceId(1),
+            SpaceMotion {
+                mono: Some((previous_vp, current_vp)),
+                stereo: None,
+                clip: DepthClip {
+                    near: 0.05,
+                    far: 200.0,
+                    orthographic: false,
+                },
+            },
+        );
+        let frame = TwoPhaseFrame::new(
+            Arc::clone(&self.history),
+            std::mem::take(&mut self.spare),
+            motions,
+            stale,
+        );
+        let kept = AtomicU32::new(0);
+        self.present.par_iter().for_each(|caster| {
+            let facts = facts_for_motion_pad(screen_motion_uv_pad(
+                previous_vp,
+                current_vp,
+                caster.aabb_min,
+                caster.aabb_max,
+            ));
+            if frame.allows_draw(
+                Some(CasterRef {
+                    key: caster.key,
+                    mesh_asset_id: caster.mesh_asset_id,
+                }),
+                caster.aabb_min,
+                caster.aabb_max,
+                facts,
+            ) {
+                kept.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        let next = frame.finish();
+        let old = std::mem::replace(&mut self.history, Arc::new(next));
+        if let Ok(old) = Arc::try_unwrap(old) {
+            let mut recycled = old.into_casters();
+            recycled.clear();
+            self.spare = recycled;
+        }
+        kept.load(Ordering::Relaxed)
+    }
+}
+
+fn facts_for_motion_pad(pad: Option<f32>) -> OcclusionFacts {
+    match pad {
+        Some(pad) if pad < HISTORY_CONFIRM_UV => OcclusionFacts {
+            occluded: true,
+            other_occluder: true,
+            rects: [None, None],
+        },
+        _ => OcclusionFacts::keep(),
+    }
+}
+
+fn project_screen(view_proj: Mat4, min: Vec3, max: Vec3) -> Option<ScreenRect> {
+    let (uv_min, uv_max) = project_world_aabb_uv(view_proj, min, max)?;
+    ScreenRect::from_uv(uv_min, uv_max)
+}
+
+fn history_view_projections(moving: bool) -> (Mat4, Mat4) {
+    let projection = reverse_z_perspective(1.0, 70.0_f32.to_radians(), 0.05, 200.0);
+    let previous = Mat4::look_at_rh(Vec3::new(0.0, 1.5, 12.0), Vec3::new(0.0, 1.5, 0.0), Vec3::Y);
+    let current = if moving {
+        Mat4::look_at_rh(Vec3::new(2.0, 1.5, 12.0), Vec3::new(2.0, 1.5, 0.0), Vec3::Y)
+    } else {
+        previous
+    };
+    (projection * previous, projection * current)
 }
 
 /// Perspective view-projection aimed at the origin from `+Z`.

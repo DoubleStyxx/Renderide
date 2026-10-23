@@ -15,7 +15,7 @@ use crate::gpu::OutputDepthMode;
 use crate::hi_z_cpu::HiZCullData;
 use crate::history_texture::HistoryTextureMipViews;
 use crate::occlusion::gpu::{HiZBuildRecord, HiZGpuState, HiZHistoryTarget, encode_hi_z_build};
-use crate::occlusion::two_phase::VisibilityHistory;
+use crate::occlusion::two_phase::{CasterKey, CasterRecord, VisibilityHistory, VisibilityScratch};
 
 /// Depth source, layout, and logical view for [`OcclusionSystem::encode_hi_z_build_pass`].
 pub(crate) struct HiZBuildInput<'a> {
@@ -37,8 +37,14 @@ pub struct OcclusionSystem {
     main: Arc<Mutex<HiZGpuState>>,
     /// Per logical secondary-camera view pyramids (single-view desktop layout each).
     offscreen: Mutex<HashMap<ViewId, Arc<Mutex<HiZGpuState>>>>,
-    /// Per-view two-phase classification from the previous tested frame.
-    visibility: Mutex<HashMap<ViewId, Arc<VisibilityHistory>>>,
+    /// Per-view classification from the previous tested frame, plus a spare map.
+    visibility: Mutex<HashMap<ViewId, VisibilitySlot>>,
+}
+
+/// Published history and the cleared map waiting for the next frame.
+struct VisibilitySlot {
+    published: Arc<VisibilityHistory>,
+    spare: HashMap<CasterKey, CasterRecord>,
 }
 
 impl Default for OcclusionSystem {
@@ -140,20 +146,42 @@ impl OcclusionSystem {
         removed
     }
 
-    /// Previous-frame two-phase classification for `view`.
+    /// Borrows the published classification and takes the spare map for `view`.
     ///
     /// Missing history is an empty snapshot: every caster is treated as newly revealed.
-    pub(crate) fn visibility_history(&self, view: ViewId) -> Arc<VisibilityHistory> {
-        self.visibility
-            .lock()
-            .get(&view)
-            .cloned()
-            .unwrap_or_else(|| Arc::new(VisibilityHistory::default()))
+    /// The spare map keeps its allocation across frames when [`Self::store_visibility_history`]
+    /// can unwrap the previous publication.
+    pub(crate) fn begin_visibility(&self, view: ViewId) -> VisibilityScratch {
+        let mut slots = self.visibility.lock();
+        let slot = slots.entry(view).or_insert_with(|| VisibilitySlot {
+            published: Arc::new(VisibilityHistory::default()),
+            spare: HashMap::new(),
+        });
+        let scratch = VisibilityScratch {
+            history: Arc::clone(&slot.published),
+            spare: std::mem::take(&mut slot.spare),
+        };
+        drop(slots);
+        scratch
     }
 
     /// Stores the classification produced by this frame's fine cull.
+    ///
+    /// When this view is the last owner of the previous publication, that map is cleared and
+    /// kept as the spare for the next frame.
     pub(crate) fn store_visibility_history(&self, view: ViewId, history: VisibilityHistory) {
-        self.visibility.lock().insert(view, Arc::new(history));
+        let mut slots = self.visibility.lock();
+        let slot = slots.entry(view).or_insert_with(|| VisibilitySlot {
+            published: Arc::new(VisibilityHistory::default()),
+            spare: HashMap::new(),
+        });
+        let old = std::mem::replace(&mut slot.published, Arc::new(history));
+        if let Ok(old_history) = Arc::try_unwrap(old) {
+            let mut recycled = old_history.into_casters();
+            recycled.clear();
+            slot.spare = recycled;
+        }
+        drop(slots);
     }
 
     /// Number of live secondary-view Hi-Z slots.

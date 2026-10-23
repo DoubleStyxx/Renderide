@@ -7,7 +7,7 @@
 
 use glam::{Mat4, Vec3};
 
-use crate::occlusion::two_phase::CasterKey;
+use crate::occlusion::two_phase::CasterRef;
 use crate::world_mesh::culling::{
     CpuCullFailure, MeshCullTarget, mesh_draw_passes_cpu_cull,
     mesh_world_geometry_for_cull_with_head,
@@ -97,14 +97,17 @@ pub(super) fn cull_result_for_slot(
     }
 }
 
-fn caster_key(draw: &StaticMeshDrawSource<'_>) -> CasterKey {
-    CasterKey::new(
-        draw.space_id,
-        draw.renderable_index,
-        draw.instance_id.0,
-        draw.renderer.node_id,
-        draw.skinned,
-    )
+fn caster_key(draw: &StaticMeshDrawSource<'_>) -> CasterRef {
+    CasterRef {
+        key: crate::occlusion::two_phase::CasterKey::new(
+            draw.space_id,
+            draw.renderable_index,
+            draw.instance_id.0,
+            draw.renderer.node_id,
+            draw.skinned,
+        ),
+        mesh_asset_id: draw.renderer.mesh_asset_id,
+    }
 }
 
 /// Returns the world-space AABB for reflection-probe selection when the view tracks probes.

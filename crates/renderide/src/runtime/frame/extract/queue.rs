@@ -286,7 +286,7 @@ fn build_view_cull_inputs<'a>(
     let mut cull_inputs = Vec::with_capacity(prepared.len());
     let mut cull_projs = Vec::with_capacity(prepared.len());
     let mut snapshots = cull_snapshots.into_iter();
-    for prep in prepared {
+    for (index, prep) in prepared.iter().enumerate() {
         let snap = snapshots.next().unwrap_or(None);
         let cull_proj = snap.as_ref().map(|s| s.proj);
         let culling = snap.map(|s| WorldMeshCullInput {
@@ -295,7 +295,7 @@ fn build_view_cull_inputs<'a>(
             hi_z: s.hi_z,
             hi_z_temporal: s.hi_z_temporal,
             two_phase: phases
-                .get(cull_inputs.len())
+                .get(index)
                 .and_then(|phase| phase.as_ref())
                 .map(|phase| &phase.frame),
         });
