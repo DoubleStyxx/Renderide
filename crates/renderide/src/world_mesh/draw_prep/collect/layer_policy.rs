@@ -12,7 +12,12 @@ pub enum ViewLayerPolicy {
     MainView,
     /// Host camera rendering with camera culling masks and private-UI opt-in.
     Camera {
-        /// Whether private render spaces are visible to a non-selective camera.
+        /// Includes other private render spaces for this camera.
+        ///
+        /// Selective roots count only for the render space the transform filter applies to, so a
+        /// dashboard camera can draw the private userspace it lives in. `render_private_ui` is
+        /// Resonite's `RenderPrivateUI` / `CapturePrivateUI` flag and is what includes other
+        /// private spaces, such as a finger photo of the dash.
         render_private_ui: bool,
     },
     /// Desktop overlay camera rendering. Only overlay roots are included.
@@ -26,6 +31,9 @@ impl ViewLayerPolicy {
     }
 
     /// Returns whether this layer policy includes private render spaces.
+    ///
+    /// `has_selective_roots` must describe the render space under test, not every filter on the
+    /// view. Pass `true` only when that space is covered by a non-empty selective transform list.
     pub(crate) const fn shows_private_render_space(self, has_selective_roots: bool) -> bool {
         match self {
             Self::MainView => true,

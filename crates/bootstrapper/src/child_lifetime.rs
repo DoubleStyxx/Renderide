@@ -48,6 +48,16 @@ impl ChildLifetimeGroup {
         self.0.register_spawned(child)
     }
 
+    /// Forgets tracked children without signaling them.
+    ///
+    /// The renderer delegate calls this after `wait` returns. On macOS, `Drop` would otherwise
+    /// signal that pid and sleep through the shutdown grace period even though the process has
+    /// already exited. Parent-death handling during the wait is unchanged, because this runs
+    /// only after the child has been reaped.
+    pub(crate) fn disarm(&self) {
+        self.0.disarm();
+    }
+
     /// Sends `SIGINT`, then `SIGTERM`, then `SIGKILL` after grace periods, to every PID registered via [`Self::register_spawned`].
     ///
     /// `SIGINT` is sent first so children can run the same path as interactive Ctrl+C (e.g. flush
@@ -68,6 +78,12 @@ mod tests {
     fn child_lifetime_group_new_succeeds() {
         let g = ChildLifetimeGroup::new();
         assert!(g.is_ok(), "{:?}", g.err());
+    }
+
+    #[test]
+    fn disarm_on_empty_group_does_not_panic() {
+        let g = ChildLifetimeGroup::new().expect("group");
+        g.disarm();
     }
 
     #[cfg(unix)]

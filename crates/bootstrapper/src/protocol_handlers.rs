@@ -43,9 +43,14 @@ pub(crate) fn dispatch_command(
         HostCommand::Shutdown => handle_shutdown(),
         HostCommand::GetText => clipboard::handle_get_text(outgoing),
         HostCommand::SetText(text) => clipboard::handle_set_text(&text),
-        HostCommand::StartRenderer(args) => {
-            renderer::handle_start_renderer(&args, outgoing, config, lifetime, renderer_child)
-        }
+        HostCommand::StartRenderer(launch) => renderer::handle_start_renderer(
+            launch.executable.as_deref(),
+            &launch.args,
+            outgoing,
+            config,
+            lifetime,
+            renderer_child,
+        ),
     }
 }
 
@@ -128,7 +133,7 @@ mod tests {
         let (mut publisher, _) = make_publisher_subscriber(&dir);
         let slot = renderer_slot();
         assert_eq!(
-            renderer::handle_start_renderer(&[], &mut publisher, &cfg, &lifetime, &slot),
+            renderer::handle_start_renderer(None, &[], &mut publisher, &cfg, &lifetime, &slot),
             LoopAction::Continue
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -147,7 +152,7 @@ mod tests {
         let (mut publisher, mut subscriber) = make_publisher_subscriber(&dir);
         let slot = renderer_slot();
         assert_eq!(
-            renderer::handle_start_renderer(&[], &mut publisher, &cfg, &lifetime, &slot),
+            renderer::handle_start_renderer(None, &[], &mut publisher, &cfg, &lifetime, &slot),
             LoopAction::Continue
         );
         for _ in 0..50 {
@@ -215,7 +220,7 @@ mod tests {
         let (mut publisher, _) = make_publisher_subscriber(&dir);
         let slot = renderer_slot();
         assert_eq!(
-            renderer::handle_start_renderer(&[], &mut publisher, &cfg, &lifetime, &slot),
+            renderer::handle_start_renderer(None, &[], &mut publisher, &cfg, &lifetime, &slot),
             LoopAction::Continue
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -286,7 +291,10 @@ mod tests {
         );
         assert_eq!(
             dispatch_command(
-                HostCommand::StartRenderer(Vec::new()),
+                HostCommand::StartRenderer(crate::launch_args::RendererLaunchRequest {
+                    executable: None,
+                    args: Vec::new(),
+                }),
                 &mut publisher,
                 &cfg,
                 &lifetime,
