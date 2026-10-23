@@ -35,6 +35,9 @@ const CUBE_INDEX: usize = 1;
 /// The first stable PNG can land while PBS and the shadow atlas are still compiling. Later
 /// writes then differ. Two consecutive identical frames are the cache-hit evidence.
 const STATIC_MATCH_ATTEMPTS: u32 = 8;
+/// Lavapipe's settled shadow frame has several hundred colors. Two identical pre-light slabs
+/// (DX12 WARP wrote a 48-color gray band) must not count as the cache hit.
+const MIN_SETTLED_UNIQUE_COLORS: usize = 128;
 
 /// Inputs for the static-identity check and the caster move.
 pub(super) struct ShadowMoveRecapture<'a> {
@@ -237,26 +240,42 @@ fn wait_until_static_frames_match(
     plain_path: &Path,
 ) -> Result<(), HarnessError> {
     let mut last_diffs = 0usize;
+    let mut last_colors = 0usize;
     for attempt in 1..=STATIC_MATCH_ATTEMPTS {
         wait_for_fresh_png(recapture)?;
         last_diffs = pixel_diff_count(plain_path, recapture.output_path)?;
         if last_diffs == 0 {
             let settled = crate::image_io::load_rgba(plain_path)?;
             crate::golden::reject_flat_image(&settled, plain_path)?;
+            last_colors = unique_color_count(&settled);
+            if last_colors >= MIN_SETTLED_UNIQUE_COLORS {
+                logger::info!(
+                    "Session: static shadow frames matched on attempt {attempt} ({last_colors} colors, {})",
+                    plain_path.display()
+                );
+                return Ok(());
+            }
             logger::info!(
-                "Session: static shadow frames matched on attempt {attempt} ({})",
-                plain_path.display()
+                "Session: static shadow frame {attempt} matched in {last_colors} colors; waiting for a lit frame"
             );
-            return Ok(());
+        } else {
+            logger::info!(
+                "Session: static shadow frame {attempt} differed in {last_diffs} pixels; waiting for the atlas to settle"
+            );
         }
-        logger::info!(
-            "Session: static shadow frame {attempt} differed in {last_diffs} pixels; waiting for the atlas to settle"
-        );
         std::fs::copy(recapture.output_path, plain_path)?;
     }
     Err(HarnessError::ImageCompare(format!(
-        "static shadow recapture still differed in {last_diffs} pixels after {STATIC_MATCH_ATTEMPTS} frames; a cache-hit frame must stay pixel-identical"
+        "static shadow recapture was not a lit cache hit after {STATIC_MATCH_ATTEMPTS} frames (last pixel diff {last_diffs}, unique colors {last_colors}; need {MIN_SETTLED_UNIQUE_COLORS})"
     )))
+}
+
+fn unique_color_count(image: &image::RgbaImage) -> usize {
+    let mut colors = std::collections::HashSet::new();
+    for pixel in image.pixels() {
+        colors.insert(u32::from_le_bytes(pixel.0));
+    }
+    colors.len()
 }
 
 fn pixel_diff_count(before: &Path, after: &Path) -> Result<usize, HarnessError> {
@@ -291,6 +310,16 @@ fn assert_pixels_changed(before: &Path, after: &Path) -> Result<(), HarnessError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unique_color_count_rejects_a_two_tone_slab() {
+        let mut image = image::RgbaImage::new(4, 4);
+        for pixel in image.pixels_mut() {
+            *pixel = image::Rgba([44, 44, 44, 255]);
+        }
+        image.put_pixel(0, 0, image::Rgba([0, 0, 0, 255]));
+        assert!(unique_color_count(&image) < MIN_SETTLED_UNIQUE_COLORS);
+    }
 
     #[test]
     fn moved_cube_keeps_the_same_renderable_and_light_counts() {
