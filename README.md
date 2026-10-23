@@ -58,7 +58,7 @@ The launcher will start the Resonite host and connect Renderide automatically.
 
 - Logs are timestamped files under a selected logs root. Source builds normally resolve the active repository and write renderer logs to `logs/renderer/`. Installed release binaries fall back to the current user's platform log root: `$XDG_STATE_HOME/renderide/logs` or `~/.local/state/renderide/logs` on Linux, `~/Library/Logs/Renderide` on macOS, and `%LOCALAPPDATA%\Renderide\logs` on Windows. Set `RENDERIDE_LOGS_ROOT` to choose the root explicitly; component logs then live under `renderer/`, `bootstrapper/`, `host/`, `renderer-test/`, and `SharedTypeGenerator/`. The Renderer config HUD also shows the selected log folder and includes an "Open log folder" button.
 
-- You can add Steam-style launch arguments after the launcher to enable mods: `<path-to-renderide> -LoadAssembly Libraries/ResoniteModLoader.dll`
+- Resonite launch arguments are forwarded to the host, including arguments the launcher does not recognize. Values with spaces stay one argument. `-Screen`, `-Device SteamVR` (`-Device=SteamVR` and `-Device:Screen360` too), legacy switches such as `-SteamVR` and `-RiftTouch`, and a bare `none` skip the desktop/VR dialog. Example: `<path-to-renderide> -Screen -LoadAssembly Libraries/ResoniteModLoader.dll`. If Resonite starts this binary with `-QueueName` and `-QueueCapacity`, or with the older `STARTRENDERER ... ARGS=` wrapper, the launcher runs `renderide-renderer` and does not open the host dialog.
 
 ### macOS
 

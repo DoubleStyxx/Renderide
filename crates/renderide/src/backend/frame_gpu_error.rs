@@ -20,4 +20,7 @@ pub enum FrameGpuInitError {
     /// No depth format can be bound as the frame-global fallback shadow atlas.
     #[error("no supported sampled depth texture format for shadow atlas fallback")]
     ShadowAtlasBindingFormatUnavailable,
+    /// The fallback reflection-probe metadata buffer could not be mapped for its initial write.
+    #[error("reflection probe metadata buffer map range failed: {0}")]
+    ReflectionProbeMetadataMapFailed(String),
 }

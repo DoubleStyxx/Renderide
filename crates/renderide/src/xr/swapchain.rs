@@ -361,8 +361,11 @@ fn import_openxr_swapchain_image(
     };
     let wgpu_desc = xr_swapchain_wgpu_descriptor(&hal_desc);
     // SAFETY: `hal_tex` was imported from the Vulkan device backing `device`, and `wgpu_desc`
-    // matches the HAL descriptor used for the import.
-    let texture = unsafe { device.create_texture_from_hal::<HalVulkan>(hal_tex, &wgpu_desc) };
+    // matches the HAL descriptor used for the import. `TextureUses::UNINITIALIZED` is the state
+    // wgpu 29 assumed for foreign textures; the first use transitions the OpenXR image.
+    let texture = unsafe {
+        device.create_texture_from_hal::<HalVulkan>(hal_tex, &wgpu_desc, TextureUses::UNINITIALIZED)
+    };
     let array_view = texture.create_view(&xr_swapchain_array_view_descriptor());
     crate::profiling::note_resource_churn!(TextureView, "xr::swapchain_array_view");
     XrAcquiredSwapchainImage {
@@ -397,8 +400,11 @@ fn import_openxr_depth_swapchain_image(
     };
     let wgpu_desc = xr_depth_swapchain_wgpu_descriptor(&hal_desc, format);
     // SAFETY: `hal_tex` was imported from the Vulkan device backing `device`, and `wgpu_desc`
-    // matches the HAL descriptor used for the import.
-    let texture = unsafe { device.create_texture_from_hal::<HalVulkan>(hal_tex, &wgpu_desc) };
+    // matches the HAL descriptor used for the import. `TextureUses::UNINITIALIZED` is the state
+    // wgpu 29 assumed for foreign textures; the first use transitions the OpenXR depth image.
+    let texture = unsafe {
+        device.create_texture_from_hal::<HalVulkan>(hal_tex, &wgpu_desc, TextureUses::UNINITIALIZED)
+    };
     let array_view = texture.create_view(&xr_depth_swapchain_array_view_descriptor(format));
     crate::profiling::note_resource_churn!(TextureView, "xr::depth_swapchain_array_view");
     XrAcquiredDepthSwapchainImage {

@@ -11,8 +11,8 @@ path = "src/lib.rs"
 gltf = "1.4"
 hashbrown = "0.17"
 jobserver = "0.1"
-naga = { version = "29.0", features = ["wgsl-in", "wgsl-out", "termcolor"] }
-naga_oil = { version = "0.22", default-features = false }
+naga = { version = "30.0", features = ["wgsl-in", "wgsl-out", "termcolor"] }
+naga_oil = { version = "0.23", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "2.0"
 toml = "1.1"
@@ -71,15 +71,15 @@ ignored = ["tracing", "tracy-client"]
 profiling = "1.0"
 ahash = "0.8"
 bytemuck = { version = "1.25", features = ["derive"] }
-glam = { version = "0.33", features = ["bytemuck"] }
+glam = { version = "0.34", features = ["bytemuck"] }
 logger = { path = "../logger" }
 tracing = { version = "0.1", features = ["log-always"] }
 renderide-shared = { path = "../renderide-shared" }
 interprocess = { path = "../interprocess" }
-pollster = "0.4"
-rayon = "1.11"
+pollster = "1.0"
+rayon = "1.12"
 crossbeam-channel = "0.5"
-lru = "0.18"
+lru = "0.19"
 parking_lot = "0.12"
 thiserror = "2.0"
 ## Portable SIMD wrappers (u32x4/etc.) used in mip downsample inner accumulators. Pulled in via
@@ -96,18 +96,21 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 texture2ddecoder = "0.1"
 notify-debouncer-mini = "0.7"
 notify = "8.2"
-naga = { version = "29.0", features = ["wgsl-in", "wgsl-out", "termcolor"] }
-naga_oil = { version = "0.22", default-features = false }
+naga = { version = "30.0", features = ["wgsl-in", "wgsl-out", "termcolor"] }
+naga_oil = { version = "0.23", default-features = false }
 unity-asset = "0.2"
 unity-asset-binary = "0.2"
-wgpu = "29.0"
-winit = "0.31.0-beta.2"
+wgpu = "30.0"
+winit = "0.31.0-beta.3"
 ash = "0.38"
-openxr = { version = "0.21", default-features = false, features = ["loaded"] }
+openxr = { version = "0.22", default-features = false, features = ["loaded"] }
 imgui = { version = "0.12", features = ["tables-api"] }
-imgui-wgpu = "0.28"
+## Upstream Yatekii/imgui-wgpu-rs commit 3c9a5e9331d36cd050592424216a07a64c78743f.
+## crates.io 0.28.0 still depends on wgpu 29. Return this dependency to crates.io
+## when a wgpu-30 release of imgui-wgpu exists.
+imgui-wgpu = { git = "https://github.com/Yatekii/imgui-wgpu-rs", rev = "3c9a5e9331d36cd050592424216a07a64c78743f" }
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
-crash-handler = "0.7"
+crash-handler = "0.8"
 ## Cross-platform stack frame capture and symbol resolution, used by the fatal crash handler to
 ## emit a hex address list (signal-safe first pass) and a best-effort symbolicated trace
 ## (second pass) for native faults that bypass Rust's panic hook.
@@ -115,7 +118,7 @@ backtrace = "0.3"
 bevy_mikktspace = "1.0"
 ## GPU timestamp query scopes; bridges per-phase GPU timing to Tracy when the `tracy` feature is on.
 ## Only compiled when the `tracy` workspace feature is enabled.
-wgpu-profiler = { version = "0.27", optional = true }
+wgpu-profiler = { version = "0.28", optional = true }
 ## Tracy client. `enable` activates the native client library; `ondemand` keeps runtime cost
 ## near-zero by only streaming data while a profiler GUI is attached. Only compiled when the
 ## `tracy` feature is enabled.
@@ -135,19 +138,19 @@ url = "2.5"
 renderide-control-client = { path = "../renderide-control-client", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-wgpu = { version = "29.0", features = ["vulkan-portability"] }
+wgpu = { version = "30.0", features = ["vulkan-portability"] }
 
 # Bundle DXC into the binary so wgpu's `Dx12Compiler::Auto` picks the static DXC instead of
 # falling back to FXC. FXC compiles average ~46 ms (max ~474 ms) and serialise the render thread
 # via `materials::pipeline_single_flight_wait`; DXC is multi-threaded and ~5-10x faster, so
 # first-touch panel pipelines stop stalling the frame.
 [target.'cfg(target_os = "windows")'.dependencies]
-wgpu = { version = "29.0", features = ["static-dxc"] }
+wgpu = { version = "30.0", features = ["static-dxc"] }
 
 [dev-dependencies]
 jobserver = "0.1"
 logger = { path = "../logger" }
-naga_oil = { version = "0.22", default-features = false }
+naga_oil = { version = "0.23", default-features = false }
 tempfile = "3.27"
 
 [target.'cfg(unix)'.dependencies]

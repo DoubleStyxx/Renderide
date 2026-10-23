@@ -78,6 +78,7 @@ pub(crate) fn host_scroll_delta_from_wheel(delta: &MouseScrollDelta) -> Vec2 {
             Vec2::new(*x * HOST_SCROLL_LINE_UNIT, *y * HOST_SCROLL_LINE_UNIT)
         }
         MouseScrollDelta::PixelDelta(p) => Vec2::new(p.x as f32, p.y as f32),
+        _ => Vec2::ZERO,
     }
 }
 
@@ -89,6 +90,7 @@ pub(crate) fn imgui_scroll_delta_from_wheel(delta: &MouseScrollDelta) -> Vec2 {
             p.x as f32 / PIXELS_PER_IMGUI_WHEEL_UNIT,
             p.y as f32 / PIXELS_PER_IMGUI_WHEEL_UNIT,
         ),
+        _ => Vec2::ZERO,
     }
 }
 

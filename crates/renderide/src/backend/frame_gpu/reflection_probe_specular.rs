@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use crate::backend::frame_gpu_error::FrameGpuInitError;
 use crate::gpu::{GpuReflectionProbeMetadata, REFLECTION_PROBE_ATLAS_FORMAT};
 
 /// Borrowed view used while creating frame-global bind groups.
@@ -15,15 +16,17 @@ pub(super) struct ReflectionProbeSpecularBindGroupResources<'a> {
     pub metadata_buffer: &'a wgpu::Buffer,
 }
 
-/// Allocates black fallback reflection-probe bindings.
-pub(super) fn create_reflection_probe_specular_fallback(
-    device: &wgpu::Device,
-) -> (
+type ReflectionProbeSpecularFallback = (
     Arc<wgpu::Texture>,
     Arc<wgpu::TextureView>,
     Arc<wgpu::Sampler>,
     Arc<wgpu::Buffer>,
-) {
+);
+
+/// Allocates black fallback reflection-probe bindings.
+pub(super) fn create_reflection_probe_specular_fallback(
+    device: &wgpu::Device,
+) -> Result<ReflectionProbeSpecularFallback, FrameGpuInitError> {
     let texture = Arc::new(device.create_texture(&wgpu::TextureDescriptor {
         label: Some("frame_reflection_probe_black_array"),
         size: wgpu::Extent3d {
@@ -73,12 +76,23 @@ pub(super) fn create_reflection_probe_specular_fallback(
         mapped_at_creation: true,
     }));
     crate::profiling::note_resource_churn!(Buffer, "backend::frame_reflection_probe_metadata");
-    metadata_buffer
-        .slice(..)
-        .get_mapped_range_mut()
-        .copy_from_slice(bytemuck::cast_slice(&metadata));
-    metadata_buffer.unmap();
-    (texture, view, sampler, metadata_buffer)
+    let mapped = match metadata_buffer.slice(..).get_mapped_range_mut() {
+        Ok(mut mapped) => {
+            mapped.copy_from_slice(bytemuck::cast_slice(&metadata));
+            drop(mapped);
+            metadata_buffer.unmap();
+            Ok(())
+        }
+        Err(err) => {
+            logger::error!("reflection probe metadata map range failed: {err}");
+            metadata_buffer.unmap();
+            Err(FrameGpuInitError::ReflectionProbeMetadataMapFailed(
+                err.to_string(),
+            ))
+        }
+    };
+    mapped?;
+    Ok((texture, view, sampler, metadata_buffer))
 }
 
 #[cfg(test)]
