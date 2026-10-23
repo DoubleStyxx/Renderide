@@ -265,7 +265,13 @@ impl FrameBracketReadback {
 
 /// Reads the two `u64` timestamps from `readback`, returning the elapsed milliseconds.
 fn read_gpu_ms(readback: &wgpu::Buffer, timestamp_period: f32) -> Option<f64> {
-    let view = readback.slice(..).get_mapped_range();
+    let view = match readback.slice(..).get_mapped_range() {
+        Ok(view) => view,
+        Err(err) => {
+            logger::debug!("frame bracket mapped range failed: {err}");
+            return None;
+        }
+    };
     let gpu_ms = timestamp_pair_bytes_to_ms(&view, timestamp_period);
     drop(view);
     gpu_ms
