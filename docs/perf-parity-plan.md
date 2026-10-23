@@ -1,6 +1,6 @@
 # Performance parity plan (issue #148): Renderide vs the Unity renderer
 
-Owner: Gauge Drone (benchmarks and perf gate). Feature owners attach numbers using section 6.
+Owner: Gauge Drone (benchmarks and perf gate). Feature owners attach numbers using the block in section 6.
 
 Status: draft. Everything marked **lavapipe** is measured and repeatable on any Linux box with Mesa lavapipe. Everything marked **real GPU** needs a machine with a physical GPU and (for the Unity side) a Resonite install; nothing in this document claims a Unity number that was not measured.
 
@@ -26,8 +26,8 @@ Scenes are host-driven (the framebench host replays a fixed scene over IPC; see 
 | S1 | `many_static_meshes` | draw-call count, instancing, CPU frustum/Hi-Z cull, draw prep | 1,600 unlit spheres, one mesh and material, 0 lights | implemented |
 | S2 | `lights_shadows` | clustered lights, shadow atlas, PBS forward | floor + 8x8 PBS spheres, 1 shadowed directional + 4 shadowed point lights | implemented |
 | S3 | `pbs_lit_material_matrix` | PBS shading, material bind groups | existing golden scene, now selectable in framebench | implemented (selector only) |
-| S4 | `many_shadowed_point_lights` | shadow-heavy lighting (30 shadowed points) | defined by PR #46 | pending #46 (lands in `scenario.rs` on that branch) |
-| S5 | `offscreen_skinned_avatars` | skinned deform, CPU cull gap (#166) | N skinned meshes outside the frustum | to add with #166 (host needs skinned mesh upload; not cheap) |
+| S4 | `many_shadowed_point_lights` | shadow-heavy lighting (30 shadowed points) | defined by PR #46 (merged); opt-in, raises `per_pixel_lights` to 32 | implemented (master) |
+| S5 | `offscreen_skinned_avatars` (+ control `onscreen_skinned_avatars`) | skinned deform, CPU cull of skinned renderers (#166/#177), shadow casters that stay when off-screen | floor + 16 visible and 256 behind-the-camera one-bone skinned spheres (host-sent posed bounds), all shadow casters of one soft-shadowed sun; control puts all 272 in view | implemented (host now uploads one-bone skinned meshes, bone assignments and posed bounds) |
 | S6 | `ui_canvas_stack` | UI draw ordering, transparent sort (#50) | hundreds of coplanar canvas quads | to add; CPU part already covered by `transparent_sort` Criterion bench on #50 |
 | S7 | `vr_mirror` | multiview + secondary view | stereo + mirror camera | **real GPU/OpenXR**; not representable on lavapipe |
 | S8 | `particles` | particle-system CPU update + draw | emitters with N particles | to add once a particle upload path is scriptable |
@@ -125,7 +125,7 @@ CI shortcut: Actions -> "Frame bench" -> Run workflow with `base_ref=master`, `h
 | S6 ui_canvas_stack | | | | | | | | | | | |
 | S7 vr_mirror | | | | | | | | | | | |
 
-Lavapipe reference numbers for the implemented scenes are in section 9.
+Lavapipe reference numbers for the implemented scenes are in section 10.
 
 ## 8. Upcoming feature PRs: scenes, benches, metric, threshold
 
@@ -133,7 +133,7 @@ Thresholds are relative to master measured on the same box in the same session. 
 
 | PR / issue | Owner | Scenes (framebench) | Criterion benches | Metric | Threshold | Notes |
 |---|---|---|---|---|---|---|
-| #166 skinned culling | Shader | S5 `offscreen_skinned_avatars` (to add), S1 unchanged | extend `culling/homogeneous_clip_aabb` with a skinned batch; keep non-skinned rows | draw calls and `cpu_frame_ms` p50 in S5 must **drop**; S1 and S2 must not regress | S1/S2 p50,p95 <= +5% (noise-adjusted); `homogeneous_clip_aabb` <= +5%; S5 draw count down by the off-screen share | golden for on-screen skinned parity; popping test with extreme poses; real GPU for deform cost |
+| #166 skinned culling (fork PR #177) | Shader | S5 `offscreen_skinned_avatars` + control `onscreen_skinned_avatars` (regression guard), S1/S2 unchanged | `culling/skinned_homogeneous_clip_aabb` vs `culling/homogeneous_clip_aabb` (both exist on #177) | S5 draw calls: offscreen must equal the visible share (17) and onscreen ~271-273 on base AND head; no allocation in the clip loop (`skinned_clip_loop_allocates_nothing`); S1/S2 must not regress | S1/S2 p50,p95 <= +5% (noise-adjusted); rigid row <= +5%; skinned row <= +10% over the rigid row | **Measured 2026-10-23 (section 10): production master already culls skinned draws via the prepared-renderables path; #177 changes only the `#[cfg(test)]` scene-walk collector plus a no-op `mesh_bounds` refactor, so no end-to-end frame-time or draw-count delta is expected or observed.** Real GPU only for skinned deform cost |
 | #144 clear modes | Shader | S2 plus a two-camera stacked-render-texture scene (to add) | none new (load-op change) | `cpu_frame_ms` p50/p95; GPU pass ms for Opaque/DepthPrepass (real GPU) | S1/S2 <= +5%; no new attachments (upload bytes/count unchanged) | golden for `Nothing`/`Depth`; load-op savings only visible on a real GPU (tile GPUs) |
 | #145 LOD cross-fade | Shader | S1 with cross-fade off must be bit-identical (draw count equal); a fading-LOD scene (to add) | allocation check on LOD collect; add `lod_select` bench if CPU cost is claimed | draw count off=base; extra draws only in transition; `cpu_frame_ms` | fade off: draws identical, p50 <= +2% (S1); fade on: report the extra-draw cost | golden mid-fade frame |
 | #147 camera double buffering | Shader | render-texture camera scene (to add), S0 | none | VRAM (second image created once), `cpu_frame_ms` | S0/S1 <= +5%; VRAM +1 color image per double-buffered texture only | VRAM check needs a real GPU or wgpu allocation report |
@@ -157,4 +157,28 @@ Use the existing manual workflow (`.github/workflows/frame-bench.yml`, `workflow
 
 ## 10. Measured lavapipe reference (this branch's scenes)
 
-See the section appended by the measurement run below (SHA, machine, numbers).
+Measured 2026-10-23 12:0x-12:3x MDT by Gauge Drone. Machine: shared 8-vCPU Linux VM, **llvmpipe/lavapipe (no real GPU)**, rustc stable, release+debuginfo, fork master **2bb2af47** (before that 3c084f4f for the PR matrix) vs #177 head 90f7c05c. Medians of 4 interleaved rounds (CI config: 256x256, 2 cores, warmup 10, frames 30, runs 5) and 3 rounds (1280x720, warmup 20, frames 60, runs 3, 8 threads). Expect +/-5-10% round-to-round noise.
+
+| Scene | CI cfg: draws, cpu_frame p50 / p95 ms | 1280x720: draws, p50 / p95 ms |
+|---|---|---|
+| S0 unlit_sphere | 1, 0.24 / 0.29 | 1, 0.25 / 0.29 |
+| S0 multi_primitive_unlit | 4, 0.27 / 0.33 | 4, 0.28 / 0.34 |
+| S1 many_static_meshes | 676, 1.9 / 2.3 | 1,040, 2.1 / 2.5 |
+| S2 lights_shadows (casters On) | 65, 0.73 / 1.3 | 65, 0.50 / 0.58 |
+| S5 offscreen_skinned_avatars | 17, 0.67 / 0.84 | 17, 0.98 / 1.35 |
+| S5 control onscreen_skinned_avatars | 271, 1.0 / 1.2 | 273, 1.7 / 2.3 |
+
+Reading: the S5 pair is the intended regression guard: 256 behind-the-camera avatars cost nothing in draw calls on either tree (17 vs 271-273 draws), so any change that makes the off-screen share draw again will show in `draw_calls` immediately (deterministic, gate at 0%). S1 draw counts differ between resolutions because of frustum/Hi-Z culling. Criterion reference (same box): `culling/homogeneous_clip_aabb` ~49-51 us, `culling/skinned_homogeneous_clip_aabb` ~52 us, `shadow_churn/static_repaint` ~120-130 us, `shadow_churn/cold_plan` ~4.2-4.5 ms, `keyword_variants/compose` ~34 ms (real per-variant naga-oil compose cost on the warmup worker, not a frame hitch), `transparent_sort/precomputed_10k` ~1.73 ms.
+
+Multi-thread lock behaviour is not visible in framebench or Criterion; the `gauge/lock-contention-bench` branch adds `renderide-lockbench` (`cargo run --release -p renderide-lockbench -- --threads 2,4,8`) for A/B-ing lock crates; use it whenever a dependency bump touches `parking_lot` or the GPU queue gate.
+
+### Exact commands for Styxx on a real GPU
+```
+git clone https://github.com/DoubleStyxx/Renderide && cd Renderide
+cargo build --release --locked -p renderide -p renderide-framebench
+unset VK_ICD_FILENAMES VK_DRIVER_FILES        # use the real driver
+for s in many_static_meshes lights_shadows pbs_lit_material_matrix offscreen_skinned_avatars onscreen_skinned_avatars; do
+  RAYON_NUM_THREADS=8 target/release/renderide-framebench run --renderer target/release/renderide-renderer \
+     --scenario $s --resolution 1920x1080 --warmup 30 --frames 120 --runs 3 --output perf-$s.json
+done   # check adapter.device_type != Cpu in the JSON; keep gpu_passes_ms
+```
