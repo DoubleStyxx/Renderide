@@ -10,7 +10,7 @@ use crate::camera::{
 use crate::materials::RasterPipelineKind;
 use crate::scene::SceneTransformRead;
 use crate::shared::RenderingContext;
-use crate::world_mesh::WorldMeshDrawItem;
+use crate::world_mesh::{WorldMeshDrawItem, apply_reverse_z_ndc_bias};
 
 /// Chooses perspective vs orthographic projection for a draw (overlay vs world).
 #[inline]
@@ -190,26 +190,39 @@ pub(crate) fn compute_per_draw_vp_matrices(
     render_context: RenderingContext,
     world_proj: Mat4,
     overlay_proj: Option<Mat4>,
+    ndc_z_bias: f32,
 ) -> PerDrawVpMatrices {
     let Some(space) = scene.space(item.space_id) else {
         return PerDrawVpMatrices::identity();
     };
-    if item.is_overlay {
+    let matrices = if item.is_overlay {
         let overlay_vp = overlay_view_projection(overlay_proj, world_proj);
         let model = resolve_model_selection(scene, item, hc, render_context);
-        return PerDrawVpMatrices::new(overlay_vp, overlay_vp, model);
-    }
-    let model = || resolve_model_selection(scene, item, hc, render_context);
-    let view = view_matrix_for_host_world_mesh_space(scene, space, hc);
-    let vr_stereo_view = Mat4::IDENTITY;
-    if let Some(stereo) = hc.active_stereo() {
-        let (sl, sr) = stereo.view_proj_pair();
-        PerDrawVpMatrices::new(sl * vr_stereo_view, sr * vr_stereo_view, model())
+        PerDrawVpMatrices::new(overlay_vp, overlay_vp, model)
     } else {
-        let proj = projection_for_world_mesh_draw(false, overlay_proj, world_proj);
-        let base_vp = proj * view;
-        PerDrawVpMatrices::new(base_vp, base_vp, model())
+        let model = || resolve_model_selection(scene, item, hc, render_context);
+        let view = view_matrix_for_host_world_mesh_space(scene, space, hc);
+        let vr_stereo_view = Mat4::IDENTITY;
+        if let Some(stereo) = hc.active_stereo() {
+            let (sl, sr) = stereo.view_proj_pair();
+            PerDrawVpMatrices::new(sl * vr_stereo_view, sr * vr_stereo_view, model())
+        } else {
+            let proj = projection_for_world_mesh_draw(false, overlay_proj, world_proj);
+            let base_vp = proj * view;
+            PerDrawVpMatrices::new(base_vp, base_vp, model())
+        }
+    };
+    apply_ndc_z_bias(matrices, ndc_z_bias)
+}
+
+/// Left-multiplies a constant reverse-Z NDC offset into both eye view-projections.
+fn apply_ndc_z_bias(mut matrices: PerDrawVpMatrices, ndc_z_bias: f32) -> PerDrawVpMatrices {
+    if ndc_z_bias == 0.0 {
+        return matrices;
     }
+    matrices.view_proj_left = apply_reverse_z_ndc_bias(matrices.view_proj_left, ndc_z_bias);
+    matrices.view_proj_right = apply_reverse_z_ndc_bias(matrices.view_proj_right, ndc_z_bias);
+    matrices
 }
 
 #[cfg(test)]
@@ -350,6 +363,7 @@ mod tests {
             RenderingContext::UserView,
             Mat4::IDENTITY,
             Some(overlay_proj),
+            0.0,
         );
 
         let origin_clip = matrices.view_proj_left * matrices.model * Vec4::new(0.0, 0.0, 0.0, 1.0);
@@ -382,6 +396,47 @@ mod tests {
         assert!(
             (right_ndc_x - expected_x).abs() < 1e-3,
             "expected NDC x {expected_x}, got {right_ndc_x}",
+        );
+    }
+
+    #[test]
+    fn per_draw_ndc_bias_moves_overlay_depth_closer_in_reverse_z() {
+        let mut scene = SceneCoordinator::new();
+        let space_id = RenderSpaceId(104);
+        scene.test_seed_space_identity_worlds(space_id, vec![identity_transform()], vec![-1]);
+        scene.test_set_space_overlay(space_id, true);
+        let mut item = draw_item(false);
+        item.space_id = space_id;
+        item.is_overlay = true;
+        let viewport = Viewport::from_tuple((256, 256));
+        let overlay_proj =
+            HostCameraFrame::overlay_projection(viewport, CameraClipPlanes::new(0.1, 100.0));
+        let bias = 4.0 / 16_777_216.0;
+        let base = compute_per_draw_vp_matrices(
+            &scene,
+            &item,
+            &HostCameraFrame::default(),
+            RenderingContext::UserView,
+            Mat4::IDENTITY,
+            Some(overlay_proj),
+            0.0,
+        );
+        let closer = compute_per_draw_vp_matrices(
+            &scene,
+            &item,
+            &HostCameraFrame::default(),
+            RenderingContext::UserView,
+            Mat4::IDENTITY,
+            Some(overlay_proj),
+            bias,
+        );
+        let point = Vec4::new(0.0, 0.0, 0.0, 1.0);
+        let base_clip = base.view_proj_left * base.model * point;
+        let closer_clip = closer.view_proj_left * closer.model * point;
+        let delta = closer_clip.z / closer_clip.w - base_clip.z / base_clip.w;
+        assert!(
+            (delta - bias).abs() < 1.0e-6,
+            "expected NDC z to increase by {bias}, got {delta}"
         );
     }
 
