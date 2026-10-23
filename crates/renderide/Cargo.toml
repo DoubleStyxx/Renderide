@@ -80,7 +80,7 @@ pollster = "1.0"
 rayon = "1.12"
 crossbeam-channel = "0.5"
 lru = "0.19"
-parking_lot = "0.12"
+parking_lot = "0.13"
 thiserror = "2.0"
 ## Portable SIMD wrappers (u32x4/etc.) used in mip downsample inner accumulators. Pulled in via
 ## glam transitively, listed here as a direct dep since renderide CPU code calls it.

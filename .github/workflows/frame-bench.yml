@@ -62,13 +62,13 @@ jobs:
     timeout-minutes: 180
     steps:
       - name: Checkout candidate
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.head_ref != '' && inputs.head_ref || github.ref }}
           path: head
 
       - name: Checkout baseline
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.base_ref }}
           path: base
