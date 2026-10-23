@@ -227,7 +227,7 @@ impl AppDriver {
             return;
         }
 
-        apply_window_event(&mut self.input, window.as_ref(), &event);
+        apply_window_event(&mut self.input, window.as_ref(), event_loop, &event);
 
         if fullscreen_toggle_shortcut(&event, self.input.keyboard_modifiers())
             && let Some(target) = self.target.as_ref()

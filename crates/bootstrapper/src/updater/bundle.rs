@@ -1,5 +1,6 @@
 //! Release archive and extracted bundle validation.
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs;
@@ -29,9 +30,17 @@ pub(super) fn validate_zip_paths(archive_path: &Path) -> Result<(), UpdateError>
         let entry = zip
             .by_index(index)
             .map_err(|e| UpdateError::InvalidArchive(e.to_string()))?;
-        validate_zip_entry_name(entry.name())?;
+        let name = archive_entry_name(entry.name())?;
+        validate_zip_entry_name(name.as_ref())?;
     }
     Ok(())
+}
+
+/// Turns a zip entry name into an archive error when decoding fails.
+pub(super) fn archive_entry_name<'a>(
+    name: zip::result::ZipResult<Cow<'a, str>>,
+) -> Result<Cow<'a, str>, UpdateError> {
+    name.map_err(|err| UpdateError::InvalidArchive(err.to_string()))
 }
 
 /// Rejects absolute, parent-relative, or platform-ambiguous archive paths.
@@ -579,6 +588,27 @@ mod tests {
         .to_string();
 
         assert!(validate_manifest(&text, &metadata, &candidate).is_ok());
+    }
+
+    #[test]
+    fn ed25519_dalek3_known_answer_round_trip() {
+        const MESSAGE: &[u8] = b"{}";
+        const SIGNATURE_B64: &str = "tCFbGQP4srJllkVV+oc0rNbRFzzE0m00PEyBFJnDOPFP4iOwdQ6GccLck81ksWLZmqDCC7NLQYd6wAocvYUAAA==";
+        assert_eq!(signed_manifest_for_test("{}"), SIGNATURE_B64);
+        assert!(verify_manifest_signature_bytes(MESSAGE, SIGNATURE_B64.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn zip_entry_name_error_becomes_invalid_archive() {
+        let err = archive_entry_name(Err(zip::result::ZipError::InvalidArchive(
+            "undecodable entry name".into(),
+        )));
+        match err {
+            Err(UpdateError::InvalidArchive(message)) => {
+                assert!(message.contains("undecodable entry name"), "{message}");
+            }
+            other => panic!("expected InvalidArchive, got {other:?}"),
+        }
     }
 
     #[test]

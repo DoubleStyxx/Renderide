@@ -253,7 +253,15 @@ fn read_timestamps(installed: &Installed, count: u32) -> Option<Vec<u8>> {
         poison();
         return None;
     }
-    let bytes = slice.get_mapped_range().to_vec();
+    let bytes = match slice.get_mapped_range() {
+        Ok(view) => view.to_vec(),
+        Err(err) => {
+            logger::warn!("frame bench: mapped timestamp range failed: {err}");
+            installed.readback.unmap();
+            poison();
+            return None;
+        }
+    };
     installed.readback.unmap();
     Some(bytes)
 }

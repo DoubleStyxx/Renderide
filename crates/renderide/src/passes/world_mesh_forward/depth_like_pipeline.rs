@@ -62,6 +62,8 @@ pub(super) fn create_depth_like_pipeline(
             compilation_options: Default::default(),
             targets: spec.color_targets,
         });
+    let vertex_buffers: Vec<Option<wgpu::VertexBufferLayout<'static>>> =
+        spec.vertex_buffers.iter().cloned().map(Some).collect();
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(spec.label),
         layout: Some(&layout),
@@ -69,7 +71,7 @@ pub(super) fn create_depth_like_pipeline(
             module: &shader,
             entry_point: Some("vs_main"),
             compilation_options: Default::default(),
-            buffers: spec.vertex_buffers,
+            buffers: &vertex_buffers,
         },
         fragment,
         primitive: wgpu::PrimitiveState {
