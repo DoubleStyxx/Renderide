@@ -203,7 +203,26 @@ fn write_png_atomically(
         // Publish the pass count before the PNG rename so a stable PNG has its stat.
         publish_atlas_pass_record(output_path, passes)?;
     }
-    std::fs::rename(&tmp_path, output_path).map_err(HeadlessReadbackError::Io)
+    std::fs::rename(&tmp_path, output_path).map_err(HeadlessReadbackError::Io)?;
+    if shadow_atlas_passes.is_some() {
+        // `rename` keeps the temp PNG's mtime, which is earlier than the sidecar write.
+        // APFS then reports the sidecar as newer, and the harness rejects the finished pair.
+        align_atlas_pass_sidecar_mtime(output_path)?;
+    }
+    Ok(())
+}
+
+/// Gives the sidecar the PNG's mtime so a finished pair is not newer than the image.
+fn align_atlas_pass_sidecar_mtime(output_path: &Path) -> Result<(), HeadlessReadbackError> {
+    let png_mtime = std::fs::metadata(output_path)
+        .and_then(|meta| meta.modified())
+        .map_err(HeadlessReadbackError::Io)?;
+    let sidecar = output_path.with_extension("atlas-passes");
+    std::fs::File::options()
+        .write(true)
+        .open(&sidecar)
+        .and_then(|file| file.set_modified(png_mtime))
+        .map_err(HeadlessReadbackError::Io)
 }
 
 /// Writes `this_frame total` beside the PNG and appends the same line to the pass log.

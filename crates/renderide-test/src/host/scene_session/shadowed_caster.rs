@@ -319,6 +319,9 @@ fn read_atlas_pass_sidecar(png: &Path) -> Result<AtlasPassSample, HarnessError> 
     let sidecar = atlas_pass_sidecar(png);
     let png_mtime = std::fs::metadata(png)?.modified()?;
     let side_mtime = std::fs::metadata(&sidecar)?.modified()?;
+    // A sidecar written for the next frame, before that frame's PNG rename, is newer than
+    // the PNG still on disk. A finished pair has equal mtimes: the renderer stamps the sidecar
+    // with the PNG mtime after rename, because the temp PNG is older than the sidecar write.
     if side_mtime > png_mtime {
         return Err(HarnessError::ImageCompare(
             "shadow atlas pass sidecar is newer than the PNG".to_string(),
@@ -449,6 +452,46 @@ fn assert_pixels_changed(before: &Path, after: &Path) -> Result<(), HarnessError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn atlas_pass_sidecar_matches_the_png_mtime() -> Result<(), HarnessError> {
+        let dir = std::env::temp_dir().join(format!("shadow-atlas-mtime-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
+        let png = dir.join("frame.png");
+        std::fs::write(&png, b"png")?;
+        let sidecar = atlas_pass_sidecar(&png);
+        std::fs::write(&sidecar, "0 3\n")?;
+        let png_mtime = std::fs::metadata(&png)?.modified()?;
+        let earlier = png_mtime
+            .checked_sub(Duration::from_secs(2))
+            .unwrap_or(png_mtime);
+        std::fs::File::options()
+            .write(true)
+            .open(&sidecar)?
+            .set_modified(earlier)?;
+        let sample = read_atlas_pass_sidecar(&png)?;
+        assert_eq!(sample.this_frame, 0);
+        assert_eq!(sample.total, 3);
+
+        let later = png_mtime
+            .checked_add(Duration::from_secs(2))
+            .unwrap_or(png_mtime);
+        std::fs::File::options()
+            .write(true)
+            .open(&sidecar)?
+            .set_modified(later)?;
+        match read_atlas_pass_sidecar(&png) {
+            Ok(_) => {
+                return Err(HarnessError::ImageCompare(
+                    "newer sidecar was accepted".to_string(),
+                ));
+            }
+            Err(err) => assert!(err.to_string().contains("newer than the PNG")),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
 
     #[test]
     fn atlas_pass_line_parses_two_integers() {
