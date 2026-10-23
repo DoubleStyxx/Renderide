@@ -14,10 +14,12 @@
 //! Each PID stores the last original counter and an offset. The counter written
 //! back is `original + offset` (mod 16). The offset changes only when the
 //! original counter is discontinuous. A repeated original counter with the same
-//! payload is a duplicate retransmission, so the output counter repeats and the
-//! offset stays put. A fragment that restarts on the same counter value but
-//! carries a different payload is a discontinuity, not a duplicate. Two
-//! different payloads that share a hash are indistinguishable from a duplicate.
+//! payload is a duplicate retransmission and is not forwarded. On GStreamer 1.24
+//! a repeated counter takes the continuity-mismatch path and drops the rest of
+//! the PES, so the repair removes the packet instead of repeating the counter.
+//! A fragment that restarts on the same counter value but carries a different
+//! payload is a discontinuity, not a duplicate. Two different payloads that
+//! share a hash are indistinguishable from a duplicate.
 
 /// MPEG-TS packet size accepted by `tsdemux`.
 const TS_PACKET_SIZE: usize = 188;
@@ -151,25 +153,27 @@ impl MpegTsContinuityState {
             return None;
         }
         let mut patches = Vec::new();
+        let mut dropped = Vec::new();
         let mut rewritten = 0;
         for (index, packet) in aligned.chunks(TS_PACKET_SIZE).enumerate() {
-            if let Some(byte) = next_continuity_byte(packet, &mut self.pids) {
-                patches.push((index * TS_PACKET_SIZE + 3, byte));
-                rewritten += 1;
+            match next_continuity_byte(packet, &mut self.pids) {
+                PacketEdit::Keep => {}
+                PacketEdit::Rewrite(byte) => {
+                    patches.push((index * TS_PACKET_SIZE + 3, byte));
+                    rewritten += 1;
+                }
+                PacketEdit::Drop => dropped.push(index),
             }
         }
-        let forward = if complete == chunk.len() && patches.is_empty() {
+        let forward = if dropped.is_empty() && complete == chunk.len() && patches.is_empty() {
             ChunkForward::Unchanged
-        } else if complete == chunk.len() {
+        } else if dropped.is_empty() && complete == chunk.len() {
             ChunkForward::Patch(patches)
         } else {
-            let mut output = aligned.to_vec();
-            for (offset, byte) in patches {
-                if let Some(slot) = output.get_mut(offset) {
-                    *slot = byte;
-                }
+            let output = copy_forwarded_packets(aligned, &patches, &dropped);
+            if complete != chunk.len() {
+                self.pending.extend_from_slice(&chunk[complete..]);
             }
-            self.pending.extend_from_slice(&chunk[complete..]);
             ChunkForward::Replace(output)
         };
         Some(ChunkRepair { forward, rewritten })
@@ -257,9 +261,16 @@ fn take_locked_packets(
             return (consumed, true, rewritten);
         }
         let end = cursor + TS_PACKET_SIZE;
-        if let Some(byte) = next_continuity_byte(&data[cursor..end], pids) {
-            data[cursor + 3] = byte;
-            rewritten += 1;
+        match next_continuity_byte(&data[cursor..end], pids) {
+            PacketEdit::Drop => {
+                data.drain(cursor..end);
+                continue;
+            }
+            PacketEdit::Rewrite(byte) => {
+                data[cursor + 3] = byte;
+                rewritten += 1;
+            }
+            PacketEdit::Keep => {}
         }
         cursor = end;
     }
@@ -279,32 +290,48 @@ fn find_packet_lock(data: &[u8]) -> Option<usize> {
     })
 }
 
-/// Returns a replacement for byte 3 when this packet's counter must change.
-fn next_continuity_byte(packet: &[u8], pids: &mut [Option<PidContinuity>]) -> Option<u8> {
-    let header = TsPacketHeader::parse(packet)?;
-    if header.discontinuity {
+/// How one packet should be forwarded after the continuity scan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PacketEdit {
+    /// Leave the packet bytes as they are.
+    Keep,
+    /// Replace byte 3 with this value.
+    Rewrite(u8),
+    /// Do not forward the packet.
+    Drop,
+}
+
+/// Returns how to forward one packet, updating `pids` when the packet is accepted.
+fn next_continuity_byte(packet: &[u8], pids: &mut [Option<PidContinuity>]) -> PacketEdit {
+    let Some(header) = TsPacketHeader::parse(packet) else {
+        return PacketEdit::Keep;
+    };
+    // `tsdemux` 1.24 clears its counter only for a payload-bearing packet with
+    // `discontinuity_indicator`. An adaptation-only or PCR-only flag must not
+    // clear a nonzero offset, or the next payload is written against a new baseline.
+    if header.discontinuity && header.has_payload {
         clear_pid(pids, header.pid);
-        return None;
+        return PacketEdit::Keep;
     }
     if header.transport_error || header.pid == NULL_PID || !header.has_payload {
-        return None;
+        return PacketEdit::Keep;
     }
     let hash = payload_hash(packet, header.payload_offset);
-    let slot = pids.get_mut(usize::from(header.pid))?;
+    let Some(slot) = pids.get_mut(usize::from(header.pid)) else {
+        return PacketEdit::Keep;
+    };
     let Some(previous) = *slot else {
         *slot = Some(PidContinuity {
             last_original: header.continuity,
             offset: 0,
             payload_hash: hash,
         });
-        return None;
+        return PacketEdit::Keep;
     };
     if header.continuity == previous.last_original && hash == previous.payload_hash {
-        // Duplicate retransmission. Leave the offset alone so the output counter repeats.
-        return replacement_byte(
-            packet[3],
-            output_counter(header.continuity, previous.offset),
-        );
+        // Drop the retransmission. Repeating the counter would take tsdemux 1.24's
+        // mismatch path and drop the rest of the PES. The offset stays put.
+        return PacketEdit::Drop;
     }
     let offset = if header.continuity == next_counter(previous.last_original) {
         previous.offset
@@ -317,10 +344,32 @@ fn next_continuity_byte(packet: &[u8], pids: &mut [Option<PidContinuity>]) -> Op
         offset,
         payload_hash: hash,
     });
-    replacement_byte(packet[3], output_counter(header.continuity, offset))
+    match replacement_byte(packet[3], output_counter(header.continuity, offset)) {
+        Some(byte) => PacketEdit::Rewrite(byte),
+        None => PacketEdit::Keep,
+    }
 }
 
-/// Clears one PID. A discontinuity indicator starts a new baseline on the next payload.
+/// Copies kept packets and applies counter rewrites addressed in the original buffer.
+fn copy_forwarded_packets(aligned: &[u8], patches: &[(usize, u8)], dropped: &[usize]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(aligned.len());
+    for (index, packet) in aligned.chunks(TS_PACKET_SIZE).enumerate() {
+        if dropped.contains(&index) {
+            continue;
+        }
+        let start = output.len();
+        output.extend_from_slice(packet);
+        let patch_at = index * TS_PACKET_SIZE + 3;
+        if let Some((_, byte)) = patches.iter().find(|(offset, _)| *offset == patch_at)
+            && let Some(slot) = output.get_mut(start + 3)
+        {
+            *slot = *byte;
+        }
+    }
+    output
+}
+
+/// Clears one PID. A payload-bearing discontinuity indicator starts a new baseline.
 fn clear_pid(pids: &mut [Option<PidContinuity>], pid: u16) {
     if let Some(slot) = pids.get_mut(usize::from(pid)) {
         *slot = None;
@@ -542,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_after_a_reset_repeats_the_output_counter() {
+    fn duplicate_after_a_reset_is_not_forwarded() {
         let mut state = MpegTsContinuityState::new();
         let mut data = Vec::new();
         data.extend(packet(VIDEO_PID, 0b01, 5, 1));
@@ -554,9 +603,11 @@ mod tests {
 
         let (output, rewritten) = push_all(&mut state, &data);
         let counters: Vec<u8> = output.chunks(TS_PACKET_SIZE).map(continuity_of).collect();
-        assert_eq!(counters, vec![5, 6, 7, 8, 8, 9]);
-        assert_eq!(rewritten, 5);
-        assert_eq!(output[4 * TS_PACKET_SIZE + 4], 4);
+        assert_eq!(counters, vec![5, 6, 7, 8, 9]);
+        assert_eq!(rewritten, 4);
+        assert_eq!(output.len(), 5 * TS_PACKET_SIZE);
+        assert_eq!(output[3 * TS_PACKET_SIZE + 4], 4);
+        assert_eq!(output[4 * TS_PACKET_SIZE + 4], 5);
     }
 
     #[test]
@@ -644,7 +695,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_counter_is_left_unchanged_before_any_offset() {
+    fn duplicate_counter_is_not_forwarded_before_any_offset() {
         let mut state = MpegTsContinuityState::new();
         let mut data = Vec::new();
         data.extend(packet(VIDEO_PID, 0b01, 2, 1));
@@ -652,8 +703,42 @@ mod tests {
 
         let (output, rewritten) = push_all(&mut state, &data);
         assert_eq!(rewritten, 0);
-        assert_eq!(continuity_of(&output[TS_PACKET_SIZE..]), 2);
-        assert_eq!(output[TS_PACKET_SIZE + 4], 1);
+        assert_eq!(output.len(), TS_PACKET_SIZE);
+        assert_eq!(continuity_of(&output), 2);
+        assert_eq!(output[4], 1);
+    }
+
+    #[test]
+    fn flagged_adaptation_only_packet_keeps_a_nonzero_offset() {
+        let mut state = MpegTsContinuityState::new();
+        let mut repaired = Vec::new();
+        repaired.extend(packet(VIDEO_PID, 0b01, 5, 1));
+        repaired.extend(packet(VIDEO_PID, 0b01, 0, 2));
+        let (output, rewritten) = push_all(&mut state, &repaired);
+        assert_eq!(rewritten, 1);
+        assert_eq!(
+            output
+                .chunks(TS_PACKET_SIZE)
+                .map(continuity_of)
+                .collect::<Vec<_>>(),
+            vec![5, 6]
+        );
+
+        // Adaptation-only (PCR-only uses the same control). The flag must not
+        // clear the offset of 6 established by the reset above.
+        let mut flagged = packet(VIDEO_PID, 0b10, 0, 0xFF);
+        flagged[4] = 1;
+        flagged[5] = DISCONTINUITY_INDICATOR;
+        let mut follow = Vec::new();
+        follow.extend(flagged);
+        follow.extend(packet(VIDEO_PID, 0b01, 1, 3));
+
+        let (output, rewritten) = push_all(&mut state, &follow);
+        let counters: Vec<u8> = output.chunks(TS_PACKET_SIZE).map(continuity_of).collect();
+        assert_eq!(counters, vec![0, 7]);
+        assert_eq!(rewritten, 1);
+        assert_eq!(output[5], DISCONTINUITY_INDICATOR);
+        assert_eq!(output[TS_PACKET_SIZE + 4], 3);
     }
 
     #[test]
