@@ -57,6 +57,8 @@ struct PreparedRunViewState {
     front_face: RasterFrontFace,
     /// Camera distance reused by alpha-blended slot draws.
     alpha_distance_sq: f32,
+    /// Signed LOD stipple weight shared by every slot in the run. `0` disables stippling.
+    lod_fade: f32,
 }
 
 /// Skinned renderer lookup result for a prepared renderer run.
@@ -205,6 +207,7 @@ fn prepared_run_view_state<'a>(
             world_aabb,
             front_face,
             alpha_distance_sq,
+            lod_fade: 0.0,
         }),
         cull_stats,
     )
@@ -244,6 +247,7 @@ fn append_prepared_run_draws(
             property_block_id: d.property_block_id,
             world_aabb: state.world_aabb,
             particle_draw: d.particle_draw,
+            lod_fade: state.lod_fade,
         };
         if let Some(item) = evaluate_draw_candidate(
             ctx,
@@ -312,7 +316,10 @@ fn collect_prepared_renderer_run<'a>(
     }
     let (view_state, cull_stats) =
         prepared_run_view_state(run, first, is_overlay, mesh, &skinning, ctx, cull_cache);
-    if let Some(view_state) = view_state {
+    if let Some(mut view_state) = view_state {
+        view_state.lod_fade = state
+            .lod_visibility
+            .lod_fade(first.space_id, first.renderer_ordinal);
         append_prepared_run_draws(run, ctx, state.cache, mesh, is_overlay, view_state, out);
     }
     cull_stats

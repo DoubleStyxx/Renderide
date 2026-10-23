@@ -53,6 +53,7 @@ pub(super) fn push_one_slot_draw(
         blendshape_deformed,
         tangent_blendshape_deform_active,
         cached_cull,
+        lod_fade,
     } = flags;
 
     let Some((material_asset_id, property_block_id)) =
@@ -116,6 +117,7 @@ pub(super) fn push_one_slot_draw(
         property_block_id,
         world_aabb,
         particle_draw: ParticleDrawParams::default(),
+        lod_fade,
     };
     if let Some(item) = evaluate_draw_candidate(
         ctx,

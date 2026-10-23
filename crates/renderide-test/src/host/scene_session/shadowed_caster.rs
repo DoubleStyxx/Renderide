@@ -159,6 +159,7 @@ pub(super) fn many_point_lights_setup() -> SceneSetup {
             ),
             renderables,
             lights,
+            lod_group: None,
         },
     }
 }
@@ -197,6 +198,7 @@ fn floor_and_cube_scene(cube: Vec<SceneRenderable>) -> SceneSubmission {
         camera_world_pose: super::default_camera_world_pose(),
         renderables,
         lights: Vec::new(),
+        lod_group: None,
     }
 }
 

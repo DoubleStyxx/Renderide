@@ -69,6 +69,8 @@ pub struct PaddedPerDrawUniforms {
     /// Particle draw metadata rows consumed by generated render-buffer shaders.
     pub particle: [[f32; 4]; 4],
     /// Padding to keep every dynamic storage offset aligned across supported adapters.
+    ///
+    /// `_pad2[0][0]` is the signed LOD cross-fade weight. `0` disables stippling.
     pub _pad2: [[f32; 4]; 12],
 }
 
@@ -106,6 +108,24 @@ impl PaddedPerDrawUniforms {
             particle: ParticleDrawParams::default().to_uniform_rows(),
             _pad2: [[0.0; 4]; 12],
         }
+    }
+}
+
+/// Slot of the signed LOD cross-fade weight inside [`PaddedPerDrawUniforms::_pad2`].
+const PER_DRAW_LOD_FADE_PAD_ROW: usize = 0;
+/// Column of the signed LOD cross-fade weight inside that row.
+const PER_DRAW_LOD_FADE_PAD_COLUMN: usize = 0;
+
+impl PaddedPerDrawUniforms {
+    /// Returns a copy with the signed LOD cross-fade weight stored for WGSL.
+    ///
+    /// `0` matches the zeroed padding used before cross-fade existed, so non-fading draws keep
+    /// the same uniform bits.
+    #[inline]
+    #[must_use]
+    pub fn with_lod_fade(mut self, lod_fade: f32) -> Self {
+        self._pad2[PER_DRAW_LOD_FADE_PAD_ROW][PER_DRAW_LOD_FADE_PAD_COLUMN] = lod_fade;
+        self
     }
 
     /// Returns a copy with particle draw metadata encoded for WGSL.
@@ -244,6 +264,16 @@ mod tests {
     #[test]
     fn padded_size_matches_stride() {
         assert_eq!(size_of::<PaddedPerDrawUniforms>(), PER_DRAW_UNIFORM_STRIDE);
+    }
+
+    #[test]
+    fn lod_fade_zero_keeps_the_padding_slot_clear() {
+        let cleared =
+            PaddedPerDrawUniforms::new_single(Mat4::IDENTITY, Mat4::IDENTITY).with_lod_fade(0.0);
+        assert_eq!(cleared._pad2[0][0], 0.0);
+        let faded = cleared.with_lod_fade(0.35);
+        assert_eq!(faded._pad2[0][0], 0.35);
+        assert_eq!(faded._pad2[0][1], 0.0);
     }
 
     /// Forward pass WGSL uses `clip = view_proj * (model * local)`. Packing PVxmodel into

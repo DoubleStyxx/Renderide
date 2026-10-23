@@ -139,5 +139,6 @@ pub fn dummy_world_mesh_draw_item(spec: DummyDrawItemSpec) -> WorldMeshDrawItem 
         reflection_probes: ReflectionProbeDrawSelection::default(),
         ui_rect_clip_local: None,
         particle_draw: ParticleDrawParams::default(),
+        lod_fade: 0.0,
     }
 }

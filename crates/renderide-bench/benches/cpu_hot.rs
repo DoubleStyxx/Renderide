@@ -9,9 +9,10 @@ use std::hint::black_box;
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use renderide_bench::{
     BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload, CULL_BATCH,
-    CullWorkload, KeywordVariantCacheWorkload, MATERIAL_UNIFORM_BATCH,
-    MaterialUniformUpdateWorkload, SHADOW_CHURN_CASTERS, SHADOW_CHURN_LIGHTS, ShadowChurnWorkload,
-    TRANSFORM_BATCH, TransformWorkload, WORLD_MATRIX_NODES, WorldMatrixWorkload,
+    CullWorkload, KeywordVariantCacheWorkload, LOD_FADE_BATCH, LodFadeWorkload,
+    MATERIAL_UNIFORM_BATCH, MaterialUniformUpdateWorkload, SHADOW_CHURN_CASTERS,
+    SHADOW_CHURN_LIGHTS, ShadowChurnWorkload, TRANSFORM_BATCH, TransformWorkload,
+    WORLD_MATRIX_NODES, WorldMatrixWorkload,
 };
 
 fn transforms(c: &mut Criterion) {
@@ -120,6 +121,19 @@ fn shadow_churn(c: &mut Criterion) {
     group.finish();
 }
 
+fn lod_fade(c: &mut Criterion) {
+    let workload = LodFadeWorkload::standard();
+    let mut group = c.benchmark_group("lod_fade");
+    group.throughput(Throughput::Elements(LOD_FADE_BATCH as u64));
+    group.bench_function("cross_fade_off", |b| {
+        b.iter(|| black_box(workload.fold_disabled()));
+    });
+    group.bench_function("mid_transition", |b| {
+        b.iter(|| black_box(workload.fold_mid_fade()));
+    });
+    group.finish();
+}
+
 fn buffer_pool(c: &mut Criterion) {
     let mut workload = BufferPoolWorkload::standard();
     let mut group = c.benchmark_group("buffer_pool");
@@ -145,7 +159,8 @@ criterion_group!(
     material_uniforms,
     bind_groups,
     keyword_variants,
-    shadow_churn
+    shadow_churn,
+    lod_fade
 );
 
 #[cfg(feature = "gpu")]

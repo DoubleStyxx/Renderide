@@ -34,7 +34,7 @@ pub(crate) struct LodRendererRef {
 pub(crate) struct LodEntry {
     /// Unity-style relative screen-height threshold for this LOD.
     pub(crate) screen_relative_transition_height: f32,
-    /// Host fade width. Stored for parity; mesh-swap selection does not consume it yet.
+    /// Host fade width, as a fraction of this LOD's screen-height span.
     pub(crate) fade_transition_width: f32,
     /// Renderers shown when this LOD is selected.
     pub(crate) renderers: Vec<LodRendererRef>,
@@ -45,9 +45,9 @@ pub(crate) struct LodEntry {
 pub(crate) struct LodGroupEntry {
     /// Dense transform index that owns the LOD group component.
     pub(crate) node_id: i32,
-    /// Host cross-fade flag. Stored for future fade support.
+    /// Host cross-fade flag. When set, a mid-transition view draws both neighboring LODs.
     pub(crate) cross_fade: bool,
-    /// Host animated cross-fade flag. Stored for future fade support.
+    /// Host animated cross-fade flag. Stored for a future time-based fade.
     pub(crate) animate_cross_fading: bool,
     /// Ordered LOD entries from nearest/highest-detail to farthest/lowest-detail.
     pub(crate) lods: Vec<LodEntry>,
