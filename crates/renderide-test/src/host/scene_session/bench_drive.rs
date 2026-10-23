@@ -31,7 +31,7 @@ pub struct BenchDriveConfig {
     /// Path to the `renderide-renderer` binary.
     pub renderer_path: PathBuf,
     /// `unlit_sphere`, `multi_primitive_unlit`, `pbs_lit_material_matrix`, `many_static_meshes`,
-    /// `lights_shadows`, or `many_shadowed_point_lights`.
+    /// `lights_shadows`, `many_shadowed_point_lights`, `offscreen_skinned_avatars`, or `onscreen_skinned_avatars`.
     pub scenario: String,
     /// Raw per-frame JSON path the renderer writes when the measured window completes.
     pub report_path: PathBuf,
@@ -147,6 +147,8 @@ fn scenario_template(name: &str) -> Result<SessionTemplate, HarnessError> {
             })
         }
         "many_shadowed_point_lights" => Ok(SessionTemplate::ManyShadowedPointLights),
+        "offscreen_skinned_avatars" => Ok(SessionTemplate::SkinnedAvatars { offscreen: true }),
+        "onscreen_skinned_avatars" => Ok(SessionTemplate::SkinnedAvatars { offscreen: false }),
         other => Err(HarnessError::UnknownBenchScenario(other.to_string())),
     }
 }
@@ -155,7 +157,10 @@ fn publish_many_light_shadow_quality(
     queues: &mut renderide_shared::ipc::HostDualQueueIpc,
     scenario: &str,
 ) -> Result<(), HarnessError> {
-    if scenario != "many_shadowed_point_lights" {
+    if !matches!(
+        scenario,
+        "many_shadowed_point_lights" | "offscreen_skinned_avatars" | "onscreen_skinned_avatars"
+    ) {
         return Ok(());
     }
     let sent = queues.send_primary(RendererCommand::QualityConfig(QualityConfig {

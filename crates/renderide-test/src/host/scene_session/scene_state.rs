@@ -6,12 +6,14 @@ use std::time::{Duration, Instant};
 use glam::{Quat, Vec3, Vec4};
 use renderide_shared::buffer::SharedMemoryBufferDescriptor;
 use renderide_shared::ipc::HostDualQueueIpc;
+use renderide_shared::packing::extras::SKINNED_MESH_BOUNDS_UPDATE_HOST_ROW_BYTES;
 use renderide_shared::packing::memory_packable::MemoryPackable;
 use renderide_shared::packing::memory_packer::MemoryPacker;
 use renderide_shared::shared::{
-    LIGHT_STATE_HOST_ROW_BYTES, LightRenderablesUpdate, LightState, LightType,
-    MeshRenderablesUpdate, MeshRendererState, MotionVectorMode, RenderSH2, RenderSpaceUpdate,
-    RenderTransform, ShadowCastMode, ShadowType, TransformsUpdate,
+    BoneAssignment, LIGHT_STATE_HOST_ROW_BYTES, LightRenderablesUpdate, LightState, LightType,
+    MeshRenderablesUpdate, MeshRendererState, MotionVectorMode, RenderBoundingBox, RenderSH2,
+    RenderSpaceUpdate, RenderTransform, ShadowCastMode, ShadowType, SkinnedMeshBoundsUpdate,
+    SkinnedMeshRenderablesUpdate, TransformsUpdate,
 };
 use renderide_shared::wire_writer::mesh_renderers::{
     encode_additions, encode_mesh_states, encode_packed_material_ids,
@@ -41,6 +43,26 @@ pub(super) struct SceneRenderable {
     pub shadow_cast_mode: ShadowCastMode,
 }
 
+/// One one-bone skinned mesh renderer (an "avatar") submitted by a test scene.
+///
+/// The renderer node doubles as the root bone and the only bone, so [`Self::pose`] places the
+/// whole mesh. `posed_bounds` is the object-space AABB the host would send each frame.
+#[derive(Clone, Debug)]
+pub(super) struct SceneSkinned {
+    /// Dense transform index used as renderer node, root bone and bone 0.
+    pub transform_id: i32,
+    /// Local transform pose for the node (and bone).
+    pub pose: RenderTransform,
+    /// Uploaded skinned mesh asset id.
+    pub mesh_asset_id: i32,
+    /// Material asset id bound to the renderer.
+    pub material_asset_id: i32,
+    /// Host shadow-caster mode.
+    pub shadow_cast_mode: ShadowCastMode,
+    /// Posed object-space bounds sent through `SkinnedMeshRenderablesUpdate.bounds_updates`.
+    pub posed_bounds: RenderBoundingBox,
+}
+
 /// One regular light submitted by a test scene.
 #[derive(Clone, Debug)]
 pub(super) struct SceneLight {
@@ -61,6 +83,8 @@ pub(super) struct SceneSubmission {
     pub renderables: Vec<SceneRenderable>,
     /// Regular lights to add and update.
     pub lights: Vec<SceneLight>,
+    /// One-bone skinned renderers to add and update.
+    pub skinned: Vec<SceneSkinned>,
 }
 
 impl SceneSubmission {
@@ -77,6 +101,7 @@ impl SceneSubmission {
                 shadow_cast_mode: ShadowCastMode::Off,
             }],
             lights: Vec::new(),
+            skinned: Vec::new(),
         }
     }
 }
@@ -101,6 +126,12 @@ struct SceneSharedMemoryRegions {
     packed_material_ids_bytes: Vec<u8>,
     light_additions_bytes: Vec<u8>,
     light_states_bytes: Vec<u8>,
+    skinned_additions_bytes: Vec<u8>,
+    skinned_states_bytes: Vec<u8>,
+    skinned_material_ids_bytes: Vec<u8>,
+    bone_assignments_bytes: Vec<u8>,
+    bone_indexes_bytes: Vec<u8>,
+    skinned_bounds_bytes: Vec<u8>,
 }
 
 impl SceneSharedMemoryRegions {
@@ -129,6 +160,7 @@ impl SceneSharedMemoryRegions {
                 .collect::<Vec<_>>(),
         );
         let light_states_bytes = encode_light_states(&light_state_rows(scene));
+        let skinned = encode_skinned_regions(scene);
         Self {
             pose_updates_bytes,
             mesh_additions_bytes,
@@ -136,6 +168,12 @@ impl SceneSharedMemoryRegions {
             packed_material_ids_bytes,
             light_additions_bytes,
             light_states_bytes,
+            skinned_additions_bytes: skinned.additions,
+            skinned_states_bytes: skinned.states,
+            skinned_material_ids_bytes: skinned.material_ids,
+            bone_assignments_bytes: skinned.bone_assignments,
+            bone_indexes_bytes: skinned.bone_indexes,
+            skinned_bounds_bytes: skinned.bounds,
         }
     }
 
@@ -146,6 +184,12 @@ impl SceneSharedMemoryRegions {
             + self.packed_material_ids_bytes.len()
             + self.light_additions_bytes.len()
             + self.light_states_bytes.len()
+            + self.skinned_additions_bytes.len()
+            + self.skinned_states_bytes.len()
+            + self.skinned_material_ids_bytes.len()
+            + self.bone_assignments_bytes.len()
+            + self.bone_indexes_bytes.len()
+            + self.skinned_bounds_bytes.len()
     }
 }
 
@@ -157,6 +201,12 @@ struct SceneSharedMemoryLayout {
     packed_material_ids: SharedMemoryBufferDescriptor,
     light_additions: SharedMemoryBufferDescriptor,
     light_states: SharedMemoryBufferDescriptor,
+    skinned_additions: SharedMemoryBufferDescriptor,
+    skinned_states: SharedMemoryBufferDescriptor,
+    skinned_material_ids: SharedMemoryBufferDescriptor,
+    bone_assignments: SharedMemoryBufferDescriptor,
+    bone_indexes: SharedMemoryBufferDescriptor,
+    skinned_bounds: SharedMemoryBufferDescriptor,
 }
 
 impl SceneSharedMemoryLayout {
@@ -199,6 +249,13 @@ impl SceneSharedMemoryLayout {
             &mut offset,
             regions.light_states_bytes.len(),
         );
+        let mut region = |len: usize| descriptor_for_region(buffer_id, capacity, &mut offset, len);
+        let skinned_additions = region(regions.skinned_additions_bytes.len());
+        let skinned_states = region(regions.skinned_states_bytes.len());
+        let skinned_material_ids = region(regions.skinned_material_ids_bytes.len());
+        let bone_assignments = region(regions.bone_assignments_bytes.len());
+        let bone_indexes = region(regions.bone_indexes_bytes.len());
+        let skinned_bounds = region(regions.skinned_bounds_bytes.len());
         Self {
             pose_updates,
             mesh_additions,
@@ -206,6 +263,12 @@ impl SceneSharedMemoryLayout {
             packed_material_ids,
             light_additions,
             light_states,
+            skinned_additions,
+            skinned_states,
+            skinned_material_ids,
+            bone_assignments,
+            bone_indexes,
+            skinned_bounds,
         }
     }
 }
@@ -394,6 +457,10 @@ fn pose_rows(scene: &SceneSubmission) -> Vec<TransformPoseRow> {
             transform_id: light.transform_id,
             pose: light.pose,
         }))
+        .chain(scene.skinned.iter().map(|avatar| TransformPoseRow {
+            transform_id: avatar.transform_id,
+            pose: avatar.pose,
+        }))
         .collect()
 }
 
@@ -413,6 +480,99 @@ fn mesh_state_rows(scene: &SceneSubmission) -> Vec<MeshRendererState> {
             _padding: [0; 2],
         })
         .collect()
+}
+
+/// Encoded skinned-mesh shared-memory regions for one scene.
+struct SkinnedRegions {
+    additions: Vec<u8>,
+    states: Vec<u8>,
+    material_ids: Vec<u8>,
+    bone_assignments: Vec<u8>,
+    bone_indexes: Vec<u8>,
+    bounds: Vec<u8>,
+}
+
+fn encode_skinned_regions(scene: &SceneSubmission) -> SkinnedRegions {
+    if scene.skinned.is_empty() {
+        return SkinnedRegions {
+            additions: Vec::new(),
+            states: Vec::new(),
+            material_ids: Vec::new(),
+            bone_assignments: Vec::new(),
+            bone_indexes: Vec::new(),
+            bounds: Vec::new(),
+        };
+    }
+    let states: Vec<MeshRendererState> = scene
+        .skinned
+        .iter()
+        .enumerate()
+        .map(|(index, avatar)| MeshRendererState {
+            renderable_index: index as i32,
+            mesh_asset_id: avatar.mesh_asset_id,
+            material_count: 1,
+            material_property_block_count: 0,
+            sorting_order: 0,
+            shadow_cast_mode: avatar.shadow_cast_mode,
+            motion_vector_mode: MotionVectorMode::NoMotion,
+            _padding: [0; 2],
+        })
+        .collect();
+    let assignments: Vec<BoneAssignment> = scene
+        .skinned
+        .iter()
+        .enumerate()
+        .map(|(index, avatar)| BoneAssignment {
+            renderable_index: index as i32,
+            root_bone_transform_id: avatar.transform_id,
+            bone_count: 1,
+        })
+        .collect();
+    let bone_indexes: Vec<u8> = scene
+        .skinned
+        .iter()
+        .flat_map(|avatar| avatar.transform_id.to_le_bytes())
+        .collect();
+    let mut bounds =
+        vec![0u8; (scene.skinned.len() + 1) * SKINNED_MESH_BOUNDS_UPDATE_HOST_ROW_BYTES];
+    for (index, avatar) in scene.skinned.iter().enumerate() {
+        let start = index * SKINNED_MESH_BOUNDS_UPDATE_HOST_ROW_BYTES;
+        let mut packer = MemoryPacker::new(
+            &mut bounds[start..start + SKINNED_MESH_BOUNDS_UPDATE_HOST_ROW_BYTES],
+        );
+        SkinnedMeshBoundsUpdate {
+            renderable_index: index as i32,
+            local_bounds: avatar.posed_bounds,
+        }
+        .pack(&mut packer);
+    }
+    let sentinel = scene.skinned.len() * SKINNED_MESH_BOUNDS_UPDATE_HOST_ROW_BYTES;
+    let mut packer = MemoryPacker::new(&mut bounds[sentinel..]);
+    SkinnedMeshBoundsUpdate {
+        renderable_index: -1,
+        local_bounds: RenderBoundingBox::default(),
+    }
+    .pack(&mut packer);
+    SkinnedRegions {
+        additions: encode_additions(
+            &scene
+                .skinned
+                .iter()
+                .map(|avatar| avatar.transform_id)
+                .collect::<Vec<_>>(),
+        ),
+        states: encode_mesh_states(&states),
+        material_ids: encode_packed_material_ids(
+            &scene
+                .skinned
+                .iter()
+                .map(|avatar| avatar.material_asset_id)
+                .collect::<Vec<_>>(),
+        ),
+        bone_assignments: bytemuck::cast_slice(&assignments).to_vec(),
+        bone_indexes,
+        bounds,
+    }
 }
 
 fn light_state_rows(scene: &SceneSubmission) -> Vec<LightState> {
@@ -483,7 +643,43 @@ fn write_scene_regions(
         layout.light_states,
         &regions.light_states_bytes,
         "light_states",
-    )
+    )?;
+    let skinned_regions = [
+        (
+            layout.skinned_additions,
+            &regions.skinned_additions_bytes,
+            "skinned additions",
+        ),
+        (
+            layout.skinned_states,
+            &regions.skinned_states_bytes,
+            "skinned mesh_states",
+        ),
+        (
+            layout.skinned_material_ids,
+            &regions.skinned_material_ids_bytes,
+            "skinned materials",
+        ),
+        (
+            layout.bone_assignments,
+            &regions.bone_assignments_bytes,
+            "bone_assignments",
+        ),
+        (
+            layout.bone_indexes,
+            &regions.bone_indexes_bytes,
+            "bone_transform_indexes",
+        ),
+        (
+            layout.skinned_bounds,
+            &regions.skinned_bounds_bytes,
+            "skinned bounds",
+        ),
+    ];
+    for (desc, bytes, label) in skinned_regions {
+        write_region(writer, desc, bytes, label)?;
+    }
+    Ok(())
 }
 
 fn write_region(
@@ -534,7 +730,18 @@ fn build_render_space_update(
             removals: SharedMemoryBufferDescriptor::default(),
             additions: layout.mesh_additions,
         }),
-        skinned_mesh_renderers_update: None,
+        skinned_mesh_renderers_update: (!scene.skinned.is_empty()).then_some(
+            SkinnedMeshRenderablesUpdate {
+                bounds_updates: layout.skinned_bounds,
+                bone_assignments: layout.bone_assignments,
+                bone_transform_indexes: layout.bone_indexes,
+                mesh_states: layout.skinned_states,
+                mesh_materials_and_property_blocks: layout.skinned_material_ids,
+                removals: SharedMemoryBufferDescriptor::default(),
+                additions: layout.skinned_additions,
+                ..SkinnedMeshRenderablesUpdate::default()
+            },
+        ),
         lights_update: (!scene.lights.is_empty()).then_some(LightRenderablesUpdate {
             states: layout.light_states,
             removals: SharedMemoryBufferDescriptor::default(),
@@ -625,12 +832,42 @@ mod tests {
                 },
             ],
             lights: Vec::new(),
+            skinned: Vec::new(),
         };
         let regions = SceneSharedMemoryRegions::build(&scene);
         assert_eq!(regions.mesh_additions_bytes.len(), 12);
         assert_eq!(regions.mesh_states_bytes.len(), 72);
         assert_eq!(regions.packed_material_ids_bytes.len(), 8);
         assert_eq!(target_transform_count(&scene), 5);
+    }
+
+    #[test]
+    fn skinned_regions_are_sized_and_terminated() {
+        let avatar = |transform_id| SceneSkinned {
+            transform_id,
+            pose: identity_transform(),
+            mesh_asset_id: 3,
+            material_asset_id: 4,
+            shadow_cast_mode: ShadowCastMode::On,
+            posed_bounds: RenderBoundingBox::default(),
+        };
+        let scene = SceneSubmission {
+            camera_world_pose: default_camera_world_pose(),
+            renderables: Vec::new(),
+            lights: Vec::new(),
+            skinned: vec![avatar(7), avatar(9)],
+        };
+        let regions = SceneSharedMemoryRegions::build(&scene);
+        assert_eq!(regions.skinned_additions_bytes.len(), 12);
+        assert_eq!(regions.skinned_states_bytes.len(), 72);
+        assert_eq!(regions.skinned_material_ids_bytes.len(), 8);
+        assert_eq!(regions.bone_assignments_bytes.len(), 24);
+        assert_eq!(regions.bone_indexes_bytes.len(), 8);
+        assert_eq!(
+            regions.skinned_bounds_bytes.len(),
+            3 * SKINNED_MESH_BOUNDS_UPDATE_HOST_ROW_BYTES
+        );
+        assert_eq!(target_transform_count(&scene), 10);
     }
 
     #[test]
@@ -650,6 +887,7 @@ mod tests {
                     state: directional_light([0.5, 0.5, 1.0], 1.0),
                 },
             ],
+            skinned: Vec::new(),
         };
         let bytes = encode_light_states(&light_state_rows(&scene));
         assert_eq!(bytes.len(), 3 * LIGHT_STATE_HOST_ROW_BYTES);

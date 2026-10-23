@@ -110,6 +110,11 @@ pub enum SessionTemplate {
     ShadowedCasterMove,
     /// Thirty hard-shadow point lights over a small caster grid. Opt-in frame bench only.
     ManyShadowedPointLights,
+    /// One-bone skinned avatars; `offscreen` puts 256 of 272 behind the camera.
+    SkinnedAvatars {
+        /// Whether the bulk of the avatars sit outside the camera frustum.
+        offscreen: bool,
+    },
 }
 
 /// Drives the full session end-to-end. The renderer process is killed on `Err` via [`Drop`] of
@@ -196,6 +201,8 @@ struct MeshAsset {
     buffer_id: i32,
     mesh: Mesh,
     bounds: RenderBoundingBox,
+    /// Upload as a one-bone skinned mesh (framebench skinned scenes).
+    skinned: bool,
 }
 
 struct MaterialAsset {
@@ -365,6 +372,7 @@ fn template_label(template: &SessionTemplate) -> &'static str {
         SessionTemplate::ExoticShaderPair => "ExoticShaderPair",
         SessionTemplate::ShadowedCasterMove => "ShadowedCasterMove",
         SessionTemplate::ManyShadowedPointLights => "ManyShadowedPointLights",
+        SessionTemplate::SkinnedAvatars { .. } => "SkinnedAvatars",
     }
 }
 
@@ -396,6 +404,9 @@ fn build_scene_setup(template: SessionTemplate) -> SceneSetup {
         SessionTemplate::ExoticShaderPair => exotic_pair::scene_setup(),
         SessionTemplate::ShadowedCasterMove => shadowed_caster::scene_setup(),
         SessionTemplate::ManyShadowedPointLights => shadowed_caster::many_point_lights_setup(),
+        SessionTemplate::SkinnedAvatars { offscreen } => {
+            bench_scenes::skinned_avatars_setup(offscreen)
+        }
     }
 }
 
@@ -410,6 +421,11 @@ fn upload_scene_meshes(
     for mesh in &setup.meshes {
         let upload = pack_mesh_upload(&mesh.mesh, mesh.bounds)
             .map_err(|e| HarnessError::QueueOptions(format!("pack mesh upload: {e}")))?;
+        let upload = if mesh.skinned {
+            upload.with_single_bone_skin()
+        } else {
+            upload
+        };
         uploaded.push(upload_mesh(
             queues,
             lockstep,
@@ -457,6 +473,7 @@ fn sphere_setup() -> SceneSetup {
         meshes: vec![MeshAsset {
             asset_id: mesh_asset_id,
             buffer_id: asset_ids::MESH_BUFFER,
+            skinned: false,
             mesh: generate_sphere(
                 sphere_tessellation::LATITUDE_BANDS,
                 sphere_tessellation::LONGITUDE_BANDS,
@@ -485,6 +502,7 @@ fn torus_setup(texture_rgba: Vec<u8>, texture_size: (u32, u32)) -> SceneSetup {
         meshes: vec![MeshAsset {
             asset_id: mesh_asset_id,
             buffer_id: asset_ids::MESH_BUFFER,
+            skinned: false,
             mesh: generate_torus(
                 torus_geometry::MAJOR_SEGMENTS,
                 torus_geometry::MINOR_SEGMENTS,
@@ -589,6 +607,7 @@ fn multi_primitive_unlit_grid_setup(
             camera_world_pose: transform(Vec3::new(0.0, 0.0, -4.2), Vec3::ONE, Quat::IDENTITY),
             renderables,
             lights: Vec::new(),
+            skinned: Vec::new(),
         },
     }
 }
@@ -652,6 +671,7 @@ fn pbs_lit_material_matrix_setup() -> SceneSetup {
             camera_world_pose: transform(Vec3::new(0.0, 0.0, -4.0), Vec3::ONE, Quat::IDENTITY),
             renderables,
             lights,
+            skinned: Vec::new(),
         },
     }
 }
@@ -705,6 +725,7 @@ fn alpha_cutout_masked_quads_setup(mask_rgba: Vec<u8>, texture_size: (u32, u32))
             camera_world_pose: default_camera_world_pose(),
             renderables,
             lights: Vec::new(),
+            skinned: Vec::new(),
         },
     }
 }
@@ -719,6 +740,7 @@ fn gltf_textured_static_mesh_setup(
         meshes: vec![MeshAsset {
             asset_id: scene_mesh_id(0),
             buffer_id: scene_mesh_buffer_id(0),
+            skinned: false,
             mesh,
             bounds,
         }],
@@ -740,6 +762,7 @@ fn gltf_textured_static_mesh_setup(
                 shadow_cast_mode: ShadowCastMode::Off,
             }],
             lights: Vec::new(),
+            skinned: Vec::new(),
         },
     }
 }
@@ -748,6 +771,7 @@ fn mesh_asset(index: i32, mesh: Mesh, bounds: RenderBoundingBox) -> MeshAsset {
     MeshAsset {
         asset_id: scene_mesh_id(index),
         buffer_id: scene_mesh_buffer_id(index),
+        skinned: false,
         mesh,
         bounds,
     }

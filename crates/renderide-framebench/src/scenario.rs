@@ -9,7 +9,14 @@
 pub const DEFAULT_SCENARIOS: [&str; 2] = ["unlit_sphere", "multi_primitive_unlit"];
 
 /// Extra scenarios selectable with `--scenario`. They are not in the default CI gate set.
-pub const EXTRA_SCENARIOS: [&str; 3] = ["pbs_lit_material_matrix", "many_static_meshes", "lights_shadows"];
+#[cfg(test)]
+const EXTRA_SCENARIOS: [&str; 5] = [
+    "pbs_lit_material_matrix",
+    "many_static_meshes",
+    "lights_shadows",
+    "offscreen_skinned_avatars",
+    "onscreen_skinned_avatars",
+];
 
 /// Transport name recorded in every report. The socket is not implemented.
 pub const CONTROL_TRANSPORT: &str = "localhost-tcp-jsonrpc";
@@ -55,7 +62,21 @@ const MANY_STATIC_MESHES: Scenario = Scenario {
 const LIGHTS_SHADOWS: Scenario = Scenario {
     name: "lights_shadows",
     camera_position: [0.0, 6.0, -14.0],
-    camera_rotation_xyzw: [0.1305262, 0.0, 0.0, 0.9914449],
+    camera_rotation_xyzw: [0.130_526_2, 0.0, 0.0, 0.991_444_9],
+};
+
+/// 16 visible plus 256 behind-the-camera one-bone skinned avatars, all shadow casters.
+const OFFSCREEN_SKINNED_AVATARS: Scenario = Scenario {
+    name: "offscreen_skinned_avatars",
+    camera_position: [0.0, 4.0, -12.0],
+    camera_rotation_xyzw: [0.099_833_42, 0.0, 0.0, 0.995_004_2],
+};
+
+/// Control for [`OFFSCREEN_SKINNED_AVATARS`]: the same 272 avatars all in view.
+const ONSCREEN_SKINNED_AVATARS: Scenario = Scenario {
+    name: "onscreen_skinned_avatars",
+    camera_position: [0.0, 4.0, -12.0],
+    camera_rotation_xyzw: [0.099_833_42, 0.0, 0.0, 0.995_004_2],
 };
 
 /// Thirty shadowed point lights. Opt-in: absent from [`DEFAULT_SCENARIOS`] so the default CI
@@ -76,6 +97,8 @@ pub fn by_name(name: &str) -> Option<&'static Scenario> {
         "many_static_meshes" => Some(&MANY_STATIC_MESHES),
         "lights_shadows" => Some(&LIGHTS_SHADOWS),
         "many_shadowed_point_lights" => Some(&MANY_SHADOWED_POINT_LIGHTS),
+        "offscreen_skinned_avatars" => Some(&OFFSCREEN_SKINNED_AVATARS),
+        "onscreen_skinned_avatars" => Some(&ONSCREEN_SKINNED_AVATARS),
         _ => None,
     }
 }
@@ -137,7 +160,9 @@ pub fn pose_from_script(steps: &[ScriptStep]) -> Option<([f32; 3], [f32; 4])> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_SCENARIOS, ScriptStep, by_name, pose_from_script, script};
+    use super::{
+        DEFAULT_SCENARIOS, EXTRA_SCENARIOS, ScriptStep, by_name, pose_from_script, script,
+    };
 
     fn method_names(steps: &[ScriptStep]) -> Vec<&'static str> {
         steps
@@ -166,6 +191,14 @@ mod tests {
             assert!(json.contains("\"method\":\"camera.set_pose\""), "{json}");
             assert!(json.contains("\"method\":\"frames.wait\""), "{json}");
             assert!(json.contains("\"method\":\"stats.query\""), "{json}");
+        }
+    }
+
+    #[test]
+    fn extra_scenarios_resolve_and_stay_out_of_the_default_set() {
+        for name in EXTRA_SCENARIOS {
+            assert!(by_name(name).is_some(), "{name} must resolve");
+            assert!(!DEFAULT_SCENARIOS.contains(&name));
         }
     }
 
