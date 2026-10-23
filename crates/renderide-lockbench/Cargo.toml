@@ -1,0 +1,18 @@
+[package]
+name = "renderide-lockbench"
+version = "0.1.0"
+edition = "2024"
+description = "Multi-thread contention bench comparing parking_lot 0.12.5 and 0.13 on the renderer's lock patterns."
+publish = false
+
+[[bin]]
+name = "renderide-lockbench"
+path = "src/main.rs"
+
+[dependencies]
+# Both majors side by side (wgpu and imgui keep 0.12.x in the dependency tree).
+parking_lot_012 = { package = "parking_lot", version = "=0.12.5" }
+parking_lot_013 = { package = "parking_lot", version = "0.13" }
+
+[lints]
+workspace = true
