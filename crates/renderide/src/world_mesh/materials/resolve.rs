@@ -325,7 +325,8 @@ pub(crate) fn resolve_material_batch_with_registry(
         uses_two_sided_transparency: embedded.uses_two_sided_transparency,
     });
     let ui_rect_clip_local = ui_rect_clip_local_from_maps(mat_map, pb_map, pipeline_property_ids);
-    let host_variant_bits = router.variant_bits_for_shader_asset(shader_asset_id);
+    let host_variant_bits =
+        shader_select::keyword_host_bits(material_asset_id, shader_asset_id, router);
     let shader_specialization = match &pipeline {
         RasterPipelineKind::EmbeddedStem(stem) => {
             crate::materials::custom_shader::keyword_specialization_key(

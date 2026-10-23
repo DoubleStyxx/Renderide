@@ -66,6 +66,9 @@ pub enum CaseTemplate {
     CustomShaderPropertyUpdate,
     /// Poincare-disk tiling and a raymarched gyroid, each with `_Speed` 0.
     ExoticShaderPair,
+    /// Rainbow custom shader beside packaged Unlit. `plain.png` is the assigned pair.
+    /// `actual.png` is the frame after the left material is cleared.
+    CustomShaderBesideUnlit,
 }
 
 /// Default golden directory, relative to the workspace root: `crates/renderide-test/goldens/`.
@@ -185,6 +188,28 @@ pub fn custom_shader_property_update() -> IntegrationCase {
     }
 }
 
+/// Rainbow on the left (`RAINBOW` off) and packaged textured Unlit on the right, then clear.
+pub fn custom_shader_beside_unlit() -> IntegrationCase {
+    IntegrationCase {
+        name: "custom_shader_beside_unlit".to_string(),
+        description:
+            "Left quad is ExampleRainbowWgsl with RAINBOW off. Right quad is packaged Unlit on _Tex. The compared frame clears the left material."
+                .to_string(),
+        golden_path: default_goldens_dir().join("custom_shader_beside_unlit.png"),
+        resolution: (320, 320),
+        tolerance: Tolerance {
+            ssim_min: Some(0.72),
+            max_abs_diff: Some(56),
+            max_failing_pixel_fraction: Some(0.025),
+            min_luma_range: Some(20),
+            min_unique_colors: Some(8),
+            min_non_background_pixel_fraction: Some(0.12),
+            combine: Combine::And,
+        },
+        template: CaseTemplate::CustomShaderBesideUnlit,
+    }
+}
+
 /// Poincare disk on the left and a gyroid SDF on the right. Both materials keep `_Speed` at 0.
 pub fn exotic_shader_pair() -> IntegrationCase {
     IntegrationCase {
@@ -230,6 +255,7 @@ pub fn registry() -> Vec<IntegrationCase> {
         pbs_lit_material_matrix(),
         alpha_cutout_masked_quads(),
         custom_shader_property_update(),
+        custom_shader_beside_unlit(),
         exotic_shader_pair(),
     ];
     let gltf_fixture = default_fixture_path();
@@ -248,7 +274,9 @@ impl IntegrationCase {
     /// Golden for the pre-update capture, when this case records two frames.
     pub fn plain_capture_golden(&self) -> Option<PathBuf> {
         match self.template {
-            CaseTemplate::CustomShaderPropertyUpdate => Some(plain_png_path(&self.golden_path)),
+            CaseTemplate::CustomShaderPropertyUpdate | CaseTemplate::CustomShaderBesideUnlit => {
+                Some(plain_png_path(&self.golden_path))
+            }
             _ => None,
         }
     }
@@ -358,5 +386,102 @@ mod tests {
                 "custom_shader_property_update_plain.png"
             ))
         );
+    }
+
+    /// The two goldens must miss the case tolerance, and the failing-pixel fraction must sit
+    /// above the configured limit. A no-op clear would otherwise pass.
+    #[test]
+    fn beside_unlit_goldens_disagree_and_the_left_quad_flattens() {
+        let case = lookup("custom_shader_beside_unlit").expect("registered");
+        let plain_path = case.plain_capture_golden().expect("plain golden");
+        let plain = load_rgba(&plain_path);
+        let cleared = load_rgba(&case.golden_path);
+        let plain_vs_cleared = case
+            .tolerance
+            .evaluate(&plain, &cleared)
+            .expect("plain against cleared");
+        let cleared_vs_plain = case
+            .tolerance
+            .evaluate(&cleared, &plain)
+            .expect("cleared against plain");
+        assert!(
+            !plain_vs_cleared.passed && !cleared_vs_plain.passed,
+            "the two frames must fail the case tolerance against each other"
+        );
+        let limit = case
+            .tolerance
+            .max_failing_pixel_fraction
+            .expect("pixel fraction");
+        let fraction = plain_vs_cleared
+            .failing_pixel_fraction
+            .expect("failing fraction");
+        let reverse = cleared_vs_plain
+            .failing_pixel_fraction
+            .expect("reverse failing fraction");
+        assert!(
+            fraction > limit && reverse > limit,
+            "cross-golden fractions {fraction} and {reverse} must exceed tolerance {limit}"
+        );
+
+        let (plain_colors, plain_luma) = left_quad_center(&plain);
+        let (cleared_colors, cleared_luma) = left_quad_center(&cleared);
+        assert!(
+            plain_colors >= 8 && plain_luma >= 20,
+            "plain left centre should be a checker, colors={plain_colors} luma={plain_luma}"
+        );
+        assert!(
+            cleared_colors <= 2 && cleared_luma <= 2,
+            "cleared left centre should be flat, colors={cleared_colors} luma={cleared_luma}"
+        );
+    }
+
+    fn load_rgba(path: &std::path::Path) -> image::RgbaImage {
+        image::open(path)
+            .unwrap_or_else(|err| panic!("open {}: {err}", path.display()))
+            .to_rgba8()
+    }
+
+    /// Unique RGB colors and luma range in a window at the left quad's centre.
+    fn left_quad_center(image: &image::RgbaImage) -> (usize, u8) {
+        let half = image.width() / 2;
+        let mut min_x = half;
+        let mut max_x = 0;
+        let mut min_y = image.height();
+        let mut max_y = 0;
+        for y in 0..image.height() {
+            for x in 0..half {
+                let pixel = image.get_pixel(x, y);
+                if pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 0 {
+                    continue;
+                }
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+                min_y = min_y.min(y);
+                max_y = max_y.max(y);
+            }
+        }
+        let center_x = u32::midpoint(min_x, max_x);
+        let center_y = u32::midpoint(min_y, max_y);
+        let radius = 12;
+        let mut colors = std::collections::HashSet::new();
+        let mut luma_min = 255u8;
+        let mut luma_max = 0u8;
+        let y0 = center_y.saturating_sub(radius);
+        let y1 = (center_y + radius).min(image.height());
+        let x0 = center_x.saturating_sub(radius);
+        let x1 = (center_x + radius).min(image.width());
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let pixel = image.get_pixel(x, y);
+                colors.insert((pixel[0], pixel[1], pixel[2]));
+                let luma = ((77 * u32::from(pixel[0])
+                    + 150 * u32::from(pixel[1])
+                    + 29 * u32::from(pixel[2]))
+                    / 256) as u8;
+                luma_min = luma_min.min(luma);
+                luma_max = luma_max.max(luma);
+            }
+        }
+        (colors.len(), luma_max.saturating_sub(luma_min))
     }
 }

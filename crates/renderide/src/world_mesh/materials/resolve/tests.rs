@@ -258,3 +258,89 @@ fn per_material_override_replaces_only_the_assigned_material() {
     );
     crate::materials::custom_shader::remove(key).expect("remove");
 }
+
+/// Host `_ALPHATEST` is bit 0, the same index as custom `RAINBOW`. An override must ignore it.
+///
+/// Ids stay off `4101`/`4102`. The uniform-pack contract test uses those, and both tests share
+/// the process-global override map.
+#[test]
+fn per_material_override_ignores_host_alphatest_bit() {
+    const KEY: &str = "rainbow-override-bits";
+    const ASSIGNED: i32 = 4301;
+    const NAMED: i32 = 4302;
+    let _guard = OverrideBitGuard(KEY, ASSIGNED, NAMED);
+    let installed = crate::materials::custom_shader::install(
+        KEY,
+        include_str!("../../../../../../RenderideMod/Shaders/example_rainbow.wgsl"),
+    )
+    .expect("install");
+    let registry = PropertyIdRegistry::new();
+    let rainbow = registry.intern("RAINBOW");
+    let mut store = MaterialPropertyStore::new();
+    store.set_shader_asset_for_material(ASSIGNED, 99);
+    store.set_shader_asset_for_material(NAMED, 100);
+    store.set_material(ASSIGNED, rainbow, MaterialPropertyValue::Float(0.0));
+    store.set_material(NAMED, rainbow, MaterialPropertyValue::Float(0.0));
+    let mut router = MaterialRouter::new(RasterPipelineKind::Null);
+    router.set_shader_route(
+        99,
+        RasterPipelineKind::EmbeddedStem(Arc::from("unlit_default")),
+        None,
+        Some(1),
+    );
+    router.set_shader_route(
+        100,
+        RasterPipelineKind::EmbeddedStem(Arc::from(installed.default_stem.as_str())),
+        None,
+        Some(1),
+    );
+    let ids = MaterialPipelinePropertyIds::new(&registry);
+    let assign = renderide_shared::parse_custom_shader_payload(
+        &renderide_shared::format_custom_shader_assign(ASSIGNED, KEY),
+    )
+    .expect("prefix")
+    .expect("header");
+    crate::materials::custom_shader::resolve_custom_shader_payload(Ok(assign), |_| None);
+
+    let off = resolve_bits(ASSIGNED, &store, &router, &ids, &registry);
+    assert_eq!(off, 0, "RAINBOW float 0 stays off when host bit 0 is set");
+    store.set_material(ASSIGNED, rainbow, MaterialPropertyValue::Float(1.0));
+    let on = resolve_bits(ASSIGNED, &store, &router, &ids, &registry);
+    assert_eq!(
+        on, 1,
+        "RAINBOW float 1 enables keyword 0 without the host bit"
+    );
+    let named = resolve_bits(NAMED, &store, &router, &ids, &registry);
+    assert_eq!(named, 1, "a shader-name route still ORs host bit 0");
+}
+
+/// Drops the override-bit test's key and material ids when an assert fails.
+struct OverrideBitGuard(&'static str, i32, i32);
+
+impl Drop for OverrideBitGuard {
+    fn drop(&mut self) {
+        let _ = crate::materials::custom_shader::remove(self.0);
+        let _ = crate::materials::custom_shader::clear_material_override(self.1);
+        let _ = crate::materials::custom_shader::clear_material_override(self.2);
+    }
+}
+
+fn resolve_bits(
+    material_id: i32,
+    store: &MaterialPropertyStore,
+    router: &MaterialRouter,
+    ids: &MaterialPipelinePropertyIds,
+    registry: &PropertyIdRegistry,
+) -> u32 {
+    let dict = MaterialDictionary::new(store);
+    let resolved = resolve_material_batch_with_registry(
+        material_id,
+        None,
+        &dict,
+        router,
+        ids,
+        ShaderPermutation::default(),
+        Some(registry),
+    );
+    resolved.shader_specialization.static_variant_bits()
+}
