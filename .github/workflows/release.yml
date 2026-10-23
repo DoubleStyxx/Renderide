@@ -1,145 +1,100 @@
-# Nightly release pipeline.
+# Tag release pipeline.
 #
-# Picks the newest master commit that has passed `ci.yml`, builds platform
-# binaries in release mode, and publishes a GitHub Release with per-platform
-# zips. The most recent release acts as the "last good version" pointer - this
-# workflow no-ops when no new green commit has appeared since.
+# Pushing a v* tag builds the same platform bundles as nightly.yml, writes
+# SHA256SUMS, attests provenance, and opens a draft GitHub release.
+# A person publishes the draft. This workflow does not.
+#
+# Bundles are Ed25519-signed. The version job fails before the platform
+# matrix when repository variable RENDERIDE_RELEASE_PUBLIC_KEY_HEX or
+# repository secret RENDERIDE_RELEASE_PRIVATE_KEY_HEX is unset or is not
+# 64 hex characters. Unsigned drafts are not created. See RELEASING.md.
 name: Release
 
 "on":
-  schedule:
-    # 07:17 UTC nightly; minutes-offset avoids the top-of-the-hour cron rush.
-    - cron: "17 7 * * *"
-  workflow_dispatch:
-    inputs:
-      force:
-        description: "Re-release the candidate SHA even if it matches the previous release."
-        type: boolean
-        default: false
+  push:
+    tags:
+      - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: release
+  group: release-tag-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  select-commit:
-    name: Select candidate commit
+  version:
+    name: Verify tag version
     runs-on: ubuntu-latest
-    outputs:
-      sha: ${{ steps.pick.outputs.sha }}
-      short_sha: ${{ steps.pick.outputs.short_sha }}
-      previous_release_tag: ${{ steps.pick.outputs.previous_release_tag }}
-      previous_release_sha: ${{ steps.pick.outputs.previous_release_sha }}
-      tag: ${{ steps.pick.outputs.tag }}
-      should_release: ${{ steps.pick.outputs.should_release }}
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: master
-          fetch-depth: 0
-          fetch-tags: true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Find newest green commit on master
-        id: pick
+      - name: Match tag to crates/renderide/Cargo.toml
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          case "${tag}" in
+            v*) ;;
+            *)
+              echo "tag ${tag} does not start with v" >&2
+              exit 1
+              ;;
+          esac
+          version="${tag#v}"
+          cargo_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/renderide/Cargo.toml | head -n 1)"
+          if [ -z "${cargo_version}" ]; then
+            echo "crates/renderide/Cargo.toml has no package version" >&2
+            exit 1
+          fi
+          if [ "${cargo_version}" != "${version}" ]; then
+            echo "tag ${tag} does not match crates/renderide/Cargo.toml version ${cargo_version}" >&2
+            exit 1
+          fi
+          echo "tag ${tag} matches crates/renderide version ${cargo_version}"
+
+      - name: Require release signing keys
+        shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
-          FORCE: ${{ inputs.force }}
+          RENDERIDE_RELEASE_PUBLIC_KEY_HEX: ${{ vars.RENDERIDE_RELEASE_PUBLIC_KEY_HEX }}
+          RENDERIDE_RELEASE_PRIVATE_KEY_HEX: ${{ secrets.RENDERIDE_RELEASE_PRIVATE_KEY_HEX }}
         run: |
           set -euo pipefail
 
-          green_shas=$(mktemp)
-          gh api -X GET \
-            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
-            -f branch=master -f status=success -F per_page=100 \
-            | jq -r '.workflow_runs[].head_sha' \
-            | sort -u >"${green_shas}"
+          public="${RENDERIDE_RELEASE_PUBLIC_KEY_HEX:-}"
+          private="${RENDERIDE_RELEASE_PRIVATE_KEY_HEX:-}"
+          missing=0
 
-          master_ref=$(git rev-parse --verify origin/master^{commit})
-          candidate=""
-          while IFS= read -r master_sha; do
-            if grep -qx "${master_sha}" "${green_shas}"; then
-              candidate="${master_sha}"
-              break
-            fi
-          done < <(git rev-list "${master_ref}")
-
-          if [ -z "$candidate" ]; then
-            echo "No master commit has CI green; skipping." | tee -a "$GITHUB_STEP_SUMMARY"
-            echo "should_release=false" >>"$GITHUB_OUTPUT"
-            exit 0
+          if [ -z "${public}" ]; then
+            echo "Repository variable RENDERIDE_RELEASE_PUBLIC_KEY_HEX is unset. Set it to 64 hex characters (Ed25519 public key)." | tee -a "${GITHUB_STEP_SUMMARY}" >&2
+            missing=1
+          fi
+          if [ -z "${private}" ]; then
+            echo "Repository secret RENDERIDE_RELEASE_PRIVATE_KEY_HEX is unset. Set it to 64 hex characters (Ed25519 private key seed)." | tee -a "${GITHUB_STEP_SUMMARY}" >&2
+            missing=1
+          fi
+          if [ "${missing}" -ne 0 ]; then
+            echo "Tag release aborted before the platform matrix. Configure the keys in RELEASING.md, then push the tag again. Unsigned drafts are not created." | tee -a "${GITHUB_STEP_SUMMARY}" >&2
+            exit 1
           fi
 
-          short=${candidate:0:7}
-          date=$(date -u +%Y-%m-%d)
-          tag="nightly-${date}-${short}"
-
-          full_release_tags=$(mktemp)
-          gh api -X GET "repos/${GITHUB_REPOSITORY}/releases" -F per_page=100 \
-            | jq -r --arg prefix "nightly-" '
-                sort_by(.published_at // .created_at // "") | reverse | .[]
-                | select(.draft == false)
-                | select(.prerelease == false)
-                | select(.tag_name | startswith($prefix))
-                | .tag_name
-              ' >"${full_release_tags}"
-
-          resolve_release_sha() {
-            local release_tag="$1"
-            if [ -z "${release_tag}" ]; then
-              return 0
-            fi
-            if ! git cat-file -e "${release_tag}^{commit}" 2>/dev/null; then
-              git fetch --force --tags origin "refs/tags/${release_tag}:refs/tags/${release_tag}" >/dev/null 2>&1 || true
-            fi
-            git rev-parse "${release_tag}^{commit}" 2>/dev/null || true
-          }
-
-          latest_release_tag=$(head -n1 "${full_release_tags}" || true)
-          latest_release_sha=$(resolve_release_sha "${latest_release_tag}")
-
-          previous_release_tag=""
-          while IFS= read -r release_tag; do
-            if [ -z "${release_tag}" ] || [ "${release_tag}" = "${tag}" ]; then
-              continue
-            fi
-            previous_release_tag="${release_tag}"
-            break
-          done <"${full_release_tags}"
-          previous_release_sha=$(resolve_release_sha "${previous_release_tag}")
-
-          if [ -n "${latest_release_sha}" ] &&
-             [ "$candidate" = "${latest_release_sha}" ] &&
-             [ "${FORCE:-false}" != "true" ]; then
-            echo "Candidate $candidate already released as ${latest_release_tag}; nothing new tonight." | tee -a "$GITHUB_STEP_SUMMARY"
-            echo "should_release=false" >>"$GITHUB_OUTPUT"
-            exit 0
+          if [[ ! "${public}" =~ ^[0-9a-fA-F]{64}$ ]]; then
+            echo "RENDERIDE_RELEASE_PUBLIC_KEY_HEX must be 64 hex characters (Ed25519 public key). See RELEASING.md." | tee -a "${GITHUB_STEP_SUMMARY}" >&2
+            exit 1
+          fi
+          if [[ ! "${private}" =~ ^[0-9a-fA-F]{64}$ ]]; then
+            echo "RENDERIDE_RELEASE_PRIVATE_KEY_HEX must be 64 hex characters (Ed25519 private key seed). See RELEASING.md." | tee -a "${GITHUB_STEP_SUMMARY}" >&2
+            exit 1
           fi
 
-          {
-            echo "Releasing commit $candidate as tag $tag"
-            echo "Latest full release tag: ${latest_release_tag:-<none>}"
-            echo "Latest full release SHA: ${latest_release_sha:-<none>}"
-            echo "Previous changelog release tag: ${previous_release_tag:-<none>}"
-            echo "Previous changelog release SHA: ${previous_release_sha:-<none>}"
-          } | tee -a "$GITHUB_STEP_SUMMARY"
-
-          {
-            echo "sha=$candidate"
-            echo "short_sha=$short"
-            echo "previous_release_tag=$previous_release_tag"
-            echo "previous_release_sha=$previous_release_sha"
-            echo "tag=$tag"
-            echo "should_release=true"
-          } >>"$GITHUB_OUTPUT"
+          echo "Release signing keys are present and 64 hex characters." | tee -a "${GITHUB_STEP_SUMMARY}"
 
   build:
     name: ${{ matrix.platform }}
-    needs: select-commit
-    if: needs.select-commit.outputs.should_release == 'true'
+    needs: version
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
@@ -157,13 +112,10 @@ jobs:
           - os: macos-latest
             platform: macos-aarch64
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.select-commit.outputs.sha }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Mirror `ci.yml` so the release build matches what was tested.
-      # GStreamer headers gate the `video-textures` feature, which is not enabled
-      # by default, but keeping the install aligned avoids feature drift later.
+      # Same system packages as nightly.yml. GStreamer headers are unused
+      # unless video-textures is enabled; the install stays aligned with nightly.
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
         run: |
@@ -172,9 +124,11 @@ jobs:
             mesa-vulkan-drivers vulkan-tools \
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: release-${{ matrix.platform }}-cargo-binless-v1
           cache-bin: "false"
@@ -196,23 +150,25 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           if ([string]::IsNullOrWhiteSpace($env:RENDERIDE_RELEASE_PUBLIC_KEY_HEX)) {
-            throw "RENDERIDE_RELEASE_PUBLIC_KEY_HEX repository variable is required."
+            throw "RENDERIDE_RELEASE_PUBLIC_KEY_HEX repository variable is required. See RELEASING.md."
           }
-          if ($env:RENDERIDE_RELEASE_PUBLIC_KEY_HEX.Length -ne 64) {
-            throw "RENDERIDE_RELEASE_PUBLIC_KEY_HEX must be 64 hex characters."
+          if ($env:RENDERIDE_RELEASE_PUBLIC_KEY_HEX -notmatch '^[0-9a-fA-F]{64}$') {
+            throw "RENDERIDE_RELEASE_PUBLIC_KEY_HEX must be 64 hex characters. See RELEASING.md."
           }
           if ([string]::IsNullOrWhiteSpace($env:RENDERIDE_RELEASE_PRIVATE_KEY_HEX)) {
-            throw "RENDERIDE_RELEASE_PRIVATE_KEY_HEX repository secret is required."
+            throw "RENDERIDE_RELEASE_PRIVATE_KEY_HEX repository secret is required. See RELEASING.md."
           }
-          if ($env:RENDERIDE_RELEASE_PRIVATE_KEY_HEX.Length -ne 64) {
-            throw "RENDERIDE_RELEASE_PRIVATE_KEY_HEX must be 64 hex characters."
+          if ($env:RENDERIDE_RELEASE_PRIVATE_KEY_HEX -notmatch '^[0-9a-fA-F]{64}$') {
+            throw "RENDERIDE_RELEASE_PRIVATE_KEY_HEX must be 64 hex characters. See RELEASING.md."
           }
 
+      # bootstrapper produces the renderide launcher that nightly zips ship
+      # next to renderide-renderer.
       - name: Build (release)
         env:
           RENDERIDE_RELEASE_CHANNEL: github-ci
-          RENDERIDE_RELEASE_TAG: ${{ needs.select-commit.outputs.tag }}
-          RENDERIDE_RELEASE_COMMIT: ${{ needs.select-commit.outputs.sha }}
+          RENDERIDE_RELEASE_TAG: ${{ github.ref_name }}
+          RENDERIDE_RELEASE_COMMIT: ${{ github.sha }}
           RENDERIDE_RELEASE_PLATFORM: ${{ matrix.platform }}
           RENDERIDE_RELEASE_PUBLIC_KEY_HEX: ${{ vars.RENDERIDE_RELEASE_PUBLIC_KEY_HEX }}
         run: cargo build --release --locked -p renderide -p bootstrapper
@@ -221,8 +177,8 @@ jobs:
         if: runner.os != 'Windows'
         env:
           PLATFORM: ${{ matrix.platform }}
-          TAG: ${{ needs.select-commit.outputs.tag }}
-          SHA: ${{ needs.select-commit.outputs.sha }}
+          TAG: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
           RENDERIDE_RELEASE_PRIVATE_KEY_HEX: ${{ secrets.RENDERIDE_RELEASE_PRIVATE_KEY_HEX }}
         run: |
           set -euo pipefail
@@ -286,7 +242,7 @@ jobs:
               encoding="utf-8",
           )
           PY
-          cargo run --release --locked -p bootstrapper --bin renderide-sign-release-manifest -- "${dist}/renderide-release.json" > "${dist}/renderide-release.json.sig"
+          "${src}/renderide-sign-release-manifest" "${dist}/renderide-release.json" > "${dist}/renderide-release.json.sig"
           ( cd dist && zip -r "${name}.zip" "${name}" )
 
       - name: Stage zip (Windows)
@@ -294,8 +250,8 @@ jobs:
         shell: pwsh
         env:
           PLATFORM: ${{ matrix.platform }}
-          TAG: ${{ needs.select-commit.outputs.tag }}
-          SHA: ${{ needs.select-commit.outputs.sha }}
+          TAG: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
           RENDERIDE_RELEASE_PRIVATE_KEY_HEX: ${{ secrets.RENDERIDE_RELEASE_PRIVATE_KEY_HEX }}
         run: |
           $ErrorActionPreference = "Stop"
@@ -339,99 +295,86 @@ jobs:
             sha256 = $sha256
           }
           $manifest | ConvertTo-Json -Depth 4 | Set-Content "$dist/renderide-release.json" -Encoding utf8
-          $signature = cargo run --release --locked -p bootstrapper --bin renderide-sign-release-manifest -- "$dist/renderide-release.json"
+          $signature = & "$src/renderide-sign-release-manifest.exe" "$dist/renderide-release.json"
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($signature)) { throw "manifest signing failed" }
           Set-Content "$dist/renderide-release.json.sig" -Encoding ascii -NoNewline -Value $signature
           Compress-Archive -Path $dist -DestinationPath "dist/$name.zip" -Force
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: renderide-${{ matrix.platform }}
-          path: dist/renderide-${{ matrix.platform }}-${{ needs.select-commit.outputs.tag }}.zip
+          path: dist/renderide-${{ matrix.platform }}-${{ github.ref_name }}.zip
           if-no-files-found: error
 
   publish:
-    name: Publish GitHub Release
-    needs: [select-commit, build]
-    if: needs.select-commit.outputs.should_release == 'true'
+    name: Publish draft release
+    needs: [version, build]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.select-commit.outputs.sha }}
-          fetch-depth: 0
-          fetch-tags: true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: artifacts
 
-      - name: Compose release notes
-        id: notes
-        env:
-          SHA: ${{ needs.select-commit.outputs.sha }}
-          PREVIOUS_RELEASE_TAG: ${{ needs.select-commit.outputs.previous_release_tag }}
-          PREVIOUS_RELEASE_SHA: ${{ needs.select-commit.outputs.previous_release_sha }}
-          TAG: ${{ needs.select-commit.outputs.tag }}
+      - name: Write SHA256SUMS
+        shell: bash
         run: |
           set -euo pipefail
+          export LC_ALL=C
+          mkdir -p release-assets
+          find artifacts -type f -exec cp -t release-assets {} +
+          cd release-assets
+          mapfile -t files < <(find . -type f -printf '%P\n' | sort)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "no release artifacts downloaded" >&2
+            exit 1
+          fi
+          sha256sum "${files[@]}" > SHA256SUMS
+          sha256sum -c SHA256SUMS
+          {
+            echo "SHA256SUMS"
+            echo ""
+            echo '```'
+            cat SHA256SUMS
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
 
-          changelog_range_label=""
-          changelog_args=()
-          if [ -n "${PREVIOUS_RELEASE_TAG}" ] &&
-             [ -n "${PREVIOUS_RELEASE_SHA}" ] &&
-             git cat-file -e "${PREVIOUS_RELEASE_TAG}^{commit}" 2>/dev/null &&
-             git merge-base --is-ancestor "${PREVIOUS_RELEASE_SHA}" "${SHA}"
-          then
-            changelog_range_label="Changes since [${PREVIOUS_RELEASE_TAG}](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${PREVIOUS_RELEASE_TAG}) ([${PREVIOUS_RELEASE_SHA:0:8}](https://github.com/${GITHUB_REPOSITORY}/commit/${PREVIOUS_RELEASE_SHA}))."
-            changelog_args=("${PREVIOUS_RELEASE_TAG}..${SHA}")
-          else
-            changelog_range_label="No previous full release tag was available, so no commit changelog was generated for this release."
+      - name: Release notes from CHANGELOG
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          awk -v ver="${version}" '
+            BEGIN { found = 0 }
+            found == 0 && index($0, "## [" ver "]") == 1 { found = 1; print; next }
+            found == 1 && index($0, "## [") == 1 { exit }
+            found == 1 && $0 ~ /^\[[^]]+\]:/ { exit }
+            found == 1 { print }
+            END { if (found == 0) exit 2 }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "CHANGELOG.md has no section for ${version}" >&2
+            exit 1
           fi
 
-          changelog_count=0
-          {
-            echo "${changelog_range_label}"
-            if [ "${#changelog_args[@]}" -gt 0 ]; then
-              echo ""
-              while IFS=$'\x1f' read -r full_sha subject author; do
-                if [ -z "${full_sha}" ]; then
-                  continue
-                fi
-                short_sha="${full_sha:0:8}"
-                printf -- '- [%s](https://github.com/%s/commit/%s) %s by %s\n' \
-                  "${short_sha}" "${GITHUB_REPOSITORY}" "${full_sha}" "${subject}" "${author}"
-                changelog_count=$((changelog_count + 1))
-              done < <(git log --no-merges --reverse --format='%H%x1f%s%x1f%an' "${changelog_args[@]}")
-            fi
-          } > changelog.md
-
-          if [ "${#changelog_args[@]}" -gt 0 ] && [ "${changelog_count}" -eq 0 ]; then
-            {
-              echo "${changelog_range_label}"
-              echo ""
-              echo "_No non-merge commits found since the previous release._"
-            } > changelog.md
-          fi
-
-          {
-            echo "Commit: ${SHA}"
-            echo ""
-            echo "Nightly build of [${SHA}](https://github.com/${GITHUB_REPOSITORY}/commit/${SHA})."
-            echo ""
-            echo "Each zip contains the launcher (\`renderide\`), the renderer (\`renderide-renderer\`), the runtime shader package, and the XR action manifests. Windows and macOS zips also bundle the Khronos OpenXR loader; Linux uses the system OpenXR loader."
-            echo ""
-            echo "## Changelog"
-            echo ""
-            cat changelog.md
-          } > release-notes.md
-
-      - uses: softprops/action-gh-release@v2
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          tag_name: ${{ needs.select-commit.outputs.tag }}
-          name: ${{ needs.select-commit.outputs.tag }}
+          subject-path: release-assets/*
+
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          tag_name: ${{ github.ref_name }}
+          target_commitish: ${{ github.sha }}
           body_path: release-notes.md
-          target_commitish: ${{ needs.select-commit.outputs.sha }}
-          files: artifacts/**/*.zip
-          make_latest: "true"
-          prerelease: false
+          files: release-assets/*
+          draft: "true"
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: "false"
           fail_on_unmatched_files: true
