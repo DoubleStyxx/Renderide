@@ -673,6 +673,10 @@ fn sanitized_transition_height(value: f32) -> f32 {
 }
 
 #[cfg(test)]
+#[path = "lod_boxless_skinned_tests.rs"]
+mod lod_boxless_skinned_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
