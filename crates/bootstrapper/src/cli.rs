@@ -43,6 +43,11 @@ pub(crate) fn normalize_flag_token(token: &str) -> String {
 /// Parses bootstrapper args, extracting `--log-level` / `-l` for bootstrapper and Renderide.
 ///
 /// Returns Host arguments plus bootstrapper-only startup options.
+///
+/// Each OS argument is kept as one token. A path or record URL that contains spaces is not
+/// split again here. The only re-split is the renderer handoff in
+/// [`crate::launch_args::renderer_delegate_from_args`], and only when that single argument is
+/// itself a renderer launch.
 pub fn parse_args() -> ParsedArgs {
     let args: Vec<String> = env::args().skip(1).collect();
     parse_bootstrap_args_tokens(&args)

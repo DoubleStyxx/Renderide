@@ -199,6 +199,13 @@ impl RendererRuntime {
     ) -> (&mut DisplayBlitResources, &mut RenderBackend) {
         (&mut self.display_blit, &mut self.backend)
     }
+
+    /// Shadow atlas submits for the current prepare, then the total since startup.
+    ///
+    /// The first value is 0 when this frame skipped the atlas and 1 when the atlas was submitted.
+    pub(crate) fn shadow_atlas_pass_counts(&self) -> (u32, u64) {
+        self.backend.frame_resources().shadow_atlas_pass_counts()
+    }
 }
 
 #[cfg(test)]

@@ -546,7 +546,9 @@ fn readback_camera_task_texture(
     }
     let tight = {
         profiling::scope!("camera_task::copy_padded_rows");
-        let view = slice.get_mapped_range();
+        let view = slice
+            .get_mapped_range()
+            .map_err(|err| CameraReadbackError::Map(err.to_string()))?;
         plan.copy_mapped_rows_to_tight(&view)?
     };
     readback.unmap();

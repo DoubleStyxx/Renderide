@@ -24,7 +24,7 @@ repos:
       - id: clippy
         name: clippy
         entry: cargo
-        args: [clippy, --all-targets, --locked, --, -W, clippy::all, -D, warnings]
+        args: [clippy, --all-targets, --locked, --all-features, --, -D, warnings, -D, clippy::all]
         language: system
         types: [rust]
         pass_filenames: false

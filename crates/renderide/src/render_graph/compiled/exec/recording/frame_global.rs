@@ -666,7 +666,17 @@ impl CompiledRenderGraph {
                 let encode_ms = elapsed_ms(encode_start);
                 Ok(Self::finish_frame_global_split_encoder(encoder, encode_ms))
             })
-            .collect()
+            .collect::<Result<Vec<_>, GraphExecuteError>>()
+            .inspect(|_commands| {
+                if resource_pass == FrameGlobalResourcePass::ShadowAtlas {
+                    frame_resources.arm_shadow_maps_if_split_recorded();
+                }
+            })
+            .inspect_err(|_err| {
+                if resource_pass == FrameGlobalResourcePass::ShadowAtlas {
+                    frame_resources.abandon_shadow_split_recording();
+                }
+            })
     }
 
     fn finish_frame_global_split_encoder(

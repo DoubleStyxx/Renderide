@@ -171,7 +171,9 @@ pub(in crate::runtime) fn readback_reflection_probe_cube(
     }
     let mapped = {
         profiling::scope!("reflection_probe_task::copy_mapped_readback");
-        let view = slice.get_mapped_range();
+        let view = slice
+            .get_mapped_range()
+            .map_err(|err| ReflectionProbeBakeError::Map(err.to_string()))?;
         let required = usize::try_from(layout.buffer_size)
             .map_err(|_err| ReflectionProbeBakeError::OutputByteCountOverflow)?;
         if view.len() < required {

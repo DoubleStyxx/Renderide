@@ -48,24 +48,22 @@ fn resolve_user_paths(instance: &xr::Instance) -> Result<UserPaths, xr::sys::Res
     })
 }
 
-/// Creates the controller pose spaces (grip and palm) anchored at
-/// [`openxr::Posef::IDENTITY`] for the lifetime of the session.
+/// Creates the controller grip spaces anchored at [`openxr::Posef::IDENTITY`] for the lifetime of
+/// the session.
+///
+/// Palm-pose actions stay in the manifest so a runtime that implements `XR_EXT_palm_pose` can
+/// still bind them, but they are not located. The host controller node is the OpenVR raw pose
+/// recovered from grip, not the palm frame.
 fn create_pose_spaces(
     session: &xr::Session<xr::Vulkan>,
     actions: &OpenxrInputActions,
-) -> Result<(xr::Space, xr::Space, xr::Space, xr::Space), xr::sys::Result> {
+) -> Result<(xr::Space, xr::Space), xr::sys::Result> {
     Ok((
         actions
             .left_grip_pose
             .create_space(session, xr::Path::NULL, xr::Posef::IDENTITY)?,
         actions
             .right_grip_pose
-            .create_space(session, xr::Path::NULL, xr::Posef::IDENTITY)?,
-        actions
-            .left_palm_ext_pose
-            .create_space(session, xr::Path::NULL, xr::Posef::IDENTITY)?,
-        actions
-            .right_palm_ext_pose
             .create_space(session, xr::Path::NULL, xr::Posef::IDENTITY)?,
     ))
 }
@@ -105,10 +103,6 @@ pub(super) struct OpenxrInputParts {
     pub(super) left_space: xr::Space,
     /// Right grip pose space.
     pub(super) right_space: xr::Space,
-    /// Left palm pose space.
-    pub(super) left_palm_ext_space: xr::Space,
-    /// Right palm pose space.
-    pub(super) right_palm_ext_space: xr::Space,
     /// Body tracker role pose spaces.
     pub(super) tracker_spaces: Vec<TrackerPoseSpace>,
     /// Left hand OpenXR hand tracker.
@@ -152,8 +146,7 @@ pub(super) fn create_openxr_input_parts(
 
     session.attach_action_sets(&[&action_set])?;
 
-    let (left_space, right_space, left_palm_space, right_palm_space) =
-        create_pose_spaces(session, &actions)?;
+    let (left_space, right_space) = create_pose_spaces(session, &actions)?;
     let tracker_spaces = if gates.htcx_vive_tracker_interaction {
         create_tracker_pose_spaces(session, &actions.tracker_grip_poses)
     } else {
@@ -179,8 +172,6 @@ pub(super) fn create_openxr_input_parts(
         right_profile_cache: AtomicU8::new(0),
         left_space,
         right_space,
-        left_palm_ext_space: left_palm_space,
-        right_palm_ext_space: right_palm_space,
         tracker_spaces,
         left_hand_tracker,
         right_hand_tracker,

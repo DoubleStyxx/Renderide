@@ -1,7 +1,7 @@
 //! Driver thread loop: drains [`super::ring::BoundedRing`] and runs one GPU frame per message.
 //!
 //! The loop is the only place in the renderer that calls [`wgpu::Queue::submit`] or
-//! [`wgpu::SurfaceTexture::present`] for the main render-graph path. Errors are captured
+//! [`wgpu::Queue::present`] for the main render-graph path. Errors are captured
 //! into [`super::DriverErrorState`] and surfaced to the main thread at the next
 //! [`super::DriverThread::take_pending_error`] call.
 
@@ -279,9 +279,9 @@ fn present_surface_if_present(
             let _gate = ctx.gpu_queue_access_gate.lock();
             {
                 profiling::scope!("driver::present::surface_present");
-                // `SurfaceTexture::present` is infallible in the current wgpu API; if that
-                // changes, route the error into `errors` with `DriverErrorKind::Present`.
-                tex.present();
+                // `Queue::present` is infallible in wgpu 30. If that changes, route the error
+                // into `errors` with `DriverErrorKind::Present`.
+                ctx.queue.present(tex);
             }
         }
     };
