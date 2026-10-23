@@ -10,12 +10,13 @@ pub const DEFAULT_SCENARIOS: [&str; 2] = ["unlit_sphere", "multi_primitive_unlit
 
 /// Extra scenarios selectable with `--scenario`. They are not in the default CI gate set.
 #[cfg(test)]
-const EXTRA_SCENARIOS: [&str; 5] = [
+const EXTRA_SCENARIOS: [&str; 6] = [
     "pbs_lit_material_matrix",
     "many_static_meshes",
     "lights_shadows",
     "offscreen_skinned_avatars",
     "onscreen_skinned_avatars",
+    "secondary_camera_copy",
 ];
 
 /// Transport name recorded in every report. The socket is not implemented.
@@ -79,6 +80,16 @@ const ONSCREEN_SKINNED_AVATARS: Scenario = Scenario {
     camera_rotation_xyzw: [0.099_833_42, 0.0, 0.0, 0.995_004_2],
 };
 
+/// The `unlit_sphere` scene with the main `Skybox` camera plus two enabled secondary cameras
+/// (`Depth` clear, `Nothing` clear), each rendering the sphere into its own 512x512 render
+/// texture. On a renderer that seeds non-clearing HDR views from the target (fork PR #181) each
+/// secondary camera adds a full-target `Rgba16Float` copy; on master it renders without one.
+const SECONDARY_CAMERA_COPY: Scenario = Scenario {
+    name: "secondary_camera_copy",
+    camera_position: [0.0, 0.0, -3.0],
+    camera_rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+};
+
 /// Thirty shadowed point lights. Opt-in: absent from [`DEFAULT_SCENARIOS`] so the default CI
 /// window stays on the unshadowed scenes. The host raises `per_pixel_lights` to 32 and asks for
 /// 128-texel shadow faces.
@@ -99,6 +110,7 @@ pub fn by_name(name: &str) -> Option<&'static Scenario> {
         "many_shadowed_point_lights" => Some(&MANY_SHADOWED_POINT_LIGHTS),
         "offscreen_skinned_avatars" => Some(&OFFSCREEN_SKINNED_AVATARS),
         "onscreen_skinned_avatars" => Some(&ONSCREEN_SKINNED_AVATARS),
+        "secondary_camera_copy" => Some(&SECONDARY_CAMERA_COPY),
         _ => None,
     }
 }

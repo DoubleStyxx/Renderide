@@ -31,6 +31,7 @@ Scenes are host-driven (the framebench host replays a fixed scene over IPC; see 
 | S6 | `ui_canvas_stack` | UI draw ordering, transparent sort (#50) | hundreds of coplanar canvas quads | to add; CPU part already covered by `transparent_sort` Criterion bench on #50 |
 | S7 | `vr_mirror` | multiview + secondary view | stereo + mirror camera | **real GPU/OpenXR**; not representable on lavapipe |
 | S8 | `particles` | particle-system CPU update + draw | emitters with N particles | to add once a particle upload path is scriptable |
+| S9 | `secondary_camera_copy` | secondary render-texture cameras with non-clearing clears; the full-target `Rgba16Float` previous-color seed copy of fork PR #181 | S0 `unlit_sphere` scene (main camera `Skybox`) + 2 enabled, single-sample, non-double-buffered secondary cameras at the main pose, one `Depth` clear and one `Nothing` clear, each into its own 512x512 render texture (`Rgba16Float` + depth); 0 lights | implemented (host now allocates render textures and sends `cameras_update`) |
 
 Camera, resolution, warmup and frame counts are part of the scene definition: S1/S2 use the CI config (256x256, warmup 10, frames 20, runs 5) for the gate and 1920x1080 (warmup 30, frames 120, runs 3) for the reference table.
 
@@ -134,7 +135,7 @@ Thresholds are relative to master measured on the same box in the same session. 
 | PR / issue | Owner | Scenes (framebench) | Criterion benches | Metric | Threshold | Notes |
 |---|---|---|---|---|---|---|
 | #166 skinned culling (fork PR #177) | Shader | S5 `offscreen_skinned_avatars` + control `onscreen_skinned_avatars` (regression guard), S1/S2 unchanged | `culling/skinned_homogeneous_clip_aabb` vs `culling/homogeneous_clip_aabb` (both exist on #177) | S5 draw calls: offscreen must equal the visible share (17) and onscreen ~271-273 on base AND head; no allocation in the clip loop (`skinned_clip_loop_allocates_nothing`); S1/S2 must not regress | S1/S2 p50,p95 <= +5% (noise-adjusted); rigid row <= +5%; skinned row <= +10% over the rigid row | **Measured 2026-10-23 (section 10): production master already culls skinned draws via the prepared-renderables path; #177 changes only the `#[cfg(test)]` scene-walk collector plus a no-op `mesh_bounds` refactor, so no end-to-end frame-time or draw-count delta is expected or observed.** Real GPU only for skinned deform cost |
-| #144 clear modes | Shader | S2 plus a two-camera stacked-render-texture scene (to add) | none new (load-op change) | `cpu_frame_ms` p50/p95; GPU pass ms for Opaque/DepthPrepass (real GPU) | S1/S2 <= +5%; no new attachments (upload bytes/count unchanged) | golden for `Nothing`/`Depth`; load-op savings only visible on a real GPU (tile GPUs) |
+| #144 clear modes | Shader | S2 plus S9 `secondary_camera_copy` (two render-texture cameras, `Depth` + `Nothing`) | none new (load-op change) | `cpu_frame_ms` p50/p95; GPU pass ms for Opaque/DepthPrepass (real GPU) | S1/S2 <= +5%; no new attachments (upload bytes/count unchanged) | golden for `Nothing`/`Depth`; load-op savings only visible on a real GPU (tile GPUs) |
 | #145 LOD cross-fade | Shader | S1 with cross-fade off must be bit-identical (draw count equal); a fading-LOD scene (to add) | allocation check on LOD collect; add `lod_select` bench if CPU cost is claimed | draw count off=base; extra draws only in transition; `cpu_frame_ms` | fade off: draws identical, p50 <= +2% (S1); fade on: report the extra-draw cost | golden mid-fade frame |
 | #147 camera double buffering | Shader | render-texture camera scene (to add), S0 | none | VRAM (second image created once), `cpu_frame_ms` | S0/S1 <= +5%; VRAM +1 color image per double-buffered texture only | VRAM check needs a real GPU or wgpu allocation report |
 | #146 velocity buffer | Shader | S1/S2 with motion blur on and off (to add `motion_blur` flag) | allocation check: no per-frame previous-matrix `Vec` | `cpu_frame_ms`, GPU ms Opaque/MotionBlur | motion blur off: S1/S2 <= +3% (extra MRT must not tax the off path); on: report cost | GPU cost of the extra MRT is a **real GPU** question |
@@ -172,12 +173,27 @@ Reading: the S5 pair is the intended regression guard: 256 behind-the-camera ava
 
 Multi-thread lock behaviour is not visible in framebench or Criterion; the `gauge/lock-contention-bench` branch adds `renderide-lockbench` (`cargo run --release --manifest-path crates/renderide-lockbench/Cargo.toml -- --threads 2,4,8`, a standalone package outside the workspace) for A/B-ing lock crates; use it whenever a dependency bump touches `parking_lot` or the GPU queue gate.
 
+### S9 `secondary_camera_copy`: what it compares
+
+The scene is host-only, so it runs against any renderer, including master. **The meaningful comparison is master versus a tree that contains fork PR #181** (seeding a non-clearing HDR view from its render-texture target). On master the `Depth`/`Nothing` secondary cameras render with no copy; on a #181 tree each of the two adds one full-target 512x512 `Rgba16Float` `copy_texture_to_texture` per frame. The seed only applies to full-target, single-sample `Rgba16Float` views that are not double-buffered, which is why both cameras use flags bit 0 only (enabled) and a full viewport. In the frame-bench workflow, a base ref without this scenario (for example master before this branch merges) runs it on head only and reports base as `missing`.
+
+`draw_calls` in the report is the last-applied world view's count, not the sum over views, so it reads 1 here although three views (main + 2 secondary) draw the sphere each frame. `upload_count` (11 vs 5 for `unlit_sphere`) and the summed `gpu_passes_ms` show the secondary views are rendering.
+
+Measured 2026-10-23 17:55 MDT, lavapipe, CI config (256x256, 2 cores, warmup 10, frames 20, runs 5), medians of 4 interleaved rounds (min-max in brackets), same `renderide-framebench` host binary for both renderers:
+
+| Renderer | S9 draws, cpu_frame p50 / p95 ms | `WorldMeshForwardColorPreserve` pass | S0 `unlit_sphere` p50 / p95 ms (same session) |
+|---|---|---|---|
+| master renderer code (this branch, 3271f957 + this scenario) | 1, 0.50 [0.47-0.56] / 0.83 [0.80-0.91] | absent (no copy) | 0.235 / 0.272 |
+| local merge of this branch + #181 9cdbbb43 (not pushed) | 1, 0.50 [0.46-0.54] / 0.82 [0.79-0.82] | present, ~0.30-0.35 ms lavapipe GPU p50 | 0.238 / 0.278 |
+
+Reading: the two seeded copies run on the #181 tree (the extra GPU pass appears) and cost nothing measurable in CPU frame time on lavapipe (within noise). The secondary views roughly double the S0 CPU frame. The copy's real cost is GPU bandwidth (2 x 512x512x8 bytes per frame), so it needs a real GPU to measure.
+
 ### Exact commands for Styxx on a real GPU
 ```
 git clone https://github.com/DoubleStyxx/Renderide && cd Renderide
 cargo build --release --locked -p renderide -p renderide-framebench
 unset VK_ICD_FILENAMES VK_DRIVER_FILES        # use the real driver
-for s in many_static_meshes lights_shadows pbs_lit_material_matrix offscreen_skinned_avatars onscreen_skinned_avatars; do
+for s in many_static_meshes lights_shadows pbs_lit_material_matrix offscreen_skinned_avatars onscreen_skinned_avatars secondary_camera_copy; do
   RAYON_NUM_THREADS=8 target/release/renderide-framebench run --renderer target/release/renderide-renderer \
      --scenario $s --resolution 1920x1080 --warmup 30 --frames 120 --runs 3 --output perf-$s.json
 done   # check adapter.device_type != Cpu in the JSON; keep gpu_passes_ms

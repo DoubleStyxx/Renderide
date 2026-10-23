@@ -4,14 +4,19 @@
 //! - `lights_shadows`: lit spheres with a shadowed directional light and shadowed point lights.
 //! - `offscreen_skinned_avatars` / `onscreen_skinned_avatars`: one-bone skinned spheres, mostly
 //!   behind the camera (or in view as the control), with a shadowed sun so every avatar still casts.
+//! - `secondary_camera_copy`: the `unlit_sphere` scene plus two enabled secondary cameras that
+//!   render into their own render textures, one with a `Depth` clear and one with `Nothing`
+//!   (see [`secondary_camera_copy_rig`]).
 
 use glam::{Quat, Vec3};
-use renderide_shared::shared::{RenderBoundingBox, ShadowCastMode, ShadowType};
+use renderide_shared::shared::{CameraClearMode, RenderBoundingBox, ShadowCastMode, ShadowType};
 
 use crate::scene::primitives::centered_bounds;
 use crate::scene::sphere::generate_sphere;
 
-use super::scene_state::{SceneLight, SceneRenderable, SceneSkinned, SceneSubmission};
+use super::scene_state::{
+    SceneCamera, SceneLight, SceneRenderable, SceneSkinned, SceneSubmission, next_free_transform_id,
+};
 use super::{
     SceneSetup, directional_light, mesh_asset, pbs_material_for_scene, point_light,
     scene_material_id, scene_mesh_id, transform, unlit_color_material_for_scene,
@@ -239,5 +244,44 @@ pub(super) fn skinned_avatars_setup(offscreen: bool) -> SceneSetup {
             lights,
             skinned,
         },
+    }
+}
+
+/// Render-texture asset id written by the `Depth`-clear secondary camera.
+const SECONDARY_RT_DEPTH_CLEAR: i32 = 900;
+/// Render-texture asset id written by the `Nothing`-clear secondary camera.
+const SECONDARY_RT_NOTHING_CLEAR: i32 = 901;
+/// Secondary render-texture size in pixels. Independent of the main view `--resolution`.
+pub(super) const SECONDARY_RT_SIZE: (i32, i32) = (512, 512);
+
+/// Render textures to allocate and cameras to submit for `secondary_camera_copy`.
+pub(super) struct SecondaryCameraRig {
+    /// Render-texture asset ids, all [`SECONDARY_RT_SIZE`] (`Rgba16Float` color + depth).
+    pub render_textures: Vec<i32>,
+    /// One `Depth`-clear and one `Nothing`-clear camera, one render texture each.
+    pub cameras: Vec<SceneCamera>,
+}
+
+/// Two full-viewport, single-sample, non-double-buffered secondary cameras that share the main
+/// camera pose (so they draw the same sphere) and render into their own render textures.
+///
+/// On a renderer that seeds a non-clearing HDR view from its render-texture target (fork PR #181)
+/// each camera adds one full-target `Rgba16Float` copy per frame; on master the scene renders the
+/// same draws with no copy. The main camera keeps the default `Skybox` clear.
+pub(super) fn secondary_camera_copy_rig(scene: &SceneSubmission) -> SecondaryCameraRig {
+    let first = next_free_transform_id(scene);
+    let camera = |offset: i32, render_texture_asset_id, clear_mode, depth| SceneCamera {
+        transform_id: first + offset,
+        pose: scene.camera_world_pose,
+        render_texture_asset_id,
+        clear_mode,
+        depth,
+    };
+    SecondaryCameraRig {
+        render_textures: vec![SECONDARY_RT_DEPTH_CLEAR, SECONDARY_RT_NOTHING_CLEAR],
+        cameras: vec![
+            camera(0, SECONDARY_RT_DEPTH_CLEAR, CameraClearMode::Depth, 0.0),
+            camera(1, SECONDARY_RT_NOTHING_CLEAR, CameraClearMode::Nothing, 1.0),
+        ],
     }
 }
