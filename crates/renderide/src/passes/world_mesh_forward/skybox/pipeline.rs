@@ -158,6 +158,8 @@ pub(super) fn create_skybox_pipeline(
     } = desc;
     let shader_specialization_constants =
         shader_specialization.pipeline_constants_for_wgsl_source(wgsl_source);
+    let vertex_buffers: Vec<Option<wgpu::VertexBufferLayout<'static>>> =
+        vertex_buffer_layouts.iter().cloned().map(Some).collect();
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(label),
         layout: Some(layout),
@@ -168,7 +170,7 @@ pub(super) fn create_skybox_pipeline(
                 constants: shader_specialization_constants.as_slice(),
                 ..Default::default()
             },
-            buffers: vertex_buffer_layouts,
+            buffers: &vertex_buffers,
         },
         fragment: Some(wgpu::FragmentState {
             module: shader,

@@ -15,7 +15,7 @@ use crate::world_mesh::test_fixtures::{DummyDrawItemSpec, dummy_world_mesh_draw_
 use crate::world_mesh::{
     PrefetchedWorldMeshViewDraws, WorldMeshDrawItem, WorldMeshDrawPlan, WorldMeshPhase,
 };
-use glam::Vec3;
+use glam::{Mat4, Vec3};
 
 use super::{
     POINT_FACE_COUNT, light_type_u32, point_shadow_projection, shadow_view_count_for_light,
@@ -125,6 +125,117 @@ fn clear_assignment_removes_shadow_view_link() {
     assert_eq!(light.shadow_view_start, 0);
     assert_eq!(light.shadow_view_count, 0);
     assert_eq!(light.shadow_flags, 0);
+}
+
+fn ndc_z(view_proj: Mat4, world: Vec3) -> f32 {
+    let clip = view_proj * world.extend(1.0);
+    clip.z / clip.w
+}
+
+fn assert_near_and_far_depth(view_proj: Mat4, near_world: Vec3, far_world: Vec3) {
+    let near_z = ndc_z(view_proj, near_world);
+    let far_z = ndc_z(view_proj, far_world);
+    assert!(
+        near_z.abs() < 1e-4,
+        "near plane mapped to z={near_z}, expected 0"
+    );
+    assert!(
+        (far_z - 1.0).abs() < 1e-4,
+        "far plane mapped to z={far_z}, expected 1"
+    );
+}
+
+#[test]
+fn directional_shadow_depth_is_wgpu_zero_to_one() {
+    let quality = HostShadowQuality::default();
+    let direction = Vec3::NEG_Z;
+    let view_count = quality.cascade_count.max(1);
+    let view_offset = 0;
+    let view_proj =
+        super::directional_shadow_projection(direction, view_offset, view_count, quality);
+    let distance = quality.shadow_distance.max(1.0);
+    let cascade_scale = (view_offset + 1) as f32 / view_count as f32;
+    let extent = distance * cascade_scale;
+    let far = distance * 2.0;
+    let eye = -direction * extent;
+    assert_near_and_far_depth(view_proj, eye, eye + direction * far);
+
+    let origin_z = ndc_z(view_proj, Vec3::ZERO);
+    assert!(
+        origin_z > 0.0 && origin_z < 1.0,
+        "origin depth {origin_z} left the [0, 1] shadow volume"
+    );
+    assert!(super::world_aabb_visible_in_homogeneous_clip(
+        view_proj,
+        Vec3::splat(-0.5),
+        Vec3::splat(0.5),
+    ));
+    let behind = eye - direction * 5.0;
+    assert!(!super::world_aabb_visible_in_homogeneous_clip(
+        view_proj,
+        behind - Vec3::splat(0.25),
+        behind + Vec3::splat(0.25),
+    ));
+    let past_far = eye + direction * (far + 5.0);
+    assert!(!super::world_aabb_visible_in_homogeneous_clip(
+        view_proj,
+        past_far - Vec3::splat(0.25),
+        past_far + Vec3::splat(0.25),
+    ));
+}
+
+#[test]
+fn spot_shadow_depth_is_wgpu_zero_to_one() {
+    let mut light = shadowed_light(LightType::Spot);
+    light.position = [1.0, 2.0, 3.0];
+    light.direction = [0.0, 0.0, -1.0];
+    let position = Vec3::from_array(light.position);
+    let direction = Vec3::NEG_Z;
+    let view_proj = super::spot_shadow_projection(&light, position, direction);
+    let near = light.shadow_near_plane.max(0.001);
+    let far = light.range.max(near + 0.001);
+    assert_near_and_far_depth(
+        view_proj,
+        position + direction * near,
+        position + direction * far,
+    );
+    let mid = position + direction * f32::midpoint(near, far);
+    let mid_z = ndc_z(view_proj, mid);
+    assert!(
+        mid_z > 0.0 && mid_z < 1.0,
+        "spot mid-range depth {mid_z} left [0, 1]"
+    );
+    assert!(super::world_aabb_visible_in_homogeneous_clip(
+        view_proj,
+        mid - Vec3::splat(0.05),
+        mid + Vec3::splat(0.05),
+    ));
+}
+
+#[test]
+fn point_shadow_depth_is_wgpu_zero_to_one() {
+    let mut light = shadowed_light(LightType::Point);
+    light.position = [1.0, 2.0, 3.0];
+    let position = Vec3::from_array(light.position);
+    let near = light.shadow_near_plane.max(0.001);
+    let far = light.range.max(near + 0.001);
+    for face in 0..POINT_FACE_COUNT {
+        let (direction, _) = super::point_faces::basis(face);
+        let view_proj = point_shadow_projection(&light, position, face);
+        assert_near_and_far_depth(
+            view_proj,
+            position + direction * near,
+            position + direction * far,
+        );
+    }
+    let (direction, _) = super::point_faces::basis(0);
+    let view_proj = point_shadow_projection(&light, position, 0);
+    let mid = position + direction * f32::midpoint(near, far);
+    assert!(super::world_aabb_visible_in_homogeneous_clip(
+        view_proj,
+        mid - Vec3::splat(0.02),
+        mid + Vec3::splat(0.02),
+    ));
 }
 
 #[test]

@@ -84,6 +84,7 @@ pub(crate) struct DriverSubmitter {
     submit_counters: Arc<SubmitCounters>,
     device_health: Arc<GpuDeviceHealth>,
     flight_recorder: Arc<GpuFlightRecorder>,
+    queue: Arc<wgpu::Queue>,
 }
 
 impl DriverSubmitter {
@@ -99,6 +100,7 @@ impl DriverSubmitter {
             submit_counters: &self.submit_counters,
             device_health: &self.device_health,
             flight_recorder: &self.flight_recorder,
+            queue: &self.queue,
         }
     }
 }
@@ -114,6 +116,7 @@ pub struct DriverThread {
     submit_counters: Arc<SubmitCounters>,
     device_health: Arc<GpuDeviceHealth>,
     flight_recorder: Arc<GpuFlightRecorder>,
+    queue: Arc<wgpu::Queue>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
@@ -142,12 +145,13 @@ impl DriverThread {
         let surface_counters_clone = Arc::clone(&surface_counters);
         let submit_counters_clone = Arc::clone(&submit_counters);
         let flight_recorder_clone = Arc::clone(&flight_recorder);
+        let queue_for_thread = Arc::clone(&queue);
         let handle = thread::Builder::new()
             .name("renderer-driver".to_string())
             .spawn(move || {
                 worker::driver_loop(
                     ring_clone,
-                    queue,
+                    queue_for_thread,
                     gpu_queue_access_gate,
                     errors_clone,
                     surface_counters_clone,
@@ -163,6 +167,7 @@ impl DriverThread {
             submit_counters,
             device_health,
             flight_recorder,
+            queue,
             handle: Some(handle),
         })
     }
@@ -175,6 +180,7 @@ impl DriverThread {
             submit_counters: Arc::clone(&self.submit_counters),
             device_health: Arc::clone(&self.device_health),
             flight_recorder: Arc::clone(&self.flight_recorder),
+            queue: Arc::clone(&self.queue),
         }
     }
 
@@ -200,11 +206,12 @@ impl DriverThread {
             submit_counters: &self.submit_counters,
             device_health: &self.device_health,
             flight_recorder: &self.flight_recorder,
+            queue: &self.queue,
         }
     }
 
     /// Blocks until every previously-submitted surface-carrying batch has reached
-    /// [`wgpu::SurfaceTexture::present`] on the driver thread.
+    /// [`wgpu::Queue::present`] on the driver thread.
     ///
     /// Use this right before [`wgpu::Surface::get_current_texture`] to uphold wgpu's
     /// single-outstanding-surface-texture invariant without draining the full driver ring.
@@ -273,6 +280,7 @@ struct SubmitQueueRefs<'a> {
     submit_counters: &'a Arc<SubmitCounters>,
     device_health: &'a Arc<GpuDeviceHealth>,
     flight_recorder: &'a Arc<GpuFlightRecorder>,
+    queue: &'a wgpu::Queue,
 }
 
 fn submit_to_driver_ring(
@@ -300,7 +308,7 @@ fn submit_to_driver_ring(
             logger::warn!(
                 "driver thread exited after device loss; presenting abandoned surface texture before dropping submit batch"
             );
-            dropped.present_surface_texture_after_device_loss();
+            dropped.present_surface_texture_after_device_loss(submit_queue.queue);
         }
         if has_surface {
             // Roll back the submitted counter so `wait_for_previous_present` does not

@@ -373,6 +373,8 @@ pub(crate) fn build_pipeline_from_pass(
         .pipeline_constants_for_wgsl_source(shared.wgsl_source);
     {
         profiling::scope!("materials::create_render_pipeline_wgpu");
+        let vertex_buffers: Vec<Option<wgpu::VertexBufferLayout<'_>>> =
+            shared.vertex_buffers.iter().cloned().map(Some).collect();
         let pipeline = shared
             .device
             .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -385,7 +387,7 @@ pub(crate) fn build_pipeline_from_pass(
                         constants: shader_specialization_constants.as_slice(),
                         ..Default::default()
                     },
-                    buffers: shared.vertex_buffers,
+                    buffers: &vertex_buffers,
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: shared.module,
