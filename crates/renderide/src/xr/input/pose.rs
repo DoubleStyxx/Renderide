@@ -417,6 +417,57 @@ mod tests {
         assert_quat_near(wrist_rotation, Quat::IDENTITY);
     }
 
+    /// Identity OpenXR grip, both hands. Literals are not taken from
+    /// [`openxr_grip_to_steamvr_raw`] or [`touch_pose_correction`].
+    ///
+    /// Grip origin `T = (±0.007, -0.00182941, 0.1019482)`, left positive. Raw in OpenXR is
+    /// `RotX(-20.6°) * -T`. Rotation about X leaves X alone, so `raw.x = -T.x` (−0.007 left,
+    /// +0.007 right). With `cos 20.6° = 0.93605954` and `sin 20.6° = 0.35184165`:
+    ///
+    /// ```text
+    /// y = 0.00182941 * cos 20.6° − 0.1019482 * sin 20.6° = −0.03415719
+    /// z = −0.00182941 * sin 20.6° − 0.1019482 * cos 20.6° = −0.09607325
+    /// ```
+    ///
+    /// The host map flips Z, so the raw position is `(∓0.007, −0.034157, 0.096073)`.
+    ///
+    /// The host image of OpenXR `RotX(−20.6°)` is `RotX(+20.6°)`. The 45° correction
+    /// post-multiplies `RotX(45°)`, so the nudge frame is `RotX(65.6°)`.
+    /// `cos 65.6° = 0.41310443`, `sin 65.6° = 0.91068366`. Nudge `(nx, 0.04, 0.03)` with
+    /// `nx = −0.01` left and `+0.01` right rotates to
+    /// `(nx, 0.04·cos − 0.03·sin, 0.04·sin + 0.03·cos) = (nx, −0.01079633, 0.04882048)`.
+    /// Subtracting that from the raw host position gives left `(0.003, −0.023361, 0.047253)` and
+    /// right `(−0.003, −0.023361, 0.047253)`.
+    ///
+    /// Flipping the origin X sign moves raw X by 0.014. Flipping the nudge X sign moves the node
+    /// X by 0.020. Both are outside the `1e-4` tolerance.
+    #[test]
+    fn touch_identity_grip_raw_position_and_pitched_nudge_match_host_literals() {
+        let cases = [
+            (
+                Chirality::Left,
+                Vec3::new(-0.007, -0.034_157, 0.096_073),
+                Vec3::new(0.003, -0.023_361, 0.047_253),
+            ),
+            (
+                Chirality::Right,
+                Vec3::new(0.007, -0.034_157, 0.096_073),
+                Vec3::new(-0.003, -0.023_361, 0.047_253),
+            ),
+        ];
+        for (side, raw_host, node_host) in cases {
+            let (raw_position, raw_rotation) = openxr_grip_to_steamvr_raw(
+                ActiveControllerProfile::Touch,
+                side,
+                Vec3::ZERO,
+                Quat::IDENTITY,
+            );
+            assert_vec3_near(raw_position, raw_host);
+            let (node_position, _) = touch_pose_correction(side, raw_position, raw_rotation);
+            assert_vec3_near(node_position, node_host);
+        }
+    }
+
     #[test]
     fn identity_calibration_profiles_emit_openxr_grip_unchanged_before_host_conversion() {
         let grip_position = Vec3::new(0.25, 1.4, -0.35);
