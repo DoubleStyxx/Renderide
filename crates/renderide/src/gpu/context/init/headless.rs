@@ -187,5 +187,6 @@ fn headless_surface_config(
         desired_maximum_frame_latency: max_frame_latency,
         alpha_mode: wgpu::CompositeAlphaMode::Opaque,
         view_formats: Vec::new(),
+        color_space: wgpu::SurfaceColorSpace::Auto,
     }
 }

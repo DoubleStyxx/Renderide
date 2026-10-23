@@ -42,13 +42,14 @@ pub(super) unsafe extern "system" fn vk_get_instance_proc_addr_shim(
 
 /// Loads the OpenXR API entry: tries [`super::super::openxr_loader_paths::openxr_loader_candidate_paths`]
 /// with [`xr::Entry::load_from`], then falls back to [`xr::Entry::load`] (default library search).
-pub(super) fn load_xr_entry() -> Result<xr::Entry, xr::LoadError> {
+pub(super) fn load_xr_entry() -> Result<xr::Entry, xr::EntryError> {
     let paths = super::super::openxr_loader_paths::openxr_loader_candidate_paths();
     for path in paths {
-        // SAFETY: `xr::Entry::load_from` dynamically loads the OpenXR loader from `path`; the
-        // crate requires callers to guarantee the library at that path is a valid, ABI-compatible
-        // OpenXR loader. The candidate paths come from platform-known install locations.
-        match unsafe { xr::Entry::load_from(&path) } {
+        // SAFETY: `xr::Entry::load_from` dynamically loads the OpenXR loader from `path`. The
+        // crate requires the library at that path to be a valid, ABI-compatible OpenXR loader.
+        // Candidate paths come from platform-known install locations. `&()` is the desktop
+        // platform info; Android loader init is not supplied here.
+        match unsafe { xr::Entry::load_from(&path, &()) } {
             Ok(entry) => {
                 logger::debug!("OpenXR loader loaded from {}", path.display());
                 return Ok(entry);
@@ -58,9 +59,10 @@ pub(super) fn load_xr_entry() -> Result<xr::Entry, xr::LoadError> {
             }
         }
     }
-    // SAFETY: `xr::Entry::load()` uses the default dynamic-linker search for the OpenXR loader;
-    // relies on the platform's standard library search path to resolve a valid loader.
-    match unsafe { xr::Entry::load() } {
+    // SAFETY: `xr::Entry::load` uses the default dynamic-linker search for the OpenXR loader
+    // and relies on the platform search path to resolve a valid loader. `&()` skips Android
+    // loader initialization.
+    match unsafe { xr::Entry::load(&()) } {
         Ok(entry) => {
             logger::debug!("OpenXR loader loaded via default library search");
             Ok(entry)
@@ -116,6 +118,9 @@ pub(super) fn create_openxr_instance(
         },
         &enabled_extensions,
         &[],
+        // Desktop OpenXR has no platform create-info. Android still needs a Java VM and
+        // activity pointer, which this process does not have here.
+        &(),
     )?;
 
     logger::info!(

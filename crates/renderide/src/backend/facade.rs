@@ -47,6 +47,8 @@ use graph_state::RenderGraphState;
 use reflection_services::ReflectionProbeServices;
 
 pub(crate) use frame_packet::ExtractedFrameShared;
+#[cfg(any(test, feature = "bench-api"))]
+pub(crate) use frame_packet::ShadowContentRevisionSources;
 
 fn scene_color_usage_supported(format: wgpu::TextureFormat, limits: &GpuLimits) -> bool {
     limits.texture_usage_supported(

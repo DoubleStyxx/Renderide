@@ -338,6 +338,21 @@ pub trait GraphFrameGlobalResources {
     ) -> bool {
         false
     }
+
+    /// Arms a shadow-atlas note for the submit that follows a complete encode.
+    fn arm_shadow_maps_for_submit(&self) {}
+
+    /// Records that one shadow split chunk wrote a layer. Not a submit.
+    fn mark_shadow_split_chunk_recorded(&self) {}
+
+    /// Arms the submit note after every shadow split chunk has been recorded.
+    fn arm_shadow_maps_if_split_recorded(&self) {}
+
+    /// Drops split-chunk progress when the parallel join fails.
+    fn abandon_shadow_split_recording(&self) {}
+
+    /// Notes the atlas after a successful submit, or clears it when submit fails.
+    fn finish_shadow_map_submit(&self, _submitted: bool) {}
 }
 
 /// Graph-facing access to resident asset/resource pools.

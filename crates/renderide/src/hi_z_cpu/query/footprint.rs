@@ -201,7 +201,11 @@ mod tests {
     #[test]
     fn footprint_rejects_box_straddling_near_plane() {
         let proj = crate::camera::reverse_z_perspective(1.0, 60f32.to_radians(), 0.1, 100.0);
-        let view = Mat4::look_at_rh(Vec3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 0.0), Vec3::Y);
+        let view = glam::camera::rh::view::look_at_mat4(
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::Y,
+        );
         let view_proj = proj * view;
         // Box envelopes the camera position (z=1 in world), so several corners have clip.w <= 0.
         let mn = Vec3::new(-1.0, -1.0, -1.0);
@@ -215,7 +219,11 @@ mod tests {
     #[test]
     fn footprint_rejects_box_fully_behind_camera() {
         let proj = crate::camera::reverse_z_perspective(1.0, 60f32.to_radians(), 0.1, 100.0);
-        let view = Mat4::look_at_rh(Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, -1.0), Vec3::Y);
+        let view = glam::camera::rh::view::look_at_mat4(
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, -1.0),
+            Vec3::Y,
+        );
         let view_proj = proj * view;
         // Look down -Z; this box sits at +Z so it's behind the camera.
         let mn = Vec3::new(-1.0, -1.0, 5.0);
@@ -229,7 +237,8 @@ mod tests {
     #[test]
     fn footprint_in_frustum_matches_scalar_exactly() {
         let proj = crate::camera::reverse_z_perspective(16.0 / 9.0, 60f32.to_radians(), 0.1, 100.0);
-        let view = Mat4::look_at_rh(Vec3::new(0.0, 1.5, 4.0), Vec3::ZERO, Vec3::Y);
+        let view =
+            glam::camera::rh::view::look_at_mat4(Vec3::new(0.0, 1.5, 4.0), Vec3::ZERO, Vec3::Y);
         let view_proj = proj * view;
         let mn = Vec3::new(-0.5, 0.0, -0.5);
         let mx = Vec3::new(0.5, 1.0, 0.5);
@@ -276,7 +285,7 @@ mod tests {
                 if (cam - target).length_squared() < 0.01 {
                     continue;
                 }
-                let view = Mat4::look_at_rh(cam, target, Vec3::Y);
+                let view = glam::camera::rh::view::look_at_mat4(cam, target, Vec3::Y);
                 let view_proj = proj * view;
 
                 let center = Vec3::new(
