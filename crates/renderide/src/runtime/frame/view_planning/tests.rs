@@ -8,6 +8,7 @@ use crate::camera::{HostCameraFrame, StereoViewMatrices};
 use crate::config::{RendererSettings, RendererSettingsHandle};
 use crate::connection::ConnectionParams;
 use crate::gpu::OutputDepthMode;
+use crate::graph_inputs::RenderTextureSelfSampling;
 use crate::materials::ShaderPermutation;
 use crate::scene::{CameraRenderableEntry, SceneCoordinator};
 use crate::shared::{CameraPortalState, CameraState, RenderTransform};
@@ -149,7 +150,7 @@ fn secondary_camera_write_target_uses_double_buffer_policy() {
     assert_eq!(
         secondary_camera_write_target(9, double_buffered | post_processing)
             .render_texture_self_sampling(),
-        Some(RenderTextureSelfSampling::Suppress)
+        Some(RenderTextureSelfSampling::AllowPreviousContents)
     );
 }
 

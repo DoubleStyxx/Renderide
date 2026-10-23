@@ -14,6 +14,8 @@ const PARENT_SCOPED_COPY_FILES: &[&str] = &[
     "src/runtime/offscreen_tasks/reflection_probe/readback.rs",
     // Timestamp resolve copy. The bench query set is not a profiler scope; tracy may be off.
     "src/gpu/frame_bench_queries.rs",
+    // Lavapipe unit test of render-texture ping-pong. Not a frame pass.
+    "src/gpu_pools/pools/render_texture_ping_pong_gpu.rs",
 ];
 
 /// GPU copy/clear commands that must be timestamped or explicitly parent-scoped.
@@ -46,6 +48,8 @@ const DIRECT_QUEUE_SUBMIT_FILES: &[&str] = &[
     "src/runtime/offscreen_tasks/reflection_probe/readback.rs",
     // Readback submit runs after CPU frame time is sampled, outside primary frame timing.
     "src/gpu/frame_bench_queries.rs",
+    // Lavapipe unit test of render-texture ping-pong. Not a frame submission.
+    "src/gpu_pools/pools/render_texture_ping_pong_gpu.rs",
 ];
 
 /// Returns the renderide crate directory.

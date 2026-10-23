@@ -35,17 +35,36 @@ use crate::shared::SetRenderTextureFormat;
 
 static NEXT_RENDER_TEXTURE_VIEW_GENERATION: AtomicU64 = AtomicU64::new(1);
 
+/// One color image in a render texture's published/previous pair.
+#[derive(Debug)]
+struct RenderTextureColorImage {
+    /// Color storage. Becomes the camera write target on the frame it is published.
+    texture: Arc<wgpu::Texture>,
+    /// Full-mip view of `texture`.
+    view: Arc<wgpu::TextureView>,
+    /// Bind-cache identity for `view`. Stays with the image across swaps.
+    view_generation: u64,
+}
+
 /// Host render texture mirrored as a wgpu color target + optional depth.
 #[derive(Debug)]
 pub struct GpuRenderTexture {
     /// Host render-texture asset id.
     pub asset_id: i32,
     /// Color target (`Rgba16Float`); sampleable after offscreen draws.
+    ///
+    /// When double buffering is active this is the image the camera is writing this frame.
+    /// Materials that are allowed to see the previous frame sample the history image.
     pub color_texture: Arc<wgpu::Texture>,
     /// Default view over the full color mip.
     pub color_view: Arc<wgpu::TextureView>,
     /// Monotonic identifier for the current bindable color view.
     pub color_view_generation: u64,
+    /// Second color image allocated the first time a camera double-buffers this texture.
+    ///
+    /// Absent until that flag is set, so render textures that never double-buffer keep a single
+    /// color allocation. Once created it is reused; each frame swaps it with the published image.
+    previous_color: Option<RenderTextureColorImage>,
     /// Optional depth texture (always allocated for scene draws in [`Self::new_from_format`]).
     pub depth_texture: Option<Arc<wgpu::Texture>>,
     /// View over `depth_texture` when present.
@@ -98,23 +117,13 @@ impl GpuRenderTexture {
             height: h,
             depth_or_array_layers: 1,
         };
-
-        let color_texture = Arc::new(device.create_texture(&wgpu::TextureDescriptor {
-            label: Some(&format!("RenderTexture {}", fmt.asset_id)),
+        let published = create_color_image(
+            device,
+            &format!("RenderTexture {}", fmt.asset_id),
             size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu_color_format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        }));
-        let color_view =
-            Arc::new(color_texture.create_view(&wgpu::TextureViewDescriptor::default()));
-        crate::profiling::note_resource_churn!(TextureView, "gpu_pools::render_texture_color_view");
+            wgpu_color_format,
+            ColorImageRole::Published,
+        );
 
         // Host `depth` is Unity depth-stencil bits; when zero the asset may still be used as a full
         // scene target -- we always allocate a depth attachment so the forward pass can run.
@@ -145,10 +154,10 @@ impl GpuRenderTexture {
 
         Some(Self {
             asset_id: fmt.asset_id,
-            color_texture,
-            color_view,
-            color_view_generation: NEXT_RENDER_TEXTURE_VIEW_GENERATION
-                .fetch_add(1, Ordering::Relaxed),
+            color_texture: published.texture,
+            color_view: published.view,
+            color_view_generation: published.view_generation,
+            previous_color: None,
             depth_texture,
             depth_view,
             wgpu_color_format,
@@ -164,6 +173,152 @@ impl GpuRenderTexture {
     pub fn is_sampleable(&self) -> bool {
         true
     }
+
+    /// `true` when a second color image has been allocated for camera double buffering.
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn has_previous_color(&self) -> bool {
+        self.previous_color.is_some()
+    }
+
+    /// View a material should sample.
+    ///
+    /// `allow_previous` selects the image completed on the prior double-buffered frame. Callers
+    /// that are not the camera writing this texture pass `false` and get the published image.
+    pub(crate) fn color_view_for_sampling(&self, allow_previous: bool) -> Arc<wgpu::TextureView> {
+        match self.previous_color_image(allow_previous) {
+            Some(previous) => Arc::clone(&previous.view),
+            None => Arc::clone(&self.color_view),
+        }
+    }
+
+    /// Bind-cache generation of the view [`Self::color_view_for_sampling`] returns.
+    pub(crate) fn sampled_color_view_generation(&self, allow_previous: bool) -> u64 {
+        match self.previous_color_image(allow_previous) {
+            Some(previous) => previous.view_generation,
+            None => self.color_view_generation,
+        }
+    }
+
+    fn previous_color_image(&self, allow_previous: bool) -> Option<&RenderTextureColorImage> {
+        if allow_previous {
+            self.previous_color.as_ref()
+        } else {
+            None
+        }
+    }
+
+    /// Allocates the second color image the first time double buffering is requested.
+    ///
+    /// Returns `true` only on that first allocation. Later calls reuse the image.
+    fn ensure_previous_color(&mut self, device: &wgpu::Device) -> bool {
+        if self.previous_color.is_some() {
+            return false;
+        }
+        let size = wgpu::Extent3d {
+            width: self.width,
+            height: self.height,
+            depth_or_array_layers: 1,
+        };
+        let history = create_color_image(
+            device,
+            &format!("RenderTexture {} history", self.asset_id),
+            size,
+            self.wgpu_color_format,
+            ColorImageRole::History,
+        );
+        let color_bytes =
+            estimate_gpu_texture_bytes(self.wgpu_color_format, self.width, self.height, 1);
+        self.resident_bytes = self.resident_bytes.saturating_add(color_bytes);
+        self.previous_color = Some(history);
+        true
+    }
+
+    /// Exchanges the published color image with the previous-frame image.
+    ///
+    /// No-op until [`Self::ensure_previous_color`] has run. The swap is three pointer exchanges.
+    fn swap_published_color(&mut self) {
+        let Some(previous) = self.previous_color.as_mut() else {
+            return;
+        };
+        swap_ping_pong(&mut self.color_texture, &mut previous.texture);
+        swap_ping_pong(&mut self.color_view, &mut previous.view);
+        swap_ping_pong(
+            &mut self.color_view_generation,
+            &mut previous.view_generation,
+        );
+    }
+}
+
+/// Which color slot a newly created image fills. Selects the resource-churn site.
+#[derive(Clone, Copy)]
+enum ColorImageRole {
+    /// The image created with the render texture.
+    Published,
+    /// The image created the first time double buffering is enabled.
+    History,
+}
+
+/// Allocates one color image and its full-mip view.
+fn create_color_image(
+    device: &wgpu::Device,
+    label: &str,
+    size: wgpu::Extent3d,
+    format: wgpu::TextureFormat,
+    role: ColorImageRole,
+) -> RenderTextureColorImage {
+    let texture = Arc::new(device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    }));
+    let view = Arc::new(texture.create_view(&wgpu::TextureViewDescriptor::default()));
+    match role {
+        ColorImageRole::Published => {
+            crate::profiling::note_resource_churn!(
+                TextureView,
+                "gpu_pools::render_texture_color_view"
+            );
+        }
+        ColorImageRole::History => {
+            crate::profiling::note_resource_churn!(
+                TextureView,
+                "gpu_pools::render_texture_history_color_view"
+            );
+        }
+    }
+    RenderTextureColorImage {
+        texture,
+        view,
+        view_generation: NEXT_RENDER_TEXTURE_VIEW_GENERATION.fetch_add(1, Ordering::Relaxed),
+    }
+}
+
+/// Records `asset_id` as double-buffered for this planning pass.
+///
+/// Returns `true` the first time the id is seen so the caller swaps once. The scratch vec is
+/// cleared and reused each pass; a linear scan stays cheaper than a set for the handful of
+/// cameras that set the flag.
+pub(crate) fn claim_double_buffer_swap(scratch: &mut Vec<i32>, asset_id: i32) -> bool {
+    if scratch.contains(&asset_id) {
+        return false;
+    }
+    scratch.push(asset_id);
+    true
+}
+
+/// Exchanges two ping-pong slots. Used for the color texture, its view, and its generation.
+#[inline]
+pub(crate) fn swap_ping_pong<T>(current: &mut T, previous: &mut T) {
+    std::mem::swap(current, previous);
 }
 
 /// Pool of [`GpuRenderTexture`] entries keyed by host asset id.
@@ -184,6 +339,26 @@ impl RenderTexturePool {
     #[inline]
     pub fn len(&self) -> usize {
         self.inner.len()
+    }
+
+    /// Allocates the second color image once, then swaps published and previous.
+    ///
+    /// Returns whether this call allocated the second image. `None` when `asset_id` is not
+    /// resident. The swap is what makes the camera write one image while sampling the other.
+    pub(crate) fn begin_double_buffered_frame(
+        &mut self,
+        device: &wgpu::Device,
+        asset_id: i32,
+    ) -> Option<bool> {
+        let (before, after, allocated) = {
+            let texture = self.inner.get_mut(asset_id)?;
+            let before = texture.resident_bytes;
+            let allocated = texture.ensure_previous_color(device);
+            texture.swap_published_color();
+            (before, texture.resident_bytes, allocated)
+        };
+        self.inner.account_resident_delta(before, after);
+        Some(allocated)
     }
 }
 
@@ -225,4 +400,25 @@ mod tests {
 
         assert_eq!(sampler.aniso_level, 0);
     }
+
+    /// The per-frame id scratch records each render texture once and keeps its allocation.
+    #[test]
+    fn claim_double_buffer_swap_reuses_scratch_capacity() {
+        let mut scratch = Vec::new();
+
+        assert!(super::claim_double_buffer_swap(&mut scratch, 4));
+        assert!(!super::claim_double_buffer_swap(&mut scratch, 4));
+        assert!(super::claim_double_buffer_swap(&mut scratch, 9));
+        let capacity = scratch.capacity();
+
+        scratch.clear();
+        assert!(super::claim_double_buffer_swap(&mut scratch, 4));
+        assert!(super::claim_double_buffer_swap(&mut scratch, 9));
+        assert_eq!(scratch.capacity(), capacity);
+        assert_eq!(scratch.len(), 2);
+    }
 }
+
+#[cfg(test)]
+#[path = "render_texture_ping_pong_gpu.rs"]
+mod ping_pong_gpu;

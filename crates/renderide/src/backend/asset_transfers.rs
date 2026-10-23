@@ -708,6 +708,12 @@ impl AssetTransferQueue {
         &self.pools.render_texture_pool
     }
 
+    /// Mutable resident render-texture pool.
+    #[inline]
+    pub(crate) fn render_texture_pool_mut(&mut self) -> &mut RenderTexturePool {
+        &mut self.pools.render_texture_pool
+    }
+
     /// Resident video-texture pool.
     #[inline]
     pub(crate) fn video_texture_pool(&self) -> &VideoTexturePool {

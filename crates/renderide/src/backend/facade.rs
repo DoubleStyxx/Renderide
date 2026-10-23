@@ -327,6 +327,19 @@ impl RenderBackend {
         self.asset_transfers.render_texture_pool()
     }
 
+    /// Allocates and swaps a render texture's previous color image for one double-buffered camera.
+    ///
+    /// Returns whether this call allocated the second image. `None` when the asset is not resident.
+    pub(crate) fn begin_double_buffered_render_texture(
+        &mut self,
+        device: &wgpu::Device,
+        asset_id: i32,
+    ) -> Option<bool> {
+        self.asset_transfers
+            .render_texture_pool_mut()
+            .begin_double_buffered_frame(device, asset_id)
+    }
+
     /// Returns a reusable scratch target for a partial secondary camera viewport.
     pub(crate) fn secondary_render_rect_scratch(
         &mut self,

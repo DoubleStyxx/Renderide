@@ -9,9 +9,10 @@ use std::hint::black_box;
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use renderide_bench::{
     BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload, CULL_BATCH,
-    CullWorkload, KeywordVariantCacheWorkload, MATERIAL_UNIFORM_BATCH,
-    MaterialUniformUpdateWorkload, SHADOW_CHURN_CASTERS, SHADOW_CHURN_LIGHTS, ShadowChurnWorkload,
-    TRANSFORM_BATCH, TransformWorkload, WORLD_MATRIX_NODES, WorldMatrixWorkload,
+    CullWorkload, DOUBLE_BUFFER_CAMERAS, DoubleBufferWorkload, KeywordVariantCacheWorkload,
+    MATERIAL_UNIFORM_BATCH, MaterialUniformUpdateWorkload, SHADOW_CHURN_CASTERS,
+    SHADOW_CHURN_LIGHTS, ShadowChurnWorkload, TRANSFORM_BATCH, TransformWorkload,
+    WORLD_MATRIX_NODES, WorldMatrixWorkload,
 };
 
 fn transforms(c: &mut Criterion) {
@@ -120,6 +121,17 @@ fn shadow_churn(c: &mut Criterion) {
     group.finish();
 }
 
+fn render_texture_double_buffer(c: &mut Criterion) {
+    let mut workload = DoubleBufferWorkload::standard();
+    let _ = workload.steady_frame();
+    let mut group = c.benchmark_group("render_texture_double_buffer");
+    group.throughput(Throughput::Elements(DOUBLE_BUFFER_CAMERAS as u64));
+    group.bench_function("steady_swap", |b| {
+        b.iter(|| black_box(workload.steady_frame()));
+    });
+    group.finish();
+}
+
 fn buffer_pool(c: &mut Criterion) {
     let mut workload = BufferPoolWorkload::standard();
     let mut group = c.benchmark_group("buffer_pool");
@@ -142,6 +154,7 @@ criterion_group!(
     culling,
     world_matrices,
     buffer_pool,
+    render_texture_double_buffer,
     material_uniforms,
     bind_groups,
     keyword_variants,

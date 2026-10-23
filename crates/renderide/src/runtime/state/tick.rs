@@ -33,6 +33,8 @@ pub(in crate::runtime) struct RuntimeTickState {
     lockstep_wait_reason: HostWaitReason,
     /// Reusable per-frame scratch for secondary render-texture view collection.
     pub(in crate::runtime) secondary_view_tasks_scratch: Vec<(RenderSpaceId, f32, usize)>,
+    /// Render-texture ids already swapped during this secondary-camera planning pass.
+    pub(in crate::runtime) double_buffered_render_texture_scratch: Vec<i32>,
     /// Reusable per-frame scratch for camera-portal view collection.
     pub(in crate::runtime) camera_portal_view_tasks_scratch: Vec<(RenderSpaceId, usize)>,
     /// Host-submit completion work waiting for a GPU context before the next begin-frame send.
@@ -74,6 +76,7 @@ impl RuntimeTickState {
             lockstep_one_credit_block: OneCreditBlockReason::None,
             lockstep_wait_reason: HostWaitReason::None,
             secondary_view_tasks_scratch: Vec::new(),
+            double_buffered_render_texture_scratch: Vec::new(),
             camera_portal_view_tasks_scratch: Vec::new(),
             submit_completion_work: SubmitCompletionWorkQueue::new(),
             pending_reflection_probe_render_results: Vec::new(),

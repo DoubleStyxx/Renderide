@@ -5,20 +5,19 @@
 //! desktop view when included. Logic sits between the render entry point in [`super::render`] and
 //! the per-view extraction pipeline in [`super::extract`].
 
+mod double_buffer;
 mod portal_plan;
 
 use std::sync::{Arc, LazyLock};
 
 use crate::camera::{
     CameraPortalMode, CameraPortalSourceView, CameraPortalSurface, CameraRenderRect, EyeView,
-    ViewId, Viewport, WorldProjectionSet, camera_state_double_buffered, camera_state_enabled,
-    camera_state_post_processing, camera_state_render_private_ui, camera_state_render_shadows,
-    host_camera_frame_for_camera_portal, host_camera_frame_for_render_texture,
-    view_matrix_for_world_mesh_render_space,
+    ViewId, Viewport, WorldProjectionSet, camera_state_enabled, camera_state_render_private_ui,
+    camera_state_render_shadows, host_camera_frame_for_camera_portal,
+    host_camera_frame_for_render_texture, view_matrix_for_world_mesh_render_space,
 };
 use crate::diagnostics::log_once::KeyedLogOnce;
 use crate::gpu::GpuContext;
-use crate::graph_inputs::RenderTextureSelfSampling;
 use crate::render_graph::{
     FrameGlobalView, FrameViewClear, OffscreenWriteTarget, RenderPathProfile, ViewPostProcessing,
     ViewWinding,
@@ -37,6 +36,7 @@ use super::view_plan::{
     FrameViewPlan, FrameViewPlanParams, FrameViewPlanTarget, OffscreenColorCopy,
     OffscreenTargetHandles, ViewFamilyPlan,
 };
+use double_buffer::{secondary_camera_write_target, swap_double_buffer};
 #[cfg(test)]
 use portal_plan::camera_portal_stereo_render_rects;
 use portal_plan::{CameraPortalSourceViewPlan, CameraPortalSourceViewPlans, CameraPortalViewTask};
@@ -183,17 +183,6 @@ fn camera_portal_render_space_scope() -> ViewRenderSpaceScope {
 
 fn camera_portal_layer_policy() -> ViewLayerPolicy {
     ViewLayerPolicy::camera(false)
-}
-
-fn secondary_camera_write_target(rt_id: i32, flags: u16) -> OffscreenWriteTarget {
-    if camera_state_double_buffered(flags) && !camera_state_post_processing(flags) {
-        OffscreenWriteTarget::host_render_texture_with_self_sampling(
-            rt_id,
-            RenderTextureSelfSampling::AllowPreviousContents,
-        )
-    } else {
-        OffscreenWriteTarget::host_render_texture(rt_id)
-    }
 }
 
 fn secondary_camera_layer_policy(flags: u16) -> ViewLayerPolicy {
@@ -507,9 +496,13 @@ impl RendererRuntime {
     /// so a frame with secondary cameras does not allocate a fresh `Vec` for the sort each tick.
     fn collect_secondary_rt_views<'a>(&mut self, gpu: &GpuContext) -> Vec<FrameViewPlan<'a>> {
         let mut tasks = std::mem::take(&mut self.tick_state.secondary_view_tasks_scratch);
+        let mut double_buffered =
+            std::mem::take(&mut self.tick_state.double_buffered_render_texture_scratch);
         tasks.clear();
-        let result = self.collect_secondary_rt_views_using(gpu, &mut tasks);
+        double_buffered.clear();
+        let result = self.collect_secondary_rt_views_using(gpu, &mut tasks, &mut double_buffered);
         self.tick_state.secondary_view_tasks_scratch = tasks;
+        self.tick_state.double_buffered_render_texture_scratch = double_buffered;
         result
     }
 
@@ -794,10 +787,18 @@ impl RendererRuntime {
 
     /// Inner helper that consumes the supplied scratch `tasks` buffer; split out so the outer
     /// caller can keep the scratch field reachable across the immutable borrow taken here.
+    ///
+    /// Secondary cameras use the render-context world matrix, not the bare hierarchy matrix. For
+    /// overlay render spaces (userspace world: dash camera, interactive-camera mirrors, avatar
+    /// previews) that multiplies in `head_output_transform` so the camera follows the user's head,
+    /// matching how `world_mesh` draws in the same space are positioned. Without this the secondary
+    /// camera sits at userspace-local coords while its selective-render meshes track the user, so
+    /// any movement away from origin shifts the dash UI out of the camera's view.
     fn collect_secondary_rt_views_using<'a>(
         &mut self,
         gpu: &GpuContext,
         tasks: &mut Vec<(RenderSpaceId, f32, usize)>,
+        double_buffered: &mut Vec<i32>,
     ) -> Vec<FrameViewPlan<'a>> {
         collect_secondary_rt_view_tasks(&self.scene, tasks);
 
@@ -813,6 +814,7 @@ impl RendererRuntime {
                 continue;
             }
             let rt_id = entry.state.render_texture_asset_id;
+            swap_double_buffer(&mut self.backend, gpu, entry.state, double_buffered);
             let Some(rt) = self.resident_secondary_render_texture(rt_id, sid, cam_idx) else {
                 continue;
             };
@@ -839,13 +841,6 @@ impl RendererRuntime {
                 );
                 continue;
             };
-            // Use the render-context world matrix (not the bare hierarchy matrix). For overlay
-            // render spaces (userspace world: dash camera, interactive-camera mirrors, avatar
-            // previews), this multiplies in `head_output_transform` so the camera follows the
-            // user's head -- matching how `world_mesh` draws in the same space are positioned.
-            // Without this the secondary camera sits at userspace-local coords while its
-            // selective-render meshes track the user, so any movement away from origin shifts
-            // the dash UI out of the camera's view (dash content drifts off the rendered RT).
             let Some(world_m) = self.scene.world_matrix_for_render_context(
                 sid,
                 entry.transform_id as usize,

@@ -160,8 +160,10 @@ pub(crate) fn hash_texture_entry_signature_contribution(
             if offscreen_write_target.suppresses_render_texture_sampling(asset_id) {
                 false.hash(hasher);
             } else if let Some(t) = pools.render_texture.get(asset_id) {
+                let allow_previous =
+                    offscreen_write_target.allows_previous_render_texture_contents(asset_id);
                 t.is_sampleable().hash(hasher);
-                t.color_view_generation.hash(hasher);
+                t.sampled_color_view_generation(allow_previous).hash(hasher);
                 hash_sampler_state(&t.sampler, hasher);
             } else {
                 false.hash(hasher);
