@@ -37,6 +37,8 @@ pub(super) struct SceneRenderable {
     pub material_asset_id: i32,
     /// Unity-style renderer sorting order.
     pub sorting_order: i32,
+    /// Host shadow-caster mode. Existing unlit scenes leave this off.
+    pub shadow_cast_mode: ShadowCastMode,
 }
 
 /// One regular light submitted by a test scene.
@@ -72,6 +74,7 @@ impl SceneSubmission {
                 mesh_asset_id,
                 material_asset_id,
                 sorting_order: 0,
+                shadow_cast_mode: ShadowCastMode::Off,
             }],
             lights: Vec::new(),
         }
@@ -82,10 +85,12 @@ impl SceneSubmission {
 /// lockstep ticks. [`Drop`] releases the shared-memory mapping.
 pub(super) struct SceneState {
     /// Live writer keeping the scene-state SHM region alive.
-    _writer: SharedMemoryWriter,
+    writer: SharedMemoryWriter,
     /// Region bytes retained with the writer so the one-shot scene delta remains readable until
     /// the renderer consumes it.
-    _regions: SceneSharedMemoryRegions,
+    regions: SceneSharedMemoryRegions,
+    /// Packed offsets for [`Self::rewrite`].
+    layout: SceneSharedMemoryLayout,
 }
 
 #[derive(Clone, Debug)]
@@ -233,9 +238,40 @@ pub(super) fn build_scene_state(
     lockstep.set_render_space(Some(render_space));
 
     Ok(SceneState {
-        _writer: writer,
-        _regions: regions,
+        writer,
+        regions,
+        layout,
     })
+}
+
+impl SceneState {
+    /// Rewrites caster poses and latches a pose-only render-space delta.
+    ///
+    /// The lockstep host sends each delta once. Replaying mesh or light additions would allocate
+    /// a second copy of every caster and light, so this path updates the existing transform rows
+    /// and leaves the addition lists untouched.
+    pub(super) fn rewrite(
+        &mut self,
+        scene: &SceneSubmission,
+        lockstep: &mut LockstepDriver,
+    ) -> Result<(), HarnessError> {
+        let pose_updates_bytes = encode_transform_pose_updates(&pose_rows(scene));
+        if pose_updates_bytes.len() != self.regions.pose_updates_bytes.len() {
+            return Err(HarnessError::QueueOptions(
+                "scene rewrite changed the pose region size".to_string(),
+            ));
+        }
+        write_region(
+            &mut self.writer,
+            self.layout.pose_updates,
+            &pose_updates_bytes,
+            "pose_updates",
+        )?;
+        self.writer.flush();
+        self.regions.pose_updates_bytes = pose_updates_bytes;
+        lockstep.set_render_space(Some(pose_only_render_space_update(scene, &self.layout)));
+        Ok(())
+    }
 }
 
 /// Pumps the lockstep until at least one `FrameSubmitData` carrying the scene has been enqueued.
@@ -286,6 +322,39 @@ pub(super) fn directional_light(color: [f32; 3], intensity: f32) -> LightState {
 /// Builds a no-shadow point light row suitable for CI golden cases.
 pub(super) fn point_light(color: [f32; 3], intensity: f32, range: f32) -> LightState {
     light_state(LightType::Point, color, intensity, range, 30.0)
+}
+
+/// Builds a hard-shadow spot light. `resolution` is the atlas override, or `-1` for quality.
+pub(super) fn shadowed_spot_light(
+    color: [f32; 3],
+    intensity: f32,
+    range: f32,
+    spot_angle: f32,
+    resolution: i32,
+) -> LightState {
+    let mut light = light_state(LightType::Spot, color, intensity, range, spot_angle);
+    light.shadow_type = ShadowType::Hard;
+    light.shadow_strength = 1.0;
+    light.shadow_near_plane = 0.05;
+    light.shadow_bias = 0.02;
+    light.shadow_map_resolution_override = resolution;
+    light
+}
+
+/// Builds a hard-shadow point light. `resolution` is the atlas override, or `-1` for quality.
+pub(super) fn shadowed_point_light(
+    color: [f32; 3],
+    intensity: f32,
+    range: f32,
+    resolution: i32,
+) -> LightState {
+    let mut light = light_state(LightType::Point, color, intensity, range, 30.0);
+    light.shadow_type = ShadowType::Hard;
+    light.shadow_strength = 1.0;
+    light.shadow_near_plane = 0.05;
+    light.shadow_bias = 0.02;
+    light.shadow_map_resolution_override = resolution;
+    light
 }
 
 fn light_state(
@@ -339,7 +408,7 @@ fn mesh_state_rows(scene: &SceneSubmission) -> Vec<MeshRendererState> {
             material_count: 1,
             material_property_block_count: 0,
             sorting_order: renderable.sorting_order,
-            shadow_cast_mode: ShadowCastMode::Off,
+            shadow_cast_mode: renderable.shadow_cast_mode,
             motion_vector_mode: MotionVectorMode::NoMotion,
             _padding: [0; 2],
         })
@@ -426,6 +495,16 @@ fn write_region(
     writer
         .write_at(desc.offset as usize, bytes)
         .map_err(|e| HarnessError::QueueOptions(format!("write {label}: {e}")))
+}
+
+fn pose_only_render_space_update(
+    scene: &SceneSubmission,
+    layout: &SceneSharedMemoryLayout,
+) -> RenderSpaceUpdate {
+    let mut update = build_render_space_update(scene, layout);
+    update.mesh_renderers_update = None;
+    update.lights_update = None;
+    update
 }
 
 fn build_render_space_update(
@@ -534,6 +613,7 @@ mod tests {
                     mesh_asset_id: 10,
                     material_asset_id: 20,
                     sorting_order: 0,
+                    shadow_cast_mode: ShadowCastMode::Off,
                 },
                 SceneRenderable {
                     transform_id: 4,
@@ -541,6 +621,7 @@ mod tests {
                     mesh_asset_id: 11,
                     material_asset_id: 21,
                     sorting_order: 3,
+                    shadow_cast_mode: ShadowCastMode::Off,
                 },
             ],
             lights: Vec::new(),

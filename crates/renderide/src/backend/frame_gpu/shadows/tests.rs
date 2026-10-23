@@ -3,12 +3,12 @@ use std::mem::size_of;
 use glam::{Mat4, Vec3};
 use hashbrown::HashMap;
 
-use super::{
-    PaddedShadowCasterDraw, PaddedShadowLayerUniforms, clamp_shadow_resolution,
-    clamp_shadow_texture_resolution, shadow_atlas_array_view_descriptor,
-    shadow_atlas_layer_view_descriptor, shadow_pipeline_state,
+use super::shadow_encode::{
+    shadow_atlas_array_view_descriptor, shadow_atlas_layer_view_descriptor, shadow_pipeline_state,
 };
+use super::{PaddedShadowCasterDraw, PaddedShadowLayerUniforms, clamp_shadow_resolution};
 use crate::backend::frame_resource_manager::ShadowRenderView;
+use crate::backend::shadow_atlas_budget::clamp_shadow_atlas_resolution;
 use crate::gpu::{SHADOW_VIEW_KIND_DIRECTIONAL, SHADOW_VIEW_KIND_POINT, SHADOW_VIEW_KIND_SPOT};
 use crate::mesh_deform::PER_DRAW_UNIFORM_STRIDE;
 use crate::world_mesh::test_fixtures::{DummyDrawItemSpec, dummy_world_mesh_draw_item};
@@ -62,7 +62,7 @@ fn shadow_texture_resolution_clamps_to_atlas_budget() {
     let limits = limits(8192, 64);
 
     assert_eq!(
-        clamp_shadow_texture_resolution(&limits, 4096, 16, wgpu::TextureFormat::Depth32Float),
+        clamp_shadow_atlas_resolution(&limits, 4096, 16, wgpu::TextureFormat::Depth32Float),
         2896
     );
 }
