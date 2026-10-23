@@ -2,10 +2,9 @@
 
 use glam::{Mat4, Vec3};
 
-use crate::assets::mesh::GpuMesh;
 use crate::bounds::world_aabb_from_local_bounds;
 use crate::scene::{RenderSpaceId, SceneCoordinator, SceneTransformRead, SkinnedMeshRenderer};
-use crate::shared::RenderingContext;
+use crate::shared::{RenderBoundingBox, RenderingContext};
 
 #[cfg(test)]
 use super::WorldMeshCullInput;
@@ -17,8 +16,12 @@ pub(crate) struct MeshCullTarget<'a, S: SceneTransformRead + ?Sized = SceneCoord
     pub scene: &'a S,
     /// Render space containing the mesh.
     pub space_id: RenderSpaceId,
-    /// Resident GPU mesh (bounds, skinning buffers).
-    pub mesh: &'a GpuMesh,
+    /// Local AABB the cull transforms into world space.
+    ///
+    /// Skinned draws pass the same bounds [`mesh_world_geometry_for_cull_with_head`] falls back to
+    /// when the host has not sent [`SkinnedMeshRenderer::posed_object_bounds`]. The posed box, when
+    /// present, replaces this rest box. Callers store the resulting world AABB on the renderer row.
+    pub mesh_bounds: &'a RenderBoundingBox,
     /// Whether this path uses skinned bone bounds.
     pub skinned: bool,
     /// Skinned renderer when `skinned` is true.
@@ -76,7 +79,7 @@ pub(crate) fn mesh_world_geometry_for_cull_with_head<S>(
 where
     S: SceneTransformRead + ?Sized,
 {
-    if mesh_bounds_degenerate_for_cull(&target.mesh.bounds) {
+    if mesh_bounds_degenerate_for_cull(target.mesh_bounds) {
         return MeshCullGeometry {
             world_aabb: None,
             rigid_world_matrix: None,
@@ -119,7 +122,7 @@ where
         let object_bounds = sk
             .posed_object_bounds
             .as_ref()
-            .unwrap_or(&target.mesh.bounds);
+            .unwrap_or(target.mesh_bounds);
         MeshCullGeometry {
             world_aabb: world_aabb_from_local_bounds(object_bounds, root_world),
             rigid_world_matrix: None,
@@ -139,7 +142,7 @@ where
             };
         };
         MeshCullGeometry {
-            world_aabb: world_aabb_from_local_bounds(&target.mesh.bounds, model),
+            world_aabb: world_aabb_from_local_bounds(target.mesh_bounds, model),
             rigid_world_matrix: Some(model),
             front_face_world_matrix: Some(model),
         }

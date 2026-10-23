@@ -10,8 +10,8 @@ use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use renderide_bench::{
     BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload, CULL_BATCH,
     CullWorkload, KeywordVariantCacheWorkload, MATERIAL_UNIFORM_BATCH,
-    MaterialUniformUpdateWorkload, TRANSFORM_BATCH, TransformWorkload, WORLD_MATRIX_NODES,
-    WorldMatrixWorkload,
+    MaterialUniformUpdateWorkload, SkinnedCullWorkload, TRANSFORM_BATCH, TransformWorkload,
+    WORLD_MATRIX_NODES, WorldMatrixWorkload,
 };
 
 fn transforms(c: &mut Criterion) {
@@ -26,10 +26,14 @@ fn transforms(c: &mut Criterion) {
 
 fn culling(c: &mut Criterion) {
     let workload = CullWorkload::standard();
+    let skinned = SkinnedCullWorkload::standard();
     let mut group = c.benchmark_group("culling");
     group.throughput(Throughput::Elements(CULL_BATCH as u64));
     group.bench_function("homogeneous_clip_aabb", |b| {
         b.iter(|| black_box(workload.visible_count()));
+    });
+    group.bench_function("skinned_homogeneous_clip_aabb", |b| {
+        b.iter(|| black_box(skinned.visible_count()));
     });
     group.finish();
 }

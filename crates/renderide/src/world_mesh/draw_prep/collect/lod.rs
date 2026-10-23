@@ -534,7 +534,7 @@ fn world_aabb_for_lod_renderer(
     let target = MeshCullTarget {
         scene: ctx.scene_assets.scene,
         space_id,
-        mesh,
+        mesh_bounds: &mesh.bounds,
         skinned: renderer.kind == LodRendererKind::Skinned,
         skinned_renderer: renderer.skinned_renderer,
         node_id: renderer.node_id,

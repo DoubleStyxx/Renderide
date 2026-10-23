@@ -300,3 +300,88 @@ fn bench_view_proj() -> Mat4 {
     );
     projection * view
 }
+
+/// Posed bone-bounds AABBs for the skinned homogeneous-clip bench.
+///
+/// Rest boxes sit far outside the camera. Every fourth posed box is pulled onto the same grid as
+/// [`CullWorkload`], which is the extreme-pose case the cull must keep. The measured loop only
+/// reads these precomputed corners. It does not allocate.
+#[derive(Clone, Debug)]
+pub struct SkinnedCullWorkload {
+    view_proj: Mat4,
+    posed_mins: Vec<Vec3>,
+    posed_maxs: Vec<Vec3>,
+    rest_mins: Vec<Vec3>,
+    rest_maxs: Vec<Vec3>,
+}
+
+impl SkinnedCullWorkload {
+    /// Builds [`CULL_BATCH`] rest boxes and their posed replacements.
+    #[must_use]
+    pub fn standard() -> Self {
+        Self::batch(CULL_BATCH)
+    }
+
+    /// Builds `count` rest/posed pairs. Setup allocates; [`Self::visible_count`] does not.
+    #[must_use]
+    pub fn batch(count: usize) -> Self {
+        let mut posed_mins = Vec::with_capacity(count);
+        let mut posed_maxs = Vec::with_capacity(count);
+        let mut rest_mins = Vec::with_capacity(count);
+        let mut rest_maxs = Vec::with_capacity(count);
+        for index in 0..count {
+            let rest_min = Vec3::new(
+                400.0 + f32::from(u16::try_from(index).unwrap_or(u16::MAX)),
+                0.0,
+                0.0,
+            );
+            let rest_max = rest_min + Vec3::splat(0.5);
+            let posed_min = if index.is_multiple_of(4) {
+                let cell = index / 4;
+                let column = cell % CULL_GRID_SIDE;
+                let row = cell / CULL_GRID_SIDE;
+                let x = f32::from(u16::try_from(column).unwrap_or(0)) - 48.0;
+                let z = f32::from(u16::try_from(row).unwrap_or(0)) - 48.0;
+                Vec3::new(x, 0.0, z)
+            } else {
+                rest_min
+            };
+            rest_mins.push(rest_min);
+            rest_maxs.push(rest_max);
+            posed_mins.push(posed_min);
+            posed_maxs.push(posed_min + Vec3::splat(0.5));
+        }
+        Self {
+            view_proj: bench_view_proj(),
+            posed_mins,
+            posed_maxs,
+            rest_mins,
+            rest_maxs,
+        }
+    }
+
+    /// Counts posed boxes that survive the homogeneous clip test.
+    #[must_use]
+    pub fn visible_count(&self) -> u32 {
+        count_visible(self.view_proj, &self.posed_mins, &self.posed_maxs)
+    }
+
+    /// Counts rest boxes that survive the same clip test.
+    ///
+    /// The rest batch is entirely outside the camera. [`Self::visible_count`] is larger because
+    /// posed bounds can enter the frustum while the rest box stays outside it.
+    #[must_use]
+    pub fn rest_visible_count(&self) -> u32 {
+        count_visible(self.view_proj, &self.rest_mins, &self.rest_maxs)
+    }
+}
+
+fn count_visible(view_proj: Mat4, mins: &[Vec3], maxs: &[Vec3]) -> u32 {
+    let mut visible = 0_u32;
+    for (min, max) in mins.iter().zip(maxs.iter()) {
+        if world_aabb_visible_in_homogeneous_clip(view_proj, *min, *max) {
+            visible += 1;
+        }
+    }
+    visible
+}

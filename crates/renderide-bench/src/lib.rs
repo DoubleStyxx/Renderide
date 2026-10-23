@@ -7,12 +7,20 @@
 //! GPU-device benches, when they exist, compile only with `--features gpu` and are not part of
 //! the default command.
 
+pub use renderide::bench_api::SkinnedCullWorkload;
 pub use renderide::bench_api::{
     BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload, CULL_BATCH,
     CullWorkload, KeywordVariantCacheWorkload, MATERIAL_UNIFORM_BATCH,
     MaterialUniformUpdateWorkload, TRANSFORM_BATCH, TransformWorkload, WORLD_MATRIX_NODES,
     WorldMatrixWorkload,
 };
+
+#[cfg(test)]
+mod skinned_cull;
+
+#[cfg(test)]
+#[global_allocator]
+static SKINNED_CULL_ALLOC_COUNTER: skinned_cull::CountingAlloc = skinned_cull::CountingAlloc;
 
 #[cfg(test)]
 mod tests {
