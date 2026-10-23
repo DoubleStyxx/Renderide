@@ -148,9 +148,7 @@ mod tests {
     use super::*;
     use crate::camera::{CameraPose, EyeView, StereoViewMatrices};
     use crate::gpu::frame_globals::SkyboxSpecularUniformParams;
-    use crate::gpu::frame_globals::matcap::{
-        fragment_eye_from_vertex_view_idx, matcap_uv, matcap_view_rows,
-    };
+    use crate::gpu::frame_globals::matcap::{matcap_uv, matcap_view_rows};
     use crate::scene::SceneCoordinator;
 
     fn projection_with_non_unit_y() -> Mat4 {
@@ -195,8 +193,8 @@ mod tests {
         assert_eq!(uniforms.proj_left, proj.to_cols_array());
     }
 
-    /// Production stereo upload: `views[0]` / `stereo.left` stays the left uniform rows, and
-    /// multiview `view_idx` 0 reads those rows. Nothing in this path complements the eye index.
+    /// Production stereo upload: `views[0]` / `stereo.left` stays the left uniform rows.
+    /// View layer 0 reads those rows and view layer 1 reads the right rows.
     #[test]
     fn stereo_frame_uniforms_keep_left_then_right_and_view_idx_order() {
         let left_pos = Vec3::new(-0.032, 0.0, 0.0);
@@ -250,14 +248,12 @@ mod tests {
         assert!((uniforms.camera_world_pos[0] - left_pos.x).abs() < 1e-6);
         assert!((uniforms.camera_world_pos_right[0] - right_pos.x).abs() < 1e-6);
 
-        assert_eq!(fragment_eye_from_vertex_view_idx(0), 0);
-        assert_eq!(fragment_eye_from_vertex_view_idx(1), 1);
         assert_eq!(
-            matcap_view_rows(&uniforms, fragment_eye_from_vertex_view_idx(0)).x,
+            matcap_view_rows(&uniforms, 0).x,
             uniforms.view_space_x_coeffs
         );
         assert_eq!(
-            matcap_view_rows(&uniforms, fragment_eye_from_vertex_view_idx(1)).x,
+            matcap_view_rows(&uniforms, 1).x,
             uniforms.view_space_x_coeffs_right
         );
 
@@ -266,20 +262,8 @@ mod tests {
         let left_ref = matcap_uv(&uniforms, facing, point, 0, false);
         let right_ref = matcap_uv(&uniforms, facing, point, 1, false);
         assert!((left_ref - right_ref).length() < 1e-5);
-        let left_uv = matcap_uv(
-            &uniforms,
-            facing,
-            point,
-            fragment_eye_from_vertex_view_idx(0),
-            true,
-        );
-        let right_uv = matcap_uv(
-            &uniforms,
-            facing,
-            point,
-            fragment_eye_from_vertex_view_idx(1),
-            true,
-        );
+        let left_uv = matcap_uv(&uniforms, facing, point, 0, true);
+        let right_uv = matcap_uv(&uniforms, facing, point, 1, true);
         assert!(
             left_uv.x > right_uv.x,
             "left view_idx must sample to the right of the right eye, got {left_uv:?} {right_uv:?}"

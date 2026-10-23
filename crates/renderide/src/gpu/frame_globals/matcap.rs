@@ -76,16 +76,6 @@ pub(crate) fn matcap_view_rows(frame: &FrameGpuUniforms, view_layer: u32) -> Mat
 /// `multiview == false` is the Resonite reference (left/mono rows, rotation-only UV).
 /// `multiview == true` is the deliberate view-ray departure. `world_pos` is transformed with the
 /// eye's rows the same way the vertex stage writes `view_pos`.
-/// Eye selected for a multiview builtin.
-///
-/// `matcap.wgsl` copies `view_idx` into `view_layer` with no complement or xor. The frame
-/// uniform helper then keeps the low bit (`view_layer & 1`). For the only multiview values
-/// `0` and `1`, that low bit is the builtin itself: `0` left, `1` right.
-pub(crate) fn fragment_eye_from_vertex_view_idx(view_idx: u32) -> u32 {
-    let view_layer = view_idx;
-    view_layer & 1
-}
-
 pub(crate) fn matcap_uv(
     frame: &FrameGpuUniforms,
     world_normal: Vec3,
@@ -147,9 +137,7 @@ fn safe_normalize(v: Vec3, fallback: Vec3) -> Vec3 {
 mod tests {
     use glam::{Mat4, Vec2, Vec3};
 
-    use super::{
-        fragment_eye_from_vertex_view_idx, frame_from_eye_views, matcap_uv, matcap_view_rows,
-    };
+    use super::{frame_from_eye_views, matcap_uv, matcap_view_rows};
     use crate::camera::apply_view_handedness_fix;
 
     const EYE_X: f32 = 0.032;
@@ -331,23 +319,6 @@ mod tests {
         assert!(
             (delta_u - 0.5 / std::f32::consts::SQRT_2).abs() < 1e-6,
             "45-degree face-on wall U delta {delta_u}"
-        );
-    }
-
-    #[test]
-    fn vertex_view_idx_low_bit_is_the_fragment_eye() {
-        assert_eq!(fragment_eye_from_vertex_view_idx(0), 0);
-        assert_eq!(fragment_eye_from_vertex_view_idx(1), 1);
-        let left = eye_view(Vec3::new(-EYE_X, 0.0, 0.0));
-        let right = eye_view(Vec3::new(EYE_X, 0.0, 0.0));
-        let frame = frame_from_eye_views(left, right, false);
-        assert_eq!(
-            matcap_view_rows(&frame, fragment_eye_from_vertex_view_idx(0)).x,
-            frame.view_space_x_coeffs
-        );
-        assert_eq!(
-            matcap_view_rows(&frame, fragment_eye_from_vertex_view_idx(1)).x,
-            frame.view_space_x_coeffs_right
         );
     }
 

@@ -198,22 +198,23 @@ fn matcap_view_dir_from_camera(view_pos: vec3<f32>, view_layer: u32) -> vec3<f32
 
 /// Matcap texture UV for one view layer.
 ///
-/// `reference_uv` is Resonite's lookup: `(float3x3)UNITY_MATRIX_V` times the normal, then
-/// `.xy * 0.5 + 0.5`. Parallel eyes share that 3x3, so both eyes get the same UV. That match
-/// is the reference behaviour.
+/// The mono permutation returns Resonite's lookup, `reference_uv`: `(float3x3)UNITY_MATRIX_V`
+/// times the normal, then `.xy * 0.5 + 0.5`. Parallel eyes share that 3x3, so both eyes get
+/// the same UV. That match is the reference behaviour.
 ///
 /// `view_pos` is the fragment in this eye's view space (the vertex stage transforms the world
 /// position with the translated rows). Under `MULTIVIEW` only, the UV deliberately departs from
-/// the reference and uses `cross(view_dir, n_view)`. On the optical axis (`view_dir = (0, 0, -1)`)
-/// the departure equals `reference_uv`. A face-on wall fragment 45 degrees off axis
-/// (`view_dir` in the XZ plane) moves U by `0.5 / sqrt(2)` relative to the reference.
+/// the reference and uses `cross(view_dir, n_view)`. That permutation does not compute
+/// `reference_uv`. On the optical axis (`view_dir = (0, 0, -1)`) the departure equals the mono
+/// lookup. A face-on wall fragment 45 degrees off axis (`view_dir` in the XZ plane) moves U by
+/// `0.5 / sqrt(2)` relative to the reference.
 fn matcap_uv_for_view(n_view: vec3<f32>, view_pos: vec3<f32>, view_layer: u32) -> vec2<f32> {
-    let reference_uv = n_view.xy * 0.5 + vec2<f32>(0.5);
 #ifdef MULTIVIEW
     let view_dir = matcap_view_dir_from_camera(view_pos, view_layer);
     let c = cross(view_dir, n_view);
     return vec2<f32>(-c.y, c.x) * 0.5 + vec2<f32>(0.5);
 #else
+    let reference_uv = n_view.xy * 0.5 + vec2<f32>(0.5);
     return reference_uv;
 #endif
 }
