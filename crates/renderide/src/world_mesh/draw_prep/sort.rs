@@ -5,7 +5,6 @@ use std::cmp::Ordering;
 #[cfg(test)]
 use rayon::slice::ParallelSliceMut;
 
-use super::canvas_depth::transparent_depth_sort_key;
 use super::item::WorldMeshDrawItem;
 
 /// Draws assigned to one secondary structural resort worker chunk.
@@ -91,7 +90,7 @@ pub fn pack_sort_prefix(
 /// Tiebreaker for transparent draws sharing the same `(overlay, render_queue)` bucket.
 ///
 /// Order-dependent classes keep `sorting_order`, back-to-front depth, then collection order.
-/// Canvas stems compare quantized view-plane depth instead of farthest-corner distance.
+/// Canvas stems compare the precomputed plane-distance key instead of farthest-corner distance.
 /// Unstacked commutative additive/multiply classes may sort by batch key inside exact same-depth
 /// buckets because their color composition is order independent.
 #[inline]
@@ -110,6 +109,19 @@ pub(super) fn cmp_transparent_intra_run(a: &WorldMeshDrawItem, b: &WorldMeshDraw
 /// commutative blends; nontransparent draws keep batch-friendly structural ordering.
 #[inline]
 pub(super) fn cmp_order_sensitive_draws(a: &WorldMeshDrawItem, b: &WorldMeshDrawItem) -> Ordering {
+    cmp_order_sensitive_body(a, b, cmp_transparent_intra_run)
+}
+
+/// Shared prefix of [`cmp_order_sensitive_draws`]. `transparent` is the tie inside a transparent run.
+#[inline]
+fn cmp_order_sensitive_body<F>(
+    a: &WorldMeshDrawItem,
+    b: &WorldMeshDrawItem,
+    transparent: F,
+) -> Ordering
+where
+    F: Fn(&WorldMeshDrawItem, &WorldMeshDrawItem) -> Ordering,
+{
     let a_transparent = a.batch_key.uses_transparent_sorting();
     let b_transparent = b.batch_key.uses_transparent_sorting();
     a.is_overlay
@@ -125,7 +137,7 @@ pub(super) fn cmp_order_sensitive_draws(a: &WorldMeshDrawItem, b: &WorldMeshDraw
                 .then(a.node_id.cmp(&b.node_id))
                 .then(a.slot_index.cmp(&b.slot_index))
                 .then(a.collect_order.cmp(&b.collect_order)),
-            (true, true) => cmp_transparent_intra_run(a, b),
+            (true, true) => transparent(a, b),
             _ => Ordering::Equal,
         })
         .then(a.sort_prefix.cmp(&b.sort_prefix))
@@ -134,19 +146,71 @@ pub(super) fn cmp_order_sensitive_draws(a: &WorldMeshDrawItem, b: &WorldMeshDraw
 /// Orders transparent draws after `sorting_order` has already matched.
 #[inline]
 fn cmp_transparent_class_tie(a: &WorldMeshDrawItem, b: &WorldMeshDrawItem) -> Ordering {
-    transparent_depth_sort_key(b)
-        .total_cmp(&transparent_depth_sort_key(a))
+    b.transparent_depth_key
+        .total_cmp(&a.transparent_depth_key)
+        .then_with(|| transparent_class_tie_after_depth(a, b))
+}
+
+/// Same-depth class tie shared by the precomputed key and the bench-only recompute comparator.
+#[inline]
+fn transparent_class_tie_after_depth(a: &WorldMeshDrawItem, b: &WorldMeshDrawItem) -> Ordering {
+    let a_class = transparent_tie_order_class(a);
+    let b_class = transparent_tie_order_class(b);
+    a_class.cmp(&b_class).then_with(|| match a_class {
+        TransparentTieOrderClass::StableOrder => a.collect_order.cmp(&b.collect_order),
+        TransparentTieOrderClass::RelaxedBatch => a
+            .batch_key_hash
+            .cmp(&b.batch_key_hash)
+            .then_with(|| a.batch_key.cmp(&b.batch_key)),
+    })
+}
+
+/// Sorts with [`cmp_order_sensitive_draws`], which reads the precomputed depth key.
+#[cfg(feature = "bench-api")]
+pub(crate) fn sort_order_sensitive_draws_precomputed(items: &mut [WorldMeshDrawItem]) -> u64 {
+    items.sort_unstable_by(cmp_order_sensitive_draws);
+    transparent_sort_checksum(items)
+}
+
+/// Sorts the same way, but rebuilds the depth key on every compare.
+///
+/// This is the cost of the comparator before the key was stored on the draw: each compare runs
+/// the canvas stem match twice and then a quantize or a square root.
+#[cfg(feature = "bench-api")]
+pub(crate) fn sort_order_sensitive_draws_recomputing_depth(items: &mut [WorldMeshDrawItem]) -> u64 {
+    items.sort_unstable_by(cmp_order_sensitive_draws_recompute_depth);
+    transparent_sort_checksum(items)
+}
+
+#[cfg(feature = "bench-api")]
+fn cmp_order_sensitive_draws_recompute_depth(
+    a: &WorldMeshDrawItem,
+    b: &WorldMeshDrawItem,
+) -> Ordering {
+    cmp_order_sensitive_body(a, b, cmp_transparent_intra_run_recompute_depth)
+}
+
+#[cfg(feature = "bench-api")]
+fn cmp_transparent_intra_run_recompute_depth(
+    a: &WorldMeshDrawItem,
+    b: &WorldMeshDrawItem,
+) -> Ordering {
+    a.sorting_order
+        .cmp(&b.sorting_order)
         .then_with(|| {
-            let a_class = transparent_tie_order_class(a);
-            let b_class = transparent_tie_order_class(b);
-            a_class.cmp(&b_class).then_with(|| match a_class {
-                TransparentTieOrderClass::StableOrder => a.collect_order.cmp(&b.collect_order),
-                TransparentTieOrderClass::RelaxedBatch => a
-                    .batch_key_hash
-                    .cmp(&b.batch_key_hash)
-                    .then_with(|| a.batch_key.cmp(&b.batch_key)),
-            })
+            super::canvas_depth::recomputed_transparent_depth_key(b)
+                .total_cmp(&super::canvas_depth::recomputed_transparent_depth_key(a))
+                .then_with(|| transparent_class_tie_after_depth(a, b))
         })
+        .then(a.collect_order.cmp(&b.collect_order))
+}
+
+#[cfg(feature = "bench-api")]
+fn transparent_sort_checksum(items: &[WorldMeshDrawItem]) -> u64 {
+    items.iter().enumerate().fold(0_u64, |acc, (index, item)| {
+        acc.wrapping_add(item.collect_order as u64)
+            .wrapping_mul(index as u64 + 3)
+    })
 }
 
 /// Same-depth transparent tie class used to keep the comparator transitive.

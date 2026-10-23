@@ -102,6 +102,10 @@ pub enum SessionTemplate {
     ExoticShaderPair,
     /// Two coplanar `UI/Unlit` quads. The later, larger quad must cover the earlier smaller one.
     CoplanarCanvasUiQuads,
+    /// Two tilted canvases, each a parent plus an in-plane child, at two yaws.
+    TiltedCanvasUiQuads,
+    /// Opaque quad with a slightly farther UI quad whose Offset units must win the depth test.
+    CanvasOffsetBiasQuad,
 }
 
 /// Drives the full session end-to-end. The renderer process is killed on `Err` via [`Drop`] of
@@ -286,6 +290,8 @@ fn template_label(template: &SessionTemplate) -> &'static str {
         SessionTemplate::CustomShaderPropertyUpdate => "CustomShaderPropertyUpdate",
         SessionTemplate::ExoticShaderPair => "ExoticShaderPair",
         SessionTemplate::CoplanarCanvasUiQuads => "CoplanarCanvasUiQuads",
+        SessionTemplate::TiltedCanvasUiQuads => "TiltedCanvasUiQuads",
+        SessionTemplate::CanvasOffsetBiasQuad => "CanvasOffsetBiasQuad",
     }
 }
 
@@ -314,6 +320,8 @@ fn build_scene_setup(template: SessionTemplate) -> SceneSetup {
         SessionTemplate::CustomShaderPropertyUpdate => custom_property::scene_setup(),
         SessionTemplate::ExoticShaderPair => exotic_pair::scene_setup(),
         SessionTemplate::CoplanarCanvasUiQuads => coplanar_canvas_ui_quads_setup(),
+        SessionTemplate::TiltedCanvasUiQuads => tilted_canvas_ui_quads_setup(),
+        SessionTemplate::CanvasOffsetBiasQuad => canvas_offset_bias_quad_setup(),
     }
 }
 
@@ -655,6 +663,105 @@ fn coplanar_canvas_ui_quads_setup() -> SceneSetup {
     }
 }
 
+fn tilted_canvas_ui_quads_setup() -> SceneSetup {
+    let meshes = vec![mesh_asset(
+        0,
+        generate_quad(),
+        centered_bounds(Vec3::new(0.55, 0.55, 0.05)),
+    )];
+    let materials = vec![
+        ui_unlit_color_material(0, [1.0, 0.05, 0.05, 1.0]),
+        ui_unlit_color_material(1, [0.05, 0.2, 1.0, 1.0]),
+    ];
+    // +35° and −40° are both past 30°. These in-plane X offsets move each child center
+    // farther along camera +Z (positive world Z). The center-depth key then draws the child
+    // first and the parent covers it.
+    let mut renderables =
+        tilted_canvas_pair(Vec3::new(-1.0, 0.0, 0.0), 35.0_f32.to_radians(), -0.22, 0);
+    renderables.extend(tilted_canvas_pair(
+        Vec3::new(1.0, 0.0, 0.0),
+        -40.0_f32.to_radians(),
+        0.22,
+        2,
+    ));
+    SceneSetup {
+        meshes,
+        materials,
+        scene: SceneSubmission {
+            camera_world_pose: default_camera_world_pose(),
+            renderables,
+            lights: Vec::new(),
+        },
+    }
+}
+
+fn tilted_canvas_pair(
+    origin: Vec3,
+    yaw: f32,
+    child_local_x: f32,
+    transform_base: i32,
+) -> Vec<SceneRenderable> {
+    let rotation = Quat::from_rotation_y(yaw);
+    let child_position = origin + rotation * Vec3::new(child_local_x, 0.0, 0.0);
+    vec![
+        SceneRenderable {
+            transform_id: transform_base,
+            pose: transform(origin, Vec3::new(1.7, 1.7, 1.0), rotation),
+            mesh_asset_id: scene_mesh_id(0),
+            material_asset_id: scene_material_id(0),
+            sorting_order: 0,
+        },
+        SceneRenderable {
+            transform_id: transform_base + 1,
+            pose: transform(child_position, Vec3::new(0.9, 0.9, 1.0), rotation),
+            mesh_asset_id: scene_mesh_id(0),
+            material_asset_id: scene_material_id(1),
+            sorting_order: 0,
+        },
+    ]
+}
+
+fn canvas_offset_bias_quad_setup() -> SceneSetup {
+    let meshes = vec![mesh_asset(
+        0,
+        generate_quad(),
+        centered_bounds(Vec3::new(0.55, 0.55, 0.05)),
+    )];
+    let materials = vec![
+        unlit_color_material_for_scene(0, [1.0, 0.05, 0.05, 1.0]),
+        ui_unlit_offset_material(1, [0.05, 0.2, 1.0, 1.0], -64.0),
+    ];
+    let renderables = vec![
+        SceneRenderable {
+            transform_id: 0,
+            pose: transform(Vec3::ZERO, Vec3::new(1.1, 1.1, 1.0), Quat::IDENTITY),
+            mesh_asset_id: scene_mesh_id(0),
+            material_asset_id: scene_material_id(0),
+            sorting_order: 0,
+        },
+        SceneRenderable {
+            transform_id: 1,
+            pose: transform(
+                Vec3::new(0.0, 0.0, 0.0006),
+                Vec3::new(0.45, 0.45, 1.0),
+                Quat::IDENTITY,
+            ),
+            mesh_asset_id: scene_mesh_id(0),
+            material_asset_id: scene_material_id(1),
+            sorting_order: 0,
+        },
+    ];
+    SceneSetup {
+        meshes,
+        materials,
+        scene: SceneSubmission {
+            camera_world_pose: default_camera_world_pose(),
+            renderables,
+            lights: Vec::new(),
+        },
+    }
+}
+
 fn ui_unlit_color_material(index: i32, tint: [f32; 4]) -> MaterialAsset {
     MaterialAsset {
         asset_id: scene_material_id(index),
@@ -676,6 +783,17 @@ fn ui_unlit_color_material(index: i32, tint: [f32; 4]) -> MaterialAsset {
             }],
         }),
     }
+}
+
+fn ui_unlit_offset_material(index: i32, tint: [f32; 4], offset_units: f32) -> MaterialAsset {
+    let mut material = ui_unlit_color_material(index, tint);
+    if let Some(binding) = material.binding.as_mut() {
+        binding.floats.push(FloatBinding {
+            property_name: "_OffsetUnits",
+            value: offset_units,
+        });
+    }
+    material
 }
 
 fn gltf_textured_static_mesh_setup(

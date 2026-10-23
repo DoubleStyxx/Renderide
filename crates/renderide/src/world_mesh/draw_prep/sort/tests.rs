@@ -79,6 +79,7 @@ fn cmp_world_mesh_draw_items_without_depth_bucket(
 /// production.
 fn set_camera_distance(item: &mut WorldMeshDrawItem, distance_sq: f32) {
     item.camera_distance_sq = distance_sq;
+    crate::world_mesh::draw_prep::sync_transparent_depth_key(item);
     item._opaque_depth_bucket = opaque_depth_bucket(distance_sq);
     item.sort_prefix = pack_sort_prefix(
         item.is_overlay,
@@ -765,6 +766,7 @@ fn canvas_item(
         std::sync::Arc::from("ui_unlit_default"),
     );
     item.batch_key_hash = compute_batch_key_hash(&item.batch_key);
+    item.is_canvas_ui = true;
     item.canvas_plane_depth = plane_depth;
     set_camera_distance(&mut item, distance_sq);
     item
@@ -809,6 +811,7 @@ fn canvas_and_non_canvas_depth_order_stays_total() {
     let canvas_near = canvas_item(1, 100.0, Some(1.0), 0);
     let mut world_far = canvas_item(2, 64.0, None, 0);
     world_far.batch_key.pipeline = crate::materials::RasterPipelineKind::Null;
+    world_far.is_canvas_ui = false;
     world_far.canvas_plane_depth = None;
     world_far.batch_key_hash = compute_batch_key_hash(&world_far.batch_key);
     set_camera_distance(&mut world_far, 64.0);

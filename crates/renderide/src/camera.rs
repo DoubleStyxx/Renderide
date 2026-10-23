@@ -66,14 +66,21 @@ mod tests {
     use openxr::Fovf;
 
     use crate::scene::render_transform_to_matrix;
+    use crate::scene::{RenderSpaceId, SceneCoordinator};
     use crate::shared::{HeadOutputDevice, RenderTransform};
 
+    use super::geometry::EyeView;
+    use super::host_camera_frame::HostCameraFrame;
     use super::projection::{
         DEFAULT_DESKTOP_FOV_DEGREES, DESKTOP_FOV_DEGREES_MAX, DESKTOP_FOV_DEGREES_MIN,
         clamp_desktop_fov_degrees, effective_head_output_clip_planes, reverse_z_orthographic,
         reverse_z_perspective, reverse_z_perspective_openxr_fov,
     };
-    use super::view::{view_forward_world_from_view_matrix, view_matrix_from_render_transform};
+    use super::stereo::StereoViewMatrices;
+    use super::view::{
+        head_forward_from_eye_views, view_forward_world_for_collection,
+        view_forward_world_from_view_matrix, view_matrix_from_render_transform,
+    };
 
     fn expected_reverse_z_perspective_cols(
         aspect: f32,
@@ -126,6 +133,80 @@ mod tests {
         assert!(m.w_axis.w.is_finite());
         assert!(m.x_axis.x > 0.0 && m.y_axis.y > 0.0);
         assert!(m.z_axis.w == -1.0);
+    }
+
+    fn yawed_camera(yaw_radians: f32) -> RenderTransform {
+        RenderTransform {
+            position: Vec3::ZERO,
+            scale: Vec3::ONE,
+            rotation: Quat::from_rotation_y(yaw_radians),
+        }
+    }
+
+    fn eye_looking(yaw_radians: f32) -> EyeView {
+        let view = view_matrix_from_render_transform(&yawed_camera(yaw_radians));
+        EyeView::new(view, Mat4::IDENTITY, Mat4::IDENTITY, Vec3::ZERO)
+    }
+
+    #[test]
+    fn collection_forward_tracks_the_head_not_one_eye() {
+        let scene = SceneCoordinator::new();
+        let left = eye_looking(25.0_f32.to_radians());
+        let right = eye_looking(-15.0_f32.to_radians());
+        let stereo = StereoViewMatrices::new(left, right);
+        let host = HostCameraFrame {
+            vr_active: true,
+            stereo: Some(stereo),
+            ..HostCameraFrame::default()
+        };
+        let forward = view_forward_world_for_collection(&scene, &host);
+        let head = head_forward_from_eye_views(left.view, right.view);
+        let left_only = view_forward_world_from_view_matrix(left.view);
+        assert!(
+            (forward - head).length() < 1.0e-5,
+            "stereo collection forward {forward} is not the head mean {head}"
+        );
+        assert!(
+            (forward - left_only).length() > 0.05,
+            "head forward {forward} collapsed onto the left eye {left_only}"
+        );
+        assert!(forward.z > 0.9, "head still looks mostly +Z, got {forward}");
+
+        let explicit = HostCameraFrame {
+            vr_active: true,
+            stereo: Some(stereo),
+            explicit_view: Some(eye_looking(std::f32::consts::FRAC_PI_2)),
+            ..HostCameraFrame::default()
+        };
+        let explicit_forward = view_forward_world_for_collection(&scene, &explicit);
+        assert!(
+            (explicit_forward - Vec3::X).length() < 1.0e-4,
+            "explicit render-texture view must win over the HMD, got {explicit_forward}"
+        );
+
+        let ignored = HostCameraFrame {
+            vr_active: false,
+            stereo: Some(stereo),
+            ..HostCameraFrame::default()
+        };
+        let ignored_forward = view_forward_world_for_collection(&scene, &ignored);
+        assert!(
+            (ignored_forward - Vec3::NEG_Z).length() < 1.0e-4,
+            "inactive stereo must not override the empty-scene fallback, got {ignored_forward}"
+        );
+
+        let mut desktop = SceneCoordinator::new();
+        desktop.test_seed_space_identity_worlds(
+            RenderSpaceId(1),
+            vec![yawed_camera(0.0)],
+            vec![-1],
+        );
+        let desktop_forward =
+            view_forward_world_for_collection(&desktop, &HostCameraFrame::default());
+        assert!(
+            (desktop_forward - Vec3::Z).length() < 1.0e-4,
+            "desktop collection uses view_transform (+Z), got {desktop_forward}"
+        );
     }
 
     #[test]

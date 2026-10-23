@@ -4,6 +4,8 @@
 //! transient-pool, material-uniform, bind-group, and keyword-variant cache bookkeeping the frame
 //! loop uses, and they never open a wgpu device.
 
+use std::sync::Arc;
+
 use glam::{Mat4, Quat, Vec3};
 
 use crate::render_graph::resources::BufferSizePolicy;
@@ -283,6 +285,97 @@ impl BufferPoolWorkload {
             self.pool.release_buffer(*id);
         }
         checksum
+    }
+}
+
+/// Mixed transparent draws sorted by one [`TransparentSortWorkload`] sample at about a thousand rows.
+pub const TRANSPARENT_SORT_1K: usize = 1_024;
+
+/// Mixed transparent draws sorted by one [`TransparentSortWorkload`] sample at about ten thousand rows.
+pub const TRANSPARENT_SORT_10K: usize = 10_240;
+
+/// Unsorted transparent draws, half canvas stems and half world stems.
+///
+/// Both sort methods use the current plane-distance key. `sort_precomputed` reads the `f64` stored
+/// on the draw. `sort_recomputing_depth` rebuilds that key on every compare, including the canvas
+/// stem-name match, which is what `cmp_transparent_class_tie` did before the key was collected.
+#[derive(Clone, Debug)]
+pub struct TransparentSortWorkload {
+    items: Vec<crate::world_mesh::WorldMeshDrawItem>,
+}
+
+impl TransparentSortWorkload {
+    /// Builds `count` transparent draws with shuffled distances and equal `sorting_order`.
+    ///
+    /// Equal sorting order forces the comparator into the depth-key tie, which is the cost this
+    /// bench measures. Canvas rows cycle `ui_unlit`, `ui_textunlit`, and `ui_circlesegment`.
+    /// World rows use non-canvas embedded stems so the stem match still runs and returns false.
+    #[must_use]
+    pub fn mixed(count: usize) -> Self {
+        use crate::materials::RasterPipelineKind;
+        use crate::world_mesh::draw_prep::{pack_sort_prefix, sync_transparent_depth_key};
+        use crate::world_mesh::test_fixtures::{DummyDrawItemSpec, dummy_world_mesh_draw_item};
+
+        let mut items = Vec::with_capacity(count);
+        for index in 0..count {
+            let mut item = dummy_world_mesh_draw_item(DummyDrawItemSpec {
+                material_asset_id: i32::try_from(index % 64).unwrap_or(0),
+                property_block: None,
+                skinned: false,
+                sorting_order: 0,
+                mesh_asset_id: 1,
+                node_id: i32::try_from(index).unwrap_or(i32::MAX),
+                slot_index: 0,
+                collect_order: index,
+                alpha_blended: true,
+            });
+            let mixed = index.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let meters = 0.4 + (mixed % 20_000) as f32 * 0.001;
+            if index % 2 == 0 {
+                let stem = match index % 6 {
+                    0 => "ui_unlit_default",
+                    2 => "ui_textunlit_multiview",
+                    _ => "ui_circlesegment",
+                };
+                item.batch_key.pipeline = RasterPipelineKind::EmbeddedStem(Arc::from(stem));
+                item.is_canvas_ui = true;
+                item.canvas_plane_depth = Some(meters);
+            } else {
+                let stem = if index % 4 == 1 {
+                    "unlit_default"
+                } else {
+                    "pbs_metallic_default"
+                };
+                item.batch_key.pipeline = RasterPipelineKind::EmbeddedStem(Arc::from(stem));
+                item.is_canvas_ui = false;
+                item.canvas_plane_depth = None;
+            }
+            item.camera_distance_sq = meters * meters;
+            sync_transparent_depth_key(&mut item);
+            item.sort_prefix = pack_sort_prefix(
+                item.is_overlay,
+                item.batch_key.render_queue,
+                item.batch_key.uses_transparent_sorting(),
+                item._opaque_depth_bucket,
+                item.batch_key_hash,
+            );
+            items.push(item);
+        }
+        Self { items }
+    }
+
+    /// Sorts a clone with the production precomputed-key comparator.
+    #[must_use]
+    pub fn sort_precomputed(self) -> u64 {
+        let mut items = self.items;
+        crate::world_mesh::draw_prep::sort_order_sensitive_draws_precomputed(&mut items)
+    }
+
+    /// Sorts a clone while recomputing the depth key on every compare.
+    #[must_use]
+    pub fn sort_recomputing_depth(self) -> u64 {
+        let mut items = self.items;
+        crate::world_mesh::draw_prep::sort_order_sensitive_draws_recomputing_depth(&mut items)
     }
 }
 

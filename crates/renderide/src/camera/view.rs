@@ -98,18 +98,42 @@ pub(crate) fn view_forward_world_from_view_matrix(view: Mat4) -> Vec3 {
 
 /// Camera forward used when collecting one view's draws.
 ///
-/// Prefers [`HostCameraFrame::explicit_world_to_view`] and otherwise the active main-space view.
-/// Identity is used only when neither exists, which looks down world −Z.
+/// An explicit view wins, so a render-texture camera does not inherit the HMD. While VR stereo
+/// is active the forward is the mean of the two eye view directions: that is the head
+/// orientation, not the left eye and not the render-space root. Desktop and every other
+/// non-stereo view use the active main-space `view_transform`. Identity is the last resort and
+/// looks down world −Z.
 pub(crate) fn view_forward_world_for_collection(
     scene: &(impl SceneSpaceRead + ?Sized),
     host_camera: &HostCameraFrame,
 ) -> Vec3 {
-    let view = host_camera.explicit_world_to_view().unwrap_or_else(|| {
-        scene.active_main_space().map_or(Mat4::IDENTITY, |space| {
-            view_matrix_for_world_mesh_render_space(scene, space)
-        })
+    if let Some(view) = host_camera.explicit_world_to_view() {
+        return view_forward_world_from_view_matrix(view);
+    }
+    if let Some(stereo) = host_camera.active_stereo() {
+        let (left, right) = stereo.view_pair();
+        let head = head_forward_from_eye_views(left, right);
+        if head != Vec3::ZERO {
+            return head;
+        }
+    }
+    let view = scene.active_main_space().map_or(Mat4::IDENTITY, |space| {
+        view_matrix_for_world_mesh_render_space(scene, space)
     });
     view_forward_world_from_view_matrix(view)
+}
+
+/// Head forward from a stereo pair.
+///
+/// Each eye view contributes its world forward. The sum is normalized, which is the head
+/// direction for the small vergence between the eyes. A zero vector means both views were
+/// unusable.
+#[inline]
+pub(crate) fn head_forward_from_eye_views(left_view: Mat4, right_view: Mat4) -> Vec3 {
+    unit_direction(
+        view_forward_world_from_view_matrix(left_view)
+            + view_forward_world_from_view_matrix(right_view),
+    )
 }
 
 /// Overlay-camera origin and forward in overlay-local space.

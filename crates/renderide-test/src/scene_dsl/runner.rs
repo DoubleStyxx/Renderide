@@ -222,6 +222,12 @@ fn prepare_template(
         CaseTemplate::CoplanarCanvasUiQuads => Ok(PreparedTemplate {
             session_template: SessionTemplate::CoplanarCanvasUiQuads,
         }),
+        CaseTemplate::TiltedCanvasUiQuads => Ok(PreparedTemplate {
+            session_template: SessionTemplate::TiltedCanvasUiQuads,
+        }),
+        CaseTemplate::CanvasOffsetBiasQuad => Ok(PreparedTemplate {
+            session_template: SessionTemplate::CanvasOffsetBiasQuad,
+        }),
         CaseTemplate::GltfTexturedStaticMesh { path } => {
             let imported = load_static_textured_mesh(path)?;
             let texture_size = imported.texture_size;

@@ -11,7 +11,7 @@ pub(crate) mod instances;
 pub(crate) mod materials;
 pub(crate) mod phase_classification;
 pub mod prefetch;
-#[cfg(test)]
+#[cfg(any(test, feature = "bench-api"))]
 pub(crate) mod test_fixtures;
 
 pub use culling::{
@@ -38,7 +38,7 @@ pub(crate) use draw_prep::{
 };
 pub use instances::{DrawGroup, InstancePlan, MeshPassKind, WorldMeshPhase, build_plan_for_shader};
 pub(crate) use instances::{depth_prepass_group_eligible, depth_prepass_item_eligible};
-#[cfg(test)]
+#[cfg(any(test, feature = "bench-api"))]
 pub(crate) use materials::compute_batch_key_hash;
 pub use materials::{FrameMaterialBatchCache, MaterialDrawBatchKey, TransparentMaterialClass};
 pub use prefetch::{PrefetchedWorldMeshViewDraws, WorldMeshDrawPlan, WorldMeshHelperNeeds};

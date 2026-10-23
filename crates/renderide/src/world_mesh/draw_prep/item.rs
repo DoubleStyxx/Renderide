@@ -153,12 +153,25 @@ pub struct WorldMeshDrawItem {
     /// farthest-corner metric. Canvas stems do not use it for UI-versus-UI ordering; see
     /// [`Self::canvas_plane_depth`].
     pub camera_distance_sq: f32,
-    /// View-plane depth of the draw AABB center, in meters along the camera forward.
+    /// Absolute distance from the view origin to this draw's plane, in meters.
     ///
     /// `Some` only for canvas UI stems (`ui_unlit`, `ui_textunlit`, `ui_circlesegment`) when the
-    /// view basis and bounds are finite. Larger values are farther from the camera. `None` keeps
-    /// farthest-corner ordering for that draw.
+    /// rigid world matrix defines a usable plane. The value does not depend on the camera
+    /// forward, so tilted coplanar siblings share it. Larger values are farther from the view
+    /// origin. `None` keeps farthest-corner ordering for that draw.
     pub canvas_plane_depth: Option<f32>,
+    /// `true` when [`Self::batch_key`] is a canvas UI stem.
+    ///
+    /// Collected once so the transparent comparator and the depth-step walk do not repeat the
+    /// stem-name match.
+    pub is_canvas_ui: bool,
+    /// Farther-first transparent depth key collected with this draw.
+    ///
+    /// Canvas stems with [`Self::canvas_plane_depth`] store the quantized plane distance. Every
+    /// other transparent draw stores `sqrt(camera_distance_sq)`. The comparator compares these
+    /// numbers directly. A canvas-versus-world pair therefore does not use the same order as
+    /// comparing both draws by farthest-corner distance.
+    pub transparent_depth_key: f64,
     /// Conservative world-space bounds for visibility tests that run after draw collection.
     ///
     /// `None` keeps the draw visible. Overlay-space draws and sources with unusable host bounds

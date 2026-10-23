@@ -126,7 +126,7 @@ fn pack_per_draw_vp_uniforms(
             inputs.render_context,
             inputs.world_proj,
             inputs.overlay_proj,
-            canvas_ndc_z_bias(item, canvas_steps[draw_index]),
+            canvas_ndc_z_bias(item, canvas_steps.get(draw_index).copied().unwrap_or(0)),
         );
         let packed = if matrices.view_proj_left == matrices.view_proj_right {
             PaddedPerDrawUniforms::new_single(matrices.view_proj_left, matrices.model)

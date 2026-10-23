@@ -122,7 +122,13 @@ pub(super) fn evaluate_draw_candidate(
     }
     let blendshape_deformed = candidate.blendshape_deformed
         || (candidate.tangent_blendshape_deform_active && batch_key.embedded_needs_tangent);
-    let sort_metrics = candidate_sort_metrics(ctx, &candidate, &batch_key, alpha_distance_sq);
+    let sort_metrics = candidate_sort_metrics(
+        ctx,
+        &candidate,
+        &batch_key,
+        rigid_world_matrix,
+        alpha_distance_sq,
+    );
     let reflection_probes = match (ctx.view.reflection_probes, candidate.world_aabb) {
         (Some(selection), Some(aabb)) => selection.select(candidate.space_id, aabb),
         _ => ReflectionProbeDrawSelection::default(),
@@ -147,6 +153,8 @@ pub(super) fn evaluate_draw_candidate(
         collect_order: 0,
         camera_distance_sq: sort_metrics.camera_distance_sq,
         canvas_plane_depth: sort_metrics.canvas_plane_depth,
+        is_canvas_ui: sort_metrics.is_canvas_ui,
+        transparent_depth_key: sort_metrics.transparent_depth_key,
         world_aabb: candidate.world_aabb,
         lookup_ids,
         batch_key,
@@ -164,8 +172,12 @@ pub(super) fn evaluate_draw_candidate(
 struct CandidateSortMetrics {
     /// Farthest-corner distance squared, or zero for opaque-queue draws.
     camera_distance_sq: f32,
-    /// Canvas view-plane depth when this draw is a UI stem with a usable view basis.
+    /// Canvas plane distance when this draw is a UI stem with a usable rigid matrix.
     canvas_plane_depth: Option<f32>,
+    /// Whether `batch_key.pipeline` is a canvas UI stem.
+    is_canvas_ui: bool,
+    /// Precomputed farther-first key. See [`WorldMeshDrawItem::transparent_depth_key`].
+    transparent_depth_key: f64,
     /// Content hash of the resolved batch key.
     batch_key_hash: u64,
     /// Coarse opaque front-to-back bucket derived from [`Self::camera_distance_sq`].
@@ -183,6 +195,7 @@ fn candidate_sort_metrics(
     ctx: &DrawCollectionInputs<'_>,
     candidate: &DrawCandidate,
     batch_key: &MaterialDrawBatchKey,
+    rigid_world_matrix: Option<Mat4>,
     alpha_distance_sq: f32,
 ) -> CandidateSortMetrics {
     let camera_distance_sq = if batch_key.uses_transparent_sorting() {
@@ -194,11 +207,16 @@ fn candidate_sort_metrics(
     } else {
         0.0
     };
-    let canvas_plane_depth = canvas_plane_depth_for_candidate(
-        &ctx.view,
-        candidate.is_overlay,
-        &batch_key.pipeline,
-        candidate.world_aabb,
+    let is_canvas_ui = batch_key.pipeline.is_canvas_ui_stem();
+    let canvas_plane_depth = if is_canvas_ui {
+        canvas_plane_depth_for_candidate(&ctx.view, candidate.is_overlay, rigid_world_matrix)
+    } else {
+        None
+    };
+    let transparent_depth_key = super::super::transparent_depth_key_from_parts(
+        is_canvas_ui,
+        canvas_plane_depth,
+        camera_distance_sq,
     );
     let batch_key_hash = compute_batch_key_hash(batch_key);
     let opaque_depth_bucket =
@@ -213,28 +231,26 @@ fn candidate_sort_metrics(
     CandidateSortMetrics {
         camera_distance_sq,
         canvas_plane_depth,
+        is_canvas_ui,
+        transparent_depth_key,
         batch_key_hash,
         opaque_depth_bucket,
         sort_prefix,
     }
 }
 
-/// View-plane depth for a canvas stem, or `None` for every other pipeline.
+/// Plane distance for one canvas draw, or `None` when the rigid matrix is missing.
 fn canvas_plane_depth_for_candidate(
     view: &super::DrawCollectionViewInputs<'_>,
     is_overlay: bool,
-    pipeline: &crate::materials::RasterPipelineKind,
-    world_aabb: Option<(Vec3, Vec3)>,
+    rigid_world_matrix: Option<Mat4>,
 ) -> Option<f32> {
-    if !pipeline.is_canvas_ui_stem() {
-        return None;
-    }
-    let (origin, forward) = if is_overlay {
-        crate::camera::overlay_canvas_view_basis()
+    let origin = if is_overlay {
+        crate::camera::overlay_canvas_view_basis().0
     } else {
-        (view.view_origin_world, view.view_forward_world)
+        view.view_origin_world
     };
-    super::super::canvas_plane_depth_meters(origin, forward, world_aabb)
+    super::super::canvas_plane_distance_meters(origin, rigid_world_matrix?)
 }
 
 /// Returns the transparent back-to-front sort metric for a draw candidate.
@@ -548,7 +564,7 @@ mod tests {
             RasterPipelineKind::EmbeddedStem(std::sync::Arc::<str>::from("ui_unlit_default")),
         );
         let cache = FrameMaterialBatchCache::new();
-        let mut ctx = test_draw_context(&scene, &mesh_pool, &material_dict, &router, &property_ids);
+        let ctx = test_draw_context(&scene, &mesh_pool, &material_dict, &router, &property_ids);
         let candidate = || DrawCandidate {
             space_id: RenderSpaceId(3),
             node_id: 9,
@@ -586,21 +602,22 @@ mod tests {
         assert!(item.batch_key.alpha_blended);
         assert!(item.batch_key.uses_transparent_sorting());
         assert_eq!(item.camera_distance_sq, 125.0);
+        assert!(item.is_canvas_ui);
         assert_eq!(item.canvas_plane_depth, None);
 
-        ctx.view.view_forward_world = Vec3::X;
-        let with_forward = evaluate_draw_candidate(
+        let with_plane = evaluate_draw_candidate(
             &ctx,
             &cache,
             candidate(),
             RasterFrontFace::Clockwise,
             RasterPrimitiveTopology::TriangleList,
-            None,
+            Some(Mat4::from_translation(Vec3::new(0.0, 0.0, 10.0))),
             4.0,
         )
         .expect("draw item");
-        assert_eq!(with_forward.camera_distance_sq, 125.0);
-        assert_eq!(with_forward.canvas_plane_depth, Some(10.0));
+        assert_eq!(with_plane.camera_distance_sq, 125.0);
+        assert_eq!(with_plane.canvas_plane_depth, Some(10.0));
+        assert!((with_plane.transparent_depth_key - 10.0).abs() < 1.0e-4);
     }
 
     #[test]

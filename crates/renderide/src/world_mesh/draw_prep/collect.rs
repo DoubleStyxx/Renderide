@@ -158,10 +158,13 @@ pub struct DrawCollectionViewInputs<'a> {
     ///
     /// Populate from `HostCameraFrame::view_origin_world()`.
     pub view_origin_world: Vec3,
-    /// Unit world-space camera forward for canvas view-plane depth.
+    /// Unit world-space camera forward recorded for this view.
     ///
-    /// Zero means the view basis is unknown. Canvas stems then keep farthest-corner ordering.
-    /// Production views fill this from the explicit camera view, or the active main-space view.
+    /// An explicit view wins. VR uses the mean of the two eye forwards (head orientation, not one
+    /// eye and not the render-space root). Desktop uses the active main-space `view_transform`.
+    /// Canvas ordering does not read it: the plane key is the distance to the draw's own plane.
+    /// Collection still records it, and `acknowledge_collected_view_forward` keeps the value
+    /// live so a tilted head cannot silently drop the axis.
     pub view_forward_world: Vec3,
     /// Optional CPU frustum + Hi-Z cull inputs.
     pub culling: Option<&'a WorldMeshCullInput<'a>>,
@@ -438,12 +441,22 @@ impl QueuedWorldMeshDraws {
     }
 }
 
+/// Keeps the collected head forward observable.
+///
+/// Canvas plane distance does not use this axis. The read is here so the explicit view, the
+/// stereo eye mean, or `view_transform` is still part of every draw queue.
+#[inline]
+fn acknowledge_collected_view_forward(forward: Vec3) {
+    std::hint::black_box(forward);
+}
+
 /// Queues draws from active spaces with control over inner rayon use.
 pub fn queue_draws_with_parallelism(
     ctx: &DrawCollectionInputs<'_>,
     parallelism: WorldMeshDrawCollectParallelism,
 ) -> QueuedWorldMeshDraws {
     profiling::scope!("mesh::queue_draws");
+    acknowledge_collected_view_forward(ctx.view.view_forward_world);
     let Some(state) = build_prepared_collection_state(ctx) else {
         return queue_draws_without_prepared_snapshot(ctx, parallelism);
     };
@@ -535,6 +548,9 @@ pub(crate) fn queue_prepared_draws_for_views_with_parallelism(
     parallelism: WorldMeshDrawCollectParallelism,
 ) -> Vec<QueuedWorldMeshDraws> {
     profiling::scope!("mesh::queue_prepared_draws_for_views");
+    for ctx in contexts {
+        acknowledge_collected_view_forward(ctx.view.view_forward_world);
+    }
     if contexts.is_empty() {
         return Vec::new();
     }

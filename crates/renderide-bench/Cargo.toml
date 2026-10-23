@@ -27,5 +27,9 @@ criterion = "0.8"
 name = "cpu_hot"
 harness = false
 
+[[bench]]
+name = "transparent_sort"
+harness = false
+
 [lints]
 workspace = true

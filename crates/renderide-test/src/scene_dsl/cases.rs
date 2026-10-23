@@ -68,6 +68,10 @@ pub enum CaseTemplate {
     ExoticShaderPair,
     /// Coplanar UI quads: a small earlier quad must not paint over the later larger quad.
     CoplanarCanvasUiQuads,
+    /// Tilted parent/child UI canvases at two camera-relative yaws.
+    TiltedCanvasUiQuads,
+    /// UI quad that stays behind an opaque quad unless the reverse-Z NDC bias is applied.
+    CanvasOffsetBiasQuad,
 }
 
 /// Default golden directory, relative to the workspace root: `crates/renderide-test/goldens/`.
@@ -227,6 +231,52 @@ pub fn coplanar_canvas_ui_quads() -> IntegrationCase {
     }
 }
 
+/// Tilted parent and child `UI/Unlit` quads at +35° and −40° yaw.
+///
+/// The child is offset inside the parent's plane so its AABB center is farther along camera +Z.
+/// A camera-forward center key draws the child first and the parent covers it. The plane-distance
+/// key keeps collect order, so each child stays blue on its red parent. The face-on coplanar
+/// golden still passes with no bias; this one is the tilted ordering probe.
+pub fn tilted_canvas_ui_quads() -> IntegrationCase {
+    IntegrationCase {
+        name: "tilted_canvas_ui_quads".to_string(),
+        description: "Tilted parent/child UI quads at two yaws. Each later child stays visible."
+            .to_string(),
+        golden_path: default_goldens_dir().join("tilted_canvas_ui_quads.png"),
+        resolution: (256, 256),
+        // `And` so a covered child fails even when SSIM stays high. The center-depth head
+        // (`74bd3657`) scores about 0.94 SSIM and a 0.056 failing fraction on this image.
+        tolerance: Tolerance {
+            ssim_min: Some(0.98),
+            max_abs_diff: Some(24),
+            max_failing_pixel_fraction: Some(0.02),
+            min_luma_range: Some(16),
+            min_unique_colors: Some(3),
+            min_non_background_pixel_fraction: Some(0.04),
+            combine: Combine::And,
+        },
+        template: CaseTemplate::TiltedCanvasUiQuads,
+    }
+}
+
+/// Opaque red quad with a smaller UI quad 0.6 mm farther and `_OffsetUnits = -64`.
+///
+/// Four D24 quanta times 64 units pull the UI about 1.37 mm closer at the harness camera
+/// (3 m, near 0.1, far 100), so the center is blue. Hardware bias alone does not clear 0.6 mm,
+/// so the same scene stays red without the NDC term. The coplanar golden is not this probe:
+/// it passes on `LEqual` with no bias.
+pub fn canvas_offset_bias_quad() -> IntegrationCase {
+    IntegrationCase {
+        name: "canvas_offset_bias_quad".to_string(),
+        description: "A UI quad 0.6 mm behind an opaque quad. Offset units must pull it in front."
+            .to_string(),
+        golden_path: default_goldens_dir().join("canvas_offset_bias_quad.png"),
+        resolution: (256, 256),
+        tolerance: visual_tolerance(0.9, 24, 0.08, 16, 3, 0.04),
+        template: CaseTemplate::CanvasOffsetBiasQuad,
+    }
+}
+
 /// Optional GLB fixture case. The registry includes it only when the fixture file is present,
 /// so the suite remains useful before a commit-safe model has been added.
 pub fn gltf_textured_static_mesh(path: PathBuf) -> IntegrationCase {
@@ -252,6 +302,8 @@ pub fn registry() -> Vec<IntegrationCase> {
         custom_shader_property_update(),
         exotic_shader_pair(),
         coplanar_canvas_ui_quads(),
+        tilted_canvas_ui_quads(),
+        canvas_offset_bias_quad(),
     ];
     let gltf_fixture = default_fixture_path();
     if gltf_fixture.is_file() {

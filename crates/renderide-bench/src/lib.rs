@@ -10,8 +10,8 @@
 pub use renderide::bench_api::{
     BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload, CULL_BATCH,
     CullWorkload, KeywordVariantCacheWorkload, MATERIAL_UNIFORM_BATCH,
-    MaterialUniformUpdateWorkload, TRANSFORM_BATCH, TransformWorkload, WORLD_MATRIX_NODES,
-    WorldMatrixWorkload,
+    MaterialUniformUpdateWorkload, TRANSFORM_BATCH, TRANSPARENT_SORT_1K, TRANSPARENT_SORT_10K,
+    TransformWorkload, TransparentSortWorkload, WORLD_MATRIX_NODES, WorldMatrixWorkload,
 };
 
 #[cfg(test)]
@@ -19,7 +19,7 @@ mod tests {
     use super::{
         BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload,
         CULL_BATCH, CullWorkload, KeywordVariantCacheWorkload, MaterialUniformUpdateWorkload,
-        TransformWorkload, WORLD_MATRIX_NODES, WorldMatrixWorkload,
+        TransformWorkload, TransparentSortWorkload, WORLD_MATRIX_NODES, WorldMatrixWorkload,
     };
 
     #[test]
@@ -117,5 +117,14 @@ mod tests {
         assert_eq!(workload.cache_hit(), hit);
         let composed = workload.compose();
         assert!(composed > 0);
+    }
+
+    #[test]
+    fn precomputed_and_recomputed_transparent_sorts_agree() {
+        let workload = TransparentSortWorkload::mixed(64);
+        let precomputed = workload.clone().sort_precomputed();
+        let recomputed = workload.sort_recomputing_depth();
+        assert_ne!(precomputed, 0);
+        assert_eq!(precomputed, recomputed);
     }
 }
