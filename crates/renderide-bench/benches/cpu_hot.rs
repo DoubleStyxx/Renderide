@@ -10,8 +10,9 @@ use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use renderide_bench::{
     BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload, CULL_BATCH,
     CullWorkload, KeywordVariantCacheWorkload, MATERIAL_UNIFORM_BATCH,
-    MaterialUniformUpdateWorkload, SkinnedCullWorkload, TRANSFORM_BATCH, TransformWorkload,
-    WORLD_MATRIX_NODES, WorldMatrixWorkload,
+    MaterialUniformUpdateWorkload, SHADOW_CHURN_CASTERS, SHADOW_CHURN_LIGHTS, ShadowChurnWorkload,
+    SkinnedCullWorkload, TRANSFORM_BATCH, TransformWorkload, WORLD_MATRIX_NODES,
+    WorldMatrixWorkload,
 };
 
 fn transforms(c: &mut Criterion) {
@@ -98,6 +99,32 @@ fn keyword_variants(c: &mut Criterion) {
     group.finish();
 }
 
+fn shadow_churn(c: &mut Criterion) {
+    let mut workload = ShadowChurnWorkload::standard();
+    // The first plan fills the caches. Measured iterations are the steady repaint.
+    let _ = workload.prepare();
+    let mut group = c.benchmark_group("shadow_churn");
+    group.throughput(Throughput::Elements(
+        (SHADOW_CHURN_CASTERS.saturating_mul(SHADOW_CHURN_LIGHTS)) as u64,
+    ));
+    group.bench_function("static_repaint", |b| {
+        b.iter(|| black_box(workload.prepare()));
+    });
+    group.bench_function("cold_plan", |b| {
+        b.iter_batched(
+            ShadowChurnWorkload::standard,
+            |mut sample| black_box(sample.prepare()),
+            criterion::BatchSize::LargeInput,
+        );
+    });
+    let mut revision_workload = ShadowChurnWorkload::standard_with_production_revisions();
+    let _ = revision_workload.prepare();
+    group.bench_function("static_repaint_revisions", |b| {
+        b.iter(|| black_box(revision_workload.prepare()));
+    });
+    group.finish();
+}
+
 fn buffer_pool(c: &mut Criterion) {
     let mut workload = BufferPoolWorkload::standard();
     let mut group = c.benchmark_group("buffer_pool");
@@ -122,7 +149,8 @@ criterion_group!(
     buffer_pool,
     material_uniforms,
     bind_groups,
-    keyword_variants
+    keyword_variants,
+    shadow_churn
 );
 
 #[cfg(feature = "gpu")]

@@ -40,7 +40,7 @@ pub use item::{
 };
 pub use prepared_renderables::FramePreparedRenderables;
 pub use render_world::{RenderWorld, RenderWorldMaintenanceStats};
-#[cfg(test)]
+#[cfg(any(test, feature = "bench-api"))]
 pub use sort::pack_sort_prefix;
 #[cfg(test)]
 pub(crate) use sort::sort_draws;

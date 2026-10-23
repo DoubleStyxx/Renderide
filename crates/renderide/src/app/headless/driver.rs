@@ -15,6 +15,10 @@ use super::super::exit::RunExit;
 use super::readback;
 use super::schedule::{HeadlessSchedule, HeadlessTickKind};
 
+/// When `1` or `true`, headless PNG writes also emit the atlas-pass sidecar and append-only log.
+///
+/// The scene harness sets this. A normal headless capture writes only the PNG.
+const SHADOW_ATLAS_PASS_LOG_ENV: &str = "RENDERIDE_SHADOW_ATLAS_PASS_LOG";
 /// Sleep granularity inside the headless tick loop.
 const HEADLESS_TICK_SLEEP: Duration = Duration::from_millis(5);
 /// Maximum time headless mode waits for cooperative resource shutdown.
@@ -260,13 +264,22 @@ impl<'a> HeadlessDriver<'a> {
         if self.gpu.headless_color_texture().is_none() {
             return;
         }
-        if let Err(e) =
-            readback::readback_and_write_png_atomically(&self.gpu, &self.params.output_path)
-        {
+        let atlas_passes =
+            shadow_atlas_pass_log_enabled().then(|| self.runtime.shadow_atlas_pass_counts());
+        if let Err(e) = readback::readback_and_write_png_atomically(
+            &self.gpu,
+            &self.params.output_path,
+            atlas_passes,
+        ) {
             logger::warn!("Headless PNG write failed: {e}");
         } else {
             self.frames_written = self.frames_written.saturating_add(1);
             logger::trace!("Headless wrote PNG #{}", self.frames_written);
         }
     }
+}
+
+fn shadow_atlas_pass_log_enabled() -> bool {
+    std::env::var(SHADOW_ATLAS_PASS_LOG_ENV)
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
 }
