@@ -246,6 +246,11 @@ impl VideoPlayer {
             }
         };
 
+        // Fragmented HTTP MPEG-TS (YouTube HLS) resets continuity counters at
+        // fragment boundaries. Install the repair before autoplug so `tsdemux`
+        // does not drop those packets. Local files and UDP are unchanged.
+        super::mpegts::attach_mpegts_continuity_fix(&pipeline, id, &uri);
+
         if let Err(e) = pipeline.set_state(gstreamer::State::Playing) {
             logger::error!("video texture {}: failed to start playbin: {e}", id);
             return None;
