@@ -3,10 +3,10 @@ use std::mem::size_of;
 use glam::{Mat4, Vec3};
 use hashbrown::HashMap;
 
-use super::{
-    PaddedShadowCasterDraw, PaddedShadowLayerUniforms, clamp_shadow_resolution,
+use super::shadow_encode::{
     shadow_atlas_array_view_descriptor, shadow_atlas_layer_view_descriptor, shadow_pipeline_state,
 };
+use super::{PaddedShadowCasterDraw, PaddedShadowLayerUniforms, clamp_shadow_resolution};
 use crate::backend::frame_resource_manager::ShadowRenderView;
 use crate::backend::shadow_atlas_budget::clamp_shadow_atlas_resolution;
 use crate::gpu::{SHADOW_VIEW_KIND_DIRECTIONAL, SHADOW_VIEW_KIND_POINT, SHADOW_VIEW_KIND_SPOT};
