@@ -45,6 +45,8 @@ pub struct OcclusionSystem {
 struct VisibilitySlot {
     published: Arc<VisibilityHistory>,
     spare: HashMap<CasterKey, CasterRecord>,
+    /// Previous frame skipped history because the prepared caster count was over the cap.
+    suspended: bool,
 }
 
 impl Default for OcclusionSystem {
@@ -156,10 +158,12 @@ impl OcclusionSystem {
         let slot = slots.entry(view).or_insert_with(|| VisibilitySlot {
             published: Arc::new(VisibilityHistory::default()),
             spare: HashMap::new(),
+            suspended: false,
         });
         let scratch = VisibilityScratch {
             history: Arc::clone(&slot.published),
             spare: std::mem::take(&mut slot.spare),
+            suspended: slot.suspended,
         };
         drop(slots);
         scratch
@@ -168,13 +172,22 @@ impl OcclusionSystem {
     /// Stores the classification produced by this frame's fine cull.
     ///
     /// When this view is the last owner of the previous publication, that map is cleared and
-    /// kept as the spare for the next frame.
-    pub(crate) fn store_visibility_history(&self, view: ViewId, history: VisibilityHistory) {
+    /// kept as the spare for the next frame. `suspended` records that this frame did not attach
+    /// history confirmation, so the next frame stays off until the prepared count falls through
+    /// the resume band.
+    pub(crate) fn store_visibility_history(
+        &self,
+        view: ViewId,
+        history: VisibilityHistory,
+        suspended: bool,
+    ) {
         let mut slots = self.visibility.lock();
         let slot = slots.entry(view).or_insert_with(|| VisibilitySlot {
             published: Arc::new(VisibilityHistory::default()),
             spare: HashMap::new(),
+            suspended: false,
         });
+        slot.suspended = suspended;
         let old = std::mem::replace(&mut slot.published, Arc::new(history));
         if let Ok(old_history) = Arc::try_unwrap(old) {
             let mut recycled = old_history.into_casters();

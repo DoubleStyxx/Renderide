@@ -475,9 +475,10 @@ impl FramePreparedRenderables {
         }
     }
 
-    /// Count of world casters accepted by `include_space`, stopping once it passes `limit`.
+    /// Count of prepared world casters accepted by `include_space`, stopping once it passes `limit`.
     ///
-    /// `None` means the view has more casters than `limit`.
+    /// This is not a frustum-visible count. Overlay runs, hidden runs, and runs without a world
+    /// AABB are skipped. `None` means the view has more casters than `limit`.
     pub(crate) fn world_caster_count_at_most(
         &self,
         limit: usize,
@@ -766,6 +767,55 @@ impl FramePreparedRenderables {
             self.extend_cached_draws(draws);
         }
         self.refresh_runs_material_keys_and_chunks::<SceneCoordinator>(None);
+    }
+
+    /// One world-caster run per requested renderer, for the history-budget tests.
+    ///
+    /// Each run has a finite world AABB and is neither overlay nor hidden. The spatial index is
+    /// left empty; [`Self::world_caster_count_at_most`] only walks runs and draws.
+    #[cfg(test)]
+    pub(crate) fn test_with_caster_runs(groups: &[(RenderSpaceId, usize)]) -> Self {
+        let mut prepared = Self::empty(RenderingContext::UserView);
+        for &(space_id, count) in groups {
+            for _ in 0..count {
+                let index = prepared.draws.len();
+                let start = u32::try_from(index).unwrap_or(u32::MAX);
+                prepared.draws.push(FramePreparedDraw {
+                    space_id,
+                    renderable_index: index,
+                    instance_id: MeshRendererInstanceId(u64::try_from(index).unwrap_or(u64::MAX)),
+                    renderer_ordinal: 0,
+                    node_id: i32::try_from(index).unwrap_or(i32::MAX),
+                    mesh_asset_id: 1,
+                    is_overlay: false,
+                    is_hidden: false,
+                    sorting_order: 0,
+                    shadow_cast_mode: ShadowCastMode::On,
+                    skinned: false,
+                    world_space_deformed: false,
+                    blendshape_deformed: false,
+                    tangent_blendshape_deform_active: false,
+                    slot_index: 0,
+                    material_stack_order: None,
+                    first_index: 0,
+                    index_count: 3,
+                    material_asset_id: 1,
+                    property_block_id: None,
+                    cull_geometry: Some(MeshCullGeometry {
+                        world_aabb: Some((glam::Vec3::ZERO, glam::Vec3::ONE)),
+                        rigid_world_matrix: None,
+                        front_face_world_matrix: None,
+                    }),
+                    rigid_world_matrix_override: None,
+                    particle_draw: ParticleDrawParams::default(),
+                });
+                prepared.runs.push(FramePreparedRun {
+                    start,
+                    end: start.saturating_add(1),
+                });
+            }
+        }
+        prepared
     }
 }
 

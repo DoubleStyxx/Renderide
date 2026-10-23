@@ -14,11 +14,20 @@
 //! caster becomes occluded for the *next* frame only when the covering surface is closer in
 //! linear view depth by more than [`other_occluder_margin`].
 //!
-//! Views with more casters than [`HISTORY_CASTER_BUDGET`] skip this pass and use the
-//! previous-frame Hi-Z test directly. The uncapped history step measured about 0.13 µs per
-//! caster on a 4-core guest (100_000 casters was about 13 ms), which is past an 11.1 ms 90 Hz
-//! frame. Above the cap, popping can return. The next view under the cap treats every caster as
-//! newly revealed.
+//! That covering depth is the farthest reverse-Z sample in the rectangle, not the nearest
+//! occluder. A thin surface much closer than that farthest sample never reaches the ratio gate,
+//! so camera motion can still under-pad for one frame and hide a caster the thin surface no
+//! longer covers.
+//!
+//! The cap counts prepared casters: one renderer run with a world AABB, inside the view's
+//! render-space scope, and not overlay or hidden. It does not count frustum-visible casters,
+//! and material slots of one renderer are one caster. Views above [`HISTORY_CASTER_BUDGET`]
+//! skip this pass and use the previous-frame Hi-Z test directly. The uncapped history step
+//! measured about 0.13 µs per caster on a 4-core guest (100_000 casters was about 13 ms), which
+//! is past an 11.1 ms 90 Hz frame. Crossing the cap suspends the pass until the prepared count
+//! falls to [`HISTORY_CASTER_RESUME`], so a scene hovering on the cap does not enable and
+//! disable the pass on alternate frames. While suspended the stored history is empty, popping
+//! can return, and the frame that turns the pass back on treats every caster as newly revealed.
 //!
 //! A previously visible caster that is absent this frame (hidden, removed, or toggled off) and a
 //! mesh swap that leaves the AABB unchanged both emit disocclusion rectangles. A depth
@@ -56,11 +65,17 @@ const PARALLAX_SCALE_MAX: f32 = 8.0;
 /// Parallax scales below this leave the base pad unchanged.
 const PARALLAX_RESAMPLE_MIN: f32 = 1.05;
 
-/// Largest caster count that still runs history confirmation for one view.
+/// Largest prepared-caster count that still runs history confirmation for one view.
 ///
 /// At the measured ~0.13 µs per caster, this cap is about 1.1 ms. See the module docs for the
-/// 90 Hz cutoff.
+/// 90 Hz cutoff and for what the count includes.
 pub(crate) const HISTORY_CASTER_BUDGET: usize = 8_192;
+
+/// Prepared-caster count that turns history confirmation back on after [`HISTORY_CASTER_BUDGET`]
+/// suspended it.
+///
+/// Counts between this value and the cap keep the previous decision.
+pub(crate) const HISTORY_CASTER_RESUME: usize = HISTORY_CASTER_BUDGET - HISTORY_CASTER_BUDGET / 8;
 
 /// Stable identity of one occlusion-culled caster across frames.
 ///
@@ -276,6 +291,8 @@ pub(crate) struct VisibilityScratch {
     pub history: Arc<VisibilityHistory>,
     /// Cleared caster map retained from an earlier publication.
     pub spare: HashMap<CasterKey, CasterRecord>,
+    /// `true` when the previous frame skipped history because the prepared count was over the cap.
+    pub suspended: bool,
 }
 
 /// Per-view classification carried from the previous tested frame.
@@ -566,10 +583,27 @@ pub(crate) fn screen_motion_uv_pad(
     pad.is_finite().then_some(pad)
 }
 
-/// `true` when a view with `caster_count` casters may run history confirmation.
+/// `true` when a view with `caster_count` prepared casters may run history confirmation.
 #[inline]
 pub(crate) fn history_within_budget(caster_count: usize) -> bool {
     caster_count <= HISTORY_CASTER_BUDGET
+}
+
+/// `true` when this frame should attach history confirmation.
+///
+/// `caster_count` is `None` when the prepared count is above [`HISTORY_CASTER_BUDGET`]. A view
+/// that was [`suspended`](VisibilityScratch::suspended) stays off until the count is at most
+/// [`HISTORY_CASTER_RESUME`].
+#[inline]
+pub(crate) fn history_confirmation_applies(caster_count: Option<usize>, suspended: bool) -> bool {
+    let Some(caster_count) = caster_count else {
+        return false;
+    };
+    if suspended {
+        caster_count <= HISTORY_CASTER_RESUME
+    } else {
+        history_within_budget(caster_count)
+    }
 }
 
 /// UV pad after widening `base_pad` for a closer occluder's parallax.
@@ -579,6 +613,10 @@ pub(crate) fn history_within_budget(caster_count: usize) -> bool {
 /// and [`PARALLAX_SCALE_MAX`] times farther than the covering surface. `None` when the sample is
 /// occluded and the covering depth is missing, not closer, or farther than the caster by more
 /// than [`PARALLAX_SCALE_MAX`]. Callers treat `None` as "do not cull".
+///
+/// `covering_ndc_z` is the farthest depth in the rectangle. A nearer thin occluder in the same
+/// rectangle is not visible here, so a scale that looks modest can still under-pad that surface
+/// for one frame of camera motion.
 pub(crate) fn parallax_adjusted_pad(
     base_pad: f32,
     closest_ndc_z: f32,

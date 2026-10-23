@@ -423,9 +423,10 @@ impl HysteresisCullWorkload {
 /// Hi-Z pyramid sampling is not included. A pad under [`HISTORY_CONFIRM_UV`] stands in for a
 /// pyramid that still covers the expanded rectangle. This is the uncapped cost of
 /// `plan_disocclusion`, the per-caster reprojection, the history lookup, and `finish`.
-/// Production does not run it once the caster count passes
+/// Production does not run it once the prepared caster count passes
 /// [`crate::occlusion::hysteresis::HISTORY_CASTER_BUDGET`]. The sequential prepared-draw scan
-/// that feeds the plan is a separate, cheaper walk and stops at that same cap.
+/// that feeds the plan is a separate, cheaper walk and stops at that same cap. The count is
+/// prepared casters in scope, not casters that survive the frustum.
 pub struct HysteresisHistoryWorkload {
     present: Vec<PresentCaster>,
     previous_vp: Mat4,

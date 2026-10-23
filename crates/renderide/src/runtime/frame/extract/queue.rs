@@ -163,7 +163,7 @@ pub(super) fn queue_view_draws(
     for plan in plans.into_iter().flatten() {
         setup
             .occlusion
-            .store_visibility_history(plan.view_id, plan.frame.finish());
+            .store_visibility_history(plan.view_id, plan.frame.finish(), !plan.apply);
     }
     view_draws
 }
@@ -296,9 +296,7 @@ fn build_view_cull_inputs<'a>(
             hi_z_temporal: s.hi_z_temporal,
             hysteresis: plans
                 .get(index)
-                .and_then(|plan| plan.as_ref())
-                .filter(|plan| plan.apply)
-                .map(|plan| &plan.frame),
+                .and_then(|plan| super::hysteresis::attached_hysteresis(plan.as_ref())),
         });
         cull_projs.push(cull_proj);
         cull_inputs.push(culling);

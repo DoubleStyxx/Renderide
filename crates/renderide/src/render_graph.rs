@@ -66,8 +66,9 @@
 //! 6. **HiZ** -- [`passes::HiZBuildPass`] after pre-transparent depth is written. The CPU readback
 //!    is still the previous frame's pyramid. [`crate::occlusion::hysteresis`] is history-based
 //!    hysteresis on that pyramid: previously visible casters stay drawn, and a previously occluded
-//!    caster is rejected only when a motion-expanded retest still agrees. Views past the caster
-//!    budget skip that history and use the previous pyramid directly. It is not a same-frame GPU cull.
+//!    caster is rejected only when a motion-expanded retest still agrees. Views whose prepared
+//!    caster count is past the budget skip that history and use the previous pyramid directly.
+//!    It is not a same-frame GPU cull.
 //! 7. **SceneColorCompose** -- [`passes::SceneColorComposePass`] copies HDR scene color into the swapchain
 //!    / XR / offscreen output (hook for future post-processing).
 //! 8. **FrameEnd** -- submit, optional debug HUD composite, present, Hi-Z frame bookkeeping.

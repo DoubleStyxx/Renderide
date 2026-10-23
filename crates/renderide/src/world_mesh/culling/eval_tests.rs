@@ -219,8 +219,10 @@ mod prepared_space_cull_tests {
     use super::{
         PreparedSpaceCull, SpaceCullCache, mesh_cpu_cull_with_geometry, world_aabb_visible_for_cull,
     };
-    use crate::camera::{HostCameraFrame, reverse_z_perspective};
-    use crate::camera::{overlay_camera_view_matrix, view_matrix_for_world_mesh_render_space};
+    use crate::camera::{
+        HostCameraFrame, overlay_camera_view_matrix, reverse_z_perspective,
+        view_matrix_for_world_mesh_render_space,
+    };
     use crate::scene::{RenderSpaceId, SceneCoordinator};
     use crate::shared::RenderTransform;
     use crate::world_mesh::culling::frustum::world_aabb_visible_in_homogeneous_clip;
@@ -397,8 +399,8 @@ mod hysteresis_cull_integration {
     use crate::hi_z_cpu::pyramid::total_float_count;
     use crate::hi_z_cpu::{HiZCpuSnapshot, HiZCullData};
     use crate::occlusion::hysteresis::{
-        CasterKey, CasterRef, DepthClip, SpaceMotion, VisibilityHysteresis, VisibilityClass,
-        VisibilityHistory,
+        CasterKey, CasterRef, DepthClip, SpaceMotion, VisibilityClass, VisibilityHistory,
+        VisibilityHysteresis,
     };
     use crate::scene::{RenderSpaceId, SceneCoordinator};
     use crate::shared::RenderTransform;
@@ -613,18 +615,20 @@ mod hysteresis_cull_integration {
         let stable = desktop_motion(previous_vp, previous_vp, &host);
         let modest = occluding_pyramid(0.01);
         let frame = frame_for(VisibilityHistory::default(), &stable, space_id);
-        assert!(cull_caster(CullCase {
-            scene: &scene,
-            space_id,
-            host: &host,
-            proj,
-            authoring_view: view,
-            snapshot: &modest,
-            frame: &frame,
-            aabb,
-            caster,
-        })
-        .is_ok());
+        assert!(
+            cull_caster(CullCase {
+                scene: &scene,
+                space_id,
+                host: &host,
+                proj,
+                authoring_view: view,
+                snapshot: &modest,
+                frame: &frame,
+                aabb,
+                caster,
+            })
+            .is_ok()
+        );
         let history = frame.finish();
         assert_eq!(
             history.get(&key).map(|record| record.class),

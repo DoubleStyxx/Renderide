@@ -3,7 +3,9 @@
 //! The plan carries the previous classification, a per-space screen-motion bound, and
 //! disocclusion rectangles. It does not run a second GPU depth pass. Views with more casters
 //! than [`HISTORY_CASTER_BUDGET`] publish an empty history and leave the legacy Hi-Z test in
-//! place.
+//! place. The count is prepared casters in the view's render-space scope, not casters that
+//! survive the frustum. After the count crosses the cap, the pass stays off until it falls to
+//! [`crate::occlusion::hysteresis::HISTORY_CASTER_RESUME`].
 
 use glam::{Mat4, Vec3};
 use hashbrown::HashMap;
@@ -14,7 +16,7 @@ use crate::hi_z_cpu::project_world_aabb_uv;
 use crate::occlusion::hysteresis::{
     CasterKey, DepthClip, HISTORY_CASTER_BUDGET, MovedCaster, PresentCaster, ScreenRect,
     SpaceMotion, VisibilityHysteresis, VisibilityScratch, disocclusion_rects,
-    history_within_budget, plan_disocclusion,
+    history_confirmation_applies, plan_disocclusion,
 };
 use crate::scene::{RenderSpaceId, SceneCoordinator};
 use crate::world_mesh::draw_prep::PreparedCasterBounds;
@@ -29,9 +31,10 @@ pub(super) struct ViewHysteresisPlan {
     /// Plan shared with the view's [`crate::world_mesh::WorldMeshCullInput`] when [`Self::apply`]
     /// is set.
     pub frame: VisibilityHysteresis,
-    /// `false` when the caster count is above [`HISTORY_CASTER_BUDGET`]. Cull then uses the
-    /// legacy Hi-Z test. [`Self::frame`] is still finished so the spare map is recycled and the
-    /// published history is empty.
+    /// `false` when the prepared caster count is above [`HISTORY_CASTER_BUDGET`], or still inside
+    /// the resume band after a previous over-cap frame. Cull then uses the legacy Hi-Z test.
+    /// [`Self::frame`] is still finished so the spare map is recycled and the published history
+    /// is empty.
     pub apply: bool,
 }
 
@@ -70,6 +73,16 @@ pub(super) fn build_view_hysteresis_plans(
         .collect()
 }
 
+/// History plan the fine cull should consult.
+///
+/// `None` when the plan is absent or [`ViewHysteresisPlan::apply`] is false. The cull then uses
+/// the previous-frame Hi-Z test on its own, the same reject as a build without this pass.
+pub(super) fn attached_hysteresis(
+    plan: Option<&ViewHysteresisPlan>,
+) -> Option<&VisibilityHysteresis> {
+    plan.filter(|plan| plan.apply).map(|plan| &plan.frame)
+}
+
 fn build_frame(
     scene: &SceneCoordinator,
     prepared: Option<&FramePreparedRenderables>,
@@ -79,16 +92,14 @@ fn build_frame(
     temporal: Option<&HiZTemporalState>,
     scratch: VisibilityScratch,
 ) -> (VisibilityHysteresis, bool) {
-    let caster_count = prepared.map(|prepared| {
-        prepared
-            .world_caster_count_at_most(HISTORY_CASTER_BUDGET, |space_id| scope.includes(space_id))
-    });
-    let within_budget = match caster_count {
-        None => history_within_budget(0),
-        Some(Some(count)) => history_within_budget(count),
-        Some(None) => false,
-    };
-    if !within_budget {
+    let caster_count = prepared
+        .map(|prepared| {
+            prepared.world_caster_count_at_most(HISTORY_CASTER_BUDGET, |space_id| {
+                scope.includes(space_id)
+            })
+        })
+        .unwrap_or(Some(0));
+    if !history_confirmation_applies(caster_count, scratch.suspended) {
         return (
             VisibilityHysteresis::new(scratch.history, scratch.spare, HashMap::new(), Vec::new()),
             false,
@@ -383,6 +394,87 @@ mod tests {
                 Some(&temporal),
             )
             .is_none()
+        );
+    }
+
+    fn hysteresis_attached(
+        groups: &[(RenderSpaceId, usize)],
+        scope: crate::world_mesh::ViewRenderSpaceScope,
+        suspended: bool,
+    ) -> bool {
+        use crate::camera::ViewId;
+        use crate::occlusion::hysteresis::{VisibilityHistory, VisibilityScratch};
+        use crate::world_mesh::culling::WorldMeshCullInput;
+        use crate::world_mesh::draw_prep::FramePreparedRenderables;
+
+        let host = HostCameraFrame::default();
+        let proj = proj_with(60.0, None);
+        let prepared = FramePreparedRenderables::test_with_caster_runs(groups);
+        let scratch = VisibilityScratch {
+            history: Arc::new(VisibilityHistory::default()),
+            spare: HashMap::new(),
+            suspended,
+        };
+        let (frame, apply) = super::build_frame(
+            &SceneCoordinator::new(),
+            Some(&prepared),
+            scope,
+            &host,
+            &proj,
+            None,
+            scratch,
+        );
+        let plan = super::ViewHysteresisPlan {
+            view_id: ViewId::Main,
+            frame,
+            apply,
+        };
+        let culling = WorldMeshCullInput {
+            proj,
+            host_camera: &host,
+            hi_z: None,
+            hi_z_temporal: None,
+            hysteresis: super::attached_hysteresis(Some(&plan)),
+        };
+        culling.hysteresis.is_some()
+    }
+
+    #[test]
+    fn prepared_count_above_the_cap_leaves_hysteresis_unset() {
+        use crate::occlusion::hysteresis::{HISTORY_CASTER_BUDGET, HISTORY_CASTER_RESUME};
+        use crate::world_mesh::ViewRenderSpaceScope;
+
+        let budget = HISTORY_CASTER_BUDGET;
+        assert!(
+            !hysteresis_attached(
+                &[(RenderSpaceId(1), budget + 1)],
+                ViewRenderSpaceScope::AllActive,
+                false
+            ),
+            "above the cap the cull input matches a build with no history plan"
+        );
+        assert!(hysteresis_attached(
+            &[(RenderSpaceId(1), budget)],
+            ViewRenderSpaceScope::AllActive,
+            false
+        ));
+        assert!(hysteresis_attached(
+            &[(RenderSpaceId(1), 2), (RenderSpaceId(2), budget + 1)],
+            ViewRenderSpaceScope::single(RenderSpaceId(1)),
+            false
+        ));
+        assert!(!hysteresis_attached(
+            &[(RenderSpaceId(1), 2), (RenderSpaceId(2), budget + 1)],
+            ViewRenderSpaceScope::single(RenderSpaceId(2)),
+            false
+        ));
+        assert!(
+            !hysteresis_attached(
+                &[(RenderSpaceId(1), HISTORY_CASTER_RESUME + 1)],
+                ViewRenderSpaceScope::AllActive,
+                true
+            ),
+            "a suspended view stays on the legacy Hi-Z test through the resume band"
         );
     }
 }

@@ -383,10 +383,26 @@ mod tests {
     }
 
     #[test]
-    fn history_budget_includes_the_cap_and_rejects_one_past_it() {
+    fn history_confirmation_turns_off_above_the_cap_and_stays_off_through_the_band() {
+        assert!(history_confirmation_applies(
+            Some(HISTORY_CASTER_BUDGET),
+            false
+        ));
+        assert!(!history_confirmation_applies(None, false));
+        assert!(!history_confirmation_applies(
+            Some(HISTORY_CASTER_BUDGET),
+            true
+        ));
+        assert!(!history_confirmation_applies(
+            Some(HISTORY_CASTER_RESUME + 1),
+            true
+        ));
+        assert!(history_confirmation_applies(
+            Some(HISTORY_CASTER_RESUME),
+            true
+        ));
         assert!(history_within_budget(HISTORY_CASTER_BUDGET));
         assert!(!history_within_budget(HISTORY_CASTER_BUDGET + 1));
-        assert_eq!(HISTORY_CASTER_BUDGET, 8_192);
     }
 
     #[test]
@@ -420,9 +436,14 @@ mod tests {
         let capped =
             parallax_adjusted_pad(0.02, caster, Some(at_cap), true, clip).expect("ratio 8");
         assert!((capped - 0.16).abs() < 1.0e-3);
-        let visible =
-            parallax_adjusted_pad(0.02, caster, Some(ndc_from_view_depth(0.1, clip)), false, clip)
-                .expect("visible samples keep the base pad");
+        let visible = parallax_adjusted_pad(
+            0.02,
+            caster,
+            Some(ndc_from_view_depth(0.1, clip)),
+            false,
+            clip,
+        )
+        .expect("visible samples keep the base pad");
         assert!((visible - 0.02).abs() < 1.0e-6);
     }
 }

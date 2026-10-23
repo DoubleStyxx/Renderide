@@ -527,3 +527,29 @@ fn estimated_draw_count_includes_skinned_shadow_only_renderers() {
 
     assert_eq!(estimated_draw_count(&scene, id), 4);
 }
+
+#[test]
+fn world_caster_count_at_most_stops_past_the_cap_and_honors_scope() {
+    use crate::occlusion::hysteresis::HISTORY_CASTER_BUDGET;
+
+    let cap = HISTORY_CASTER_BUDGET;
+    let at_cap = FramePreparedRenderables::test_with_caster_runs(&[(RenderSpaceId(1), cap)]);
+    assert_eq!(at_cap.world_caster_count_at_most(cap, |_| true), Some(cap));
+
+    let over = FramePreparedRenderables::test_with_caster_runs(&[(RenderSpaceId(1), cap + 1)]);
+    assert_eq!(over.world_caster_count_at_most(cap, |_| true), None);
+
+    let mixed = FramePreparedRenderables::test_with_caster_runs(&[
+        (RenderSpaceId(1), cap),
+        (RenderSpaceId(2), 40),
+    ]);
+    assert_eq!(
+        mixed.world_caster_count_at_most(cap, |space_id| space_id == RenderSpaceId(1)),
+        Some(cap)
+    );
+    assert_eq!(
+        mixed.world_caster_count_at_most(cap, |space_id| space_id == RenderSpaceId(2)),
+        Some(40)
+    );
+    assert_eq!(mixed.world_caster_count_at_most(cap, |_| true), None);
+}
