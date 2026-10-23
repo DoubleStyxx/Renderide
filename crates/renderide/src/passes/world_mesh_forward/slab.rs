@@ -4,7 +4,9 @@ use bytemuck::Zeroable;
 use glam::Mat4;
 use rayon::prelude::*;
 
-use crate::camera::{HostCameraFrame, OVERLAY_CAMERA_FAR_CLIP, OVERLAY_CAMERA_NEAR_CLIP};
+use crate::camera::{
+    CameraProjectionKind, HostCameraFrame, OVERLAY_CAMERA_FAR_CLIP, OVERLAY_CAMERA_NEAR_CLIP,
+};
 use crate::cpu_parallelism::{
     RENDER_COMMAND_CHUNK_DRAWS, admit_render_command_items, current_reference_worker_count,
     record_parallel_admission,
@@ -14,7 +16,7 @@ use crate::mesh_deform::PaddedPerDrawUniforms;
 use crate::scene::SceneTransformRead;
 use crate::shared::RenderingContext;
 use crate::world_mesh::draw_prep::WorldMeshDrawItem;
-use crate::world_mesh::{assign_canvas_depth_steps, canvas_ndc_z_bias};
+use crate::world_mesh::{assign_canvas_depth_steps, canvas_bias_projection, canvas_ndc_z_bias};
 
 use super::prepare::WorldMeshForwardPrepareFrame;
 use super::vp::compute_per_draw_vp_matrices;
@@ -126,6 +128,11 @@ fn pack_per_draw_vp_uniforms(
         } else {
             (hc.clip.near, hc.clip.far)
         };
+        let projection = canvas_bias_projection(
+            item.is_overlay,
+            inputs.overlay_proj.is_some(),
+            hc.projection_kind == CameraProjectionKind::Orthographic,
+        );
         let matrices = compute_per_draw_vp_matrices(
             scene,
             item,
@@ -138,6 +145,7 @@ fn pack_per_draw_vp_uniforms(
                 canvas_steps.get(draw_index).copied().unwrap_or(0),
                 near,
                 far,
+                projection,
             ),
         );
         let packed = if matrices.view_proj_left == matrices.view_proj_right {

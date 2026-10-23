@@ -434,6 +434,42 @@ impl TransparentSortWorkload {
         let mut items = self.items;
         crate::world_mesh::draw_prep::sort_order_sensitive_draws_master(&mut items)
     }
+
+    /// Canvas rows jittered by about `1e-6` m inside a `0.1` mm snap cluster.
+    ///
+    /// [`Self::mixed`] sits on a 1 mm grid, which never writes during the snap pass. This
+    /// constructor is the input for [`Self::snap_siblings`].
+    #[must_use]
+    pub fn jittered_canvas_planes(count: usize) -> Self {
+        use crate::world_mesh::draw_prep::sync_transparent_depth_key;
+
+        let mut workload = Self::mixed(count);
+        for (index, item) in workload.items.iter_mut().enumerate() {
+            if !item.is_canvas_ui {
+                continue;
+            }
+            let cluster = (index / 8) as f32 * 0.01;
+            let jitter = ((index % 8) as f32 - 3.5) * 1.0e-6;
+            item.canvas_plane_depth = Some(1.0 + cluster + jitter);
+            sync_transparent_depth_key(item);
+        }
+        workload
+    }
+
+    /// Snaps one chunk of sibling plane depths and folds the stored depths into a checksum.
+    #[must_use]
+    pub fn snap_siblings(self) -> u64 {
+        let mut chunks = vec![self.items];
+        crate::world_mesh::draw_prep::snap_canvas_sibling_plane_depths(&mut chunks);
+        let mut checksum = 0_u64;
+        for item in &chunks[0] {
+            if let Some(depth) = item.canvas_plane_depth {
+                checksum = checksum.wrapping_add(u64::from(depth.to_bits()));
+            }
+            checksum = checksum.wrapping_add(item.transparent_depth_key.to_bits());
+        }
+        checksum
+    }
 }
 
 /// Perspective view-projection aimed at the origin from `+Z`.

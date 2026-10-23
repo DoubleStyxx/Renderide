@@ -16,13 +16,13 @@
 //! remains. This path does not zero the hardware constant.
 //!
 //! The closer-direction NDC bias (sibling steps, and negative Offset units) is scaled so its
-//! view-space pull at the draw's farthest-corner distance stays within
-//! [`CANVAS_CLOSER_BIAS_CAP_METERS`]. UI stems declare `zwrite=material(on)`. Their default blend
-//! is source alpha / one-minus-source-alpha, which materializes depth write off, so a missing
-//! `_ZWrite` does not write depth. An authored `_ZWrite` of 1 does. A later fragment whose biased
-//! depth is closer then replaces a surface that already wrote depth, including opaque geometry
-//! and a nearer canvas, out to that cap at the farthest corner. Closer fragments on the same draw
-//! move less.
+//! view-space pull at the shared canvas plane stays within [`CANVAS_CLOSER_BIAS_CAP_METERS`].
+//! That bias is applied in the depth test for every canvas draw with a step greater than zero
+//! or with negative Offset units, whatever the draw's `_ZWrite`. A canvas that does not write
+//! depth can still paint over opaque geometry up to 2 cm in front, because the test compares
+//! the biased depth with depth that was already written. Perspective fragments closer than the
+//! plane move less. An orthographic view moves every fragment of the draw by the same distance,
+//! `ndc_delta * (far - near)`, and the perspective formula overestimates that pull.
 //!
 //! One canvas is one plane distance. A panel tilted 60° whose plane is 1 m from the view origin
 //! sorts closer than a face-on panel at 1.5 m, including fragments of the tilted panel that
@@ -53,12 +53,16 @@ pub(crate) const CANVAS_PLANE_DEPTH_QUANTUM_METERS: f32 = 5.0e-4;
 /// running neighbor, so a chain of small gaps cannot swallow a larger one.
 pub(crate) const CANVAS_PLANE_SIBLING_SNAP_METERS: f32 = 1.0e-4;
 
-/// Maximum view-space pull of the closer-direction NDC bias, at the farthest corner.
+/// Maximum view-space pull of the closer-direction NDC bias, at the shared plane distance.
 ///
-/// Sixty-four steps of four D24 quanta at near `0.01` and `20` m is about `61` cm toward the
-/// camera. Capping the pull at `2` cm keeps a long coplanar run from covering opaque geometry
-/// that far in front. One step near the camera stays four quanta, because that pull is a
-/// fraction of a millimeter and never reaches the cap.
+/// Every sibling on one snapped plane uses that plane's distance, so a far corner on the same
+/// plane does not shrink the bias further. Sixty-four steps of four D24 quanta at near `0.01`
+/// and a plane `20` m away is about `61` cm toward the camera under perspective. Capping the
+/// pull at `2` cm keeps a long coplanar run from painting over opaque geometry that far in
+/// front. The depth test sees this bias whether or not the draw writes depth. One step near
+/// the camera stays four quanta, because that pull is a fraction of a millimeter. Two steps at
+/// `20` m and near `0.01` stay under the cap and stay distinct. An orthographic pull is
+/// `ndc_delta * (far - near)` and does not grow with distance.
 pub(crate) const CANVAS_CLOSER_BIAS_CAP_METERS: f32 = 0.02;
 
 /// Maximum extra canvas steps applied on top of Unity `Offset` units.
@@ -352,18 +356,41 @@ pub(crate) fn reverse_z_constant_ndc_bias(units: i32, canvas_steps: u32) -> f32 
     (-units + steps) * quanta
 }
 
-/// Scales a closer-direction NDC bias so its view-space pull at `distance` stays within
+/// Projection family used when a closer NDC bias is turned into meters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CanvasBiasProjection {
+    /// Reverse-Z perspective. The pull grows roughly with the square of distance.
+    Perspective,
+    /// Reverse-Z orthographic. The pull is `ndc_delta * (far - near)` at every fragment.
+    Orthographic,
+}
+
+/// Scales a closer-direction NDC bias so its view-space pull stays within
 /// [`CANVAS_CLOSER_BIAS_CAP_METERS`].
 ///
 /// Zero and away-from-camera biases (negative NDC) are unchanged. Non-finite clip planes leave
-/// the bias unchanged. `distance` is the draw's farthest-corner distance, so the cap is the pull
-/// at that corner. Fragments closer than the corner move less.
+/// the bias unchanged. For [`CanvasBiasProjection::Perspective`], `distance` is the shared plane
+/// distance and the cap is the pull there; fragments closer than the plane move less. For
+/// [`CanvasBiasProjection::Orthographic`] the pull does not depend on `distance`.
 #[inline]
-pub(crate) fn cap_closer_ndc_bias(ndc_bias: f32, distance: f32, near: f32, far: f32) -> f32 {
+pub(crate) fn cap_closer_ndc_bias(
+    ndc_bias: f32,
+    distance: f32,
+    near: f32,
+    far: f32,
+    projection: CanvasBiasProjection,
+) -> f32 {
     if !(ndc_bias.is_finite() && ndc_bias > 0.0) {
         return ndc_bias;
     }
-    let pull = reverse_z_ndc_closer_shift_meters(near, far, distance, ndc_bias);
+    let pull = match projection {
+        CanvasBiasProjection::Perspective => {
+            reverse_z_ndc_closer_shift_meters(near, far, distance, ndc_bias)
+        }
+        CanvasBiasProjection::Orthographic => {
+            reverse_z_ortho_closer_shift_meters(near, far, ndc_bias)
+        }
+    };
     if !pull.is_finite() || pull <= CANVAS_CLOSER_BIAS_CAP_METERS {
         return ndc_bias;
     }
@@ -375,8 +402,16 @@ pub(crate) fn cap_closer_ndc_bias(ndc_bias: f32, distance: f32, near: f32, far: 
     }
 }
 
-/// Farthest-corner distance used to size [`cap_closer_ndc_bias`], or `far` when the metric is missing.
-fn bias_reference_distance(distance_sq: f32, far: f32) -> f32 {
+/// Shared plane distance used to size the perspective cap.
+///
+/// A finite non-negative canvas plane depth is the key every sibling on that plane already
+/// shares. A missing or non-finite plane falls back to the farthest-corner distance, then to
+/// `far`. A plane at the origin (`0`) is kept: the perspective pull is undefined there, and the
+/// cap leaves the bias unchanged instead of shrinking it to a far corner.
+fn bias_reference_distance(plane_depth: Option<f32>, distance_sq: f32, far: f32) -> f32 {
+    if let Some(depth) = plane_depth.filter(|depth| depth.is_finite() && *depth >= 0.0) {
+        return depth;
+    }
     if distance_sq.is_finite() && distance_sq > 0.0 {
         let distance = distance_sq.sqrt();
         if distance.is_finite() && distance > 0.0 {
@@ -388,6 +423,20 @@ fn bias_reference_distance(distance_sq: f32, far: f32) -> f32 {
     } else {
         0.0
     }
+}
+
+/// How far a positive NDC Z bias moves a fragment toward the camera under reverse-Z orthographic.
+///
+/// `ndc = (far - distance) / (far - near)`, so adding `ndc_delta` moves the sample by
+/// `ndc_delta * (far - near)` meters at every distance. The perspective formula grows roughly
+/// with the square of distance and overestimates this pull. Non-finite inputs and `far <= near`
+/// return `0.0`.
+fn reverse_z_ortho_closer_shift_meters(near: f32, far: f32, ndc_delta: f32) -> f32 {
+    if !(near.is_finite() && far.is_finite() && ndc_delta.is_finite() && far > near) {
+        return 0.0;
+    }
+    let pull = f64::from(ndc_delta) * (f64::from(far) - f64::from(near));
+    if pull.is_finite() { pull as f32 } else { 0.0 }
 }
 
 /// How far a positive NDC Z bias moves a view-space point toward the camera, in meters.
@@ -431,13 +480,15 @@ pub(crate) fn reverse_z_ndc_closer_shift_meters(
 /// NDC Z bias to bake into one draw's view-projection. Non-canvas draws stay at zero.
 ///
 /// `near` and `far` are the clip planes of the projection this draw will use. The closer
-/// direction is capped at [`CANVAS_CLOSER_BIAS_CAP_METERS`] measured at the farthest corner.
+/// direction is capped at [`CANVAS_CLOSER_BIAS_CAP_METERS`] measured at the shared plane
+/// distance. `projection` selects the perspective or orthographic pull.
 #[inline]
 pub(crate) fn canvas_ndc_z_bias(
     item: &WorldMeshDrawItem,
     canvas_steps: u32,
     near: f32,
     far: f32,
+    projection: CanvasBiasProjection,
 ) -> f32 {
     if !item.is_canvas_ui {
         return 0.0;
@@ -449,8 +500,31 @@ pub(crate) fn canvas_ndc_z_bias(
         .map(|offset| offset.units())
         .unwrap_or(0);
     let raw = reverse_z_constant_ndc_bias(units, canvas_steps);
-    let distance = bias_reference_distance(item.camera_distance_sq, far);
-    cap_closer_ndc_bias(raw, distance, near, far)
+    let distance = bias_reference_distance(item.canvas_plane_depth, item.camera_distance_sq, far);
+    cap_closer_ndc_bias(raw, distance, near, far, projection)
+}
+
+/// Whether this draw's view-projection is the orthographic family.
+///
+/// An overlay draw with an overlay projection uses that orthographic matrix. An overlay draw
+/// without one falls back to the world projection, and a world draw always uses it, so both
+/// follow `world_is_orthographic`.
+#[inline]
+pub(crate) fn canvas_bias_projection(
+    is_overlay: bool,
+    overlay_projection_present: bool,
+    world_is_orthographic: bool,
+) -> CanvasBiasProjection {
+    let orthographic = if is_overlay && overlay_projection_present {
+        true
+    } else {
+        world_is_orthographic
+    };
+    if orthographic {
+        CanvasBiasProjection::Orthographic
+    } else {
+        CanvasBiasProjection::Perspective
+    }
 }
 
 /// Left-multiplies a constant NDC Z translation into a view-projection matrix.
@@ -470,11 +544,13 @@ mod tests {
     use super::{
         CANVAS_CLOSER_BIAS_CAP_METERS, CANVAS_DEPTH_STEP_CAP,
         CANVAS_NDC_SHIFT_REFERENCE_FAR_METERS, CANVAS_NDC_ULPS_PER_STEP, CANVAS_OFFSET_UNITS_CAP,
-        CANVAS_PLANE_DEPTH_QUANTUM_METERS, apply_reverse_z_ndc_bias, assign_canvas_depth_steps,
-        canvas_ndc_z_bias, canvas_plane_depth_quantum, canvas_plane_distance_meters,
-        cap_closer_ndc_bias, quantize_canvas_plane_depth, reverse_z_constant_ndc_bias,
-        reverse_z_ndc_closer_shift_meters, snap_canvas_sibling_plane_depths,
-        sync_transparent_depth_key, transparent_depth_key_from_parts,
+        CANVAS_PLANE_DEPTH_QUANTUM_METERS, CanvasBiasProjection, apply_reverse_z_ndc_bias,
+        assign_canvas_depth_steps, canvas_bias_projection, canvas_ndc_z_bias,
+        canvas_plane_depth_quantum, canvas_plane_distance_meters, cap_closer_ndc_bias,
+        quantize_canvas_plane_depth, reverse_z_constant_ndc_bias,
+        reverse_z_ndc_closer_shift_meters, reverse_z_ortho_closer_shift_meters,
+        snap_canvas_sibling_plane_depths, sync_transparent_depth_key,
+        transparent_depth_key_from_parts,
     };
     use crate::materials::MaterialDepthOffsetState;
     use crate::materials::RasterPipelineKind;
@@ -653,10 +729,11 @@ mod tests {
 
         let mut draw = canvas_draw(0, 1.0, Some(1.0));
         draw.batch_key.render_state.depth_offset = MaterialDepthOffsetState::new(1.0, 4);
-        assert!(canvas_ndc_z_bias(&draw, 0, 0.1, 1000.0) < 0.0);
-        assert_eq!(canvas_ndc_z_bias(&draw, 4, 0.1, 1000.0), 0.0);
+        let perspective = CanvasBiasProjection::Perspective;
+        assert!(canvas_ndc_z_bias(&draw, 0, 0.1, 1000.0, perspective) < 0.0);
+        assert_eq!(canvas_ndc_z_bias(&draw, 4, 0.1, 1000.0, perspective), 0.0);
         draw.is_canvas_ui = false;
-        assert_eq!(canvas_ndc_z_bias(&draw, 4, 0.1, 1000.0), 0.0);
+        assert_eq!(canvas_ndc_z_bias(&draw, 4, 0.1, 1000.0, perspective), 0.0);
     }
 
     #[test]
@@ -684,7 +761,8 @@ mod tests {
 
         // Uncapped 64 steps at near 0.01 and 20 m is about 61 cm. The applied bias stops at 2 cm.
         let raw_far = reverse_z_constant_ndc_bias(0, CANVAS_DEPTH_STEP_CAP);
-        let capped = cap_closer_ndc_bias(raw_far, 20.0, 0.01, far);
+        let capped =
+            cap_closer_ndc_bias(raw_far, 20.0, 0.01, far, CanvasBiasProjection::Perspective);
         let capped_pull = reverse_z_ndc_closer_shift_meters(0.01, far, 20.0, capped);
         assert!(
             (capped_pull - CANVAS_CLOSER_BIAS_CAP_METERS).abs() < 1.0e-3,
@@ -692,11 +770,20 @@ mod tests {
         );
         let near_camera = reverse_z_constant_ndc_bias(0, CANVAS_DEPTH_STEP_CAP);
         assert_eq!(
-            cap_closer_ndc_bias(near_camera, 1.0, 0.01, far),
+            cap_closer_ndc_bias(
+                near_camera,
+                1.0,
+                0.01,
+                far,
+                CanvasBiasProjection::Perspective
+            ),
             near_camera
         );
         let away = reverse_z_constant_ndc_bias(CANVAS_OFFSET_UNITS_CAP, 0);
-        assert_eq!(cap_closer_ndc_bias(away, 20.0, 0.01, far), away);
+        assert_eq!(
+            cap_closer_ndc_bias(away, 20.0, 0.01, far, CanvasBiasProjection::Perspective),
+            away
+        );
     }
 
     #[test]
@@ -825,7 +912,114 @@ mod tests {
             one < view_gap && view_gap < four,
             "one ulp {one} m, gap {view_gap} m, four ulps {four} m"
         );
-        assert!((cap_closer_ndc_bias(quantum, distance, near, far) - quantum).abs() < 1.0e-12);
+        assert!(
+            (cap_closer_ndc_bias(
+                quantum,
+                distance,
+                near,
+                far,
+                CanvasBiasProjection::Perspective,
+            ) - quantum)
+                .abs()
+                < 1.0e-12
+        );
+    }
+
+    #[test]
+    fn sibling_steps_stay_distinct_at_twenty_meters() {
+        let near = 0.01;
+        let far = CANVAS_NDC_SHIFT_REFERENCE_FAR_METERS;
+        let plane = 20.0;
+        let perspective = CanvasBiasProjection::Perspective;
+        let near_corner = canvas_draw(0, plane * plane, Some(plane));
+        let far_corner = canvas_draw(1, 40.0 * 40.0, Some(plane));
+        let step_one = canvas_ndc_z_bias(&near_corner, 1, near, far, perspective);
+        let step_two = canvas_ndc_z_bias(&near_corner, 2, near, far, perspective);
+        assert!(
+            step_two > step_one && step_one > 0.0,
+            "step biases {step_one} and {step_two} collapsed"
+        );
+        let pull_one = reverse_z_ndc_closer_shift_meters(near, far, plane, step_one);
+        let pull_two = reverse_z_ndc_closer_shift_meters(near, far, plane, step_two);
+        assert!(
+            pull_one < pull_two && pull_two <= CANVAS_CLOSER_BIAS_CAP_METERS + 1.0e-4,
+            "pulls {pull_one} m and {pull_two} m"
+        );
+        assert!(
+            (pull_one - 0.00953).abs() < 5.0e-4 && (pull_two - 0.01906).abs() < 5.0e-4,
+            "expected about 9.5 mm and 19 mm, got {pull_one} m and {pull_two} m"
+        );
+        let far_sibling = canvas_ndc_z_bias(&far_corner, 2, near, far, perspective);
+        assert_eq!(far_sibling.to_bits(), step_two.to_bits());
+        let mut corner_only = far_corner;
+        corner_only.canvas_plane_depth = None;
+        sync_transparent_depth_key(&mut corner_only);
+        let corner_bias = canvas_ndc_z_bias(&corner_only, 2, near, far, perspective);
+        assert!(
+            corner_bias < step_two,
+            "a 40 m corner saturates ({corner_bias}); the shared 20 m plane must not ({step_two})"
+        );
+    }
+
+    #[test]
+    fn orthographic_cap_does_not_use_the_perspective_pull() {
+        let near = 0.01;
+        let far = CANVAS_NDC_SHIFT_REFERENCE_FAR_METERS;
+        let raw = reverse_z_constant_ndc_bias(0, CANVAS_DEPTH_STEP_CAP);
+        let perspective =
+            cap_closer_ndc_bias(raw, 20.0, near, far, CanvasBiasProjection::Perspective);
+        let ortho = cap_closer_ndc_bias(raw, 20.0, near, far, CanvasBiasProjection::Orthographic);
+        assert_eq!(ortho, raw);
+        assert!(perspective < raw);
+        let ortho_pull = reverse_z_ortho_closer_shift_meters(near, far, ortho);
+        assert!(
+            ortho_pull < CANVAS_CLOSER_BIAS_CAP_METERS,
+            "64 steps at far 1000 is about 1.5 cm orthographically, got {ortho_pull} m"
+        );
+
+        let wide_far = 10_000.0;
+        let wide = cap_closer_ndc_bias(
+            raw,
+            20.0,
+            near,
+            wide_far,
+            CanvasBiasProjection::Orthographic,
+        );
+        let wide_perspective =
+            cap_closer_ndc_bias(raw, 20.0, near, wide_far, CanvasBiasProjection::Perspective);
+        let wide_pull = reverse_z_ortho_closer_shift_meters(near, wide_far, wide);
+        assert!(
+            (wide_pull - CANVAS_CLOSER_BIAS_CAP_METERS).abs() < 1.0e-3,
+            "orthographic pull {wide_pull} m"
+        );
+        assert!(
+            wide > wide_perspective,
+            "perspective overestimates: ortho {wide}, perspective {wide_perspective}"
+        );
+    }
+
+    #[test]
+    fn overlay_projection_is_orthographic_and_a_missing_overlay_follows_the_world() {
+        assert_eq!(
+            canvas_bias_projection(true, true, false),
+            CanvasBiasProjection::Orthographic
+        );
+        assert_eq!(
+            canvas_bias_projection(true, false, false),
+            CanvasBiasProjection::Perspective
+        );
+        assert_eq!(
+            canvas_bias_projection(true, false, true),
+            CanvasBiasProjection::Orthographic
+        );
+        assert_eq!(
+            canvas_bias_projection(false, true, false),
+            CanvasBiasProjection::Perspective
+        );
+        assert_eq!(
+            canvas_bias_projection(false, false, true),
+            CanvasBiasProjection::Orthographic
+        );
     }
 
     #[test]

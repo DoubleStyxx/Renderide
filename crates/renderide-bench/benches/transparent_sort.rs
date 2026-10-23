@@ -4,7 +4,9 @@
 //! `recompute` rebuilds the current plane-distance key on every compare, including the canvas
 //! stem-name match. That recompute path is an earlier revision of this change, not master.
 //! `precomputed` is the production comparator (`WorldMeshDrawItem::transparent_depth_key`).
-//! The clone that feeds each sample sits in `iter_batched` setup and is not part of the median.
+//! `snap` is the sibling-plane snap that runs before arrangement. It is a separate pass, not
+//! part of the comparator. The clone that feeds each sample sits in `iter_batched` setup and is
+//! not part of the median.
 //!
 //! ```text
 //! cargo bench -p renderide-bench --bench transparent_sort
@@ -28,6 +30,8 @@ fn criterion() -> Criterion {
 fn transparent_sort(c: &mut Criterion) {
     let one_k = TransparentSortWorkload::mixed(TRANSPARENT_SORT_1K);
     let ten_k = TransparentSortWorkload::mixed(TRANSPARENT_SORT_10K);
+    let snap_one_k = TransparentSortWorkload::jittered_canvas_planes(TRANSPARENT_SORT_1K);
+    let snap_ten_k = TransparentSortWorkload::jittered_canvas_planes(TRANSPARENT_SORT_10K);
     let mut group = c.benchmark_group("transparent_sort");
     group.throughput(Throughput::Elements(TRANSPARENT_SORT_1K as u64));
     group.bench_function("master_1k", |b| {
@@ -51,6 +55,13 @@ fn transparent_sort(c: &mut Criterion) {
             BatchSize::LargeInput,
         );
     });
+    group.bench_function("snap_1k", |b| {
+        b.iter_batched(
+            || snap_one_k.clone(),
+            |batch| black_box(batch.snap_siblings()),
+            BatchSize::LargeInput,
+        );
+    });
     group.throughput(Throughput::Elements(TRANSPARENT_SORT_10K as u64));
     group.bench_function("master_10k", |b| {
         b.iter_batched(
@@ -70,6 +81,13 @@ fn transparent_sort(c: &mut Criterion) {
         b.iter_batched(
             || ten_k.clone(),
             |batch| black_box(batch.sort_precomputed()),
+            BatchSize::LargeInput,
+        );
+    });
+    group.bench_function("snap_10k", |b| {
+        b.iter_batched(
+            || snap_ten_k.clone(),
+            |batch| black_box(batch.snap_siblings()),
             BatchSize::LargeInput,
         );
     });

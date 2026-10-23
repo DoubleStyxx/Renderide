@@ -129,6 +129,15 @@ mod tests {
     }
 
     #[test]
+    fn snap_siblings_checksum_is_stable() {
+        let workload = TransparentSortWorkload::jittered_canvas_planes(64);
+        let first = workload.clone().snap_siblings();
+        let second = workload.snap_siblings();
+        assert_ne!(first, 0);
+        assert_eq!(first, second);
+    }
+
+    #[test]
     fn master_farthest_corner_sort_can_disagree_with_the_plane_key() {
         let workload = TransparentSortWorkload::plane_versus_corner();
         let precomputed = workload.clone().sort_precomputed();
