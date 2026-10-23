@@ -45,7 +45,8 @@ pub(crate) struct LodEntry {
 pub(crate) struct LodGroupEntry {
     /// Dense transform index that owns the LOD group component.
     pub(crate) node_id: i32,
-    /// Host cross-fade flag. When set, a mid-transition view draws both neighboring LODs.
+    /// Host cross-fade flag. A mid-transition view draws both neighboring LODs when every
+    /// member is a color unlit material. Other groups keep the single-LOD swap.
     pub(crate) cross_fade: bool,
     /// Host animated cross-fade flag. Stored for a future time-based fade.
     pub(crate) animate_cross_fading: bool,

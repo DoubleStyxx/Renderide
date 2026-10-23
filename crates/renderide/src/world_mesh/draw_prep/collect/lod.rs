@@ -16,8 +16,8 @@ use super::super::bitset::DenseBitSet;
 use super::super::prepared_renderables::{FramePreparedLodEntry, FramePreparedLodGroup};
 use super::DrawCollectionInputs;
 use super::lod_fade::{
-    LodFadeDecision, LodFadeTable, biased_relative_height, lod_cross_fade_coverage,
-    lod_fade_decision, sanitize_unit_height,
+    LodFadeTable, biased_relative_height, commit_prepared_decision, commit_resolved_decision,
+    fade_decision_for_rows, prepared_group_stipples, prepared_scene_lods, sanitize_unit_height,
 };
 
 /// Conservative relative screen height used when bounds cross the camera plane.
@@ -67,7 +67,7 @@ impl LodVisibility {
                     instance_to_ordinal,
                     grouped,
                     selected,
-                    fades: LodFadeTable::default(),
+                    fades: LodFadeTable::acquire(renderer_count),
                 },
             );
         }
@@ -143,7 +143,11 @@ impl LodVisibility {
     }
 
     /// Marks a grouped renderer as selected by the active LOD row.
-    fn mark_selected(&mut self, space_id: RenderSpaceId, instance_id: MeshRendererInstanceId) {
+    pub(super) fn mark_selected(
+        &mut self,
+        space_id: RenderSpaceId,
+        instance_id: MeshRendererInstanceId,
+    ) {
         let Some(space) = self.spaces.get_mut(&space_id) else {
             return;
         };
@@ -160,8 +164,21 @@ impl LodVisibility {
         space.grouped.insert(renderer_ordinal);
     }
 
+    /// Dense ordinal for a stable renderer id, when this space was indexed.
+    pub(super) fn instance_ordinal(
+        &self,
+        space_id: RenderSpaceId,
+        instance_id: MeshRendererInstanceId,
+    ) -> Option<usize> {
+        self.spaces
+            .get(&space_id)?
+            .instance_to_ordinal
+            .get(&instance_id)
+            .copied()
+    }
+
     /// Records a non-zero stipple weight for one renderer ordinal.
-    fn record_fade_ordinal(
+    pub(super) fn record_fade_ordinal(
         &mut self,
         space_id: RenderSpaceId,
         renderer_ordinal: usize,
@@ -174,7 +191,11 @@ impl LodVisibility {
     }
 
     /// Marks a stable renderer ordinal as selected by the active LOD row.
-    fn mark_selected_ordinal(&mut self, space_id: RenderSpaceId, renderer_ordinal: usize) {
+    pub(super) fn mark_selected_ordinal(
+        &mut self,
+        space_id: RenderSpaceId,
+        renderer_ordinal: usize,
+    ) {
         let Some(space) = self.spaces.get_mut(&space_id) else {
             return;
         };
@@ -243,7 +264,7 @@ struct ResolvedLodRenderer<'a> {
 }
 
 /// LOD entry after resolving stale renderer ids against current scene tables.
-struct ResolvedLodEntry {
+pub(super) struct ResolvedLodEntry {
     /// Threshold copied from scene LOD state.
     pub screen_relative_transition_height: f32,
     /// Live renderer ids in this entry.
@@ -345,69 +366,16 @@ fn select_prepared_group_lod(
         return;
     };
     let scene_lods = prepared_scene_lods(ctx, group);
+    let allow_fade =
+        scene_lods.is_some_and(|scene| scene.cross_fade) && prepared_group_stipples(ctx, group);
     let decision = fade_decision_for_rows(
         selected_index,
         group.lods.len(),
         scene_lods.map(|scene| scene.lods),
         measured_height,
-        scene_lods.is_some_and(|scene| scene.cross_fade),
+        allow_fade,
     );
     commit_prepared_decision(visibility, group, &decision);
-}
-
-/// Scene LOD rows aligned with a prepared group, when the scene group is still present.
-fn prepared_scene_lods<'a>(
-    ctx: &'a DrawCollectionInputs<'_>,
-    group: &FramePreparedLodGroup,
-) -> Option<PreparedSceneLods<'a>> {
-    let space = ctx.scene_assets.scene.space(group.space_id)?;
-    let scene_group = space.lod_groups().get(group.scene_group_index)?;
-    Some(PreparedSceneLods {
-        cross_fade: scene_group.cross_fade,
-        lods: scene_group.lods.as_slice(),
-    })
-}
-
-/// Borrowed scene LOD rows used to read fade widths for one prepared group.
-#[derive(Clone, Copy)]
-struct PreparedSceneLods<'a> {
-    /// Host cross-fade flag for the group.
-    cross_fade: bool,
-    /// Scene rows aligned with the prepared LOD entries.
-    lods: &'a [LodEntry],
-}
-
-/// Marks the prepared renderers chosen by `decision` and stores non-zero stipple weights.
-fn commit_prepared_decision(
-    visibility: &mut LodVisibility,
-    group: &FramePreparedLodGroup,
-    decision: &LodFadeDecision,
-) {
-    mark_prepared_row(
-        visibility,
-        group,
-        decision.primary as usize,
-        decision.primary_weight,
-    );
-    if let Some(partner) = decision.partner {
-        mark_prepared_row(visibility, group, partner as usize, decision.partner_weight);
-    }
-}
-
-/// Marks one prepared LOD row selected and records its stipple weight.
-fn mark_prepared_row(
-    visibility: &mut LodVisibility,
-    group: &FramePreparedLodGroup,
-    index: usize,
-    weight: f32,
-) {
-    let Some(lod) = group.lods.get(index) else {
-        return;
-    };
-    for renderer in &lod.renderers {
-        visibility.mark_selected_ordinal(group.space_id, renderer.renderer_ordinal);
-        visibility.record_fade_ordinal(group.space_id, renderer.renderer_ordinal, weight);
-    }
 }
 
 /// Recomputes view-dependent bounds for a prepared LOD group when cached bounds are unavailable.
@@ -539,99 +507,16 @@ fn select_group_lod(
     let Some(selected_index) = selected_index else {
         return;
     };
+    let allow_fade =
+        cross_fade && super::lod_fade::scene_group_can_cross_fade(ctx, space_id, space, lods);
     let decision = fade_decision_for_rows(
         selected_index,
         resolved_lods.len(),
         Some(lods),
         measured_height,
-        cross_fade,
+        allow_fade,
     );
     commit_resolved_decision(visibility, space_id, &resolved_lods, &decision);
-}
-
-/// Chooses one LOD or a fading pair from the row that passed the height test.
-fn fade_decision_for_rows(
-    selected_index: usize,
-    lod_count: usize,
-    source: Option<&[LodEntry]>,
-    measured_height: Option<f32>,
-    cross_fade: bool,
-) -> LodFadeDecision {
-    let Some(effective_height) = measured_height else {
-        return LodFadeDecision::single(selected_index);
-    };
-    let Some(source) = source else {
-        return LodFadeDecision::single(selected_index);
-    };
-    let Some(selected) = source.get(selected_index) else {
-        return LodFadeDecision::single(selected_index);
-    };
-    let previous_height = if selected_index == 0 {
-        1.0
-    } else {
-        source
-            .get(selected_index - 1)
-            .map(|lod| lod.screen_relative_transition_height)
-            .unwrap_or(1.0)
-    };
-    let has_next = selected_index.saturating_add(1) < lod_count.min(source.len());
-    let coverage = lod_cross_fade_coverage(
-        selected.screen_relative_transition_height,
-        previous_height,
-        selected.fade_transition_width,
-        has_next,
-        effective_height,
-        cross_fade,
-    );
-    lod_fade_decision(selected_index, has_next, coverage)
-}
-
-/// Marks the resolved renderers chosen by `decision` and stores non-zero stipple weights.
-fn commit_resolved_decision(
-    visibility: &mut LodVisibility,
-    space_id: RenderSpaceId,
-    resolved: &[ResolvedLodEntry],
-    decision: &LodFadeDecision,
-) {
-    mark_resolved_row(
-        visibility,
-        space_id,
-        resolved,
-        decision.primary as usize,
-        decision.primary_weight,
-    );
-    if let Some(partner) = decision.partner {
-        mark_resolved_row(
-            visibility,
-            space_id,
-            resolved,
-            partner as usize,
-            decision.partner_weight,
-        );
-    }
-}
-
-/// Marks one resolved LOD row selected and records its stipple weight.
-fn mark_resolved_row(
-    visibility: &mut LodVisibility,
-    space_id: RenderSpaceId,
-    resolved: &[ResolvedLodEntry],
-    index: usize,
-    weight: f32,
-) {
-    let Some(lod) = resolved.get(index) else {
-        return;
-    };
-    for instance_id in &lod.renderers {
-        visibility.mark_selected(space_id, *instance_id);
-        let Some(space) = visibility.spaces.get(&space_id) else {
-            continue;
-        };
-        let Some(&ordinal) = space.instance_to_ordinal.get(instance_id) else {
-            continue;
-        };
-        visibility.record_fade_ordinal(space_id, ordinal, weight);
-    }
 }
 
 /// Resolves a scene renderer from a stable LOD renderer reference.
@@ -687,7 +572,7 @@ fn resolve_lod_renderer<'a>(
 }
 
 /// Finds a static renderer by hint first, then by stable instance id.
-fn static_renderer_for_lod_ref<'a>(
+pub(super) fn static_renderer_for_lod_ref<'a>(
     space: RenderSpaceView<'a>,
     renderer_ref: &LodRendererRef,
 ) -> Option<&'a StaticMeshRenderer> {
@@ -704,7 +589,7 @@ fn static_renderer_for_lod_ref<'a>(
 }
 
 /// Finds a skinned renderer by hint first, then by stable instance id.
-fn skinned_renderer_for_lod_ref<'a>(
+pub(super) fn skinned_renderer_for_lod_ref<'a>(
     space: RenderSpaceView<'a>,
     renderer_ref: &LodRendererRef,
 ) -> Option<&'a SkinnedMeshRenderer> {
@@ -860,6 +745,7 @@ fn first_non_empty_prepared_lod(lods: &[FramePreparedLodEntry]) -> Option<usize>
 
 #[cfg(test)]
 mod tests {
+    use super::super::lod_fade::lod_cross_fade_coverage;
     use super::*;
 
     /// Builds a resolved LOD entry with one renderer so selection can ignore emptiness.

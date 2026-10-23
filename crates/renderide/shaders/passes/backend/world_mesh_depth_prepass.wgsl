@@ -2,15 +2,16 @@
 //!
 //! Uses the same per-draw slab packing and position transform convention as material forward
 //! vertex stages, but emits only clip-space position and relies on fixed-function depth writes.
+//!
+//! LOD stipple uses `world_mesh_depth_prepass_fade.wgsl`. This source stays on the historical
+//! path: no fade varying, no fade load, and no fragment discard.
 
 #import renderide::draw::types as dt
-#import renderide::draw::lod_fade as lf
 
 @group(0) @binding(0) var<storage, read> instances: array<dt::PerDrawUniforms>;
 
 struct VertexOutput {
     @builtin(position) clip_pos: vec4<f32>,
-    @location(0) @interpolate(flat) lod_fade: f32,
 }
 
 @vertex
@@ -32,13 +33,9 @@ fn vs_main(
 
     var out: VertexOutput;
     out.clip_pos = vp * world_p;
-    out.lod_fade = draw.particle_padding[0].x;
     return out;
 }
 
 @fragment
-fn fs_main(in: VertexOutput) {
-    if (lf::lod_fade_discards(in.clip_pos.xy, in.lod_fade)) {
-        discard;
-    }
+fn fs_main() {
 }

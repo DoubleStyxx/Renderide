@@ -238,7 +238,10 @@ fn append_prepared_run_draws(
             index_count: d.index_count,
             is_overlay,
             sorting_order: d.sorting_order,
-            shadow_cast_mode: d.shadow_cast_mode,
+            shadow_cast_mode: super::lod_fade::shadow_cast_mode_for_lod_fade(
+                d.shadow_cast_mode,
+                state.lod_fade,
+            ),
             skinned: d.skinned,
             world_space_deformed: d.world_space_deformed,
             blendshape_deformed: d.blendshape_deformed,
