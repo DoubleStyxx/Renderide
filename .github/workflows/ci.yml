@@ -17,6 +17,9 @@ name: CI
       - "crates/**"
       - "generators/**"
       - "third_party/**"
+      - "RenderideMod/DynVars/**"
+      - "RenderideMod/CustomShaderMaterial.DynVars.cs"
+      - "RenderideMod.DynVarCore.Tests/**"
   pull_request:
     paths:
       - ".github/workflows/ci.yml"
@@ -28,6 +31,9 @@ name: CI
       - "crates/**"
       - "generators/**"
       - "third_party/**"
+      - "RenderideMod/DynVars/**"
+      - "RenderideMod/CustomShaderMaterial.DynVars.cs"
+      - "RenderideMod.DynVarCore.Tests/**"
   workflow_dispatch:
 
 concurrency:
@@ -178,6 +184,7 @@ jobs:
           cache: true
           cache-dependency-path: |
             generators/**/packages.lock.json
+            RenderideMod.DynVarCore.Tests/packages.lock.json
 
       - name: Restore
         run: dotnet restore Generators.sln --locked-mode
@@ -197,3 +204,15 @@ jobs:
       # Hosted runners do not have the host shared assembly: roundtrip sources are excluded at compile time (see SharedTypeGenerator.Tests.csproj).
       - name: Test
         run: dotnet test generators/SharedTypeGenerator.Tests/SharedTypeGenerator.Tests.csproj --configuration Release --no-build --no-restore
+
+      # Dynvar property selection is pure C# linked from RenderideMod. CI does not build the
+      # Resonite mod; that project still needs FrooxEngine.dll.
+      - name: Restore dynvar selector tests
+        run: dotnet restore RenderideMod.DynVarCore.Tests/RenderideMod.DynVarCore.Tests.csproj --locked-mode
+
+      - name: Verify dynvar selector formatting
+        if: runner.os == 'Linux'
+        run: dotnet format RenderideMod.DynVarCore.Tests/RenderideMod.DynVarCore.Tests.csproj --verify-no-changes --no-restore
+
+      - name: Test dynvar selector
+        run: dotnet test RenderideMod.DynVarCore.Tests/RenderideMod.DynVarCore.Tests.csproj --configuration Release --no-restore -warnaserror
