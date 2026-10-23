@@ -30,8 +30,8 @@ pub(super) enum CachedCull {
 /// Runs the per-renderer CPU cull once and packages the outcome for downstream slot expansion.
 ///
 /// Frames without a culling pass return `None`. Skinned draws use the posed bone-bounds AABB
-/// (or the rest mesh AABB when the host has not sent one) and share one [`CachedCull`] across
-/// every material slot.
+/// and share one [`CachedCull`] across every material slot. A skinned draw with no posed box
+/// stays visible.
 pub(super) fn compute_cached_cull(
     ctx: &DrawCollectionInputs<'_>,
     draw: &StaticMeshDrawSource<'_>,

@@ -18,9 +18,9 @@ pub(crate) struct MeshCullTarget<'a, S: SceneTransformRead + ?Sized = SceneCoord
     pub space_id: RenderSpaceId,
     /// Local AABB the cull transforms into world space.
     ///
-    /// Skinned draws pass the same bounds [`mesh_world_geometry_for_cull_with_head`] falls back to
-    /// when the host has not sent [`SkinnedMeshRenderer::posed_object_bounds`]. The posed box, when
-    /// present, replaces this rest box. Callers store the resulting world AABB on the renderer row.
+    /// Rest mesh AABB. Skinned draws use it only for the degenerate-bounds check. The cull box
+    /// itself is [`SkinnedMeshRenderer::posed_object_bounds`]; when the host has not sent one, the
+    /// world AABB stays empty so the draw is kept. Callers store the result on the renderer row.
     pub mesh_bounds: &'a RenderBoundingBox,
     /// Whether this path uses skinned bone bounds.
     pub skinned: bool,
@@ -119,10 +119,16 @@ where
                 front_face_world_matrix: None,
             };
         };
-        let object_bounds = sk
-            .posed_object_bounds
-            .as_ref()
-            .unwrap_or(target.mesh_bounds);
+        // Bones can leave the rest AABB. Substituting that box when the host has not posted a
+        // posed one frustum-rejects a mesh that is still on screen, so the draw stays visible.
+        // The root matrix is still returned for front-face winding.
+        let Some(object_bounds) = sk.posed_object_bounds.as_ref() else {
+            return MeshCullGeometry {
+                world_aabb: None,
+                rigid_world_matrix: None,
+                front_face_world_matrix: Some(root_world),
+            };
+        };
         MeshCullGeometry {
             world_aabb: world_aabb_from_local_bounds(object_bounds, root_world),
             rigid_world_matrix: None,

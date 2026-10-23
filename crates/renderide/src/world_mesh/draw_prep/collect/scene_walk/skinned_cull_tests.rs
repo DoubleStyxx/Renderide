@@ -2,7 +2,8 @@
 //!
 //! These tests call [`super::cull_cache::cull_mesh_target`], the function
 //! [`super::cull_cache::compute_cached_cull`] and the single-slot inline path both use.
-//! Posed bone bounds win over the rest mesh AABB so an extreme pose cannot pop out.
+//! Posed bone bounds are the cull box. An extreme pose outside the rest AABB stays visible, and
+//! a skinned draw with no posed box stays visible instead of being tested against the rest AABB.
 
 use std::fs;
 use std::path::Path;
@@ -26,6 +27,7 @@ use crate::scene::{RenderSpaceId, SceneCoordinator, SkinnedMeshRenderer, StaticM
 use crate::shared::{RenderBoundingBox, RenderTransform, RenderingContext};
 use crate::world_mesh::culling::{
     CpuCullFailure, MeshCullTarget, WorldMeshCullInput, WorldMeshCullProjParams,
+    mesh_world_geometry_for_cull_with_head,
 };
 
 const SPACE: RenderSpaceId = RenderSpaceId(166);
@@ -118,10 +120,11 @@ fn extreme_pose_outside_rest_aabb_stays_visible_and_slots_share_it() {
     let scene = seeded_scene();
     let rest = bounds(Vec3::new(40.0, 0.0, 0.0), Vec3::splat(0.5));
     let posed = skinned(Some(bounds(Vec3::ZERO, Vec3::splat(0.25))));
+    let rest_as_posed = skinned(Some(rest));
     let host_camera = HostCameraFrame::default();
     let culling = mono_culling(&host_camera);
 
-    let rest_only = decide(&scene, &rest, Some(&skinned(None)), Some(&culling), false);
+    let rest_only = decide(&scene, &rest, Some(&rest_as_posed), Some(&culling), false);
     let posed_visible = decide(&scene, &rest, Some(&posed), Some(&culling), false);
     assert!(
         matches!(rest_only, Some(Err(CpuCullFailure::Frustum))),
@@ -158,15 +161,48 @@ fn extreme_pose_outside_rest_aabb_stays_visible_and_slots_share_it() {
 }
 
 #[test]
+fn missing_posed_bounds_stay_visible_when_the_rest_aabb_is_offscreen() {
+    let scene = seeded_scene();
+    let rest = bounds(Vec3::new(40.0, 0.0, 0.0), Vec3::splat(0.5));
+    let host_camera = HostCameraFrame::default();
+    let culling = mono_culling(&host_camera);
+    let renderer = skinned(None);
+
+    let decision = decide(&scene, &rest, Some(&renderer), Some(&culling), false);
+    assert_eq!(
+        decision,
+        Some(Ok(None)),
+        "a pose can leave the rest AABB, so a missing posed box must not frustum-reject"
+    );
+
+    let geometry = mesh_world_geometry_for_cull_with_head(
+        &MeshCullTarget {
+            scene: &scene,
+            space_id: SPACE,
+            mesh_bounds: &rest,
+            skinned: true,
+            skinned_renderer: Some(&renderer),
+            node_id: 0,
+        },
+        Mat4::IDENTITY,
+        RenderingContext::UserView,
+    );
+    assert!(geometry.world_aabb.is_none());
+    assert!(geometry.rigid_world_matrix.is_none());
+    assert!(geometry.front_face_world_matrix.is_some());
+}
+
+#[test]
 fn posed_bounds_offscreen_cull_even_when_rest_bounds_are_onscreen() {
     let contract = golden("skinned_onscreen_cull.json");
     let scene = seeded_scene();
     let rest = bounds(Vec3::ZERO, Vec3::splat(0.25));
     let posed = skinned(Some(bounds(Vec3::new(40.0, 0.0, 0.0), Vec3::splat(0.5))));
+    let rest_as_posed = skinned(Some(rest));
     let host_camera = HostCameraFrame::default();
     let culling = mono_culling(&host_camera);
 
-    let rest_only = decide(&scene, &rest, Some(&skinned(None)), Some(&culling), false);
+    let rest_only = decide(&scene, &rest, Some(&rest_as_posed), Some(&culling), false);
     let decision = decide(&scene, &rest, Some(&posed), Some(&culling), false);
     assert_eq!(rest_only, Some(Ok(None)));
     assert_eq!(decision, Some(Err(CpuCullFailure::Frustum)));
