@@ -10,8 +10,9 @@
 pub use renderide::bench_api::{
     BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload, CULL_BATCH,
     CullWorkload, KeywordVariantCacheWorkload, MATERIAL_UNIFORM_BATCH,
-    MaterialUniformUpdateWorkload, TRANSFORM_BATCH, TRANSPARENT_SORT_1K, TRANSPARENT_SORT_10K,
-    TransformWorkload, TransparentSortWorkload, WORLD_MATRIX_NODES, WorldMatrixWorkload,
+    MaterialUniformUpdateWorkload, SHADOW_CHURN_CASTERS, SHADOW_CHURN_LIGHTS, ShadowChurnWorkload,
+    TRANSFORM_BATCH, TRANSPARENT_SORT_1K, TRANSPARENT_SORT_10K, TransformWorkload,
+    TransparentSortWorkload, WORLD_MATRIX_NODES, WorldMatrixWorkload,
 };
 
 #[cfg(test)]

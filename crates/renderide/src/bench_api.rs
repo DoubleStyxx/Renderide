@@ -29,6 +29,8 @@ pub const WORLD_MATRIX_NODES: usize = 4_096;
 /// Distinct buffer keys reused by one [`BufferPoolWorkload::reuse_cycle`] sample.
 pub const BUFFER_POOL_SLOTS: usize = 1_024;
 
+/// Static many-light shadow planning workload.
+pub use crate::backend::{SHADOW_CHURN_CASTERS, SHADOW_CHURN_LIGHTS, ShadowChurnWorkload};
 /// Custom-shader keyword variant cache workload.
 pub use crate::materials::KeywordVariantCacheWorkload;
 /// Custom-material uniform packing and bind-group cache workloads.

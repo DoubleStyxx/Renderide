@@ -231,6 +231,9 @@ fn prepare_template(
         CaseTemplate::TiltedCanvasDistanceBias => Ok(PreparedTemplate {
             session_template: SessionTemplate::TiltedCanvasDistanceBias,
         }),
+        CaseTemplate::ShadowedCasterMove => Ok(PreparedTemplate {
+            session_template: SessionTemplate::ShadowedCasterMove,
+        }),
         CaseTemplate::GltfTexturedStaticMesh { path } => {
             let imported = load_static_textured_mesh(path)?;
             let texture_size = imported.texture_size;

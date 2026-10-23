@@ -36,6 +36,14 @@ impl PlatformGroup {
         Ok(())
     }
 
+    /// Clears tracked pids so [`Drop`] does not signal a child that has already been waited on.
+    pub fn disarm(&self) {
+        self.tracked_pids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    }
+
     /// Sends `SIGINT`, then `SIGTERM`, then `SIGKILL` after grace periods, to every registered PID.
     ///
     /// Idempotent: clears the tracking list on first run.
