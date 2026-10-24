@@ -6,9 +6,10 @@
 //! place. The count is prepared casters in the view's render-space scope, not casters that
 //! survive the frustum. After the count crosses the cap, the pass stays off until it falls to
 //! [`crate::occlusion::hysteresis::HISTORY_CASTER_RESUME`]. When the previous frame had no
-//! occluded caster and the prepared set is an unchanged dense index, disocclusion rectangles
-//! stay empty and publishing the history skips the retain scan. The cull still records a class
-//! change when the pyramid occludes a caster.
+//! occluded caster and every remembered caster is still prepared with the same mesh and bounds,
+//! disocclusion rectangles stay empty and publishing the history skips the retain scan.
+//! Prepared casters the frustum skips can sit outside that remembered set. The cull still
+//! records a class change when the pyramid occludes a caster.
 
 use glam::{Mat4, Vec3};
 

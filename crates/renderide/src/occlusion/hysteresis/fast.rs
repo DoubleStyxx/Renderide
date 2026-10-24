@@ -1,11 +1,13 @@
 //! Stable-visible fast path for history confirmation.
 //!
-//! When the previous frame stored no occluded caster and this frame's prepared set is the same
-//! dense keys, meshes, and bounds, disocclusion rectangles are empty. The steady frame compares
-//! the prepared rows to a reused index table and marks a caster the pyramid does not occlude with
-//! a bit, instead of probing the history map. If every remembered caster was marked and nothing
-//! else was queued, publishing skips the retain scan. A non-dense index, a moved or occluded
-//! caster, and any row that was not tested still take the full update.
+//! When the previous frame stored no occluded caster and every remembered caster is still prepared
+//! with the same mesh and bounds, disocclusion rectangles are empty. The prepared set may be
+//! larger: casters the frustum does not test are not history. The steady frame compares those
+//! remembered rows to a reused index table and marks a caster the pyramid does not occlude with a
+//! bit, instead of probing the history map. If every remembered caster was marked and nothing else
+//! was queued, publishing skips the retain scan. A remembered caster missing from the prepared
+//! set, a sparse index, a moved or occluded caster, and any remembered row that was not tested
+//! still take the full update.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -14,13 +16,22 @@ use super::{
     VisibilityCullBuffers, VisibilityHistory, VisibilityHysteresis, bounds_moved,
 };
 
+/// Largest index table, relative to the remembered-caster count, that still skips the history map.
+///
+/// `many_static_meshes` prepares the whole grid and remembers only the frustum survivors, so the
+/// table is wider than the live rows. A much sparser index stays on the full update.
+const FAST_TABLE_SLACK: usize = 4;
+
 /// Reused index table for one view. The rows stay allocated across frames.
 #[derive(Default)]
 pub(super) struct FastSlots {
     rows: Vec<FastRow>,
     visits: Vec<AtomicU64>,
     valid: bool,
+    /// Slot count. One past the highest remembered renderer index.
     count: usize,
+    /// Remembered casters packed into [`Self::count`].
+    live: usize,
     space_id: i32,
     skinned: bool,
 }
@@ -31,6 +42,7 @@ struct FastRow {
     mesh_asset_id: i32,
     aabb_min: glam::Vec3,
     aabb_max: glam::Vec3,
+    live: bool,
 }
 
 impl FastRow {
@@ -41,6 +53,7 @@ impl FastRow {
             mesh_asset_id: 0,
             aabb_min: glam::Vec3::ZERO,
             aabb_max: glam::Vec3::ZERO,
+            live: false,
         }
     }
 }
@@ -88,6 +101,9 @@ impl FastSlots {
         let Some(row) = self.rows.get(index) else {
             return false;
         };
+        if !row.live {
+            return false;
+        }
         caster.key.instance_id == row.instance_id
             && caster.key.node_id == row.node_id
             && caster.mesh_asset_id == row.mesh_asset_id
@@ -107,6 +123,9 @@ impl FastSlots {
         let Some(row) = self.rows.get(index) else {
             return false;
         };
+        if !row.live {
+            return false;
+        }
         caster.key.space_id == self.space_id
             && caster.key.skinned == self.skinned
             && caster.key.instance_id == row.instance_id
@@ -117,6 +136,9 @@ impl FastSlots {
 
     fn key_at(&self, index: usize) -> Option<CasterKey> {
         let row = self.rows.get(index)?;
+        if !row.live {
+            return None;
+        }
         Some(CasterKey {
             space_id: self.space_id,
             renderable_index: u64::try_from(index).unwrap_or(u64::MAX),
@@ -126,101 +148,104 @@ impl FastSlots {
         })
     }
 
-    /// `true` when `present` still matches the table filled from the unchanged visible history.
+    /// `true` when every live row is still present, unchanged. Extra prepared casters are ignored.
     fn matches(&self, history: &VisibilityHistory, present: &[PresentCaster]) -> bool {
         if !self.valid
-            || self.count == 0
-            || self.count != history.casters.len()
-            || present.len() != self.count
+            || self.live == 0
+            || self.live != history.casters.len()
             || !history.no_occluded_casters()
         {
             return false;
         }
+        self.present_covers_live(present)
+    }
+
+    fn present_covers_live(&self, present: &[PresentCaster]) -> bool {
         self.clear_visits();
         for caster in present {
-            if caster.key.space_id != self.space_id || caster.key.skinned != self.skinned {
-                return false;
-            }
             let Some(index) = slot_index(caster.key.renderable_index, self.count) else {
-                return false;
+                continue;
             };
-            if !self.row_matches_present(index, caster) || self.bit(index) {
-                return false;
+            if caster.key.space_id != self.space_id || caster.key.skinned != self.skinned {
+                continue;
+            }
+            if !self.row_matches_present(index, caster) {
+                if self.rows[index].live {
+                    self.clear_visits();
+                    return false;
+                }
+                continue;
             }
             self.set_bit(index);
         }
-        let complete = self.popcount() == self.count;
+        let complete = self.popcount() == self.live;
         self.clear_visits();
         complete
     }
 
-    /// Fills the table from `history` when `present` is that same dense visible set.
+    /// Fills the table from `history` when every remembered caster is still in `present`.
     fn rebuild(&mut self, history: &VisibilityHistory, present: &[PresentCaster]) -> bool {
         self.valid = false;
-        let count = history.casters.len();
-        if count == 0
-            || count > HISTORY_CASTER_BUDGET
-            || present.len() != count
-            || !history.no_occluded_casters()
-        {
+        let live = history.casters.len();
+        if live == 0 || live > HISTORY_CASTER_BUDGET || !history.no_occluded_casters() {
             return false;
         }
-        self.count = count;
-        self.ensure(count);
-        self.clear_visits();
         let mut space_id = None;
         let mut skinned = None;
+        let mut max_index = 0usize;
         for (key, record) in history.iter() {
-            let Some(index) = slot_index(key.renderable_index, count) else {
+            if record.class != VisibilityClass::Visible {
+                return false;
+            }
+            let Ok(index) = usize::try_from(key.renderable_index) else {
                 return false;
             };
-            if record.class != VisibilityClass::Visible
-                || space_id.is_some_and(|space| space != key.space_id)
+            if space_id.is_some_and(|space| space != key.space_id)
                 || skinned.is_some_and(|flag| flag != key.skinned)
-                || self.bit(index)
             {
                 return false;
             }
             space_id = Some(key.space_id);
             skinned = Some(key.skinned);
-            self.set_bit(index);
+            max_index = max_index.max(index);
+        }
+        let table_len = max_index.saturating_add(1);
+        if table_len > HISTORY_CASTER_BUDGET || table_len > live.saturating_mul(FAST_TABLE_SLACK) {
+            return false;
+        }
+        self.count = table_len;
+        self.live = live;
+        self.space_id = space_id.unwrap_or(0);
+        self.skinned = skinned.unwrap_or(false);
+        self.ensure(table_len);
+        for row in &mut self.rows[..table_len] {
+            row.live = false;
+        }
+        for (key, record) in history.iter() {
+            let Some(index) = slot_index(key.renderable_index, table_len) else {
+                return false;
+            };
+            if self.rows[index].live {
+                return false;
+            }
             self.rows[index] = FastRow {
                 instance_id: key.instance_id,
                 node_id: key.node_id,
                 mesh_asset_id: record.mesh_asset_id,
                 aabb_min: record.aabb_min,
                 aabb_max: record.aabb_max,
+                live: true,
             };
         }
-        if self.popcount() != count {
+        if !self.present_covers_live(present) {
             return false;
         }
-        self.space_id = space_id.unwrap_or(0);
-        self.skinned = skinned.unwrap_or(false);
-        self.clear_visits();
-        for caster in present {
-            let Some(index) = slot_index(caster.key.renderable_index, count) else {
-                return false;
-            };
-            if caster.key.space_id != self.space_id
-                || caster.key.skinned != self.skinned
-                || !self.row_matches_present(index, caster)
-                || self.bit(index)
-            {
-                return false;
-            }
-            self.set_bit(index);
-        }
-        if self.popcount() != count {
-            return false;
-        }
-        self.clear_visits();
         self.valid = true;
         true
     }
 }
 
-/// Arms the fast path when `present` is exactly the visible history and the indices are dense.
+/// Arms the fast path when every remembered caster is still in `present`, unchanged.
 ///
 /// The table keeps its allocation. `None` leaves it invalid so the caller plans disocclusion.
 #[must_use]
@@ -231,7 +256,7 @@ pub(crate) fn prepare_fast_visible(
 ) -> Option<u32> {
     let slots = &mut buffers.fast_slots;
     if slots.matches(history, present) || slots.rebuild(history, present) {
-        u32::try_from(slots.count).ok()
+        u32::try_from(slots.live).ok()
     } else {
         slots.valid = false;
         None

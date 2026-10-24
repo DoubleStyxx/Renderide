@@ -19,12 +19,14 @@
 //! so camera motion can still under-pad for one frame and hide a caster the thin surface no
 //! longer covers.
 //!
-//! When the previous frame stored no occluded caster and this frame's prepared set is the same
-//! dense keys, meshes, and bounds, disocclusion rectangles are empty. A caster the pyramid does
-//! not occlude is marked in a reused index table instead of probing the history map. Publishing
-//! skips the retain scan when every remembered caster was marked. A non-dense index, a moved or
-//! occluded caster, and any row that is not tested still take the full update, so the published
-//! classification matches that slower path.
+//! When the previous frame stored no occluded caster and every remembered caster is still in the
+//! prepared set with the same mesh and bounds, disocclusion rectangles are empty. Prepared
+//! casters the frustum does not test may be extra rows; they are not history. A caster the
+//! pyramid does not occlude is marked in a reused index table instead of probing the history
+//! map. Publishing skips the retain scan when every remembered caster was marked. A remembered
+//! caster missing from the prepared set, a moved or occluded caster, and any remembered row
+//! that is not tested still take the full update, so the published classification matches that
+//! slower path.
 //!
 //! The cap counts prepared casters: one renderer run with a world AABB, inside the view's
 //! render-space scope, and not overlay or hidden. It does not count frustum-visible casters,
@@ -362,6 +364,9 @@ pub(crate) struct VisibilityCullBuffers {
     pub stale_rects: Vec<ScreenRect>,
     /// One record buffer per rayon worker, plus one for callers outside the pool.
     pub shards: Vec<Mutex<Vec<(CasterKey, CasterRecord)>>>,
+    /// `true` when the last publish skipped the retain scan. Test-only.
+    #[cfg(test)]
+    fast_published: bool,
     /// Dense index table for the stable-visible fast path. Capacity stays across frames.
     fast_slots: fast::FastSlots,
 }
@@ -524,6 +529,7 @@ impl VisibilityHysteresis {
                 stale_rects,
                 shards: Vec::new(),
                 fast_slots: fast::FastSlots::default(),
+                fast_published: false,
             },
         )
     }
@@ -647,7 +653,12 @@ impl VisibilityHysteresis {
         let visits = fast::visited_casters(&buffers.fast_slots);
         let shards_empty = buffers.shards.iter().all(|shard| shard.lock().is_empty());
         // Each remembered caster was marked once, and no class change was queued.
-        if shards_empty && fast_expected > 0 && visits == fast_expected {
+        let fast_published = shards_empty && fast_expected > 0 && visits == fast_expected;
+        #[cfg(test)]
+        {
+            buffers.fast_published = fast_published;
+        }
+        if fast_published {
             let (mut history, spare) = adopt_spare(history, spare);
             history.epoch = epoch;
             return VisibilityRecycle {

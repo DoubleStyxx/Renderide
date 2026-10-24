@@ -8,6 +8,7 @@ mod fast_path_tests {
 
     use super::*;
 
+    #[derive(Clone)]
     struct DrawCall {
         caster: Option<CasterRef>,
         aabb_min: Vec3,
@@ -15,6 +16,7 @@ mod fast_path_tests {
         facts: OcclusionFacts,
     }
 
+    #[derive(Clone)]
     struct Frame {
         present: Vec<PresentCaster>,
         calls: Vec<DrawCall>,
@@ -33,6 +35,7 @@ mod fast_path_tests {
         draws: Vec<bool>,
         rows: Vec<Row>,
         armed: bool,
+        published_fast: bool,
     }
 
     fn key_in(space: i32, index: u64, skinned: bool) -> CasterKey {
@@ -207,7 +210,12 @@ mod fast_path_tests {
             )
         });
         (
-            Snap { draws, rows, armed },
+            Snap {
+                draws,
+                rows,
+                armed,
+                published_fast: recycled.buffers.fast_published,
+            },
             recycled.history,
             recycled.spare,
             recycled.buffers,
@@ -413,7 +421,15 @@ mod fast_path_tests {
         let fast = run(visible_history(&entries), &frames, true);
         let slow = run(visible_history(&entries), &frames, false);
         assert!(fast[0].armed);
-        assert!(!fast[1].armed, "the dropped row is new on the next frame");
+        assert!(
+            !fast[0].published_fast,
+            "the untested caster keeps the full publish"
+        );
+        assert!(
+            fast[1].armed,
+            "the prepared superset still arms; the returned caster is newly revealed"
+        );
+        assert!(!fast[1].published_fast);
         assert_same(&fast, &slow);
         assert!(class_of(&fast[0], 2).is_none());
         assert!(fast[1].draws[2]);
@@ -534,21 +550,68 @@ mod fast_path_tests {
     }
 
     #[test]
-    fn fast_matches_slow_when_indices_are_not_dense() {
-        let entries = [(0, 1), (2, 1)];
+    fn fast_matches_slow_when_indices_are_too_sparse() {
+        let entries = [(0, 1), (64, 1)];
         let frames = [Frame {
             present: present_of(&entries),
-            calls: vec![call(0, keep()), call(2, keep())],
+            calls: vec![call(0, keep()), call(64, keep())],
             parallel: false,
         }];
         let fast = run(visible_history(&entries), &frames, true);
         let slow = run(visible_history(&entries), &frames, false);
         assert!(
             !fast[0].armed,
-            "a hole in the renderer index stays on the full update"
+            "a sparse renderer index stays on the full update"
         );
+        assert!(!fast[0].published_fast);
         assert_same(&fast, &slow);
         assert_eq!(fast[0].rows.len(), 2);
+    }
+
+    #[test]
+    fn fast_path_counts_frames_when_extra_prepared_casters_miss_the_frustum() {
+        // `many_static_meshes` prepares the whole grid and draws the frustum survivors.
+        // History keeps those survivors. The prepared list is a superset every frame.
+        let remembered: Vec<(u64, i32)> = (0..6).map(|index| (index * 2, 1)).collect();
+        let prepared: Vec<(u64, i32)> = (0..12).map(|index| (index, 1)).collect();
+        let calls: Vec<DrawCall> = remembered
+            .iter()
+            .map(|(index, _)| call(*index, keep()))
+            .collect();
+        let steady = Frame {
+            present: present_of(&prepared),
+            calls: calls.clone(),
+            parallel: false,
+        };
+        let mut frames = vec![steady.clone(), steady.clone(), steady.clone(), steady];
+        let mut leaving = calls;
+        leaving.pop();
+        frames.push(Frame {
+            present: present_of(&prepared),
+            calls: leaving,
+            parallel: false,
+        });
+        let fast = run(visible_history(&remembered), &frames, true);
+        let slow = run(visible_history(&remembered), &frames, false);
+        let armed = fast.iter().filter(|snap| snap.armed).count();
+        let published = fast.iter().filter(|snap| snap.published_fast).count();
+        assert_eq!(
+            armed,
+            frames.len(),
+            "every frame arms on the prepared superset"
+        );
+        assert_eq!(
+            published,
+            frames.len() - 1,
+            "the frustum miss publishes in full"
+        );
+        assert_same(&fast, &slow);
+        assert!(class_of(&fast[3], 10).is_some());
+        assert!(
+            class_of(&fast[4], 10).is_none(),
+            "the untested caster is dropped"
+        );
+        assert_eq!(fast[4].rows.len(), remembered.len() - 1);
     }
 
     #[test]
