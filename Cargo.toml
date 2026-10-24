@@ -13,6 +13,9 @@ members = [
   "crates/logger",
   "crates/renderide-wayland-tablet",
 ]
+# Standalone tool package with its own Cargo.lock: it links two parking_lot majors side by side and
+# must not add them to the workspace lockfile. Run it with --manifest-path (see its README).
+exclude = ["crates/renderide-lockbench"]
 
 # `cc` stays at 1.2.63 in Cargo.lock. cc 1.9.0 applies `RUSTC_WRAPPER` to the
 # `cl.exe` it finds (rust-lang/cc-rs#2022). Windows CI sets that wrapper to
