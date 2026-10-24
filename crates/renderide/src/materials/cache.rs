@@ -510,18 +510,42 @@ impl MaterialPipelineCache {
             if let Some(hit) = shard.pipelines.get(&key).cloned() {
                 drop(shard);
                 self.stats.note_hit();
+                crate::diagnostics::pbs_capture::note_lookup(
+                    kind,
+                    desc.depth_stencil_format,
+                    desc.sample_count,
+                    "ready",
+                );
                 return MaterialPipelineLookup::Ready(hit);
             }
             if let Some(err) = shard.failed.get(&key).cloned() {
                 drop(shard);
+                crate::diagnostics::pbs_capture::note_lookup(
+                    kind,
+                    desc.depth_stencil_format,
+                    desc.sample_count,
+                    "failed",
+                );
                 return MaterialPipelineLookup::Failed(err);
             }
             if !shard.pending.insert(key.clone()) {
+                crate::diagnostics::pbs_capture::note_lookup(
+                    kind,
+                    desc.depth_stencil_format,
+                    desc.sample_count,
+                    "pending",
+                );
                 return MaterialPipelineLookup::Pending;
             }
         }
 
         self.queue_pipeline_build(key, kind.clone(), *desc, variant, wgsl_override);
+        crate::diagnostics::pbs_capture::note_lookup(
+            kind,
+            desc.depth_stencil_format,
+            desc.sample_count,
+            "pending",
+        );
         MaterialPipelineLookup::Pending
     }
 
@@ -738,6 +762,12 @@ impl MaterialPipelineCache {
         set: MaterialPipelineSet,
     ) {
         self.stats.note_insertion();
+        crate::diagnostics::pbs_capture::note_created(
+            &key.kind,
+            key.depth_stencil_format,
+            key.sample_count,
+            set.len(),
+        );
         let evicted = {
             let mut shard = self.shard_for(&key).lock();
             shard.pending.remove(&key);

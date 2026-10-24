@@ -146,6 +146,15 @@ impl GpuContext {
         }
     }
 
+    /// Returns the persistent headless depth texture for the PBS canary dump.
+    pub fn headless_depth_texture(&self) -> Option<&wgpu::Texture> {
+        if self.is_headless() {
+            self.primary_offscreen.as_ref().map(|t| &t.depth_texture)
+        } else {
+            None
+        }
+    }
+
     /// Primary offscreen color texture for a dev-only `capture.png`, headless or windowed.
     #[cfg(feature = "control-api")]
     pub(crate) fn control_color_texture(&self) -> Option<&wgpu::Texture> {

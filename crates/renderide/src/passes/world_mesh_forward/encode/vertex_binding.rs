@@ -262,7 +262,13 @@ pub(super) fn draw_mesh_submesh_instanced(
 
     let first = item.first_index;
     let end = first.saturating_add(item.index_count);
+    let instance_count = instances.end.saturating_sub(instances.start);
     rpass.draw_indexed(first..end, 0, instances);
+    crate::diagnostics::pbs_capture::note_draw(
+        item.renderable_index,
+        item.index_count,
+        instance_count,
+    );
 }
 
 /// Binds position and normal streams and issues one indexed draw for the GTAO normal prepass.
@@ -296,7 +302,13 @@ pub(super) fn draw_mesh_submesh_normals_instanced(
 
     let first = item.first_index;
     let end = first.saturating_add(item.index_count);
+    let instance_count = instances.end.saturating_sub(instances.start);
     rpass.draw_indexed(first..end, 0, instances);
+    crate::diagnostics::pbs_capture::note_draw(
+        item.renderable_index,
+        item.index_count,
+        instance_count,
+    );
 }
 
 /// Binds the position stream and issues one indexed draw for the depth prepass.
@@ -319,7 +331,13 @@ pub(super) fn draw_mesh_submesh_depth_instanced(
 
     let first = item.first_index;
     let end = first.saturating_add(item.index_count);
+    let instance_count = instances.end.saturating_sub(instances.start);
     rpass.draw_indexed(first..end, 0, instances);
+    crate::diagnostics::pbs_capture::note_draw(
+        item.renderable_index,
+        item.index_count,
+        instance_count,
+    );
 }
 
 /// Returns the resident mesh for a drawable item after validating required stream readiness.

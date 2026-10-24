@@ -70,6 +70,7 @@ impl<'a> HeadlessDriver<'a> {
             params.height,
             params.interval_ms,
         );
+        crate::diagnostics::pbs_capture::arm_if_pbs_capture(&params.output_path);
         crash_context::set_target_mode(TargetMode::Headless);
         crash_context::set_render_mode(RenderMode::Headless);
 
@@ -161,6 +162,7 @@ impl<'a> HeadlessDriver<'a> {
         match kind {
             HeadlessTickKind::FullFrame => {
                 profiling::scope!("headless::full_frame");
+                crate::diagnostics::pbs_capture::begin_frame();
                 let outcome = self.runtime.tick_one_frame(&mut self.gpu, inputs);
                 self.schedule.complete_full_frame(Instant::now());
                 outcome
@@ -278,6 +280,7 @@ impl<'a> HeadlessDriver<'a> {
             self.frames_written = self.frames_written.saturating_add(1);
             logger::trace!("Headless wrote PNG #{}", self.frames_written);
         }
+        super::pbs_depth::dump_depth(&self.gpu, &self.params.output_path);
     }
 }
 
