@@ -202,17 +202,23 @@ impl Drop for CpuRenderPhaseScope {
 
 /// Runs global asset/material preparation for a schedule-backed render submission.
 ///
-/// Headless and software adapters compile at most one pipeline on this thread during the
-/// drain. That `create_render_pipeline` must not overlap the driver thread's `Queue::submit`
-/// of the previous frame: on DX12 WARP the overlap hangs the render thread and can publish
-/// a corrupt pipeline. Flush the driver first so the compile starts on an idle device.
+/// Headless compiles every pipeline queued for this thread. A windowed software adapter
+/// compiles at most one. When that queue is non-empty, the compile waits until the
+/// driver thread has finished `Queue::submit` and the device is idle. On DX12 WARP,
+/// compiling during that submit hangs the render thread and can cache a pipeline that
+/// under-draws. If the driver does not go idle, this frame only collects builds that
+/// already finished and leaves the queue for a later frame. An empty queue does not
+/// wait, so real GPUs and idle headless frames keep their normal submit overlap.
 pub(in crate::runtime) fn prepare_assets_for_schedule(
     backend: &mut RenderBackend,
     gpu: &GpuContext,
 ) {
     backend.sync_material_shader_hot_reload();
-    if backend.material_pipelines_compile_on_render_thread() {
-        gpu.flush_driver();
+    if crate::materials::render_thread_builds_queued()
+        && !gpu.wait_until_idle_for_pipeline_compile()
+    {
+        backend.drain_finished_pipeline_builds();
+        return;
     }
     backend.drain_pipeline_build_completions();
 }

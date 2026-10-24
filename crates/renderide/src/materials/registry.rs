@@ -155,6 +155,7 @@ impl MaterialRegistry {
         device: Arc<wgpu::Device>,
         limits: Arc<crate::gpu::GpuLimits>,
         compile_on_render_thread: bool,
+        render_thread_compiles_per_frame: usize,
     ) -> Self {
         let mut asset_graph = MaterialAssetGraph::new(RasterPipelineKind::Null);
         asset_graph.register_global_uniform("Renderide_FrameIndex", GlobalUniformValueType::Uint);
@@ -165,7 +166,12 @@ impl MaterialRegistry {
             .register_global_uniform("Renderide_ViewProjection", GlobalUniformValueType::Mat4);
         Self {
             asset_graph,
-            cache: MaterialPipelineCache::new(device, limits, compile_on_render_thread),
+            cache: MaterialPipelineCache::new(
+                device,
+                limits,
+                compile_on_render_thread,
+                render_thread_compiles_per_frame,
+            ),
         }
     }
 
@@ -258,20 +264,20 @@ impl MaterialRegistry {
             .variant_bits_for_shader_asset(shader_asset_id)
     }
 
-    /// Headless and software adapters compile on the render thread. Real GPUs do not.
-    pub(crate) fn compiles_on_render_thread(&self) -> bool {
-        self.cache.compiles_on_render_thread()
-    }
-
     /// Drains finished pipeline builds into the cache.
     ///
     /// Invoked once per frame from the renderer's tick before per-view recording so worker
     /// threads never touch the completion channel or the pending/failed mutexes during draw.
-    /// Headless and software adapters also compile at most one queued pipeline on this thread,
-    /// after the caller has flushed the driver thread so `create_render_pipeline` does not
-    /// overlap `Queue::submit`.
+    /// Headless compiles every pipeline queued for this thread. A windowed software
+    /// adapter compiles at most one. The caller waits for an idle device first so
+    /// `create_render_pipeline` does not overlap `Queue::submit`.
     pub fn drain_pipeline_build_completions(&self) {
         self.cache.drain_pipeline_build_completions();
+    }
+
+    /// Drains builds that already finished, without starting a render-thread compile.
+    pub fn drain_finished_pipeline_builds(&self) {
+        self.cache.drain_finished_pipeline_builds();
     }
 
     /// Enables or disables development WGSL hot reload polling.

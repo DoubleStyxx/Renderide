@@ -188,6 +188,12 @@ impl RendererRuntime {
                     gpu.adapter_info().device_type,
                     &gpu.adapter_info().name,
                 ),
+                render_thread_compiles_per_frame:
+                    crate::materials::render_thread_compiles_per_frame(
+                        gpu.is_headless(),
+                        gpu.adapter_info().device_type,
+                        &gpu.adapter_info().name,
+                    ),
             },
             shm,
             ipc,

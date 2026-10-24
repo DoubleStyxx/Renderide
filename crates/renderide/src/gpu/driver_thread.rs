@@ -259,6 +259,15 @@ impl DriverThread {
     /// the headless readback path to establish a happens-before edge with the render
     /// work before issuing the texture-to-buffer copy on the main thread.
     pub fn flush(&self) {
+        let _ = self.flush_within(Duration::from_secs(5));
+    }
+
+    /// Like [`Self::flush`], but reports whether the driver signaled before `timeout`.
+    ///
+    /// A missing driver thread returns `true`: there is no in-flight `Queue::submit`
+    /// left to wait for. A timeout returns `false` so the caller can skip work that
+    /// must not overlap that submit.
+    pub fn flush_within(&self, timeout: Duration) -> bool {
         let (wait, rx) = SubmitWait::new();
         let batch = SubmitBatch {
             submit_kind: DriverSubmitKind::Flush,
@@ -274,11 +283,11 @@ impl DriverThread {
         };
         if self.submit(batch).is_none() {
             // Driver thread is gone; no signal will ever arrive, so skip the wait.
-            return;
+            return true;
         }
         // Any recv error (channel disconnected due to panic inside the driver) is treated
         // as "driver no longer running" -- callers handle that via the separate error slot.
-        let _ = rx.recv_timeout(Duration::from_secs(5));
+        rx.recv_timeout(timeout).is_ok()
     }
 }
 

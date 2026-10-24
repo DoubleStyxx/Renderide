@@ -34,8 +34,7 @@ use crate::materials::{
 use super::pipeline_build_error::PipelineBuildError;
 use super::pipeline_compile::{
     PipelineBuildOutcome, PipelineBuildRequest, PipelineBuildResources,
-    RENDER_THREAD_PIPELINE_COMPILES_PER_FRAME, drain_render_thread_pipeline_builds,
-    spawn_pipeline_build,
+    drain_render_thread_pipeline_builds, spawn_pipeline_build,
 };
 use super::raster_pipeline::MaterialPipelineDesc;
 
@@ -425,26 +424,29 @@ pub struct MaterialPipelineCache {
     stats: AtomicCacheCounters,
     warmup_stats: PipelineWarmupDedupeCounters,
     shader_module_cache: Arc<ShaderModuleCache>,
-    /// Headless and software adapters compile here, on the render thread, one pipeline per frame.
+    /// Headless and software adapters compile here, on the render thread.
     /// Real GPUs leave this false and use the background pool.
     compile_on_render_thread: bool,
-}
-
-impl MaterialPipelineCache {
-    /// Headless and software adapters compile on the render thread.
-    pub(super) fn compiles_on_render_thread(&self) -> bool {
-        self.compile_on_render_thread
-    }
+    /// Compiles `drain_pipeline_build_completions` may run on this thread.
+    ///
+    /// Headless is unbounded so the capture builds the whole queue before submit.
+    /// A windowed software adapter is one. Real GPUs store zero and ignore it.
+    render_thread_compiles_per_frame: usize,
 }
 
 impl MaterialPipelineCache {
     /// Creates an empty cache for `device` with the device's effective [`crate::gpu::GpuLimits`].
     ///
     /// `compile_on_render_thread` is set for headless and software adapters. Real GPUs pass false.
+    ///
+    /// `render_thread_compiles_per_frame` is the drain budget. Headless passes `usize::MAX`.
+    /// A windowed software adapter passes one. The value is ignored when
+    /// `compile_on_render_thread` is false.
     pub fn new(
         device: Arc<wgpu::Device>,
         limits: Arc<crate::gpu::GpuLimits>,
         compile_on_render_thread: bool,
+        render_thread_compiles_per_frame: usize,
     ) -> Self {
         let (pipeline_build_tx, pipeline_build_rx) = crossbeam_channel::unbounded();
         let cap = per_shard_cap();
@@ -462,6 +464,7 @@ impl MaterialPipelineCache {
             warmup_stats: PipelineWarmupDedupeCounters::default(),
             shader_module_cache: Arc::new(ShaderModuleCache::default()),
             compile_on_render_thread,
+            render_thread_compiles_per_frame,
         }
     }
 
@@ -592,12 +595,20 @@ impl MaterialPipelineCache {
     /// every cache probe.
     pub(super) fn drain_pipeline_build_completions(&self) {
         profiling::scope!("materials::drain_pipeline_build_completions");
-        // Software and headless builds were queued for this thread. Finish at most one
-        // before draining the completion channel so this frame can record it. Real GPUs
-        // leave the queue empty and only observe the background pool here.
+        // Software and headless builds were queued for this thread. Headless finishes
+        // the queue; a windowed software adapter finishes at most one. Real GPUs leave
+        // the queue empty and only observe the background pool here.
         if self.compile_on_render_thread {
-            drain_render_thread_pipeline_builds(RENDER_THREAD_PIPELINE_COMPILES_PER_FRAME);
+            drain_render_thread_pipeline_builds(self.render_thread_compiles_per_frame);
         }
+        self.drain_completed_pipeline_builds();
+    }
+
+    /// Applies pipeline builds that already finished, without starting a render-thread compile.
+    ///
+    /// Used when the driver thread is still inside a previous submit. Compiling then would
+    /// overlap `Queue::submit` on DX12 WARP.
+    pub(super) fn drain_finished_pipeline_builds(&self) {
         self.drain_completed_pipeline_builds();
     }
 

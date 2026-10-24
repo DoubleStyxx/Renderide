@@ -3,12 +3,17 @@
 //! Real GPUs keep the background pool. Headless captures and software adapters
 //! (WARP, lavapipe, llvmpipe) compile on the render thread instead: a background
 //! `create_render_pipeline` deadlocks DX12 WARP while the render thread is inside
-//! a frame. That path compiles at most [`RENDER_THREAD_PIPELINE_COMPILES_PER_FRAME`]
-//! pipelines per drain, so a desktop software adapter cannot compile a whole scene
-//! in one frame. The caller flushes the driver thread before the drain so the compile
-//! does not overlap `Queue::submit`; on DX12 WARP that overlap hangs the render thread
-//! and can leave a corrupt pipeline marked ready. Queued builds stay pending and finish
-//! on later frames.
+//! a frame. The caller waits until the driver thread has finished `Queue::submit`
+//! and the device is idle before that compile. On DX12 WARP, overlapping the two
+//! hangs the render thread and can cache a pipeline that under-draws.
+//!
+//! A windowed software adapter compiles at most
+//! [`RENDER_THREAD_PIPELINE_COMPILES_PER_FRAME`] pipelines per drain so one frame
+//! cannot absorb a whole scene. Headless captures compile the whole queued set in
+//! that drain. Splitting the same set across submitted frames on DX12 WARP published
+//! a steady PBS frame under the golden coverage gate (1119 unique colors, 5.9%
+//! non-background) where compiling the queue before the submit passed (3780 colors,
+//! 8.8%). Queued builds that do not fit in this drain stay pending.
 
 use std::sync::{Arc, OnceLock};
 
@@ -61,6 +66,27 @@ pub(crate) fn compile_on_render_thread(
     adapter_name: &str,
 ) -> bool {
     headless || device_type == wgpu::DeviceType::Cpu || adapter_name_is_software(adapter_name)
+}
+
+/// How many render-thread pipeline compiles one drain may run.
+///
+/// `0` keeps the background pool. Headless returns [`usize::MAX`] so the capture
+/// compiles every pipeline queued for this thread before the frame submits. A
+/// windowed software adapter returns [`RENDER_THREAD_PIPELINE_COMPILES_PER_FRAME`].
+/// Real GPUs are unchanged: cold-load cost stays on the background pool.
+pub(crate) fn render_thread_compiles_per_frame(
+    headless: bool,
+    device_type: wgpu::DeviceType,
+    adapter_name: &str,
+) -> usize {
+    if !compile_on_render_thread(headless, device_type, adapter_name) {
+        return 0;
+    }
+    if headless {
+        usize::MAX
+    } else {
+        RENDER_THREAD_PIPELINE_COMPILES_PER_FRAME
+    }
 }
 
 fn adapter_name_is_software(name: &str) -> bool {
@@ -125,6 +151,11 @@ fn render_thread_pipeline_build_queue() -> &'static Mutex<Vec<PipelineBuildReque
     &QUEUE
 }
 
+/// True when a render-thread compile is waiting for the next drain.
+pub(crate) fn render_thread_builds_queued() -> bool {
+    !render_thread_pipeline_build_queue().lock().is_empty()
+}
+
 fn material_pipeline_compile_worker_count() -> usize {
     std::thread::available_parallelism().map_or(1, |threads| {
         (threads.get() / 2).clamp(1, MATERIAL_PIPELINE_MAX_WORKERS)
@@ -147,8 +178,9 @@ fn material_pipeline_compile_pool() -> Result<&'static rayon::ThreadPool, String
 #[cfg(test)]
 mod tests {
     use super::{
-        MATERIAL_PIPELINE_MAX_WORKERS, compile_on_render_thread,
-        material_pipeline_compile_worker_count,
+        MATERIAL_PIPELINE_MAX_WORKERS, RENDER_THREAD_PIPELINE_COMPILES_PER_FRAME,
+        compile_on_render_thread, material_pipeline_compile_worker_count,
+        render_thread_compiles_per_frame,
     };
 
     #[test]
@@ -191,5 +223,25 @@ mod tests {
             wgpu::DeviceType::IntegratedGpu,
             "Intel(R) UHD Graphics"
         ));
+    }
+
+    #[test]
+    fn headless_compiles_the_queued_set_and_windowed_software_compiles_one() {
+        let discrete = wgpu::DeviceType::DiscreteGpu;
+        let cpu = wgpu::DeviceType::Cpu;
+
+        assert_eq!(
+            render_thread_compiles_per_frame(true, discrete, "NVIDIA GeForce RTX 4090"),
+            usize::MAX
+        );
+        assert_eq!(
+            render_thread_compiles_per_frame(false, cpu, "Microsoft Basic Render Driver"),
+            RENDER_THREAD_PIPELINE_COMPILES_PER_FRAME
+        );
+        assert_eq!(
+            render_thread_compiles_per_frame(false, discrete, "NVIDIA GeForce RTX 4090"),
+            0
+        );
+        assert_eq!(RENDER_THREAD_PIPELINE_COMPILES_PER_FRAME, 1);
     }
 }

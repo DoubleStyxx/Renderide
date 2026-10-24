@@ -55,6 +55,10 @@ pub struct RenderBackendAttachDesc {
     /// Headless and software adapters compile material pipelines on the render thread.
     /// Real GPUs leave this false and use the background pool.
     pub compile_pipelines_on_render_thread: bool,
+    /// Render-thread compiles allowed in one drain. Headless is [`usize::MAX`].
+    /// A windowed software adapter is one. Ignored when
+    /// `compile_pipelines_on_render_thread` is false.
+    pub render_thread_compiles_per_frame: usize,
 }
 
 impl RenderBackend {
@@ -86,6 +90,7 @@ impl RenderBackend {
             suppress_renderer_config_disk_writes,
             headless,
             compile_pipelines_on_render_thread,
+            render_thread_compiles_per_frame,
         } = desc;
         self.renderer_settings = Some(renderer_settings.clone());
         self.surface_format = Some(surface_format);
@@ -119,13 +124,14 @@ impl RenderBackend {
             );
         }
         logger::info!(
-            "material pipelines: compile_on_render_thread={compile_pipelines_on_render_thread}"
+            "material pipelines: compile_on_render_thread={compile_pipelines_on_render_thread} per_frame={render_thread_compiles_per_frame}"
         );
         self.materials.try_attach_gpu(
             device.clone(),
             &queue,
             Arc::clone(&gpu_limits),
             compile_pipelines_on_render_thread,
+            render_thread_compiles_per_frame,
         )?;
         self.reflection_probes
             .pre_warm_sh2_projection_pipelines(&device);

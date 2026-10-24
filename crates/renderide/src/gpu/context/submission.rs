@@ -7,7 +7,11 @@
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// How long a render-thread pipeline compile waits for the previous `Queue::submit`
+/// to leave the driver thread. The readback flush stays on its own shorter timeout.
+const PIPELINE_COMPILE_DRIVER_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 use super::GpuContext;
 use crate::gpu::GpuRetainedResources;
@@ -324,6 +328,33 @@ impl GpuContext {
     /// runs on the main thread). Most code paths never need this.
     pub fn flush_driver(&self) {
         self.submission.driver_thread.flush();
+    }
+
+    /// Waits until the driver thread has finished every queued submit and the device
+    /// reports no pending GPU work.
+    ///
+    /// Render-thread `create_render_pipeline` calls this first. A timed-out wait
+    /// returns false so the caller leaves the compile queued instead of overlapping
+    /// `Queue::submit` on DX12 WARP.
+    pub fn wait_until_idle_for_pipeline_compile(&self) -> bool {
+        if !self
+            .submission
+            .driver_thread
+            .flush_within(PIPELINE_COMPILE_DRIVER_IDLE_TIMEOUT)
+        {
+            logger::warn!(
+                "material pipeline compile deferred: driver thread did not finish Queue::submit within {}s",
+                PIPELINE_COMPILE_DRIVER_IDLE_TIMEOUT.as_secs()
+            );
+            return false;
+        }
+        if let Err(err) = self.device().poll(wgpu::PollType::wait_indefinitely()) {
+            logger::warn!(
+                "material pipeline compile deferred: device poll failed before create_render_pipeline: {err}"
+            );
+            return false;
+        }
+        true
     }
 
     /// Blocks only until the most recently submitted surface-carrying batch has reached
