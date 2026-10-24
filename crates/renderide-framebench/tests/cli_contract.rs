@@ -131,12 +131,20 @@ fn run_without_json_keeps_stdout_free_of_error_documents() {
 #[cfg(unix)]
 #[test]
 fn renderer_that_never_handshakes_exits_3() {
+    use std::os::unix::fs::PermissionsExt;
+
     let dir = tempfile::tempdir().expect("tempdir");
+    // A script, not /bin/true: macOS has no /bin/true (it is /usr/bin/true).
+    let renderer = dir.path().join("exit-at-once.sh");
+    std::fs::write(&renderer, "#!/bin/sh\nexit 0\n").expect("write renderer stub");
+    std::fs::set_permissions(&renderer, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod renderer stub");
+    let renderer = renderer.to_str().expect("utf8 tempdir path");
     let output = run(
         &[
             "run",
             "--renderer",
-            "/bin/true",
+            renderer,
             "--scenario",
             "unlit_sphere",
             "--timeout-seconds",
