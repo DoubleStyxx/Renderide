@@ -64,6 +64,11 @@ pub struct WorldMeshDrawCollection {
     pub visibility: WorldMeshVisibilityStats,
     /// CPU arrangement counters for the final draw list.
     pub arrangement: WorldMeshDrawArrangementStats,
+    /// Set while collecting when this view consumes motion vectors and a draw carries a previous matrix.
+    ///
+    /// Prepare reads this instead of scanning the draw list again. Views that do not consume motion
+    /// vectors leave it false and skip the previous-matrix lookup.
+    pub has_rigid_object_motion: bool,
 }
 
 impl WorldMeshDrawCollection {
@@ -76,6 +81,7 @@ impl WorldMeshDrawCollection {
             draws_hi_z_culled: 0,
             visibility: WorldMeshVisibilityStats::default(),
             arrangement: WorldMeshDrawArrangementStats::default(),
+            has_rigid_object_motion: false,
         }
     }
 }
@@ -149,8 +155,33 @@ pub struct WorldMeshDrawItem {
     /// Approximate camera distance metric used for transparent-sorted back-to-front ordering.
     ///
     /// Transparent draws prefer world bounds when available and fall back to transform-origin
-    /// distance when the host has not provided usable mesh bounds for the draw.
+    /// distance when the host has not provided usable mesh bounds for the draw. This remains the
+    /// farthest-corner metric. Canvas stems do not use it for UI-versus-UI ordering; see
+    /// [`Self::canvas_plane_depth`].
     pub camera_distance_sq: f32,
+    /// Absolute distance from the view origin to this draw's plane, in meters.
+    ///
+    /// `Some` only for canvas UI stems (`ui_unlit`, `ui_textunlit`, `ui_circlesegment`) when the
+    /// rigid world matrix defines a usable plane. The value does not depend on the camera
+    /// forward. Siblings within `0.1` mm snap to one anchor before the `0.5` mm quantum, so float
+    /// noise cannot split a run. Larger values are farther from the view origin. The closer NDC
+    /// bias cap is sized at this perpendicular distance. Under perspective a fragment at view
+    /// distance `z` is pulled about `(z / P)^2` times that capped pull. `None` keeps
+    /// farthest-corner ordering for that draw, and the cap then falls back to that corner.
+    pub canvas_plane_depth: Option<f32>,
+    /// `true` when [`Self::batch_key`] is a canvas UI stem.
+    ///
+    /// Collected once so the transparent comparator and the depth-step walk do not repeat the
+    /// stem-name match.
+    pub is_canvas_ui: bool,
+    /// Farther-first transparent depth key collected with this draw.
+    ///
+    /// Canvas stems with [`Self::canvas_plane_depth`] store the quantized plane distance. Every
+    /// other transparent draw stores `sqrt(camera_distance_sq)`. The comparator compares these
+    /// numbers directly. A canvas-versus-world pair therefore does not use the same order as
+    /// comparing both draws by farthest-corner distance. A large glass pane in front of a canvas
+    /// sorts behind it when the pane's farthest corner is farther than the canvas plane.
+    pub transparent_depth_key: f64,
     /// Conservative world-space bounds for visibility tests that run after draw collection.
     ///
     /// `None` keeps the draw visible. Overlay-space draws and sources with unusable host bounds
@@ -187,6 +218,12 @@ pub struct WorldMeshDrawItem {
     /// Rigid-body world matrix for non-skinned draws, filled during draw collection to avoid
     /// recomputing [`crate::scene::SceneCoordinator::world_matrix_for_render_context`] in the forward pass.
     pub rigid_world_matrix: Option<Mat4>,
+    /// Previous rigid world matrix when this draw should write object velocity.
+    ///
+    /// `None` keeps the camera-reprojection velocity already stored for the pixel. Set only for
+    /// rigid, non-overlay, non-particle static draws in [`crate::shared::MotionVectorMode::Object`]
+    /// whose current matrix matches the cached hierarchy matrix and differs from the previous one.
+    pub previous_rigid_world_matrix: Option<Mat4>,
     /// CPU-selected specular reflection probes for this draw.
     pub reflection_probes: ReflectionProbeDrawSelection,
     /// Object-local UI rect clip. `Some` enables overlay rect-clip cull and per-draw scissor.

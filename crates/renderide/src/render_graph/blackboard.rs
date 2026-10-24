@@ -411,11 +411,10 @@ blackboard_slot! {
     /// Blackboard slot reserving the per-view screen-space motion-vector texture for temporal
     /// techniques (TAA, motion blur, temporal denoising).
     ///
-    /// **No pass produces this slot today.** The slot is declared so downstream work can land a
-    /// velocity prepass without coordinating a new blackboard key across the codebase in the same
-    /// change. `Value` is the [`ImportedTextureHandle`] of the `Rg16Float` velocity target; the
-    /// consumer resolves the actual `wgpu::TextureView` via the graph-resources context at encode
-    /// time.
+    /// **No pass produces this slot today.** Production motion blur allocates its own transient
+    /// `Rg16Float` velocity target. That target is not an [`ImportedTextureHandle`], so this
+    /// test-only slot is not the producer hook for object velocity. Object velocity is composited
+    /// into the transient target by `ObjectMotionVectors` after the camera reprojection pass.
     ///
     /// Lives on the per-view blackboard because motion vectors are screen-space and view-specific.
     pub FrameMotionVectorsSlot => ImportedTextureHandle,

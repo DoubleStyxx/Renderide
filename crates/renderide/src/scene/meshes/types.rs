@@ -105,8 +105,8 @@ pub struct SkinnedMeshRenderer {
     /// Host-computed posed AABB for this skinned renderable, expressed in the space of
     /// [`Self::root_bone_transform_id`] (the renderer-root local frame the host sends to us in
     /// [`crate::shared::SkinnedMeshBoundsUpdate::local_bounds`]). `None` until the host has sent
-    /// the first bounds row for this renderable -- culling falls back to the mesh bind-pose AABB
-    /// transformed by the renderable's root matrix.
+    /// the first bounds row for this renderable. Culling does not substitute the rest mesh AABB:
+    /// a pose can leave that box, so a missing posed box leaves the draw visible.
     pub posed_object_bounds: Option<RenderBoundingBox>,
 }
 

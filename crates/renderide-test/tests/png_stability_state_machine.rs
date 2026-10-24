@@ -16,6 +16,7 @@ fn timing(scene_submitted_at: SystemTime, scene_submit_instant: Instant) -> PngS
         scene_submit_instant,
         overall_timeout: Duration::from_secs(10),
         interval: Duration::from_secs(1),
+        non_flat_skips: 0,
     }
 }
 

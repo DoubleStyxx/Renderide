@@ -3,6 +3,7 @@
 use glam::Mat4;
 
 use crate::camera::{HostCameraFrame, ViewId};
+use crate::scene::RenderSpaceId;
 use crate::shared::RenderingContext;
 use crate::world_mesh::{ViewLayerPolicy, ViewRenderSpaceScope, WorldMeshCullProjParams};
 
@@ -27,7 +28,14 @@ pub(crate) struct FrameLightViewDesc {
     /// Layer/private-space visibility policy matching this view's draw collection.
     pub layer_policy: ViewLayerPolicy,
     /// Whether this view has an explicit selective root list.
+    ///
+    /// Combined with [`Self::transform_filter_space`]. An unset filter space applies this flag to
+    /// every in-scope render space. A set filter space applies it only to that space.
     pub has_selective_roots: bool,
+    /// Render space whose selective roots can reveal private lights.
+    ///
+    /// `None` matches draw collection when the transform filter is not bound to one space.
+    pub transform_filter_space: Option<RenderSpaceId>,
     /// Head-output transform used when resolving overlay-space world matrices.
     pub head_output_transform: Mat4,
     /// Whether this view should pack shadow metadata for contributing lights.

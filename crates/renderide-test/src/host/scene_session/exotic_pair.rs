@@ -2,7 +2,7 @@
 //! right. Both materials set `_Speed` to 0 so the frame does not depend on `frame_time`.
 
 use glam::{Quat, Vec3};
-use renderide_shared::shared::ColorProfile;
+use renderide_shared::shared::{ColorProfile, ShadowCastMode};
 use renderide_shared::{format_custom_shader_assign, format_custom_shader_payload};
 
 use crate::error::HarnessError;
@@ -108,6 +108,7 @@ pub(super) fn scene_setup() -> SceneSetup {
                     mesh_asset_id: super::scene_mesh_id(0),
                     material_asset_id: scene_material_id(0),
                     sorting_order: 0,
+                    shadow_cast_mode: ShadowCastMode::Off,
                 },
                 SceneRenderable {
                     transform_id: 1,
@@ -119,9 +120,11 @@ pub(super) fn scene_setup() -> SceneSetup {
                     mesh_asset_id: super::scene_mesh_id(0),
                     material_asset_id: scene_material_id(1),
                     sorting_order: 0,
+                    shadow_cast_mode: ShadowCastMode::Off,
                 },
             ],
             lights: Vec::new(),
+            skinned: Vec::new(),
         },
     }
 }

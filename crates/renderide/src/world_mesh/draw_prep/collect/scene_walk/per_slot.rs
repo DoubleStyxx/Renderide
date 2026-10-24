@@ -27,7 +27,7 @@ enum SlotCullDecision {
     RejectedFrustum,
     /// Draw is rejected by Hi-Z culling.
     RejectedHiZ,
-    /// No cull pass was active for this draw (skinned, or no culling config); skip cull bookkeeping.
+    /// No cull pass was active for this draw; skip cull bookkeeping.
     NotApplicable,
 }
 
@@ -126,6 +126,7 @@ pub(super) fn push_one_slot_draw(
         rigid_world_matrix,
         alpha_distance_sq,
     ) {
+        *acc.has_rigid_object_motion |= item.previous_rigid_world_matrix.is_some();
         acc.out.push(item);
     }
 }

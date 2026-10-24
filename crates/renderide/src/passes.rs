@@ -21,11 +21,18 @@ pub(crate) use post_processing::{
     GtaoGraphResources, GtaoPassRange, MotionBlurEffect,
 };
 pub(crate) use scene_color_compose::{SceneColorComposeGraphResources, SceneColorComposePass};
+#[cfg(feature = "bench-api")]
+pub use world_mesh_forward::CameraClearLoadOpInput;
 pub(crate) use world_mesh_forward::ForwardMsaaResources;
+#[cfg(feature = "bench-api")]
 pub(crate) use world_mesh_forward::{
-    GTAO_VIEW_NORMAL_FORMAT, MaterialBatchBoundary, PreparedWorldMeshForwardFrame,
-    ShadowDepthDrawBatch, WorldMeshDepthSnapshotPass, WorldMeshDesktopOverlayGraphResources,
-    WorldMeshDesktopOverlayPass, WorldMeshForwardDepthPrepass,
+    CAMERA_CLEAR_LOAD_OP_CAMERAS, camera_clear_load_op_checksum, camera_clear_load_op_inputs,
+};
+pub(crate) use world_mesh_forward::{
+    GTAO_VIEW_NORMAL_FORMAT, MaterialBatchBoundary, ObjectMotionDraw,
+    PreparedWorldMeshForwardFrame, ShadowDepthDrawBatch, WorldMeshDepthSnapshotPass,
+    WorldMeshDesktopOverlayGraphResources, WorldMeshDesktopOverlayPass,
+    WorldMeshForwardColorPreservePass, WorldMeshForwardDepthPrepass,
     WorldMeshForwardDepthPrepassGraphResources, WorldMeshForwardDepthPrepassPipelineKey,
     WorldMeshForwardDepthResolvePass, WorldMeshForwardEncodeRefs, WorldMeshForwardGraphResources,
     WorldMeshForwardGtaoDepthResolvePass, WorldMeshForwardInstancePlanCache,
@@ -37,5 +44,6 @@ pub(crate) use world_mesh_forward::{
     WorldMeshForwardPrepareScratch, WorldMeshForwardPrepareView, WorldMeshForwardSkyboxRenderer,
     WorldMeshForwardTransparentSequencePass, WorldMeshOverlayForwardPlanSlot,
     depth_prepass_pipeline_key_for_draw, draw_shadow_depth_subset, normal_pipeline_key_for_draw,
-    pre_warm_depth_prepass_pipeline, pre_warm_normal_pipeline, prepare_world_mesh_forward_frame,
+    object_motion_previous_vp_bind_group, pre_warm_depth_prepass_pipeline,
+    pre_warm_normal_pipeline, prepare_world_mesh_forward_frame, record_object_motion_vectors,
 };

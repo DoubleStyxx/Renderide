@@ -298,6 +298,7 @@ fn hash_world_mesh_draw_item<H: Hasher>(item: &WorldMeshDrawItem, hasher: &mut H
     item._opaque_depth_bucket.hash(hasher);
     item.sort_prefix.hash(hasher);
     hash_mat4_option(item.rigid_world_matrix, hasher);
+    hash_mat4_option(item.previous_rigid_world_matrix, hasher);
     hash_reflection_probe_selection(item, hasher);
     hash_vec4_option(item.ui_rect_clip_local, hasher);
 }
@@ -327,6 +328,13 @@ fn hash_world_mesh_draw_order_item<H: Hasher>(item: &WorldMeshDrawItem, hasher: 
 fn hash_camera_distance_if_ordered<H: Hasher>(item: &WorldMeshDrawItem, hasher: &mut H) {
     if item.batch_key.requires_strict_order() {
         item.camera_distance_sq.to_bits().hash(hasher);
+        match item.canvas_plane_depth {
+            Some(depth) => {
+                true.hash(hasher);
+                depth.to_bits().hash(hasher);
+            }
+            None => false.hash(hasher),
+        }
     }
 }
 

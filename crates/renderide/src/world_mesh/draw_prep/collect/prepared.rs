@@ -19,7 +19,10 @@ use super::candidate::{DrawCandidate, evaluate_draw_candidate};
 use super::transform_chain_has_degenerate_scale;
 use super::world_matrix::{front_face_for_draw_matrices, world_matrix_for_local_vertex_stream};
 use super::{CollectState, DrawCollectionInputs};
-use super::{effective_overlay_in_view, special_layer_visible_in_view, transform_filter_for_space};
+use super::{
+    effective_overlay_in_view, render_space_visible_in_view, special_layer_visible_in_view,
+    transform_filter_for_space,
+};
 
 /// Returns true when two prepared slot entries came from the same source renderer.
 #[inline]
@@ -140,7 +143,7 @@ fn prepared_run_view_state<'a>(
             let target = MeshCullTarget {
                 scene: ctx.scene_assets.scene,
                 space_id: first.space_id,
-                mesh,
+                mesh_bounds: &mesh.bounds,
                 skinned: first.skinned,
                 skinned_renderer: skinning.as_renderer(),
                 node_id: first.node_id,
@@ -216,7 +219,8 @@ fn append_prepared_run_draws(
     is_overlay: bool,
     state: PreparedRunViewState,
     out: &mut Vec<WorldMeshDrawItem>,
-) {
+) -> bool {
+    let mut has_rigid_object_motion = false;
     for d in run {
         let primitive_topology =
             stacked_material_submesh_topology(d.slot_index, &mesh.submesh_topologies);
@@ -251,9 +255,11 @@ fn append_prepared_run_draws(
             state.rigid_world_matrix,
             state.alpha_distance_sq,
         ) {
+            has_rigid_object_motion |= item.previous_rigid_world_matrix.is_some();
             out.push(item);
         }
     }
+    has_rigid_object_motion
 }
 
 /// Collects one prepared renderer run after frame-global slot expansion.
@@ -263,11 +269,15 @@ fn collect_prepared_renderer_run<'a>(
     state: CollectState<'_>,
     cull_cache: &mut SpaceCullCache<'a>,
     out: &mut Vec<WorldMeshDrawItem>,
+    has_rigid_object_motion: &mut bool,
 ) -> (usize, usize, usize) {
     let Some(first) = run.first() else {
         return (0, 0, 0);
     };
-    if !ctx.view.render_space_scope.includes(first.space_id) {
+    // Shadow passes and other unculled walks visit every prepared run. The filtered space-id
+    // list is not consulted here, and LOD treats a missing space as visible, so private UI has
+    // to be rejected by the same predicate as the color query.
+    if !render_space_visible_in_view(ctx, first.space_id) {
         return (0, 0, 0);
     }
     if !prepared_run_passes_filter(first, ctx, state.filter_masks) {
@@ -293,6 +303,9 @@ fn collect_prepared_renderer_run<'a>(
     if transform_chain_has_degenerate_scale(ctx, first.space_id, first.node_id) {
         return (0, 0, 0);
     }
+    // Recorded before mesh lookup so unit tests can see admission without a resident `GpuMesh`.
+    #[cfg(test)]
+    prepared_admission::note(first.space_id);
     let is_overlay = effective_overlay_in_view(ctx, source_is_overlay);
     let Some(mesh) = ctx.scene_assets.mesh_pool.get(first.mesh_asset_id) else {
         return (0, 0, 0);
@@ -304,7 +317,8 @@ fn collect_prepared_renderer_run<'a>(
     let (view_state, cull_stats) =
         prepared_run_view_state(run, first, is_overlay, mesh, &skinning, ctx, cull_cache);
     if let Some(view_state) = view_state {
-        append_prepared_run_draws(run, ctx, state.cache, mesh, is_overlay, view_state, out);
+        *has_rigid_object_motion |=
+            append_prepared_run_draws(run, ctx, state.cache, mesh, is_overlay, view_state, out);
     }
     cull_stats
 }
@@ -321,7 +335,7 @@ pub(super) fn collect_prepared_chunk<'a>(
     runs: &[FramePreparedRun],
     ctx: &DrawCollectionInputs<'a>,
     state: CollectState<'_>,
-) -> (Vec<WorldMeshDrawItem>, (usize, usize, usize)) {
+) -> (Vec<WorldMeshDrawItem>, (usize, usize, usize), bool) {
     profiling::scope!("mesh::collect_prepared::chunk");
     let chunk_draws = {
         profiling::scope!("mesh::collect_prepared::chunk_capacity");
@@ -331,6 +345,7 @@ pub(super) fn collect_prepared_chunk<'a>(
     };
     let mut out: Vec<WorldMeshDrawItem> = Vec::with_capacity(chunk_draws);
     let mut cull_stats = (0usize, 0usize, 0usize);
+    let mut has_rigid_object_motion = false;
     let mut cull_cache = SpaceCullCache::<'a>::new();
 
     {
@@ -339,13 +354,53 @@ pub(super) fn collect_prepared_chunk<'a>(
             let start = prepared_run.start as usize;
             let end = prepared_run.end as usize;
             let run = &draws[start..end];
-            let run_stats =
-                collect_prepared_renderer_run(run, ctx, state, &mut cull_cache, &mut out);
+            let run_stats = collect_prepared_renderer_run(
+                run,
+                ctx,
+                state,
+                &mut cull_cache,
+                &mut out,
+                &mut has_rigid_object_motion,
+            );
             cull_stats.0 += run_stats.0;
             cull_stats.1 += run_stats.1;
             cull_stats.2 += run_stats.2;
         }
     }
 
-    (out, cull_stats)
+    (out, cull_stats, has_rigid_object_motion)
+}
+
+/// Spaces admitted by prepared collection after private-UI and layer gates.
+///
+/// Production builds omit this. Tests use it because a missing mesh yields no draw items for
+/// both filtered and leaked runs, so draw length cannot show whether private UI was rejected.
+///
+/// The record is thread-local. It is complete only when collection stays on the calling thread
+/// (`WorldMeshDrawCollectParallelism::SerialInnerForNestedBatch`). Parallel chunk workers note
+/// their own threads, and `take` does not see those notes.
+#[cfg(test)]
+pub(super) mod prepared_admission {
+    use std::cell::RefCell;
+
+    use crate::scene::RenderSpaceId;
+
+    thread_local! {
+        static ADMITTED: RefCell<Vec<RenderSpaceId>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Clears admissions recorded on this thread.
+    pub(in super::super) fn reset() {
+        ADMITTED.with(|admitted| admitted.borrow_mut().clear());
+    }
+
+    /// Records one renderer run that passed view visibility gates.
+    pub(in super::super) fn note(space_id: RenderSpaceId) {
+        ADMITTED.with(|admitted| admitted.borrow_mut().push(space_id));
+    }
+
+    /// Takes the admissions recorded on this thread.
+    pub(in super::super) fn take() -> Vec<RenderSpaceId> {
+        ADMITTED.with(|admitted| admitted.replace(Vec::new()))
+    }
 }

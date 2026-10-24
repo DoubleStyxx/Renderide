@@ -19,6 +19,12 @@ struct PerDrawUniforms {
     /// Particle draw metadata: texture-sheet frame grid width/height.
     particle_frame_grid: vec4<f32>,
     /// Padding so each dynamic storage row remains aligned to 512 bytes.
+    ///
+    /// Layout shared with `PaddedPerDrawUniforms._pad2`:
+    /// - `[0..4]`: previous rigid model columns.
+    /// - `[4].x`: `1.0` when that previous model was written.
+    /// - `[5].x`: reserved for the LOD fade weight (#182). Object velocity never writes row 5.
+    /// - `[6..12]`: unused.
     particle_padding: array<vec4<f32>, 12>,
 }
 
@@ -44,6 +50,23 @@ fn select_view_proj(draw: PerDrawUniforms, view_idx: u32) -> mat4x4<f32> {
         return draw.view_proj_left;
     }
     return draw.view_proj_right;
+}
+
+/// Previous rigid model packed into `particle_padding[0..4]`.
+///
+/// Row 5 is reserved for the LOD fade weight and is not read here.
+fn previous_model(draw: PerDrawUniforms) -> mat4x4<f32> {
+    return mat4x4<f32>(
+        draw.particle_padding[0],
+        draw.particle_padding[1],
+        draw.particle_padding[2],
+        draw.particle_padding[3],
+    );
+}
+
+/// `true` when [`previous_model`] was written for this draw.
+fn previous_model_valid(draw: PerDrawUniforms) -> bool {
+    return draw.particle_padding[4].x > 0.5;
 }
 
 /// `true` when the bound position stream has already been transformed into world space.

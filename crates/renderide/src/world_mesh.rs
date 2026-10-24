@@ -11,7 +11,7 @@ pub(crate) mod instances;
 pub(crate) mod materials;
 pub(crate) mod phase_classification;
 pub mod prefetch;
-#[cfg(test)]
+#[cfg(any(test, feature = "bench-api"))]
 pub(crate) mod test_fixtures;
 
 pub use culling::{
@@ -32,12 +32,14 @@ pub use draw_prep::{
     WorldMeshDrawCollectParallelism, WorldMeshDrawItem, draw_filter_from_camera_entry,
 };
 pub(crate) use draw_prep::{
-    QueuedWorldMeshDraws, WorldMeshCommandCache, fingerprint_world_mesh_draws,
-    queue_draws_with_parallelism, queue_prepared_draws_for_views_with_parallelism,
+    QueuedWorldMeshDraws, WorldMeshCommandCache, apply_reverse_z_ndc_bias,
+    assign_canvas_depth_steps, canvas_bias_projection, canvas_ndc_z_bias,
+    fingerprint_world_mesh_draws, queue_draws_with_parallelism,
+    queue_prepared_draws_for_views_with_parallelism,
 };
 pub use instances::{DrawGroup, InstancePlan, MeshPassKind, WorldMeshPhase, build_plan_for_shader};
 pub(crate) use instances::{depth_prepass_group_eligible, depth_prepass_item_eligible};
-#[cfg(test)]
+#[cfg(any(test, feature = "bench-api"))]
 pub(crate) use materials::compute_batch_key_hash;
 pub use materials::{FrameMaterialBatchCache, MaterialDrawBatchKey, TransparentMaterialClass};
 pub use prefetch::{PrefetchedWorldMeshViewDraws, WorldMeshDrawPlan, WorldMeshHelperNeeds};

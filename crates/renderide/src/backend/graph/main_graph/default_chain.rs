@@ -30,6 +30,7 @@ pub(super) fn build_default_post_processing_chain(
     }));
     chain.push(Box::new(crate::passes::MotionBlurEffect::new(
         h.depth,
+        h.per_draw_slab,
         post_processing_resources.motion_blur_state_cache(),
     )));
     chain.push(Box::new(crate::passes::AcesTonemapEffect));

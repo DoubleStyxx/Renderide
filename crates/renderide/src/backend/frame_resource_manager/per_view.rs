@@ -446,6 +446,7 @@ impl FrameResourceManager {
             let changed = sync.changed;
             self.apply_shadow_atlas_resolution(resolution);
             if changed {
+                self.mark_shadow_maps_for_render();
                 self.rebuild_per_view_frame_bind_groups_for_global_sync(device, view_layouts);
             }
         }

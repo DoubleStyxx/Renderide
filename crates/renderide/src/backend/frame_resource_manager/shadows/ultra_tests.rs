@@ -68,6 +68,7 @@ fn prefetched_plan(items: Vec<WorldMeshDrawItem>) -> WorldMeshDrawPlan {
             draws_hi_z_culled: 0,
             visibility: Default::default(),
             arrangement: Default::default(),
+            has_rigid_object_motion: false,
         },
         None,
     )))
@@ -93,8 +94,11 @@ fn shadow_planning_clamps_to_gpu_atlas_capacity() {
         });
     let draw_plan = prefetched_plan(vec![pbs_draw(1, ShadowCastMode::On)]);
 
-    manager
-        .prepare_shadow_frame_for_views(HostShadowQuality::default(), [(ViewId::Main, &draw_plan)]);
+    manager.prepare_shadow_frame_for_views(
+        HostShadowQuality::default(),
+        [(ViewId::Main, &draw_plan)],
+        &super::ZeroShadowContentRevisions,
+    );
 
     let plan = manager.shadow_frame_plan();
     assert_eq!(shadow_view_capacity(manager.limits.as_deref()), 2);
@@ -134,7 +138,11 @@ fn ultra_shadow_planning_caps_quality_resolution_by_light_type() {
         ..Default::default()
     });
 
-    manager.prepare_shadow_frame_for_views(quality, [(ViewId::Main, &draw_plan)]);
+    manager.prepare_shadow_frame_for_views(
+        quality,
+        [(ViewId::Main, &draw_plan)],
+        &super::ZeroShadowContentRevisions,
+    );
 
     let plan = manager.shadow_frame_plan();
     assert_eq!(plan.requested_resolution, 4096);
@@ -170,7 +178,11 @@ fn custom_shadow_resolution_override_bypasses_quality_light_type_cap() {
         ..Default::default()
     });
 
-    manager.prepare_shadow_frame_for_views(quality, [(ViewId::Main, &draw_plan)]);
+    manager.prepare_shadow_frame_for_views(
+        quality,
+        [(ViewId::Main, &draw_plan)],
+        &super::ZeroShadowContentRevisions,
+    );
 
     let plan = manager.shadow_frame_plan();
     assert_eq!(plan.requested_resolution, 2048);
@@ -200,7 +212,11 @@ fn applying_actual_atlas_resolution_updates_shadow_metadata() {
         ..Default::default()
     });
 
-    manager.prepare_shadow_frame_for_views(quality, [(ViewId::Main, &draw_plan)]);
+    manager.prepare_shadow_frame_for_views(
+        quality,
+        [(ViewId::Main, &draw_plan)],
+        &super::ZeroShadowContentRevisions,
+    );
     let old_bias = manager.shadow_frame_plan().metadata[1].light_params[2];
     manager.apply_shadow_atlas_resolution(1024);
 

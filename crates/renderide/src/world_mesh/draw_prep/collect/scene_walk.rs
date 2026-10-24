@@ -3,6 +3,8 @@
 mod cull_cache;
 mod per_renderer;
 mod per_slot;
+#[cfg(test)]
+mod skinned_cull_tests;
 
 use crate::scene::{RenderSpaceId, SkinnedMeshRenderer, StaticMeshRenderer};
 
@@ -40,8 +42,7 @@ struct OverlayDeformCullFlags<'a> {
     pub blendshape_deformed: bool,
     /// Active blendshape tangent deltas should run when a material reads tangents.
     pub tangent_blendshape_deform_active: bool,
-    /// Cached cull outcome for this renderer; `None` when the cull was skipped (skinned or no
-    /// culling pass active).
+    /// Cached cull outcome for this renderer; `None` when no culling pass is active.
     pub cached_cull: Option<&'a CachedCull>,
 }
 
@@ -74,6 +75,8 @@ struct DrawCollectionAccumulator<'a> {
     /// Precomputed filter result per node index. When `Some`, used in place of
     /// [`super::super::filter::CameraTransformDrawFilter::passes_scene_node`] to avoid per-draw ancestor walks.
     pub filter_pass_mask: Option<&'a [bool]>,
+    /// Set when a pushed draw carries a previous rigid matrix.
+    pub has_rigid_object_motion: &'a mut bool,
 }
 
 /// Whether a chunk covers the static or skinned renderer list of a render space.
@@ -140,15 +143,16 @@ pub(super) fn collect_chunk(
     spec: &WorldMeshChunkSpec,
     ctx: &DrawCollectionInputs<'_>,
     state: CollectState<'_>,
-) -> (Vec<WorldMeshDrawItem>, (usize, usize, usize)) {
+) -> (Vec<WorldMeshDrawItem>, (usize, usize, usize), bool) {
     let mut out = Vec::new();
     let mut cull_stats = (0usize, 0usize, 0usize);
+    let mut has_rigid_object_motion = false;
 
     let Some(space) = ctx.scene_assets.scene.space(spec.space_id) else {
-        return (out, cull_stats);
+        return (out, cull_stats, false);
     };
     if !space.is_active() {
-        return (out, cull_stats);
+        return (out, cull_stats, false);
     }
 
     let filter_pass_mask = state.filter_masks.get(&spec.space_id).map(Vec::as_slice);
@@ -156,6 +160,7 @@ pub(super) fn collect_chunk(
         out: &mut out,
         cull_stats: &mut cull_stats,
         filter_pass_mask,
+        has_rigid_object_motion: &mut has_rigid_object_motion,
     };
 
     match spec.kind {
@@ -193,7 +198,7 @@ pub(super) fn collect_chunk(
             }
         }
     }
-    (out, cull_stats)
+    (out, cull_stats, has_rigid_object_motion)
 }
 
 /// Builds a [`StaticMeshDrawSource`] from a static renderer entry, or returns `None` if the

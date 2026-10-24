@@ -238,7 +238,7 @@ impl CompiledRenderGraph {
                 retained_resources: per_view_retained_resources,
                 ..
             },
-        ) = self.record_graph_commands(
+        ) = match self.record_graph_commands(
             mv_ctx,
             GraphCommandRecordingInputs {
                 views,
@@ -249,7 +249,16 @@ impl CompiledRenderGraph {
                 plan: recording_plan,
                 command_diagnostics,
             },
-        )?;
+        ) {
+            Ok(recorded) => recorded,
+            Err(err) => {
+                mv_ctx
+                    .backend
+                    .frame_resources()
+                    .finish_shadow_map_submit(false);
+                return Err(err);
+            }
+        };
 
         let submit_stats = {
             profiling::scope!("graph::submit_frame_batch");
@@ -410,3 +419,8 @@ fn usize_to_u64(value: usize) -> u64 {
 mod pre_warm;
 mod recording;
 mod resolve;
+
+#[cfg(test)]
+pub(crate) use resolve::{
+    ClearLoadDecisionInputs, ClearLoadViewSource, clear_load_inputs_from_view,
+};

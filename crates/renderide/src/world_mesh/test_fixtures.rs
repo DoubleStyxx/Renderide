@@ -125,6 +125,9 @@ pub fn dummy_world_mesh_draw_item(spec: DummyDrawItemSpec) -> WorldMeshDrawItem 
         blendshape_deformed: false,
         collect_order,
         camera_distance_sq: 0.0,
+        canvas_plane_depth: None,
+        is_canvas_ui: false,
+        transparent_depth_key: 0.0,
         world_aabb: None,
         lookup_ids: MaterialPropertyLookupIds {
             material_asset_id: mid,
@@ -136,6 +139,7 @@ pub fn dummy_world_mesh_draw_item(spec: DummyDrawItemSpec) -> WorldMeshDrawItem 
         _opaque_depth_bucket: 0,
         sort_prefix,
         rigid_world_matrix: None,
+        previous_rigid_world_matrix: None,
         reflection_probes: ReflectionProbeDrawSelection::default(),
         ui_rect_clip_local: None,
         particle_draw: ParticleDrawParams::default(),

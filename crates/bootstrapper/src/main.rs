@@ -15,6 +15,9 @@ mod dialog;
 /// Parses CLI args, initializes the bootstrapper log file and panic hook, shows startup warnings,
 /// optionally prompts for desktop vs VR, then runs [`bootstrapper::run`].
 ///
+/// When the process was started as a Resonite `-Renderer` target, it instead waits on
+/// `renderide-renderer` and never reaches the host dialog.
+///
 /// Logging is initialized **before** the startup dialogs so that an `rfd` backend hang on
 /// headless or display-less Linux systems leaves an actionable line in
 /// `logs/bootstrapper/*.log` instead of producing a silent "nothing happens" failure.
@@ -29,6 +32,11 @@ mod dialog;
 /// Exits with status `0` without spawning the Host when the user cancels the
 /// desktop vs VR dialog.
 fn main() {
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(renderer_args) = bootstrapper::launch_args::renderer_delegate_from_args(&raw_args) {
+        std::process::exit(renderer_delegate_exit_code(&renderer_args));
+    }
+
     let parsed_args = bootstrapper::cli::parse_args();
     let log_level = parsed_args.log_level;
     let resonite_dir = parsed_args.resonite_dir.clone();
@@ -89,5 +97,25 @@ fn main() {
     if let Err(e) = bootstrapper::run(opts) {
         logger::error!("{e}");
         std::process::exit(1);
+    }
+}
+
+/// Launches `renderide-renderer` and returns the status code to exit with.
+///
+/// Used when Resonite started this binary via `-Renderer`. The parent tracks this process, so
+/// the launcher waits instead of opening the host or the desktop/VR dialog.
+fn renderer_delegate_exit_code(args: &[String]) -> i32 {
+    match bootstrapper::launch_args::spawn_renderer_delegate(args) {
+        Ok(status) => status.code().unwrap_or(1),
+        Err(error) => {
+            #[expect(
+                clippy::print_stderr,
+                reason = "renderer delegate runs before logging is initialized"
+            )]
+            {
+                eprintln!("renderide: failed to launch renderide-renderer: {error}");
+            }
+            1
+        }
     }
 }

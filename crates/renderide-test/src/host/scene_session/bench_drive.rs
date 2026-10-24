@@ -9,27 +9,35 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use glam::{Quat, Vec3};
+use renderide_shared::shared::{QualityConfig, RendererCommand};
 
 use crate::error::HarnessError;
 use crate::scene::textures::{checker_rgba, uv_ramp_rgba};
 
+use super::super::asset_upload::{DEFAULT_ASSET_UPLOAD_TIMEOUT, create_render_texture};
 use super::super::handshake::{DEFAULT_HANDSHAKE_TIMEOUT, run_handshake};
 use super::super::ipc_setup::{DEFAULT_QUEUE_CAPACITY_BYTES, connect_session};
 use super::super::lockstep::{FrameSubmitScalars, LockstepDriver};
+use super::bench_scenes::{SECONDARY_RT_SIZE, secondary_camera_copy_rig};
 use super::consts::timing;
-use super::scene_state::{build_scene_state, ensure_scene_submitted};
+use super::scene_state::{build_scene_state_with_cameras, ensure_scene_submitted};
 use super::shutdown::request_shutdown_and_wait;
 use super::spawn::SpawnedRenderer;
 use super::{
     SessionTemplate, build_scene_setup, transform, upload_scene_materials, upload_scene_meshes,
 };
 
+/// Scenario that adds two render-texture secondary cameras to the `unlit_sphere` scene.
+const SECONDARY_CAMERA_COPY: &str = "secondary_camera_copy";
+
 /// One scenario invocation. The caller owns warmup, measured-frame, and pose choices.
 #[derive(Clone, Debug)]
 pub struct BenchDriveConfig {
     /// Path to the `renderide-renderer` binary.
     pub renderer_path: PathBuf,
-    /// `unlit_sphere` or `multi_primitive_unlit`.
+    /// `unlit_sphere`, `multi_primitive_unlit`, `pbs_lit_material_matrix`, `many_static_meshes`,
+    /// `lights_shadows`, `many_shadowed_point_lights`, `offscreen_skinned_avatars`,
+    /// `onscreen_skinned_avatars`, or `secondary_camera_copy`.
     pub scenario: String,
     /// Raw per-frame JSON path the renderer writes when the measured window completes.
     pub report_path: PathBuf,
@@ -88,6 +96,7 @@ pub fn drive_bench(cfg: &BenchDriveConfig) -> Result<(), HarnessError> {
         &prefix,
         DEFAULT_HANDSHAKE_TIMEOUT,
     )?;
+    publish_many_light_shadow_quality(&mut session.queues, &cfg.scenario)?;
 
     let mut setup = build_scene_setup(template);
     apply_camera(&mut setup, cfg);
@@ -105,7 +114,28 @@ pub fn drive_bench(cfg: &BenchDriveConfig) -> Result<(), HarnessError> {
         &backing_dir,
         &setup,
     )?;
-    let scene = build_scene_state(&prefix, &backing_dir, &setup.scene, &mut lockstep)?;
+    let cameras = if cfg.scenario == SECONDARY_CAMERA_COPY {
+        let rig = secondary_camera_copy_rig(&setup.scene);
+        for asset_id in &rig.render_textures {
+            create_render_texture(
+                &mut session.queues,
+                &mut lockstep,
+                *asset_id,
+                SECONDARY_RT_SIZE,
+                DEFAULT_ASSET_UPLOAD_TIMEOUT,
+            )?;
+        }
+        rig.cameras
+    } else {
+        Vec::new()
+    };
+    let scene = build_scene_state_with_cameras(
+        &prefix,
+        &backing_dir,
+        &setup.scene,
+        &cameras,
+        &mut lockstep,
+    )?;
     let _submit = ensure_scene_submitted(&mut session.queues, &mut lockstep, cfg.timeout)?;
 
     let child = spawned
@@ -130,7 +160,10 @@ pub fn drive_bench(cfg: &BenchDriveConfig) -> Result<(), HarnessError> {
 
 fn scenario_template(name: &str) -> Result<SessionTemplate, HarnessError> {
     match name {
-        "unlit_sphere" => Ok(SessionTemplate::Sphere),
+        "unlit_sphere" | SECONDARY_CAMERA_COPY => Ok(SessionTemplate::Sphere),
+        "pbs_lit_material_matrix" => Ok(SessionTemplate::PbsLitMaterialMatrix),
+        "many_static_meshes" => Ok(SessionTemplate::ManyStaticMeshes),
+        "lights_shadows" => Ok(SessionTemplate::LightsShadows),
         "multi_primitive_unlit" => {
             let checker = checker_rgba(256, 256, 8, [245, 245, 245, 255], [24, 34, 54, 255]);
             let uv_ramp = uv_ramp_rgba(256, 256);
@@ -140,8 +173,34 @@ fn scenario_template(name: &str) -> Result<SessionTemplate, HarnessError> {
                 texture_size: (256, 256),
             })
         }
+        "many_shadowed_point_lights" => Ok(SessionTemplate::ManyShadowedPointLights),
+        "offscreen_skinned_avatars" => Ok(SessionTemplate::SkinnedAvatars { offscreen: true }),
+        "onscreen_skinned_avatars" => Ok(SessionTemplate::SkinnedAvatars { offscreen: false }),
         other => Err(HarnessError::UnknownBenchScenario(other.to_string())),
     }
+}
+
+fn publish_many_light_shadow_quality(
+    queues: &mut renderide_shared::ipc::HostDualQueueIpc,
+    scenario: &str,
+) -> Result<(), HarnessError> {
+    if !matches!(
+        scenario,
+        "many_shadowed_point_lights" | "offscreen_skinned_avatars" | "onscreen_skinned_avatars"
+    ) {
+        return Ok(());
+    }
+    let sent = queues.send_primary(RendererCommand::QualityConfig(QualityConfig {
+        per_pixel_lights: 32,
+        shadow_distance: 30.0,
+        ..QualityConfig::default()
+    }));
+    if sent {
+        return Ok(());
+    }
+    Err(HarnessError::QueueOptions(
+        "send_primary(QualityConfig) returned false (queue full?)".to_string(),
+    ))
 }
 
 fn apply_camera(setup: &mut super::SceneSetup, cfg: &BenchDriveConfig) {
@@ -274,7 +333,10 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    use super::{BenchDriveConfig, bench_renderer_args, drive_bench};
+    use super::{
+        BenchDriveConfig, SECONDARY_CAMERA_COPY, SessionTemplate, bench_renderer_args,
+        build_scene_setup, drive_bench, scenario_template, secondary_camera_copy_rig,
+    };
 
     fn cfg(scenario: &str, windowed: bool) -> BenchDriveConfig {
         BenchDriveConfig {
@@ -290,6 +352,35 @@ mod tests {
             windowed,
             camera_position: [0.0, 0.0, -3.0],
             camera_rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        }
+    }
+
+    #[test]
+    fn secondary_camera_copy_adds_depth_and_nothing_cameras_to_the_sphere_scene() {
+        assert!(matches!(
+            scenario_template(SECONDARY_CAMERA_COPY),
+            Ok(SessionTemplate::Sphere)
+        ));
+        let setup = build_scene_setup(SessionTemplate::Sphere);
+        let rig = secondary_camera_copy_rig(&setup.scene);
+        assert_eq!(rig.render_textures.len(), 2);
+        let clears: Vec<_> = rig.cameras.iter().map(|c| c.clear_mode).collect();
+        assert_eq!(
+            clears,
+            [
+                renderide_shared::shared::CameraClearMode::Depth,
+                renderide_shared::shared::CameraClearMode::Nothing
+            ]
+        );
+        for (camera, rt) in rig.cameras.iter().zip(&rig.render_textures) {
+            assert_eq!(camera.render_texture_asset_id, *rt);
+            assert!(
+                setup
+                    .scene
+                    .renderables
+                    .iter()
+                    .all(|r| r.transform_id != camera.transform_id)
+            );
         }
     }
 

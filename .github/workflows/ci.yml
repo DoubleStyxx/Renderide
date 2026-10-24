@@ -1,9 +1,11 @@
 # Builds the Rust workspace and the .NET generator solution on all major desktop OSes.
 name: CI
 
-# Path filters intentionally omit `RenderideMod/**`. The mod references FrooxEngine.dll
-# and Renderite.Shared.dll from a Resonite install. Those assemblies are proprietary and
-# are not on hosted runners, so CI does not build the mod.
+# Path filters omit the mod project. It references FrooxEngine.dll and
+# Renderite.Shared.dll from a Resonite install. Those assemblies are proprietary
+# and are not on hosted runners, so CI does not build RenderideMod.csproj.
+# `RenderideMod/Shaders/**` is included: Rust `include_str!` compiles those WGSL
+# files into the renderer and the headless golden suite.
 "on":
   push:
     branches: [master]
@@ -17,6 +19,7 @@ name: CI
       - "crates/**"
       - "generators/**"
       - "third_party/**"
+      - "RenderideMod/Shaders/**"
   pull_request:
     paths:
       - ".github/workflows/ci.yml"
@@ -28,6 +31,7 @@ name: CI
       - "crates/**"
       - "generators/**"
       - "third_party/**"
+      - "RenderideMod/Shaders/**"
   workflow_dispatch:
 
 concurrency:
@@ -46,6 +50,10 @@ jobs:
   rust:
     name: Rust / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # Healthy jobs are about 10 minutes on ubuntu and 21 on windows.
+    # 45 minutes is about twice the slower of those, and still above the
+    # 32 minute master run at 0104fee whose apt download crawled.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -62,19 +70,34 @@ jobs:
             clippy_features: ""
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # mesa-vulkan-drivers provides lavapipe so `renderide-test check-suite` can open a
       # headless Vulkan adapter. There is no `materials::registry` GPU smoke test.
       # GStreamer dev packages are required only when the `video-textures` feature is enabled
       # (Linux clippy does this via `--all-features`); pkg-config resolves the headers/libs at build time.
+      #
+      # On master 0104fee7 the install fetched 96.2 MB in 20 min 31 s (78.1 kB/s) and
+      # the Rust ubuntu job ran ~32 minutes. The suite step itself was ~19 seconds.
+      # plugins-good, flite, and the soundfont are Depends of gstreamer1.0-plugins-bad,
+      # not recommends. The MPEG-TS test only loads the tsdemux element, whose .so needs
+      # libgstreamer-plugins-bad1.0-0 plus the base plugins. Install that library and
+      # copy the one plugin instead of the plugins-bad package. `--no-install-recommends`
+      # still skips VA-API drivers. pkg-config is named so the -dev packages resolve.
       - name: Install Linux system dependencies (Vulkan + GStreamer)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            mesa-vulkan-drivers vulkan-tools \
-            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            mesa-vulkan-drivers vulkan-tools pkg-config \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            gstreamer1.0-plugins-base libgstreamer-plugins-bad1.0-0
+          plugindir="$(pkg-config --variable=pluginsdir gstreamer-1.0)"
+          tmp="$(mktemp -d)"
+          ( cd "$tmp" && apt-get download gstreamer1.0-plugins-bad )
+          dpkg-deb -x "$tmp"/gstreamer1.0-plugins-bad_*.deb "$tmp/root"
+          sudo cp "$tmp"/root/usr/lib/*/gstreamer-1.0/libgstmpegtsdemux.so "$plugindir/"
+          rm -rf "$tmp"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -82,7 +105,7 @@ jobs:
 
       - name: Enable sccache (Windows)
         if: runner.os == 'Windows'
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Configure sccache (Windows)
         if: runner.os == 'Windows'
@@ -130,7 +153,20 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --locked
 
+      # The default test command does not enable `video-textures`. This run covers the
+      # appsrc -> tsdemux continuity probe, which needs the GStreamer plugins above.
+      - name: Test MPEG-TS continuity repair
+        if: runner.os == 'Linux'
+        run: cargo test --locked -p renderide --features video-textures --lib assets::video::mpegts
+
+      # Happy path is about 20 seconds (ubuntu on 0104fee, and on the #142 PR head).
+      # Each scene already fails itself after DEFAULT_CASE_TIMEOUT (180s) in
+      # crates/renderide-test. 20 minutes is about twice a 4-wide wave of those
+      # per-scene caps, so a stuck scene ends the step instead of holding the
+      # default six-hour job. Two times the happy path would be under a minute
+      # and would kill a scene that is still inside its own timeout.
       - name: Run headless renderer suite
+        timeout-minutes: 20
         shell: bash
         run: |
           set -euo pipefail
@@ -142,7 +178,7 @@ jobs:
 
       - name: Upload headless suite artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: headless-renderer-suite-${{ matrix.os }}
           path: |
@@ -169,9 +205,9 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: "10.0"
           # Restores NuGet global-packages folder between runs (keyed on dependency manifests).

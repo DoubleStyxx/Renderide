@@ -10,7 +10,7 @@ use std::process::Child;
 use std::time::{Duration, Instant, SystemTime};
 
 use glam::{Quat, Vec3};
-use renderide_shared::shared::ColorProfile;
+use renderide_shared::shared::{ColorProfile, ShadowCastMode};
 use renderide_shared::{format_custom_shader_assign, format_custom_shader_payload};
 
 use crate::error::HarnessError;
@@ -103,8 +103,10 @@ pub(super) fn scene_setup() -> SceneSetup {
                 mesh_asset_id: super::scene_mesh_id(0),
                 material_asset_id: scene_material_id(0),
                 sorting_order: 0,
+                shadow_cast_mode: ShadowCastMode::Off,
             }],
             lights: Vec::new(),
+            skinned: Vec::new(),
         },
     }
 }
@@ -223,6 +225,7 @@ pub(super) fn recapture_after_property_update(
             scene_submit_instant,
             overall_timeout: recapture.timeout,
             interval: RECAPTURE_INTERVAL,
+            non_flat_skips: 0,
         },
         recapture.renderer,
     )?;

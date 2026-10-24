@@ -8,11 +8,13 @@
 //!    (rayon-parallel above the existing threshold), uploads the per-draw slab and frame
 //!    uniforms via the graph upload sink, and stores the prepared state in
 //!    [`WorldMeshForwardPlanSlot`] before any graph pass records.
-//! 2. [`WorldMeshForwardDepthPrepass`] -- **[`RasterPass`]** that clears and fills depth for
-//!    conservative opaque draws.
-//! 3. [`WorldMeshForwardOpaquePass`] -- **[`RasterPass`]** that clears HDR color, loads the
+//! 2. [`WorldMeshForwardDepthPrepass`] -- **[`RasterPass`]** that clears or loads depth, then fills
+//!    it for conservative opaque draws. Clear-none loads depth only when this view also seeds
+//!    color. Every unseeded view, and every other clear mode, still clears depth.
+//! 3. [`WorldMeshForwardOpaquePass`] -- **[`RasterPass`]** that clears or loads HDR color, loads the
 //!    prepass depth attachment, records pre-skybox opaque and alpha-test phases, then records the
-//!    skybox/background.
+//!    skybox/background. [`WorldMeshForwardColorPreservePass`] copies a full-target render texture
+//!    into that HDR image first when the camera keeps existing color.
 //! 4. [`WorldMeshForwardGtaoDepthResolvePass`] -- optional **[`EncoderPass`]** that resolves
 //!    current MSAA depth before GTAO samples the single-sample frame depth.
 //! 5. [`WorldMeshForwardNormalPass`] -- optional **[`RasterPass`]** that writes smooth
@@ -38,6 +40,8 @@
 
 mod attachments;
 mod camera;
+mod clear_load;
+mod color_preserve;
 mod color_resolve;
 mod color_snapshot;
 mod current_view_textures;
@@ -58,12 +62,27 @@ mod state;
 mod transparent_sequence;
 mod vp;
 
+#[cfg(test)]
+mod clear_stack_gpu;
+#[cfg(test)]
+mod forward_schedule_tests;
+
+#[cfg(feature = "bench-api")]
+pub use clear_load::CameraClearLoadOpInput;
+#[cfg(feature = "bench-api")]
+pub(crate) use clear_load::{
+    CAMERA_CLEAR_LOAD_OP_CAMERAS, camera_clear_load_op_checksum, camera_clear_load_op_inputs,
+};
+pub use color_preserve::WorldMeshForwardColorPreservePass;
 pub use depth_prepass::{WorldMeshForwardDepthPrepass, WorldMeshForwardDepthPrepassGraphResources};
 pub(crate) use depth_prepass::{
     WorldMeshForwardDepthPrepassPipelineKey, depth_prepass_pipeline_key_for_draw,
     pre_warm_depth_prepass_pipeline,
 };
-pub(crate) use encode::{ShadowDepthDrawBatch, draw_shadow_depth_subset};
+pub(crate) use encode::{
+    ObjectMotionDraw, ShadowDepthDrawBatch, draw_shadow_depth_subset,
+    object_motion_previous_vp_bind_group, record_object_motion_vectors,
+};
 pub(crate) use material_batch::{MaterialBatchBoundary, MaterialBatchPacket, MaterialDrawResolver};
 pub(crate) use normal_pass::{
     GTAO_VIEW_NORMAL_FORMAT, WorldMeshForwardNormalPipelineKey, normal_pipeline_key_for_draw,
@@ -97,6 +116,7 @@ use crate::render_graph::resources::{
 use crate::world_mesh::{InstancePlan, WorldMeshPhase};
 
 use attachments::declare_forward_color_depth_attachments;
+use clear_load::forward_clear_loads_for_view;
 use depth_resolve::encode_msaa_depth_resolve_after_clear_only;
 use depth_snapshot::{
     EncodeCtx as DepthSnapshotEncodeCtx, encode_world_mesh_forward_depth_snapshot,
@@ -530,6 +550,9 @@ impl RasterPass for WorldMeshForwardOpaquePass {
             let mut r = b.raster();
             // No `resolve_target` here: when MSAA is active, the multisampled buffer is preserved
             // and resolved by the transparent sequence using the Karis HDR-aware bracket.
+            // The compiled graph is shared by every camera. This clear is the skybox/color
+            // default. [`Self::color_load_op_override`] switches a seeded depth-only or
+            // clear-none view to [`wgpu::LoadOp::Load`] when the pass opens.
             let color_ops = wgpu::Operations {
                 load: wgpu::LoadOp::Clear(crate::present::SWAPCHAIN_CLEAR_COLOR),
                 store: wgpu::StoreOp::Store,
@@ -554,6 +577,17 @@ impl RasterPass for WorldMeshForwardOpaquePass {
             .get::<WorldMeshForwardPlanSlot>()
             .is_some_and(|prepared| prepared.pipeline.use_multiview);
         stereo_mask_or_template(use_multiview, template.multiview_mask)
+    }
+
+    fn color_load_op_override(
+        &self,
+        ctx: &RasterPassCtx<'_, '_>,
+        attachment_index: usize,
+    ) -> Option<wgpu::LoadOp<wgpu::Color>> {
+        if attachment_index != 0 {
+            return None;
+        }
+        Some(forward_clear_loads_for_view(ctx.frame.view).color)
     }
 
     fn stencil_ops_override(
@@ -938,44 +972,5 @@ impl EncoderPass for WorldMeshForwardDepthResolvePass {
 
     fn record(&self, ctx: &mut EncoderPassCtx<'_, '_, '_>) -> Result<(), RenderPassError> {
         self.inner.record(ctx)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        InstancePlan, forward_intersection_raster_needed,
-        transparent_sequence::forward_transparent_sequence_needed,
-    };
-    use crate::world_mesh::{DrawGroup, WorldMeshPhase};
-
-    /// Empty helper plans skip their raster pass even after opaque work records successfully.
-    #[test]
-    fn helper_raster_needed_requires_matching_groups() {
-        let empty = InstancePlan::default();
-        assert!(!forward_intersection_raster_needed(true, &empty));
-        assert!(!forward_transparent_sequence_needed(true, &empty));
-
-        let mut intersect = InstancePlan::default();
-        intersect
-            .phase_mut(WorldMeshPhase::Intersection)
-            .push(DrawGroup {
-                representative_draw_idx: 0,
-                instance_range: 0..1,
-                material_packet_idx: 0,
-            });
-        assert!(forward_intersection_raster_needed(true, &intersect));
-        assert!(!forward_intersection_raster_needed(false, &intersect));
-
-        let mut transparent = InstancePlan::default();
-        transparent
-            .phase_mut(WorldMeshPhase::Transparent)
-            .push(DrawGroup {
-                representative_draw_idx: 0,
-                instance_range: 0..1,
-                material_packet_idx: 0,
-            });
-        assert!(forward_transparent_sequence_needed(true, &transparent));
-        assert!(!forward_transparent_sequence_needed(false, &transparent));
     }
 }

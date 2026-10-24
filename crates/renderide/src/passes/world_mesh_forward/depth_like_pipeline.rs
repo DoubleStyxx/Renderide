@@ -6,7 +6,7 @@ use crate::materials::{RasterFrontFace, RasterPrimitiveTopology};
 use crate::render_graph::gpu_cache::create_wgsl_shader_module;
 
 /// Pipeline descriptor inputs shared by depth-only, shadow, and normal prepasses.
-pub(super) struct DepthLikePipelineSpec<'a> {
+pub(in crate::passes::world_mesh_forward) struct DepthLikePipelineSpec<'a> {
     /// Debug label used for the shader module, pipeline layout, and pipeline.
     pub(super) label: &'a str,
     /// WGSL source for this pass variant.
@@ -38,7 +38,7 @@ pub(super) struct DepthLikePipelineSpec<'a> {
 }
 
 /// Creates a render pipeline for world-mesh passes that share depth-like scaffolding.
-pub(super) fn create_depth_like_pipeline(
+pub(in crate::passes::world_mesh_forward) fn create_depth_like_pipeline(
     device: &wgpu::Device,
     spec: DepthLikePipelineSpec<'_>,
 ) -> wgpu::RenderPipeline {

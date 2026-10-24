@@ -11,10 +11,14 @@ members = [
   "crates/interprocess",
   "crates/bootstrapper",
   "crates/logger",
+  "crates/renderide-wayland-tablet",
 ]
 
-# `cc` stays at 1.2.63 in Cargo.lock. 1.9.0 makes Windows `cl.exe` treat `/WX-`
-# as a source file while building `libmimalloc-sys` (CI clippy, MSVC 14.51).
+# `cc` stays at 1.2.63 in Cargo.lock. cc 1.9.0 applies `RUSTC_WRAPPER` to the
+# `cl.exe` it finds (rust-lang/cc-rs#2022). Windows CI sets that wrapper to
+# sccache, and `cl.exe` then treats `/WX-` as a source file while building
+# `libmimalloc-sys` 0.1.49 (MSVC 14.51). 1.10.0 does not revert that.
+# `cargo update -p cc` would undo the pin.
 
 [profile.dev]
 opt-level = 1

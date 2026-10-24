@@ -83,8 +83,9 @@ pub use plots::{
     plot_frame_upload_batch, plot_ipc_poll, plot_lockstep_pipeline, plot_mesh_deform,
     plot_rayon_admission, plot_render_world_maintenance, plot_shadow_atlas,
     plot_surface_acquire_outcome, plot_surface_get_current_texture_ms,
-    plot_surface_in_flight_count, plot_surface_previous_present_wait_ms, plot_window_focused,
-    plot_world_mesh_prepare, plot_world_mesh_subpass,
+    plot_surface_in_flight_count, plot_surface_previous_present_wait_ms,
+    plot_vr_swapchain_gpu_wait_ms, plot_window_focused, plot_world_mesh_prepare,
+    plot_world_mesh_subpass,
 };
 pub(crate) use plots::{
     MeshUploadBatchProfileSample, plot_mesh_derived_stream_masks, plot_mesh_upload_batch,

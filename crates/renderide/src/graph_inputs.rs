@@ -191,10 +191,13 @@ pub trait GraphPerDrawSlabResources {
     ) -> Option<wgpu::Buffer>;
 
     /// Gives callers mutable access to the per-view CPU slab-packing scratch.
+    ///
+    /// The second buffer is the retained canvas depth-step list. Callers clear and refill it
+    /// instead of allocating a new `Vec` for every view every frame.
     fn with_per_view_per_draw_scratch(
         &self,
         view_id: ViewId,
-        f: &mut dyn FnMut(&mut Vec<PaddedPerDrawUniforms>),
+        f: &mut dyn FnMut(&mut Vec<PaddedPerDrawUniforms>, &mut Vec<u32>),
     ) -> bool;
 
     /// Gives callers mutable access to the per-view material-batch boundary scratch so it can be
@@ -338,6 +341,21 @@ pub trait GraphFrameGlobalResources {
     ) -> bool {
         false
     }
+
+    /// Arms a shadow-atlas note for the submit that follows a complete encode.
+    fn arm_shadow_maps_for_submit(&self) {}
+
+    /// Records that one shadow split chunk wrote a layer. Not a submit.
+    fn mark_shadow_split_chunk_recorded(&self) {}
+
+    /// Arms the submit note after every shadow split chunk has been recorded.
+    fn arm_shadow_maps_if_split_recorded(&self) {}
+
+    /// Drops split-chunk progress when the parallel join fails.
+    fn abandon_shadow_split_recording(&self) {}
+
+    /// Notes the atlas after a successful submit, or clears it when submit fails.
+    fn finish_shadow_map_submit(&self, _submitted: bool) {}
 }
 
 /// Graph-facing access to resident asset/resource pools.
@@ -494,6 +512,11 @@ impl<'a> FrameSceneRead<'a> {
     /// Wraps the flushed scene for pass-facing frame contracts.
     pub(crate) fn new(coordinator: &'a SceneCoordinator) -> Self {
         Self { coordinator }
+    }
+
+    /// Host frame the current previous rigid matrices were published for.
+    pub(crate) fn object_motion_published_frame(self) -> Option<i32> {
+        self.coordinator.object_motion_published_frame()
     }
 }
 
@@ -749,6 +772,17 @@ pub struct GraphPassFrameView<'a> {
     pub msaa_depth_resolve: Option<Arc<MsaaDepthResolveResources>>,
     /// Background clear/skybox behavior for this view.
     pub clear: FrameViewClear,
+    /// Full-target offscreen color texture when this view can copy it into HDR scene color.
+    ///
+    /// `None` for the swapchain, multiview, and partial-viewport scratch targets. Those paths
+    /// cannot preserve the previous color by loading the HDR transient.
+    pub color_texture: Option<&'a wgpu::Texture>,
+    /// `true` when [`Self::depth_texture`] is the persistent camera depth target.
+    ///
+    /// Window, OpenXR, and full render-texture views own that image. A partial viewport renders
+    /// into a scratch depth image that is not copied back. Clear-none loads the image only when
+    /// this view also seeds color. Every unseeded view still clears depth.
+    pub persistent_depth_target: bool,
     /// Post-processing permissions requested by this view.
     pub post_processing: ViewPostProcessing,
 }

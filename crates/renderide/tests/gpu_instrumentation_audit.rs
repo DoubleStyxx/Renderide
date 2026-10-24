@@ -4,6 +4,13 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// `#[cfg(test)]` GPU harnesses. They open a private device and never run in the renderer,
+/// so they are not frame-profiler passes.
+const TEST_GPU_HARNESS_FILES: &[&str] = &[
+    "src/passes/world_mesh_forward/clear_stack_gpu.rs",
+    "src/passes/world_mesh_forward/encode/object_motion_pixels.rs",
+];
+
 /// Files whose copy commands are covered by a caller-level GPU profiler scope.
 const PARENT_SCOPED_COPY_FILES: &[&str] = &[
     "src/app/headless/readback.rs",
@@ -107,7 +114,12 @@ fn copy_window_has_gpu_scope(window: &str) -> bool {
 
 /// Returns whether this file's copy commands are covered by a broader query scope.
 fn copy_file_parent_scoped(label: &str) -> bool {
-    PARENT_SCOPED_COPY_FILES.contains(&label)
+    PARENT_SCOPED_COPY_FILES.contains(&label) || TEST_GPU_HARNESS_FILES.contains(&label)
+}
+
+/// Returns whether this file is a private test harness rather than a renderer pass.
+fn test_gpu_harness(label: &str) -> bool {
+    TEST_GPU_HARNESS_FILES.contains(&label)
 }
 
 /// Returns whether this file owns intentionally direct queue submissions.
@@ -120,6 +132,9 @@ fn gpu_passes_have_timestamp_writes() -> io::Result<()> {
     let mut offenders = Vec::new();
     for path in rust_sources()? {
         let label = file_label(&path);
+        if test_gpu_harness(&label) {
+            continue;
+        }
         let src = fs::read_to_string(&path)?;
         let lines: Vec<&str> = src.lines().collect();
         for (idx, line) in lines.iter().enumerate() {

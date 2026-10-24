@@ -79,6 +79,7 @@ fn cmp_world_mesh_draw_items_without_depth_bucket(
 /// production.
 fn set_camera_distance(item: &mut WorldMeshDrawItem, distance_sq: f32) {
     item.camera_distance_sq = distance_sq;
+    crate::world_mesh::draw_prep::sync_transparent_depth_key(item);
     item._opaque_depth_bucket = opaque_depth_bucket(distance_sq);
     item.sort_prefix = pack_sort_prefix(
         item.is_overlay,
@@ -742,4 +743,91 @@ fn parallel_transparent_intra_prefix_resort_matches_serial() {
             || (w[0].sorting_order == w[1].sorting_order
                 && w[0].camera_distance_sq >= w[1].camera_distance_sq)
     }));
+}
+
+fn canvas_item(
+    collect_order: usize,
+    distance_sq: f32,
+    plane_depth: Option<f32>,
+    sorting_order: i32,
+) -> WorldMeshDrawItem {
+    let mut item = dummy_world_mesh_draw_item(DummyDrawItemSpec {
+        material_asset_id: 1,
+        property_block: None,
+        skinned: false,
+        sorting_order,
+        mesh_asset_id: 1,
+        node_id: collect_order as i32,
+        slot_index: 0,
+        collect_order,
+        alpha_blended: true,
+    });
+    item.batch_key.pipeline = crate::materials::RasterPipelineKind::EmbeddedStem(
+        std::sync::Arc::from("ui_unlit_default"),
+    );
+    item.batch_key_hash = compute_batch_key_hash(&item.batch_key);
+    item.is_canvas_ui = true;
+    item.canvas_plane_depth = plane_depth;
+    set_camera_distance(&mut item, distance_sq);
+    item
+}
+
+#[test]
+fn coplanar_canvas_ui_ignores_farthest_corner_distance() {
+    let small = canvas_item(0, 4.0, Some(2.0), 0);
+    let wide = canvas_item(1, 40.0, Some(2.0 + 1.0e-4), 0);
+    assert_eq!(cmp_transparent_intra_run(&small, &wide), Ordering::Less);
+    assert_eq!(cmp_order_sensitive_draws(&small, &wide), Ordering::Less);
+
+    let mut draws = vec![wide, small];
+    sort_draws(&mut draws);
+    assert_eq!(
+        draws
+            .iter()
+            .map(|item| item.collect_order)
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+}
+
+#[test]
+fn separated_canvas_planes_sort_farther_first() {
+    let far_plane = canvas_item(1, 1.0, Some(8.0), 0);
+    let near_plane = canvas_item(0, 10_000.0, Some(1.5), 0);
+    assert_eq!(
+        cmp_transparent_intra_run(&far_plane, &near_plane),
+        Ordering::Less
+    );
+    let higher_sorting_order = canvas_item(9, 1.0, Some(100.0), 5);
+    assert_eq!(
+        cmp_transparent_intra_run(&near_plane, &higher_sorting_order),
+        Ordering::Less
+    );
+}
+
+#[test]
+fn canvas_and_non_canvas_depth_order_stays_total() {
+    let canvas_far = canvas_item(0, 1.0, Some(9.0), 0);
+    let canvas_near = canvas_item(1, 100.0, Some(1.0), 0);
+    let mut world_far = canvas_item(2, 64.0, None, 0);
+    world_far.batch_key.pipeline = crate::materials::RasterPipelineKind::Null;
+    world_far.is_canvas_ui = false;
+    world_far.canvas_plane_depth = None;
+    world_far.batch_key_hash = compute_batch_key_hash(&world_far.batch_key);
+    set_camera_distance(&mut world_far, 64.0);
+    let mut world_near = world_far.clone();
+    world_near.collect_order = 3;
+    set_camera_distance(&mut world_near, 1.0);
+
+    let items = [canvas_far, canvas_near, world_far, world_near];
+    assert_order_sensitive_comparator_is_total(&items);
+    assert!(
+        items[0].camera_distance_sq < items[2].camera_distance_sq,
+        "farthest-corner order would draw the canvas after the world quad"
+    );
+    assert_eq!(
+        cmp_transparent_intra_run(&items[0], &items[2]),
+        Ordering::Less,
+        "9m canvas plane sorts before a world draw 8m away"
+    );
 }

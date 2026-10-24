@@ -1,0 +1,9 @@
+{
+  "offscreen_skinned_renderers": 64,
+  "onscreen_extreme_pose_renderers": 1,
+  "material_slots_per_renderer": 2,
+  "slots_before_cull": 130,
+  "broadphase_candidate_runs": 1,
+  "broadphase_candidate_slots": 2,
+  "frustum_rejected_slots": 128
+}
