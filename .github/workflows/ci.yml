@@ -261,6 +261,10 @@ jobs:
       # WARP (adapter vendor 0x1414, device 0x008c) may use a 300s readiness
       # budget so a ~127s submission stall can finish (#216, #214). Other
       # adapters stay on the 180s case timeout. This 20 minute cap is unchanged.
+      # Windows run 40089689334 spent about 3m45s in this step and failed inside
+      # the pbs_lit case timeout, not this cap. One WARP case at 300s instead of
+      # 180s adds about two minutes, and the other cases in that step already
+      # finished, so the cap stays at 20 minutes.
       - name: Run headless renderer suite
         timeout-minutes: 20
         shell: bash

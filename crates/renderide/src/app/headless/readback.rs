@@ -158,9 +158,12 @@ fn submit_texture_to_buffer_copy(
     gpu.flush_driver();
     // `flush_driver` means the driver thread returned from `Queue::submit`, not
     // that the GPU finished the frame. Copying before `on_submitted_work_done`
-    // reads the clear color during a long queue stall (#216). This wait is only
-    // on the headless PNG readback. The windowed frame loop never calls it, so
-    // Gauge's frame-time samples do not include it.
+    // reads the clear color during a long queue stall (#216). This wait runs
+    // inside the headless PNG readback. The windowed frame loop does not call
+    // it on every submit, so Gauge's ordinary frame-time samples do not include
+    // it. A control-api `capture.png` request does: `note_control_presented`
+    // in `app/driver/frame.rs` calls `control_capture_readback`, which uses this
+    // same readback.
     let stall = confirm_frame_submission_done(gpu)?;
 
     let mut encoder = gpu

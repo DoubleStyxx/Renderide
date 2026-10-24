@@ -161,46 +161,107 @@ const SUBMIT_STALL_TEXT_KEYWORD: &str = "renderide_submit_stall_ms";
 /// A missing chunk, a non-numeric chunk, or a non-zero count is not ready. A Null fallback
 /// drawn while the requested shader is still compiling is a positive count. A draw skipped
 /// because no pipeline was available is a positive count too.
+#[cfg(test)]
 fn pipeline_frame_is_ready(path: &Path) -> bool {
-    pipeline_pending_text(path).is_some_and(|text| text.trim() == "0")
+    decode_stable_png(path)
+        .text(PIPELINE_PENDING_TEXT_KEYWORD)
+        .is_some_and(|text| text.trim() == "0")
 }
 
-fn pipeline_pending_text(path: &Path) -> Option<String> {
-    png_text_chunk(path, PIPELINE_PENDING_TEXT_KEYWORD)
+/// One open of a stable PNG: every `tEXt` chunk and the RGBA pixels, when they decode.
+struct DecodedPng {
+    texts: Vec<(String, String)>,
+    image: Option<image::RgbaImage>,
 }
 
-fn png_text_chunk(path: &Path, keyword: &str) -> Option<String> {
-    let file = std::fs::File::open(path).ok()?;
-    let decoder = png::Decoder::new(std::io::BufReader::new(file));
-    let reader = decoder.read_info().ok()?;
-    reader
-        .info()
-        .uncompressed_latin1_text
-        .iter()
-        .find(|chunk| chunk.keyword == keyword)
-        .map(|chunk| chunk.text.clone())
-}
+impl DecodedPng {
+    fn missing() -> Self {
+        Self {
+            texts: Vec::new(),
+            image: None,
+        }
+    }
 
-fn read_frame_readiness(path: &Path) -> FrameReadiness {
-    let pending_text = pipeline_pending_text(path);
-    let (pending, dropped_draws) = gpu_ready::counts_from_pending_chunk(pending_text.as_deref());
-    let gpu_done =
-        png_text_chunk(path, GPU_DONE_TEXT_KEYWORD).is_some_and(|text| text.trim() == "1");
-    let stall_ms = png_text_chunk(path, SUBMIT_STALL_TEXT_KEYWORD)
-        .and_then(|text| text.trim().parse::<u64>().ok())
-        .unwrap_or(0);
-    FrameReadiness {
-        gpu_done,
-        pending,
-        dropped_draws,
-        flat: png_is_flat(path),
-        stall_ms,
+    fn text(&self, keyword: &str) -> Option<&str> {
+        self.texts
+            .iter()
+            .find(|(key, _)| key == keyword)
+            .map(|(_, text)| text.as_str())
     }
 }
 
-/// Whether the PNG at `path` decodes to a flat single-color image.
-fn png_is_flat(path: &Path) -> bool {
-    crate::image_io::load_rgba(path).is_ok_and(|img| crate::golden::is_flat_image(&img))
+/// Reads the file once. A failed decode has no chunks and is not flat.
+fn decode_stable_png(path: &Path) -> DecodedPng {
+    let Ok(bytes) = std::fs::read(path) else {
+        return DecodedPng::missing();
+    };
+    let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    let Ok(mut reader) = decoder.read_info() else {
+        return DecodedPng::missing();
+    };
+    let texts = reader
+        .info()
+        .uncompressed_latin1_text
+        .iter()
+        .map(|chunk| (chunk.keyword.clone(), chunk.text.clone()))
+        .collect();
+    let Some(size) = reader.output_buffer_size() else {
+        return DecodedPng { texts, image: None };
+    };
+    let mut buf = vec![0u8; size];
+    let Ok(output) = reader.next_frame(&mut buf) else {
+        return DecodedPng { texts, image: None };
+    };
+    DecodedPng {
+        texts,
+        image: rgba8_image(&output, &buf),
+    }
+}
+
+/// Headless captures are 8-bit RGBA with packed rows. Anything else is not a flat image.
+fn rgba8_image(output: &png::OutputInfo, buf: &[u8]) -> Option<image::RgbaImage> {
+    if output.color_type != png::ColorType::Rgba || output.bit_depth != png::BitDepth::Eight {
+        return None;
+    }
+    let bytes = output.buffer_size();
+    if buf.len() < bytes || output.line_size != output.width as usize * 4 {
+        return None;
+    }
+    image::RgbaImage::from_raw(output.width, output.height, buf[..bytes].to_vec())
+}
+
+/// Readiness plus the pending chunk text, from a single decode.
+struct DecodedFrame {
+    readiness: FrameReadiness,
+    pending_text: Option<String>,
+}
+
+fn read_frame_readiness(path: &Path) -> DecodedFrame {
+    let decoded = decode_stable_png(path);
+    let pending_text = decoded
+        .text(PIPELINE_PENDING_TEXT_KEYWORD)
+        .map(str::to_string);
+    let (pending, dropped_draws) = gpu_ready::counts_from_pending_chunk(pending_text.as_deref());
+    let gpu_done = decoded
+        .text(GPU_DONE_TEXT_KEYWORD)
+        .is_some_and(|text| text.trim() == "1");
+    let stall_ms = decoded
+        .text(SUBMIT_STALL_TEXT_KEYWORD)
+        .and_then(|text| text.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    DecodedFrame {
+        readiness: FrameReadiness {
+            gpu_done,
+            pending,
+            dropped_draws,
+            flat: decoded
+                .image
+                .as_ref()
+                .is_some_and(crate::golden::is_flat_image),
+            stall_ms,
+        },
+        pending_text,
+    }
 }
 
 /// Reads the current observation of `output_path`. Maps any I/O failure to
@@ -302,7 +363,7 @@ pub(super) fn run_lockstep_until_png_stable(
         std::thread::sleep(timing::POLL_INTERVAL);
     }
 
-    let wait = reported_wait(wait_timing.overall_timeout, warp.used);
+    let wait = reported_wait(wait_timing.overall_timeout, warp.used, deadline_floor);
     stats.sync(settle.longest_stall_ms(), warp.used);
     timeout_outcome(
         output_path,
@@ -337,10 +398,14 @@ fn settle_stable_frame(
         state.reject_candidate();
         return false;
     };
-    let frame = read_frame_readiness(output_path);
-    note_stable_frame(output_path, &frame, progress);
+    let decoded = read_frame_readiness(output_path);
+    note_stable_frame(
+        decoded.pending_text.as_deref(),
+        &decoded.readiness,
+        progress,
+    );
     stats.sync(settle.longest_stall_ms(), warp_used);
-    let decision = settle.observe(mtime, frame);
+    let decision = settle.observe(mtime, decoded.readiness);
     stats.sync(settle.longest_stall_ms(), warp_used);
     if decision == SettleDecision::Accept {
         logger::info!(
@@ -432,17 +497,24 @@ fn extend_warp_budget(
     );
 }
 
-fn reported_wait(overall: Duration, warp_budget_used: bool) -> Duration {
-    if warp_budget_used {
+fn reported_wait(overall: Duration, warp_budget_used: bool, deadline_floor: Duration) -> Duration {
+    let budget = if warp_budget_used {
         gpu_ready::warp_readiness_budget(true, overall)
     } else {
         overall
-    }
+    };
+    budget.max(deadline_floor)
 }
 
 /// Records the stable frame and logs the same rejection lines the Linux suite greps for.
-fn note_stable_frame(path: &Path, frame: &FrameReadiness, progress: &mut CaptureProgress) {
-    let pending_text = pipeline_pending_text(path);
+///
+/// `pending_text` is the chunk already decoded with the frame. This does not reopen the PNG.
+fn note_stable_frame(
+    pending_text: Option<&str>,
+    frame: &FrameReadiness,
+    progress: &mut CaptureProgress,
+) {
+    let ready = pending_text.is_some_and(|text| text.trim() == "0");
     if frame.flat {
         if !progress.flat_candidate_seen {
             logger::info!(
@@ -450,8 +522,8 @@ fn note_stable_frame(path: &Path, frame: &FrameReadiness, progress: &mut Capture
             );
         }
         progress.flat_candidate_seen = true;
-        progress.pending_pipeline_seen |= !pipeline_frame_is_ready(path);
-    } else if !pipeline_frame_is_ready(path) {
+        progress.pending_pipeline_seen |= !ready;
+    } else if !ready {
         // Pipelines compile asynchronously. A draw whose pipeline is still pending,
         // or that was skipped because no pipeline was available, is stamped on the
         // PNG (materials/registry.rs). Keep pumping for a later write.
@@ -465,7 +537,7 @@ fn note_stable_frame(path: &Path, frame: &FrameReadiness, progress: &mut Capture
         logger::info!("Session: stable PNG gpu submission is not done; waiting for a later frame");
         progress.gpu_not_done_logged = true;
     }
-    progress.chunks.note(pending_text.as_deref());
+    progress.chunks.note(pending_text);
 }
 
 /// Writes the stall and WARP-budget flag beside the PNG on every exit, including timeout.
@@ -591,6 +663,19 @@ mod tests {
         }
         chunks.frames = frames;
         chunks
+    }
+
+    #[test]
+    fn reported_wait_includes_the_deadline_floor() {
+        let floor = Duration::from_millis(3500);
+        let short = Duration::from_millis(500);
+        assert_eq!(super::reported_wait(short, false, floor), floor);
+        let base = Duration::from_secs(180);
+        assert_eq!(super::reported_wait(base, false, floor), base);
+        assert_eq!(
+            super::reported_wait(base, true, floor),
+            Duration::from_secs(300)
+        );
     }
 
     #[test]

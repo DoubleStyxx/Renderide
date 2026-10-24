@@ -2,11 +2,12 @@
 //!
 //! A frame is a capture candidate only after its own submission has completed
 //! (`gpu_done`), with pending=0 and zero dropped draws, and the image is not flat.
-//! The settle counts distinct GPU-completed frames. Wall-clock time does not.
+//! The settle accepts only two consecutive good GPU-done frames. A bad frame
+//! resets the count. Wall-clock time does not.
 
 use std::time::{Duration, SystemTime};
 
-/// Distinct GPU-completed frames required before a candidate is accepted.
+/// Consecutive good frames required before a candidate is accepted.
 pub(crate) const GPU_SETTLE_FRAMES: u32 = 2;
 
 /// Readiness budget used when the selected adapter is WARP.
@@ -42,16 +43,15 @@ impl FrameReadiness {
 pub(crate) enum SettleDecision {
     /// This observation is not a capture candidate and does not count.
     Reject,
-    /// Counted, or already counted, and still short of an acceptable candidate.
+    /// This good frame is counted, and one more consecutive good frame is required.
     Hold,
-    /// The current frame is a candidate and two GPU-completed frames have settled.
+    /// This frame and the previous distinct frame were both good.
     Accept,
 }
 
-/// Counts distinct GPU-completed frames. The same mtime never counts twice.
+/// Counts consecutive good frames. The same mtime never counts twice.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct GpuFrameSettle {
-    armed: bool,
     completed: u32,
     last_mtime: Option<SystemTime>,
     longest_stall_ms: u64,
@@ -63,7 +63,7 @@ impl GpuFrameSettle {
         self.longest_stall_ms
     }
 
-    /// Distinct GPU-completed frames counted so far.
+    /// Consecutive good frames counted so far.
     #[cfg(test)]
     pub(crate) const fn completed_frames(&self) -> u32 {
         self.completed
@@ -71,36 +71,31 @@ impl GpuFrameSettle {
 
     /// Updates the settle from one stable PNG.
     ///
-    /// `gpu_done=false` never increments and never accepts. A flat or not-ready
-    /// frame before the first candidate does not arm the settle. After the first
-    /// candidate, each later distinct GPU-completed frame increments, including a
-    /// flat one, but only a current candidate is accepted.
+    /// A good frame is GPU-done, pending=0, zero dropped draws, and not flat.
+    /// Two consecutive good frames, each with its own mtime, are accepted. Any
+    /// other frame resets the count. Repeating the same mtime does not count again.
     pub(crate) fn observe(&mut self, mtime: SystemTime, frame: FrameReadiness) -> SettleDecision {
         self.longest_stall_ms = self.longest_stall_ms.max(frame.stall_ms);
-        if !frame.gpu_done {
-            return SettleDecision::Reject;
-        }
         if self.last_mtime == Some(mtime) {
-            return self.decision_for_current(frame);
-        }
-        if !self.armed {
             if !frame.is_candidate() {
+                self.completed = 0;
                 return SettleDecision::Reject;
             }
-            self.armed = true;
-            self.completed = 1;
-            self.last_mtime = Some(mtime);
-            return SettleDecision::Hold;
+            return self.decision_for_current();
+        }
+        self.last_mtime = Some(mtime);
+        if !frame.is_candidate() {
+            self.completed = 0;
+            return SettleDecision::Reject;
         }
         self.completed = self.completed.saturating_add(1);
-        self.last_mtime = Some(mtime);
-        self.decision_for_current(frame)
+        self.decision_for_current()
     }
 
-    fn decision_for_current(&self, frame: FrameReadiness) -> SettleDecision {
-        if frame.is_candidate() && self.completed >= GPU_SETTLE_FRAMES {
+    fn decision_for_current(&self) -> SettleDecision {
+        if self.completed >= GPU_SETTLE_FRAMES {
             SettleDecision::Accept
-        } else if self.armed {
+        } else if self.completed > 0 {
             SettleDecision::Hold
         } else {
             SettleDecision::Reject
@@ -171,7 +166,7 @@ mod tests {
         assert_eq!(settle.observe(at(2), frame), SettleDecision::Reject);
         assert_eq!(settle.completed_frames(), 0);
         assert!(!frame.is_candidate());
-        // The first real GPU-done frame still only arms the settle.
+        // The first good frame is only a hold; a second consecutive one accepts.
         assert_eq!(settle.observe(at(3), candidate(4)), SettleDecision::Hold);
         assert_eq!(settle.completed_frames(), 1);
     }
@@ -204,15 +199,34 @@ mod tests {
     }
 
     #[test]
-    fn a_flat_gpu_done_frame_after_arm_increments_but_is_not_accepted() {
+    fn good_flat_good_is_rejected_until_two_consecutive_good_frames() {
         let mut settle = GpuFrameSettle::default();
         assert_eq!(settle.observe(at(1), candidate(1)), SettleDecision::Hold);
         let mut flat = candidate(40);
         flat.flat = true;
-        assert_eq!(settle.observe(at(2), flat), SettleDecision::Hold);
-        assert_eq!(settle.completed_frames(), 2);
-        assert_eq!(settle.observe(at(3), candidate(5)), SettleDecision::Accept);
+        assert_eq!(settle.observe(at(2), flat), SettleDecision::Reject);
+        assert_eq!(settle.completed_frames(), 0);
+        assert_eq!(settle.observe(at(3), candidate(5)), SettleDecision::Hold);
+        assert_eq!(settle.completed_frames(), 1);
         assert_eq!(settle.longest_stall_ms(), 40);
+        let mut pending = candidate(0);
+        pending.pending = Some(2);
+        pending.dropped_draws = None;
+        assert_eq!(settle.observe(at(4), pending), SettleDecision::Reject);
+        assert_eq!(settle.completed_frames(), 0);
+        let mut not_done = candidate(0);
+        not_done.gpu_done = false;
+        assert_eq!(settle.observe(at(5), candidate(1)), SettleDecision::Hold);
+        assert_eq!(settle.observe(at(6), not_done), SettleDecision::Reject);
+        assert_eq!(settle.completed_frames(), 0);
+    }
+
+    #[test]
+    fn two_consecutive_good_frames_are_accepted() {
+        let mut settle = GpuFrameSettle::default();
+        assert_eq!(settle.observe(at(1), candidate(7)), SettleDecision::Hold);
+        assert_eq!(settle.observe(at(2), candidate(8)), SettleDecision::Accept);
+        assert_eq!(settle.completed_frames(), 2);
     }
 
     #[test]
