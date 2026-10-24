@@ -24,6 +24,7 @@ mod ring;
 mod submit_batch;
 mod submit_counters;
 mod surface_counters;
+mod swapchain_handoff;
 mod watchdog;
 mod worker;
 mod xr_finalize;
@@ -121,15 +122,18 @@ pub struct DriverThread {
 }
 
 impl DriverThread {
-    /// Spawns the driver thread. The thread owns its own clone of the wgpu [`wgpu::Queue`];
-    /// the main thread keeps the one inside [`crate::gpu::GpuContext`] for
-    /// `queue.write_buffer` / `queue.write_texture` use during encoding.
+    /// Spawns the driver thread. The thread owns its own clone of the wgpu [`wgpu::Device`]
+    /// and [`wgpu::Queue`]; the main thread keeps the ones inside [`crate::gpu::GpuContext`]
+    /// for `queue.write_buffer` / `queue.write_texture` use during encoding. The queue
+    /// clone registers `on_submitted_work_done` before `xrReleaseSwapchainImage`, and the
+    /// device clone polls so that callback can run.
     ///
     /// `gpu_queue_access_gate` is cloned from [`crate::gpu::GpuContext`]; the driver
     /// loop acquires it around every `Queue::submit` so submits cannot overlap with
     /// texture uploads or OpenXR calls that touch the same Vulkan queue. See
     /// [`crate::gpu::GpuQueueAccessGate`] for the queue-access rules it enforces.
     pub fn new(
+        device: Arc<wgpu::Device>,
         queue: Arc<wgpu::Queue>,
         gpu_queue_access_gate: crate::gpu::GpuQueueAccessGate,
         device_health: Arc<GpuDeviceHealth>,
@@ -145,13 +149,18 @@ impl DriverThread {
         let surface_counters_clone = Arc::clone(&surface_counters);
         let submit_counters_clone = Arc::clone(&submit_counters);
         let flight_recorder_clone = Arc::clone(&flight_recorder);
+        let device_health_for_driver = Arc::clone(&device_health);
         let queue_for_thread = Arc::clone(&queue);
         let handle = thread::Builder::new()
             .name("renderer-driver".to_string())
             .spawn(move || {
                 worker::driver_loop(
                     ring_clone,
-                    queue_for_thread,
+                    worker::DriverGpuHandles {
+                        device,
+                        queue: queue_for_thread,
+                        device_health: device_health_for_driver,
+                    },
                     gpu_queue_access_gate,
                     errors_clone,
                     surface_counters_clone,

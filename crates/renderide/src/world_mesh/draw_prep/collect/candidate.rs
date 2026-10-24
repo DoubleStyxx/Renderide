@@ -10,8 +10,9 @@ use crate::scene::{MeshRendererInstanceId, RenderSpaceId};
 use crate::shared::ShadowCastMode;
 use crate::world_mesh::culling::overlay_rect_clip_visible;
 use crate::world_mesh::materials::{
-    FrameMaterialBatchCache, MaterialResolveCtx, apply_render_buffer_mesh_pipeline_override,
-    batch_key_for_slot_cached, compute_batch_key_hash, normalized_material_slot,
+    FrameMaterialBatchCache, MaterialDrawBatchKey, MaterialResolveCtx,
+    apply_render_buffer_mesh_pipeline_override, batch_key_for_slot_cached, compute_batch_key_hash,
+    normalized_material_slot,
 };
 
 use super::super::item::{MaterialStackOrder, WorldMeshDrawItem};
@@ -123,31 +124,13 @@ pub(super) fn evaluate_draw_candidate(
     }
     let blendshape_deformed = candidate.blendshape_deformed
         || (candidate.tangent_blendshape_deform_active && batch_key.embedded_needs_tangent);
-    let camera_distance_sq = if batch_key.uses_transparent_sorting() {
-        transparent_sort_distance_sq(
-            ctx.view.view_origin_world,
-            candidate.world_aabb,
-            alpha_distance_sq,
-        )
-    } else {
-        0.0
-    };
     super::lod_fade::select_unlit_fade_pipeline(&mut batch_key.pipeline, candidate.lod_fade);
-    let batch_key_hash = compute_batch_key_hash(&batch_key);
-    // Precompute the opaque depth bucket here so the sort comparator does not redo `sqrt + log2`
-    // on every pairwise compare. The argument matches the previous comparator-side computation
-    // (`opaque_depth_bucket(item.camera_distance_sq)`) so the resulting order is stable:
-    // transparent-sorted draws use the class-compatible sort metric preserved on
-    // `camera_distance_sq`, while opaque-queue draws feed `0.0` and bucket to `0`,
-    // leaving batch-key tiebreaking intact.
-    let opaque_depth_bucket =
-        crate::world_mesh::draw_prep::sort::opaque_depth_bucket(camera_distance_sq);
-    let sort_prefix = crate::world_mesh::draw_prep::sort::pack_sort_prefix(
-        candidate.is_overlay,
-        batch_key.render_queue,
-        batch_key.uses_transparent_sorting(),
-        opaque_depth_bucket,
-        batch_key_hash,
+    let sort_metrics = candidate_sort_metrics(
+        ctx,
+        &candidate,
+        &batch_key,
+        rigid_world_matrix,
+        alpha_distance_sq,
     );
     let reflection_probes = match (ctx.view.reflection_probes, candidate.world_aabb) {
         (Some(selection), Some(aabb)) => selection.select(candidate.space_id, aabb),
@@ -171,19 +154,107 @@ pub(super) fn evaluate_draw_candidate(
         world_space_deformed: candidate.world_space_deformed,
         blendshape_deformed,
         collect_order: 0,
-        camera_distance_sq,
+        camera_distance_sq: sort_metrics.camera_distance_sq,
+        canvas_plane_depth: sort_metrics.canvas_plane_depth,
+        is_canvas_ui: sort_metrics.is_canvas_ui,
+        transparent_depth_key: sort_metrics.transparent_depth_key,
         world_aabb: candidate.world_aabb,
         lookup_ids,
         batch_key,
-        batch_key_hash,
-        _opaque_depth_bucket: opaque_depth_bucket,
-        sort_prefix,
+        batch_key_hash: sort_metrics.batch_key_hash,
+        _opaque_depth_bucket: sort_metrics.opaque_depth_bucket,
+        sort_prefix: sort_metrics.sort_prefix,
         rigid_world_matrix,
         reflection_probes,
         ui_rect_clip_local,
         particle_draw: candidate.particle_draw,
         lod_fade: candidate.lod_fade,
     })
+}
+
+/// Distance, canvas-plane depth, and packed sort prefix for one accepted candidate.
+struct CandidateSortMetrics {
+    /// Farthest-corner distance squared, or zero for opaque-queue draws.
+    camera_distance_sq: f32,
+    /// Canvas plane distance when this draw is a UI stem with a usable rigid matrix.
+    canvas_plane_depth: Option<f32>,
+    /// Whether `batch_key.pipeline` is a canvas UI stem.
+    is_canvas_ui: bool,
+    /// Precomputed farther-first key. See [`WorldMeshDrawItem::transparent_depth_key`].
+    transparent_depth_key: f64,
+    /// Content hash of the resolved batch key.
+    batch_key_hash: u64,
+    /// Coarse opaque front-to-back bucket derived from [`Self::camera_distance_sq`].
+    opaque_depth_bucket: u16,
+    /// Packed primary sort key.
+    sort_prefix: u64,
+}
+
+/// Builds the sort metrics stored on a draw item.
+///
+/// The opaque depth bucket is computed once here so the comparator does not redo `sqrt + log2`
+/// on every pairwise compare. Transparent-sorted draws keep the farthest-corner metric on
+/// `camera_distance_sq`. Opaque-queue draws pass `0.0` and bucket to `0`.
+fn candidate_sort_metrics(
+    ctx: &DrawCollectionInputs<'_>,
+    candidate: &DrawCandidate,
+    batch_key: &MaterialDrawBatchKey,
+    rigid_world_matrix: Option<Mat4>,
+    alpha_distance_sq: f32,
+) -> CandidateSortMetrics {
+    let camera_distance_sq = if batch_key.uses_transparent_sorting() {
+        transparent_sort_distance_sq(
+            ctx.view.view_origin_world,
+            candidate.world_aabb,
+            alpha_distance_sq,
+        )
+    } else {
+        0.0
+    };
+    let is_canvas_ui = batch_key.pipeline.is_canvas_ui_stem();
+    let canvas_plane_depth = if is_canvas_ui {
+        canvas_plane_depth_for_candidate(&ctx.view, candidate.is_overlay, rigid_world_matrix)
+    } else {
+        None
+    };
+    let transparent_depth_key = super::super::transparent_depth_key_from_parts(
+        is_canvas_ui,
+        canvas_plane_depth,
+        camera_distance_sq,
+    );
+    let batch_key_hash = compute_batch_key_hash(batch_key);
+    let opaque_depth_bucket =
+        crate::world_mesh::draw_prep::sort::opaque_depth_bucket(camera_distance_sq);
+    let sort_prefix = crate::world_mesh::draw_prep::sort::pack_sort_prefix(
+        candidate.is_overlay,
+        batch_key.render_queue,
+        batch_key.uses_transparent_sorting(),
+        opaque_depth_bucket,
+        batch_key_hash,
+    );
+    CandidateSortMetrics {
+        camera_distance_sq,
+        canvas_plane_depth,
+        is_canvas_ui,
+        transparent_depth_key,
+        batch_key_hash,
+        opaque_depth_bucket,
+        sort_prefix,
+    }
+}
+
+/// Plane distance for one canvas draw, or `None` when the rigid matrix is missing.
+fn canvas_plane_depth_for_candidate(
+    view: &super::DrawCollectionViewInputs<'_>,
+    is_overlay: bool,
+    rigid_world_matrix: Option<Mat4>,
+) -> Option<f32> {
+    let origin = if is_overlay {
+        crate::camera::overlay_canvas_view_origin()
+    } else {
+        view.view_origin_world
+    };
+    super::super::canvas_plane_distance_meters(origin, rigid_world_matrix?)
 }
 
 /// Returns the transparent back-to-front sort metric for a draw candidate.
@@ -501,7 +572,7 @@ mod tests {
         );
         let cache = FrameMaterialBatchCache::new();
         let ctx = test_draw_context(&scene, &mesh_pool, &material_dict, &router, &property_ids);
-        let candidate = DrawCandidate {
+        let candidate = || DrawCandidate {
             space_id: RenderSpaceId(3),
             node_id: 9,
             renderable_index: 42,
@@ -528,7 +599,7 @@ mod tests {
         let item = evaluate_draw_candidate(
             &ctx,
             &cache,
-            candidate,
+            candidate(),
             RasterFrontFace::Clockwise,
             RasterPrimitiveTopology::TriangleList,
             None,
@@ -539,6 +610,22 @@ mod tests {
         assert!(item.batch_key.alpha_blended);
         assert!(item.batch_key.uses_transparent_sorting());
         assert_eq!(item.camera_distance_sq, 125.0);
+        assert!(item.is_canvas_ui);
+        assert_eq!(item.canvas_plane_depth, None);
+
+        let with_plane = evaluate_draw_candidate(
+            &ctx,
+            &cache,
+            candidate(),
+            RasterFrontFace::Clockwise,
+            RasterPrimitiveTopology::TriangleList,
+            Some(Mat4::from_translation(Vec3::new(0.0, 0.0, 10.0))),
+            4.0,
+        )
+        .expect("draw item");
+        assert_eq!(with_plane.camera_distance_sq, 125.0);
+        assert_eq!(with_plane.canvas_plane_depth, Some(10.0));
+        assert!((with_plane.transparent_depth_key - 10.0).abs() < 1.0e-4);
     }
 
     #[test]

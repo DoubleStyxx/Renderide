@@ -4,7 +4,9 @@ use bytemuck::Zeroable;
 use glam::Mat4;
 use rayon::prelude::*;
 
-use crate::camera::HostCameraFrame;
+use crate::camera::{
+    CameraProjectionKind, HostCameraFrame, OVERLAY_CAMERA_FAR_CLIP, OVERLAY_CAMERA_NEAR_CLIP,
+};
 use crate::cpu_parallelism::{
     RENDER_COMMAND_CHUNK_DRAWS, admit_render_command_items, current_reference_worker_count,
     record_parallel_admission,
@@ -14,6 +16,7 @@ use crate::mesh_deform::PaddedPerDrawUniforms;
 use crate::scene::SceneTransformRead;
 use crate::shared::RenderingContext;
 use crate::world_mesh::draw_prep::WorldMeshDrawItem;
+use crate::world_mesh::{assign_canvas_depth_steps, canvas_bias_projection, canvas_ndc_z_bias};
 
 use super::prepare::WorldMeshForwardPrepareFrame;
 use super::vp::compute_per_draw_vp_matrices;
@@ -83,11 +86,12 @@ pub(super) fn pack_and_upload_per_draw_slab(
 
     // Step 2: pack VP uniforms in `slab_layout` order and enqueue the storage-buffer upload.
     let mut uploaded = false;
-    let mut pack_and_upload = |uniforms: &mut Vec<PaddedPerDrawUniforms>| {
+    let mut pack_and_upload = |uniforms: &mut Vec<PaddedPerDrawUniforms>,
+                               canvas_steps: &mut Vec<u32>| {
         uniforms.clear();
         uniforms.resize_with(inputs.draws.len(), PaddedPerDrawUniforms::zeroed);
 
-        pack_per_draw_vp_uniforms(uniforms, &inputs, scene, hc);
+        pack_per_draw_vp_uniforms(uniforms, canvas_steps, &inputs, scene, hc);
 
         {
             profiling::scope!("world_mesh::enqueue_slab_upload");
@@ -110,12 +114,33 @@ pub(super) fn pack_and_upload_per_draw_slab(
 /// depending on whether `compute_per_draw_vp_matrices` returns identical left/right matrices.
 fn pack_per_draw_vp_uniforms(
     uniforms: &mut [PaddedPerDrawUniforms],
+    canvas_steps: &mut Vec<u32>,
     inputs: &SlabPackInputs<'_>,
     scene: &(impl SceneTransformRead + Sync + ?Sized),
     hc: &HostCameraFrame,
 ) {
     profiling::scope!("world_mesh::pack_vp_matrices");
-    let pack_one = |slot: &mut PaddedPerDrawUniforms, item: &WorldMeshDrawItem| {
+    assign_canvas_depth_steps(inputs.draws, canvas_steps);
+    let pack_one = |slot: &mut PaddedPerDrawUniforms, draw_index: usize| {
+        let item = &inputs.draws[draw_index];
+        // Near/far follow `is_overlay` alone. The projection family also requires
+        // `overlay_proj` to be present before it treats an overlay draw as orthographic.
+        // Those agree for every draw this packer sees: `compute_view_projections` sets
+        // `overlay_proj` from this same draw list, so an overlay item always has one.
+        // The constants below are the clip planes baked into that desktop overlay ortho.
+        // The `None` arm of `canvas_bias_projection` only matches the world-matrix fallback
+        // in `projection_for_world_mesh_draw`; packing does not reach it, so it does not
+        // change this cap.
+        let (near, far) = if item.is_overlay {
+            (OVERLAY_CAMERA_NEAR_CLIP, OVERLAY_CAMERA_FAR_CLIP)
+        } else {
+            (hc.clip.near, hc.clip.far)
+        };
+        let projection = canvas_bias_projection(
+            item.is_overlay,
+            inputs.overlay_proj.is_some(),
+            hc.projection_kind == CameraProjectionKind::Orthographic,
+        );
         let matrices = compute_per_draw_vp_matrices(
             scene,
             item,
@@ -123,6 +148,13 @@ fn pack_per_draw_vp_uniforms(
             inputs.render_context,
             inputs.world_proj,
             inputs.overlay_proj,
+            canvas_ndc_z_bias(
+                item,
+                canvas_steps.get(draw_index).copied().unwrap_or(0),
+                near,
+                far,
+                projection,
+            ),
         );
         let packed = if matrices.view_proj_left == matrices.view_proj_right {
             PaddedPerDrawUniforms::new_single(matrices.view_proj_left, matrices.model)
@@ -163,12 +195,12 @@ fn pack_per_draw_vp_uniforms(
             .for_each(|(slots, layout)| {
                 profiling::scope!("world_mesh::pack_vp_matrices::worker");
                 for (slot, &draw_idx) in slots.iter_mut().zip(layout.iter()) {
-                    pack_one(slot, &inputs.draws[draw_idx]);
+                    pack_one(slot, draw_idx);
                 }
             });
     } else {
         for (slot, &draw_idx) in uniforms.iter_mut().zip(inputs.slab_layout.iter()) {
-            pack_one(slot, &inputs.draws[draw_idx]);
+            pack_one(slot, draw_idx);
         }
     }
 }

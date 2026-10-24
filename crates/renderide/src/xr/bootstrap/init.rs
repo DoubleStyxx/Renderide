@@ -4,6 +4,7 @@
 
 use openxr as xr;
 
+use crate::config::{ResolvedVrSwapchainGpuWait, VrSwapchainGpuWait, VrSwapchainGpuWaitQuery};
 use crate::frontend::input::HeadsetMetadata;
 
 use super::super::debug_utils::OpenxrDebugUtilsMessenger;
@@ -31,9 +32,13 @@ use super::wgpu_assembly::{
 /// physical device via `xrGetVulkanGraphicsDeviceKHR`, so the renderer cannot override it. When the
 /// runtime's choice does not match the user's configured preference, the log line printed below
 /// makes the mismatch visible without requiring a Vulkan-layer trace.
+///
+/// `vr_swapchain_gpu_wait` is resolved once against the runtime name and the adapter the runtime
+/// selected, then logged. The resulting on/off bit is stored on the session.
 pub fn init_wgpu_openxr(
     gpu_validation_layers: bool,
     power_preference: wgpu::PowerPreference,
+    vr_swapchain_gpu_wait: VrSwapchainGpuWait,
 ) -> Result<XrWgpuHandles, XrBootstrapError> {
     // Runtimes often log with printf/stderr; ensure stdio forwarding (idempotent; usually already done in `run`).
     crate::native_stdio::ensure_stdio_forwarded_to_logger();
@@ -51,7 +56,7 @@ pub fn init_wgpu_openxr(
 
     let (xr_system_id, environment_blend_mode, reqs) =
         probe_head_set_and_vulkan_requirements(&xr_instance)?;
-    let headset_metadata = query_headset_metadata(&xr_instance, xr_system_id);
+    let (headset_metadata, runtime_name) = query_headset_metadata(&xr_instance, xr_system_id);
     logger::info!(
         "OpenXR system: id={:?} environment_blend_mode={:?} vulkan_min={} vulkan_max={}",
         xr_system_id,
@@ -95,6 +100,16 @@ pub fn init_wgpu_openxr(
             vk_device_properties: &vk_device_properties,
         })?;
 
+    let wait_query = VrSwapchainGpuWaitQuery {
+        runtime_name: &runtime_name,
+        adapter_name: &wgpu_exposed.info.name,
+        driver: &wgpu_exposed.info.driver,
+        driver_info: &wgpu_exposed.info.driver_info,
+        vendor_id: wgpu_exposed.info.vendor,
+    };
+    let swapchain_gpu_wait = vr_swapchain_gpu_wait.resolve(wait_query);
+    log_swapchain_gpu_wait(swapchain_gpu_wait, wait_query);
+
     let (xr_session, openxr_input) =
         openxr_session_state_and_input(OpenXrSessionBootstrapDescriptor {
             xr_instance,
@@ -106,6 +121,7 @@ pub fn init_wgpu_openxr(
             vk_device: &vk_device,
             queue_family_index,
             profile_gates,
+            swapchain_gpu_wait: swapchain_gpu_wait.enabled,
         })?;
 
     wgpu_from_hal_openxr_chain(WgpuHalOpenXrAssembly {
@@ -123,10 +139,19 @@ pub fn init_wgpu_openxr(
     })
 }
 
+/// Logs the resolved VR swapchain wait once, at session start.
+fn log_swapchain_gpu_wait(
+    decision: ResolvedVrSwapchainGpuWait,
+    query: VrSwapchainGpuWaitQuery<'_>,
+) {
+    decision.log_session_start(query);
+}
+
+/// Host headset metadata, and the OpenXR runtime name the GPU-wait `auto` mode matches.
 fn query_headset_metadata(
     xr_instance: &xr::Instance,
     xr_system_id: xr::SystemId,
-) -> HeadsetMetadata {
+) -> (HeadsetMetadata, String) {
     let instance_properties = match xr_instance.properties() {
         Ok(properties) => Some(properties),
         Err(error) => {
@@ -172,5 +197,5 @@ fn query_headset_metadata(
         metadata.connection_type,
     );
 
-    metadata
+    (metadata, runtime_name.to_owned())
 }

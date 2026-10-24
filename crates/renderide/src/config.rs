@@ -70,8 +70,9 @@ pub use types::{
     GTAO_MAX_DENOISE_PASSES, GTAO_MAX_QUALITY_LEVEL, GTAO_MAX_RESOLUTION_DIVISOR,
     GTAO_MAX_SLICE_COUNT, GTAO_MAX_STEPS_PER_SLICE, GraphicsApiSetting, GtaoSettings,
     MotionBlurSettings, MsaaSampleCount, PostProcessingSettings, PowerPreferenceSetting,
-    PresentationModeSetting, RenderGraphValidationMode, RendererSettings, SceneColorFormat,
-    TonemapMode, WatchdogAction, WatchdogSettings,
+    PresentationModeSetting, RenderGraphValidationMode, RendererSettings,
+    ResolvedVrSwapchainGpuWait, SceneColorFormat, TonemapMode, VrSwapchainGpuWait,
+    VrSwapchainGpuWaitQuery, WatchdogAction, WatchdogSettings,
 };
 #[cfg(test)]
 pub(crate) use types::{DebugSettings, TonemapSettings};

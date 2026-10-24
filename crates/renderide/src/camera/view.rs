@@ -86,3 +86,14 @@ pub fn world_to_view_pair_for_skybox(
     });
     (view, view)
 }
+
+/// Overlay-camera origin in overlay-local space.
+///
+/// Desktop overlay draws are not in the main camera frame. The overlay view is
+/// `translation(0, 0, -10) * scale(1, 1, -1)`, and the inverse of that fixed matrix maps the
+/// view origin to `(0, 0, -10)`. Canvas plane depth uses this constant. Collection does not
+/// invert a view matrix to recover a camera forward.
+#[inline]
+pub(crate) fn overlay_canvas_view_origin() -> Vec3 {
+    Vec3::new(0.0, 0.0, super::host_camera_frame::OVERLAY_CAMERA_LOCAL_Z)
+}
