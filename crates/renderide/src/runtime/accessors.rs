@@ -171,7 +171,7 @@ impl RendererRuntime {
         self.backend.set_shadow_quality(self.shadow_quality());
         let (shm, ipc) = self.frontend.transport_pair_mut();
         let headless = gpu.is_headless();
-        let frame_bench = crate::app::frame_bench::active();
+        let frame_bench = crate::runtime::frame_bench_active();
         if let Err(e) =
             self.backend.attach(
                 crate::backend::RenderBackendAttachDesc {
