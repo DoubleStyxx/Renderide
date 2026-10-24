@@ -2,11 +2,10 @@
 //!
 //! Forward shading writes a transient HDR image, and compose then blits that image over the
 //! camera target. Loading the transient does not keep the render texture. Depth-only and
-//! clear-none cameras therefore copy the current color in first, then load it. The double-buffered
-//! camera that claimed this frame's swap copies its history image. A later camera on that texture
-//! copies the published write image. Skybox and color cameras skip this pass.
+//! clear-none cameras therefore copy the current color in first, then load it. The image they
+//! copy is [`preserved_color_texture`]: history for the first writer of a swapped texture, and
+//! the published image for every later writer. Skybox and color cameras skip this pass.
 
-use crate::frame_contract::RenderTextureSelfSampling;
 use crate::passes::helpers::missing_pass_resource;
 use crate::render_graph::context::EncoderPassCtx;
 use crate::render_graph::error::{RenderPassError, SetupError};
@@ -14,6 +13,7 @@ use crate::render_graph::pass::{EncoderPass, PassBuilder};
 use crate::render_graph::resources::{ImportedTextureHandle, TextureAccess, TextureHandle};
 
 use super::clear_load::forward_clear_loads_for_view;
+pub(crate) use super::clear_load::preserved_color_texture;
 
 /// Encoder pass that seeds HDR scene color from the current full-target color texture.
 #[derive(Debug)]
@@ -45,21 +45,15 @@ impl EncoderPass for WorldMeshForwardColorPreservePass {
     }
 
     fn should_record(&self, ctx: &EncoderPassCtx<'_, '_, '_>) -> Result<bool, RenderPassError> {
+        // `seed_color` is `preserved_color_texture(view).is_some()`, so this pass records exactly
+        // when the forward color load keeps that copy.
         Ok(forward_clear_loads_for_view(ctx.frame.view).seed_color)
     }
 
     fn record(&self, ctx: &mut EncoderPassCtx<'_, '_, '_>) -> Result<(), RenderPassError> {
         let extent = ctx.frame.view.viewport_px;
-        let source = preserved_color_texture(
-            ctx.frame
-                .view
-                .offscreen_write_target
-                .render_texture_self_sampling(),
-            ctx.frame.view.color_texture,
-            ctx.frame.view.history_color_texture,
-            ctx.frame.view.seed_published_color,
-        )
-        .ok_or_else(|| missing_pass_resource(self.name(), "preserved color texture"))?;
+        let source = preserved_color_texture(ctx.frame.view)
+            .ok_or_else(|| missing_pass_resource(self.name(), "preserved color texture"))?;
         let destination = ctx
             .graph_resources
             .transient_texture(self.scene_color_hdr)
@@ -120,25 +114,4 @@ pub(crate) fn copy_preserved_scene_color(
             depth_or_array_layers: 1,
         },
     );
-}
-
-/// Color image a Nothing or Depth camera copies into HDR scene color.
-///
-/// The double-buffered camera that claimed the swap returns `history` and never the write
-/// image. A later camera on that texture returns `write`. Every other camera returns `write`.
-/// `None` means this view has no image to preserve.
-pub(crate) fn preserved_color_texture<'a>(
-    self_sampling: Option<RenderTextureSelfSampling>,
-    write: Option<&'a wgpu::Texture>,
-    history: Option<&'a wgpu::Texture>,
-    seed_published_color: bool,
-) -> Option<&'a wgpu::Texture> {
-    if seed_published_color {
-        return write;
-    }
-    if self_sampling == Some(RenderTextureSelfSampling::AllowPreviousContents) {
-        history
-    } else {
-        write
-    }
 }

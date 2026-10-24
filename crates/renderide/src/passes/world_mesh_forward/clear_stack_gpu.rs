@@ -140,13 +140,7 @@ fn nothing_camera_over_double_buffered_texture_seeds_the_history_image() {
     assert!(loads.seed_color);
     assert!(matches!(loads.color, wgpu::LoadOp::Load));
     assert!(matches!(loads.depth, wgpu::LoadOp::Load));
-    let source = preserved_color_texture(
-        view.offscreen_write_target.render_texture_self_sampling(),
-        view.color_texture,
-        view.history_color_texture,
-        view.seed_published_color,
-    )
-    .expect("double-buffered seed source");
+    let source = preserved_color_texture(&view).expect("double-buffered seed source");
     renderer.poison_scene_color(&device, &queue);
     renderer.copy_source(&device, &queue, source);
     renderer.draw_overlay(&device, &queue, loads.color, loads.depth);

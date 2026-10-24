@@ -35,10 +35,9 @@ pub(in crate::runtime) struct OffscreenTargetHandles {
     pub(in crate::runtime) write_target: OffscreenWriteTarget,
     /// Color texture backing `color_view`.
     pub(in crate::runtime) color_texture: wgpu::Texture,
-    /// Previous-frame color image for the double-buffered camera that claimed the swap.
-    /// The preserve pass copies this instead of `color_texture` for that camera only.
+    /// History image for the first writer of a swapped texture. Later writers leave this empty.
     pub(in crate::runtime) history_color_texture: Option<wgpu::Texture>,
-    /// `true` when a later double-buffered camera seeds `color_texture` rather than history.
+    /// `true` when this view writes a swapped texture after another view already did this frame.
     pub(in crate::runtime) seed_published_color: bool,
     /// Color attachment view for this render texture.
     pub(in crate::runtime) color_view: wgpu::TextureView,
@@ -77,21 +76,6 @@ impl OffscreenTargetHandles {
             seed_published_color: false,
             copy_to_color: None,
         }
-    }
-
-    /// Records the previous-frame color image a double-buffered camera seeds from.
-    pub(in crate::runtime) fn with_history_color(
-        mut self,
-        history_color_texture: wgpu::Texture,
-    ) -> Self {
-        self.history_color_texture = Some(history_color_texture);
-        self
-    }
-
-    /// Marks a later double-buffered writer that seeds the published color image.
-    pub(in crate::runtime) fn with_seed_published_color(mut self) -> Self {
-        self.seed_published_color = true;
-        self
     }
 
     /// Adds a post-render color copy destination.
@@ -170,6 +154,11 @@ impl<'a> ViewFamilyPlan<'a> {
     /// Shared slice of ordered planned views.
     pub(in crate::runtime) fn plans(&self) -> &[FrameViewPlan<'a>] {
         &self.views
+    }
+
+    /// Mutable ordered views, used to attach double-buffer seeds after the family is ordered.
+    pub(in crate::runtime) fn plans_mut(&mut self) -> &mut [FrameViewPlan<'a>] {
+        &mut self.views
     }
 
     /// Primary-view metadata for frame-global graph passes.
@@ -323,6 +312,24 @@ impl<'a> FrameViewPlan<'a> {
         }
         handles.color_texture = color_texture;
         handles.color_view = color_view;
+    }
+
+    /// The first writer of a swapped texture copies `history` instead of the published image.
+    pub(in crate::runtime) fn seed_first_writer_from_history(&mut self, history: wgpu::Texture) {
+        let FrameViewPlanTarget::Offscreen(handles) = &mut self.target else {
+            return;
+        };
+        handles.history_color_texture = Some(history);
+        handles.seed_published_color = false;
+    }
+
+    /// A writer after the first one this frame copies the published image.
+    pub(in crate::runtime) fn seed_later_writer_from_published(&mut self) {
+        let FrameViewPlanTarget::Offscreen(handles) = &mut self.target else {
+            return;
+        };
+        handles.history_color_texture = None;
+        handles.seed_published_color = true;
     }
 
     /// Offscreen target currently written by this view.

@@ -75,6 +75,12 @@ pub struct GpuRenderTexture {
     previous_color: Option<RenderTextureColorImage>,
     /// Planning passes since an enabled camera last had the double-buffer flag set.
     history_idle_frames: u8,
+    /// `true` after this frame's swap, until the next planning pass clears it.
+    ///
+    /// Cookie sampling runs before cameras write. History then holds the last completed frame
+    /// and the published image is two frames old. A frame that does not swap leaves this false
+    /// so cookies keep the published image, which is the newer one.
+    history_is_last_completed_frame: bool,
     /// Optional depth texture (always allocated for scene draws in [`Self::new_from_format`]).
     pub depth_texture: Option<Arc<wgpu::Texture>>,
     /// View over `depth_texture` when present.
@@ -169,6 +175,7 @@ impl GpuRenderTexture {
             color_view_generation: published.view_generation,
             previous_color: None,
             history_idle_frames: 0,
+            history_is_last_completed_frame: false,
             depth_texture,
             depth_view,
             wgpu_color_format,
@@ -195,8 +202,8 @@ impl GpuRenderTexture {
     /// Color image completed on the previous double-buffered frame.
     ///
     /// `None` until the first rendered double-buffered pass allocates it, and again after idle
-    /// release. The camera that claimed this frame's swap seeds this image. Later cameras on
-    /// the same texture seed the published write image instead.
+    /// release. The first writer of this texture seeds this image. Later writers seed the
+    /// published image instead.
     #[inline]
     pub(crate) fn history_color_texture(&self) -> Option<Arc<wgpu::Texture>> {
         self.previous_color
@@ -221,6 +228,19 @@ impl GpuRenderTexture {
             Some(previous) => previous.view_generation,
             None => self.color_view_generation,
         }
+    }
+
+    /// Color view for a pass that samples this texture before cameras write it.
+    ///
+    /// After this frame's swap, history is the last completed image. Otherwise the published
+    /// image is the one to sample.
+    pub(crate) fn color_view_for_early_sampling(&self) -> &wgpu::TextureView {
+        if self.history_is_last_completed_frame
+            && let Some(previous) = self.previous_color.as_ref()
+        {
+            return previous.view.as_ref();
+        }
+        self.color_view.as_ref()
     }
 
     fn previous_color_image(&self, allow_previous: bool) -> Option<&RenderTextureColorImage> {
@@ -270,6 +290,7 @@ impl GpuRenderTexture {
             &mut self.color_view_generation,
             &mut previous.view_generation,
         );
+        self.history_is_last_completed_frame = true;
     }
 
     /// Removes the history image and subtracts its bytes from the resident total.
@@ -278,6 +299,7 @@ impl GpuRenderTexture {
         let bytes = estimate_gpu_texture_bytes(self.wgpu_color_format, self.width, self.height, 1);
         self.resident_bytes = self.resident_bytes.saturating_sub(bytes);
         self.history_idle_frames = 0;
+        self.history_is_last_completed_frame = false;
         Some(RetiredRenderTextureHistory {
             bytes,
             texture: previous.texture,
@@ -457,6 +479,18 @@ impl RenderTexturePool {
             self.history_ids.push(asset_id);
         }
         Some(allocated)
+    }
+
+    /// Forgets which textures swapped, before this planning pass claims new swaps.
+    ///
+    /// Cookies sample history only while the flag is set. Clearing it first keeps a frame that
+    /// does not swap on the published image.
+    pub(crate) fn clear_history_completed_frame_flags(&mut self) {
+        for &asset_id in &self.history_ids {
+            if let Some(texture) = self.inner.get_mut(asset_id) {
+                texture.history_is_last_completed_frame = false;
+            }
+        }
     }
 
     /// Ages history images and returns the scratch vec holding any that reached the idle limit.

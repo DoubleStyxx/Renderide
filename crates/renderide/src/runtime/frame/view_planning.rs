@@ -268,10 +268,6 @@ fn log_camera_portal_disable_per_pixel_lights(rt_id: i32) {
 struct ResidentSecondaryRenderTexture {
     /// Host render texture color storage.
     color_texture: Arc<wgpu::Texture>,
-    /// Previous-frame color image after the camera that claimed the swap. Absent otherwise.
-    history_color_texture: Option<Arc<wgpu::Texture>>,
-    /// `true` when this camera did not claim the swap and must seed the published write image.
-    seed_published_color: bool,
     /// Full host render texture color view.
     color_view: Arc<wgpu::TextureView>,
     /// Full host render texture depth storage.
@@ -308,8 +304,6 @@ impl RendererRuntime {
         };
         Some(ResidentSecondaryRenderTexture {
             color_texture: rt.color_texture.clone(),
-            history_color_texture: None,
-            seed_published_color: false,
             color_view: rt.color_view.clone(),
             depth_format: depth_texture.format(),
             depth_texture,
@@ -340,8 +334,6 @@ impl RendererRuntime {
         };
         Some(ResidentSecondaryRenderTexture {
             color_texture: rt.color_texture.clone(),
-            history_color_texture: None,
-            seed_published_color: false,
             color_view: rt.color_view.clone(),
             depth_format: depth_texture.format(),
             depth_texture,
@@ -433,7 +425,14 @@ impl RendererRuntime {
             self.build_main_view_with_profile(main_extent_px, main_profile, main_offscreen_target)
         });
 
-        assemble_view_family_plan(&fallback_frame_global, secondary_views, hmd_view, main_view)
+        let mut family =
+            assemble_view_family_plan(&fallback_frame_global, secondary_views, hmd_view, main_view);
+        double_buffer::assign_execution_order_color_seeds(
+            self.backend.render_texture_pool(),
+            &self.tick_state.double_buffered_render_texture_scratch,
+            family.plans_mut(),
+        );
+        family
     }
 
     /// Builds fallback primary-view metadata for frame-global passes when no HMD or main view is
@@ -494,6 +493,11 @@ impl RendererRuntime {
         let mut views = self.collect_camera_portal_views(device, main_extent_px);
         views.extend(self.collect_secondary_rt_views(device));
         double_buffer::refresh_swapped_view_color_handles(
+            self.backend.render_texture_pool(),
+            &self.tick_state.double_buffered_render_texture_scratch,
+            &mut views,
+        );
+        double_buffer::assign_execution_order_color_seeds(
             self.backend.render_texture_pool(),
             &self.tick_state.double_buffered_render_texture_scratch,
             &mut views,
@@ -779,6 +783,10 @@ impl RendererRuntime {
         swapped: &mut Vec<i32>,
         flagged: &mut Vec<i32>,
     ) -> Vec<FrameViewPlan<'a>> {
+        self.backend
+            .asset_transfers
+            .render_texture_pool_mut()
+            .clear_history_completed_frame_flags();
         collect_secondary_rt_view_tasks(&self.scene, tasks);
 
         let mut views: Vec<FrameViewPlan<'a>> = Vec::with_capacity(tasks.len());

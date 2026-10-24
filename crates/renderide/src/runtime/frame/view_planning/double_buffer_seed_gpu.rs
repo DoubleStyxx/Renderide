@@ -58,16 +58,21 @@ fn full_viewport() -> RenderRect {
     }
 }
 
-fn double_buffered_camera(
+fn scene_camera(
     depth: f32,
     clear_mode: CameraClearMode,
     renderable_index: i32,
+    double_buffered: bool,
 ) -> CameraRenderableEntry {
+    let mut flags = 1_u16;
+    if double_buffered {
+        flags |= 1 << 2;
+    }
     CameraRenderableEntry {
         renderable_index,
         transform_id: 0,
         state: CameraState {
-            flags: 1 | (1 << 2),
+            flags,
             render_texture_asset_id: ASSET,
             depth,
             clear_mode,
@@ -77,6 +82,14 @@ fn double_buffered_camera(
         selective_transform_ids: Vec::new(),
         exclude_transform_ids: Vec::new(),
     }
+}
+
+fn double_buffered_camera(
+    depth: f32,
+    clear_mode: CameraClearMode,
+    renderable_index: i32,
+) -> CameraRenderableEntry {
+    scene_camera(depth, clear_mode, renderable_index, true)
 }
 
 fn seed_space(scene: &mut SceneCoordinator) {
@@ -279,18 +292,84 @@ fn record_preserve(
     view: &GraphPassFrameView<'_>,
     destination: &wgpu::Texture,
 ) {
-    let source = preserved_color_texture(
-        view.offscreen_write_target.render_texture_self_sampling(),
-        view.color_texture,
-        view.history_color_texture,
-        view.seed_published_color,
-    )
-    .expect("preserve source");
+    let source = preserved_color_texture(view).expect("preserve source");
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("double-buffer-seed-preserve"),
     });
     copy_preserved_scene_color(&mut encoder, source, destination, view.viewport_px);
     queue.submit(std::iter::once(encoder.finish()));
+}
+
+fn paint_history_and_published(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    history: &wgpu::Texture,
+    published: &wgpu::Texture,
+) {
+    clear_color(
+        device,
+        queue,
+        history,
+        wgpu::Color {
+            r: 1.0,
+            g: 0.0,
+            b: 1.0,
+            a: 1.0,
+        },
+    );
+    clear_color(
+        device,
+        queue,
+        published,
+        wgpu::Color {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        },
+    );
+}
+
+fn assert_preserved_is_published(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    plan: &FrameViewPlan<'_>,
+    history: &wgpu::Texture,
+) {
+    let view = view_from_plan(plan);
+    let loads = forward_clear_loads_for_view(&view);
+    assert!(loads.seed_color);
+    assert!(matches!(loads.color, wgpu::LoadOp::Load));
+    let published = view.color_texture.expect("published color");
+    let scene = scene_target(device);
+    record_preserve(device, queue, &view, &scene);
+    let preserved = read_color(device, queue, &scene);
+    assert_eq!(preserved, read_color(device, queue, published));
+    assert_ne!(preserved, read_color(device, queue, history));
+}
+
+fn assert_cookie_samples_history(runtime: &RendererRuntime) {
+    let texture = runtime
+        .backend
+        .render_texture_pool()
+        .get(ASSET)
+        .expect("resident");
+    let early: *const wgpu::TextureView = texture.color_view_for_early_sampling();
+    let history = texture.color_view_for_sampling(true);
+    let published: *const wgpu::TextureView = texture.color_view.as_ref();
+    assert_eq!(early, Arc::as_ptr(&history));
+    assert_ne!(early, published);
+}
+
+fn assert_cookie_samples_published(runtime: &RendererRuntime) {
+    let texture = runtime
+        .backend
+        .render_texture_pool()
+        .get(ASSET)
+        .expect("resident");
+    let early: *const wgpu::TextureView = texture.color_view_for_early_sampling();
+    let published: *const wgpu::TextureView = texture.color_view.as_ref();
+    assert_eq!(early, published);
 }
 
 /// The second Nothing camera keeps the image the first camera is writing this frame.
@@ -359,12 +438,98 @@ fn stacked_double_buffered_nothing_preserves_this_frame_write() {
     let history_pixels = read_color(&device, &queue, &history);
     assert_eq!(preserved, write_pixels);
     assert_ne!(preserved, history_pixels);
+    assert_cookie_samples_history(&runtime);
+    runtime
+        .backend
+        .asset_transfers
+        .render_texture_pool_mut()
+        .clear_history_completed_frame_flags();
+    assert_cookie_samples_published(&runtime);
+}
+
+/// A normal Skybox at depth 0 draws this frame. The double-buffered Nothing behind it keeps that
+/// output instead of copying history over it.
+#[test]
+fn normal_skybox_then_double_buffered_nothing_keeps_this_frame() {
+    let Some((device, queue)) = open_device() else {
+        logger::info!("normal skybox then double-buffer seed skipped: no adapter");
+        return;
+    };
+    let mut runtime = build_runtime();
+    insert_texture(&mut runtime, &device);
+    seed_space(&mut runtime.scene);
+    runtime.scene.test_push_cameras(
+        SPACE,
+        [
+            scene_camera(0.0, CameraClearMode::Skybox, 0, false),
+            scene_camera(1.0, CameraClearMode::Nothing, 1, true),
+        ],
+    );
+
+    let plans = plan_offscreen(&mut runtime, &device);
+    assert_eq!(plans.len(), 2);
+    let first = offscreen(&plans[0]);
+    let second = offscreen(&plans[1]);
+    assert!(first.history_color_texture.is_some());
+    assert!(!first.seed_published_color);
+    assert!(second.history_color_texture.is_none());
+    assert!(second.seed_published_color);
+    assert_eq!(&first.color_texture, &second.color_texture);
+
+    let sky = view_from_plan(&plans[0]);
+    assert!(!forward_clear_loads_for_view(&sky).seed_color);
+    assert!(preserved_color_texture(&sky).is_none());
+
+    let history = first.history_color_texture.clone().expect("history image");
+    paint_history_and_published(&device, &queue, &history, &second.color_texture);
+    assert_preserved_is_published(&device, &queue, &plans[1], &history);
+}
+
+/// A normal Nothing camera sorted before the claimer is the first writer, so it seeds history.
+#[test]
+fn normal_nothing_before_double_buffered_camera_seeds_history() {
+    let Some((device, queue)) = open_device() else {
+        logger::info!("normal nothing before double-buffer seed skipped: no adapter");
+        return;
+    };
+    let mut runtime = build_runtime();
+    insert_texture(&mut runtime, &device);
+    seed_space(&mut runtime.scene);
+    runtime.scene.test_push_cameras(
+        SPACE,
+        [
+            scene_camera(0.0, CameraClearMode::Nothing, 0, false),
+            scene_camera(1.0, CameraClearMode::Skybox, 1, true),
+        ],
+    );
+
+    let plans = plan_offscreen(&mut runtime, &device);
+    assert_eq!(plans.len(), 2);
+    let first = offscreen(&plans[0]);
+    let second = offscreen(&plans[1]);
+    assert!(first.history_color_texture.is_some());
+    assert!(!first.seed_published_color);
+    assert!(second.history_color_texture.is_none());
+    assert!(second.seed_published_color);
+
+    let history = first.history_color_texture.clone().expect("history image");
+    paint_history_and_published(&device, &queue, &history, &first.color_texture);
+    let view = view_from_plan(&plans[0]);
+    let loads = forward_clear_loads_for_view(&view);
+    assert!(loads.seed_color);
+    assert!(matches!(loads.color, wgpu::LoadOp::Load));
+    assert!(matches!(loads.depth, wgpu::LoadOp::Load));
+    let scene = scene_target(&device);
+    record_preserve(&device, &queue, &view, &scene);
+    let preserved = read_color(&device, &queue, &scene);
+    assert_eq!(preserved, read_color(&device, &queue, &history));
+    assert_ne!(preserved, read_color(&device, &queue, &first.color_texture));
 }
 
 /// A mirror planned before the swap writes the post-swap published image.
 #[test]
 fn portal_on_double_buffered_texture_refreshes_published_handles() {
-    let Some((device, _queue)) = open_device() else {
+    let Some((device, queue)) = open_device() else {
         logger::info!("portal double-buffer refresh skipped: no adapter");
         return;
     };
@@ -391,7 +556,7 @@ fn portal_on_double_buffered_texture_refreshes_published_handles() {
     );
     runtime.scene.test_push_cameras(
         SPACE,
-        [double_buffered_camera(0.0, CameraClearMode::Skybox, 2)],
+        [double_buffered_camera(0.0, CameraClearMode::Nothing, 2)],
     );
     aim_host_camera(&mut runtime);
 
@@ -423,6 +588,11 @@ fn portal_on_double_buffered_texture_refreshes_published_handles() {
     assert_eq!(portal_color, published.as_ref());
     assert_eq!(camera_color, published.as_ref());
     assert_ne!(portal_color, history.as_ref());
-    assert!(offscreen(portal).history_color_texture.is_none());
-    assert!(offscreen(camera).history_color_texture.is_some());
+    assert!(offscreen(portal).history_color_texture.is_some());
+    assert!(!offscreen(portal).seed_published_color);
+    assert!(offscreen(camera).history_color_texture.is_none());
+    assert!(offscreen(camera).seed_published_color);
+
+    paint_history_and_published(&device, &queue, history.as_ref(), camera_color);
+    assert_preserved_is_published(&device, &queue, camera, history.as_ref());
 }

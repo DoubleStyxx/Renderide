@@ -772,16 +772,15 @@ pub struct GraphPassFrameView<'a> {
     /// `None` for the swapchain, multiview, and partial-viewport scratch targets. Those paths
     /// cannot preserve the previous color by loading the HDR transient.
     pub color_texture: Option<&'a wgpu::Texture>,
-    /// Previous-frame color image for a double-buffered camera.
+    /// History image when this view is the first writer of a swapped texture.
     ///
-    /// Nothing and Depth clear modes copy this into HDR scene color when this camera claimed
-    /// the double-buffer swap. [`Self::color_texture`] is the image this frame writes.
+    /// Nothing and Depth copy this into HDR scene color. Later writers leave it empty and set
+    /// [`Self::seed_published_color`]. [`Self::color_texture`] is the image this frame writes.
     pub history_color_texture: Option<&'a wgpu::Texture>,
-    /// `true` when a later double-buffered camera this frame seeds [`Self::color_texture`].
+    /// `true` when this view writes a swapped texture after another view already did this frame.
     ///
-    /// The camera that claimed the swap leaves this false and seeds history. Copying history
-    /// again would replace the first writer's output and pair last frame's color with this
-    /// frame's depth.
+    /// The preserve pass then copies [`Self::color_texture`], which holds that earlier output.
+    /// Copying history again would replace it and pair last frame's color with this frame's depth.
     pub seed_published_color: bool,
     /// `true` when [`Self::depth_texture`] is the persistent camera depth target.
     ///

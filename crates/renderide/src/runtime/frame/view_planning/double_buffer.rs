@@ -73,8 +73,8 @@ fn note_double_buffer_flag(flagged: &mut Vec<i32>, state: CameraState) {
 /// Swaps a ready double-buffered render texture once per planning pass.
 ///
 /// Call only after the camera has a resident target, a resolved viewport, scratch for a partial
-/// viewport, and a world matrix. Returns `true` when this camera claimed the swap. Later cameras
-/// on the same texture get `false` and seed the published write image.
+/// viewport, and a world matrix. Returns `true` when this camera claimed the swap. Which writer
+/// seeds history is decided later, in execution order.
 pub(super) fn swap_double_buffer(
     backend: &mut RenderBackend,
     device: &wgpu::Device,
@@ -96,34 +96,24 @@ pub(super) fn swap_double_buffer(
 }
 
 /// Replaces the snapshotted color handles with the image published after the swap.
-///
-/// History is attached only for the camera that claimed the swap. A later camera on the same
-/// texture seeds the published write image, which already contains this frame's first writer.
 fn refresh_published_color(
     pool: &RenderTexturePool,
     rt_id: i32,
     rt: &mut ResidentSecondaryRenderTexture,
-    claimed_swap: bool,
 ) {
     let Some(texture) = pool.get(rt_id) else {
         return;
     };
     rt.color_texture = Arc::clone(&texture.color_texture);
     rt.color_view = Arc::clone(&texture.color_view);
-    if claimed_swap {
-        rt.history_color_texture = texture.history_color_texture();
-        rt.seed_published_color = false;
-    } else {
-        rt.history_color_texture = None;
-        rt.seed_published_color = true;
-    }
 }
 
 /// Points every planned view of a swapped texture at the post-swap published color image.
 ///
 /// Portals and mirrors are planned before secondary cameras, so their handles still name the
 /// image that the swap turns into history. Rewriting those handles makes every writer of the
-/// texture target the same published image. History attachments are left alone.
+/// texture target the same published image. [`assign_execution_order_color_seeds`] then chooses
+/// history for the first writer and the published image for every later writer.
 pub(super) fn refresh_swapped_view_color_handles(
     pool: &RenderTexturePool,
     swapped: &[i32],
@@ -146,6 +136,42 @@ pub(super) fn refresh_swapped_view_color_handles(
             texture.color_texture.as_ref().clone(),
             texture.color_view.as_ref().clone(),
         );
+    }
+}
+
+/// Attaches history to the first writer of each swapped texture and the published image to the rest.
+///
+/// `views` is execution order: portals, then secondary cameras by depth, then the main view. The
+/// first writer of any kind seeds history, which is the last completed frame. Every later writer
+/// seeds the published image those earlier writers are filling this frame. The published image
+/// before that first write is two frames old. No scratch vector is allocated.
+pub(super) fn assign_execution_order_color_seeds(
+    pool: &RenderTexturePool,
+    swapped: &[i32],
+    views: &mut [FrameViewPlan<'_>],
+) {
+    if swapped.is_empty() || views.is_empty() {
+        return;
+    }
+    for &asset_id in swapped {
+        let Some(history) = pool
+            .get(asset_id)
+            .and_then(|texture| texture.history_color_texture())
+        else {
+            continue;
+        };
+        let mut attached = false;
+        for view in views.iter_mut() {
+            if view.write_target().host_render_texture_asset_id() != Some(asset_id) {
+                continue;
+            }
+            if attached {
+                view.seed_later_writer_from_published();
+            } else {
+                attached = true;
+                view.seed_first_writer_from_history(history.as_ref().clone());
+            }
+        }
     }
 }
 
@@ -235,13 +261,8 @@ pub(super) fn plan_secondary_rt_camera<'a>(
         runtime.host_camera.head_output_transform,
     )?;
     if camera_state_double_buffered(state.flags) {
-        let claimed_swap = swap_double_buffer(&mut runtime.backend, device, state, swapped);
-        refresh_published_color(
-            runtime.backend.render_texture_pool(),
-            rt_id,
-            &mut rt,
-            claimed_swap,
-        );
+        swap_double_buffer(&mut runtime.backend, device, state, swapped);
+        refresh_published_color(runtime.backend.render_texture_pool(), rt_id, &mut rt);
     }
     let handles = assemble_secondary_rt_handles(
         secondary_camera_write_target(rt_id, state.flags),
@@ -292,6 +313,8 @@ pub(super) fn secondary_rt_handles_for_rect(
 }
 
 /// Builds graph handles from a post-swap color snapshot and scratch acquired before the swap.
+///
+/// History and the published-seed bit are attached later by [`assign_execution_order_color_seeds`].
 fn assemble_secondary_rt_handles(
     write_target: OffscreenWriteTarget,
     rt: ResidentSecondaryRenderTexture,
@@ -299,52 +322,30 @@ fn assemble_secondary_rt_handles(
     scratch: Option<crate::backend::SecondaryRtScratchTargets>,
 ) -> OffscreenTargetHandles {
     let Some(scratch) = scratch else {
-        return with_history_color(
-            OffscreenTargetHandles::new(
-                write_target,
-                rt.color_texture.as_ref().clone(),
-                rt.color_view.as_ref().clone(),
-                rt.depth_texture.as_ref().clone(),
-                rt.depth_view.as_ref().clone(),
-                rt.extent_px,
-                rt.color_format,
-            ),
-            &rt,
+        return OffscreenTargetHandles::new(
+            write_target,
+            rt.color_texture.as_ref().clone(),
+            rt.color_view.as_ref().clone(),
+            rt.depth_texture.as_ref().clone(),
+            rt.depth_view.as_ref().clone(),
+            rt.extent_px,
+            rt.color_format,
         );
     };
-    with_history_color(
-        OffscreenTargetHandles::new(
-            write_target,
-            scratch.color_texture.as_ref().clone(),
-            scratch.color_view.as_ref().clone(),
-            scratch.depth_texture.as_ref().clone(),
-            scratch.depth_view.as_ref().clone(),
-            render_rect.extent_px,
-            rt.color_format,
-        )
-        .with_copy_to_color(OffscreenColorCopy {
-            destination_texture: rt.color_texture.as_ref().clone(),
-            destination_origin_px: render_rect.origin_px,
-            extent_px: render_rect.extent_px,
-        }),
-        &rt,
+    OffscreenTargetHandles::new(
+        write_target,
+        scratch.color_texture.as_ref().clone(),
+        scratch.color_view.as_ref().clone(),
+        scratch.depth_texture.as_ref().clone(),
+        scratch.depth_view.as_ref().clone(),
+        render_rect.extent_px,
+        rt.color_format,
     )
-}
-
-/// Attaches history for the swap claimer, or marks a later writer to seed the published image.
-fn with_history_color(
-    handles: OffscreenTargetHandles,
-    rt: &ResidentSecondaryRenderTexture,
-) -> OffscreenTargetHandles {
-    let handles = match rt.history_color_texture.as_ref() {
-        Some(texture) => handles.with_history_color(texture.as_ref().clone()),
-        None => handles,
-    };
-    if rt.seed_published_color {
-        handles.with_seed_published_color()
-    } else {
-        handles
-    }
+    .with_copy_to_color(OffscreenColorCopy {
+        destination_texture: rt.color_texture.as_ref().clone(),
+        destination_origin_px: render_rect.origin_px,
+        extent_px: render_rect.extent_px,
+    })
 }
 
 /// Finishes the [`FrameViewPlan`] for a camera that already has post-swap handles.
