@@ -2,6 +2,7 @@
 name = "bootstrapper"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
 description = "ResoBoot-aligned process bootstrap: spawns Renderite Host, IPC queue loop, renderer and clipboard bridging."
 
 [lib]

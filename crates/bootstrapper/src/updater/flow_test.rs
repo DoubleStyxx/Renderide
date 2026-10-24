@@ -254,16 +254,14 @@ fn network_failure_does_not_prompt_or_replace_the_installed_binary() {
     );
     assert_eq!(outcome, StartupUpdateOutcome::Continue);
 
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-    let address = listener.local_addr().expect("addr");
-    drop(listener);
+    let closed = MockServer::closes_immediately();
     let candidate = UpdateCandidate {
         tag: UPDATE_TAG.to_owned(),
         commit: UPDATE_COMMIT.to_owned(),
         changelog: String::new(),
         asset: ReleaseAsset::new(
             asset_name_for(platform, UPDATE_TAG),
-            format!("http://{address}/asset.zip"),
+            format!("{}/asset.zip", closed.base),
         ),
     };
     let error = super::install::install_candidate_in(install.path(), &metadata(), &candidate)
@@ -271,6 +269,44 @@ fn network_failure_does_not_prompt_or_replace_the_installed_binary() {
     assert!(
         matches!(error, UpdateError::SelfUpdate(_)),
         "unexpected error: {error}"
+    );
+    assert_eq!(read_file(&launcher), OLD_LAUNCHER);
+    assert_eq!(read_file(&renderer), OLD_RENDERER);
+}
+
+#[test]
+fn asset_url_redirect_is_followed_before_the_archive_is_checked() {
+    let platform = platform();
+    let install = tempfile::tempdir().expect("install dir");
+    write_install_tree(install.path(), platform, OLD_LAUNCHER, OLD_RENDERER);
+    let launcher = install.path().join(launcher_relative(platform));
+    let renderer = install.path().join(renderer_relative(platform));
+    let server = MockServer::serving_with_asset_redirect(vec![vec![served_update(
+        platform,
+        b"this is not a zip archive".to_vec(),
+    )]]);
+    let candidate = super::github::fetch_latest_candidate_from(&server.base, &metadata())
+        .expect("list")
+        .expect("newer nightly");
+    assert!(
+        candidate.asset.download_url().contains("/redirect/"),
+        "listing should publish the redirecting asset url"
+    );
+
+    let error = super::install::install_candidate_in(install.path(), &metadata(), &candidate)
+        .expect_err("redirected body is not a zip");
+    assert!(
+        matches!(error, UpdateError::InvalidArchive(_)),
+        "unexpected error: {error}"
+    );
+    let targets = server.request_targets();
+    assert!(
+        targets.iter().any(|target| target.contains("/redirect/")),
+        "asset url should be requested: {targets:?}"
+    );
+    assert!(
+        targets.iter().any(|target| target.contains("/assets/")),
+        "redirect should be followed to the download path: {targets:?}"
     );
     assert_eq!(read_file(&launcher), OLD_LAUNCHER);
     assert_eq!(read_file(&renderer), OLD_RENDERER);

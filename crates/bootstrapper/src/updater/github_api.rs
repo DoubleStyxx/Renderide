@@ -6,7 +6,11 @@
 //!
 //! Pagination follows `Link: rel="next"` as the header wrote it. 0.44 appended `?per_page=100` to
 //! that URL even when it already had a query string, which fails the whole check once a second
-//! page exists. 1.x does not. The first request still asks for `per_page=100`.
+//! page exists. 1.x does not. The first request still asks for `per_page=100`. A next URL that
+//! repeats a page already fetched fails immediately. One hundred pages is only a backstop.
+
+use std::collections::HashSet;
+use std::time::Duration;
 
 use self_update::reqwest::blocking::Client;
 use self_update::reqwest::header::{HeaderMap, LINK, USER_AGENT};
@@ -22,8 +26,13 @@ pub(super) const GITHUB_API_BASE: &str = "https://api.github.com";
 /// User-Agent 0.44 sent on release-listing requests.
 const LISTING_USER_AGENT: &str = "rust/self-update";
 
-/// Stops a `Link` cycle from walking forever. The repository's release list fits in one page.
+/// Backstop if every next URL is unique. A repeated next URL fails before this.
 const MAX_LISTING_PAGES: usize = 100;
+
+/// Same total timeout reqwest 0.13 applies when the caller does not set one.
+///
+/// Set here so a later reqwest default does not change how long an update check waits.
+const LISTING_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Fetches every release page for `owner`/`repo` under `api_base`.
 pub(super) fn list_releases(
@@ -32,14 +41,17 @@ pub(super) fn list_releases(
     repo: &str,
 ) -> Result<Vec<ListedRelease>, UpdateError> {
     let client = Client::builder()
+        .timeout(LISTING_TIMEOUT)
         .build()
         .map_err(|error| UpdateError::SelfUpdate(format!("build GitHub API client: {error}")))?;
     let mut url = format!(
         "{}/repos/{owner}/{repo}/releases?per_page=100",
         api_base.trim_end_matches('/')
     );
+    let mut seen_urls = HashSet::new();
     let mut releases = Vec::new();
     for _page in 0..MAX_LISTING_PAGES {
+        seen_urls.insert(url.clone());
         let response = client
             .get(&url)
             .header(USER_AGENT, LISTING_USER_AGENT)
@@ -62,6 +74,11 @@ pub(super) fn list_releases(
             releases.push(parse_release(release)?);
         }
         match next_link(&headers) {
+            Some(next) if seen_urls.contains(&next) => {
+                return Err(UpdateError::SelfUpdate(format!(
+                    "release listing repeated next url {next}"
+                )));
+            }
             Some(next) => url = next,
             None => return Ok(releases),
         }
@@ -214,12 +231,34 @@ mod tests {
     }
 
     #[test]
-    fn listing_connection_refused_is_an_error() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        let address = listener.local_addr().expect("addr");
-        drop(listener);
-        let error = list_releases(&format!("http://{address}"), "DoubleStyx", "Renderide")
-            .expect_err("refused");
+    fn listing_closed_connection_is_an_error() {
+        let server = MockServer::closes_immediately();
+        let error = list_releases(&server.base, "DoubleStyx", "Renderide").expect_err("closed");
         assert!(matches!(error, UpdateError::SelfUpdate(_)));
+    }
+
+    #[test]
+    fn listing_repeated_next_url_fails_before_another_request() {
+        let server = MockServer::repeating_next_link();
+        let error = list_releases(&server.base, "DoubleStyx", "Renderide").expect_err("cycle");
+        let UpdateError::SelfUpdate(message) = error else {
+            panic!("expected self-update error");
+        };
+        assert!(message.contains("repeated"), "{message}");
+        assert_eq!(server.listing_requests(), 1);
+    }
+
+    #[test]
+    fn listing_stops_after_the_page_cap_when_every_next_url_is_new() {
+        let server = MockServer::endless_distinct_pages();
+        let error = list_releases(&server.base, "DoubleStyx", "Renderide").expect_err("cap");
+        let UpdateError::SelfUpdate(message) = error else {
+            panic!("expected self-update error");
+        };
+        assert!(
+            message.contains(&MAX_LISTING_PAGES.to_string()),
+            "{message}"
+        );
+        assert_eq!(server.listing_requests(), MAX_LISTING_PAGES);
     }
 }

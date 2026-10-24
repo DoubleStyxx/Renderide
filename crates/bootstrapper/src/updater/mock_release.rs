@@ -58,20 +58,33 @@ impl MockServer {
 
     /// Listing requests receive `status` and an empty body.
     pub(super) fn listing_status(status: u16) -> Self {
-        Self::start(Vec::new(), status, HashMap::new())
+        Self::start(Vec::new(), ListingMode::Pages { status }, false, false)
+    }
+
+    /// Accepts the connection and closes it before any HTTP response.
+    pub(super) fn closes_immediately() -> Self {
+        Self::start(Vec::new(), ListingMode::Pages { status: 200 }, false, true)
+    }
+
+    /// Every listing page sends `Link: rel="next"` back at the same request URL.
+    pub(super) fn repeating_next_link() -> Self {
+        Self::start(Vec::new(), ListingMode::RepeatNext, false, false)
+    }
+
+    /// Every listing page sends `Link: rel="next"` at a page URL that has not been used yet.
+    pub(super) fn endless_distinct_pages() -> Self {
+        Self::start(Vec::new(), ListingMode::EndlessDistinct, false, false)
     }
 
     /// Serves `pages` in order. Page 1 is the first entry. Asset paths are `/assets/{name}`.
     pub(super) fn serving(pages: Vec<Vec<ServedRelease>>) -> Self {
-        let mut assets = HashMap::new();
-        for page in &pages {
-            for release in page {
-                for asset in &release.assets {
-                    assets.insert(asset.name.clone(), asset.bytes.clone());
-                }
-            }
-        }
-        Self::start(pages, 200, assets)
+        Self::start(pages, ListingMode::Pages { status: 200 }, false, false)
+    }
+
+    /// Like [`Self::serving`], but each asset `url` is `/redirect/{name}` and that path
+    /// answers `302` to `/assets/{name}` on this same server.
+    pub(super) fn serving_with_asset_redirect(pages: Vec<Vec<ServedRelease>>) -> Self {
+        Self::start(pages, ListingMode::Pages { status: 200 }, true, false)
     }
 
     /// Absolute URL for an asset this server hosts.
@@ -99,15 +112,24 @@ impl MockServer {
 
     fn start(
         pages: Vec<Vec<ServedRelease>>,
-        listing_status: u16,
-        assets: HashMap<String, Vec<u8>>,
+        mode: ListingMode,
+        redirect_assets: bool,
+        close_immediately: bool,
     ) -> Self {
+        let mut assets = HashMap::new();
+        for page in &pages {
+            for release in page {
+                for asset in &release.assets {
+                    assets.insert(asset.name.clone(), asset.bytes.clone());
+                }
+            }
+        }
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock release server");
         let address = listener.local_addr().expect("mock server address");
         let base = format!("http://{address}");
         let page_bodies = pages
             .iter()
-            .map(|page| page_json(&base, page))
+            .map(|page| page_json(&base, page, redirect_assets))
             .collect::<Vec<_>>();
         let listing_requests = Arc::new(AtomicUsize::new(0));
         let download_requests = Arc::new(AtomicUsize::new(0));
@@ -116,7 +138,8 @@ impl MockServer {
         let thread = {
             let state = ServeState {
                 base: base.clone(),
-                listing_status,
+                close_immediately,
+                mode,
                 pages: page_bodies,
                 assets,
                 listing_requests: Arc::clone(&listing_requests),
@@ -163,7 +186,7 @@ fn release_with_named_asset(tag: &str) -> ServedRelease {
     }
 }
 
-fn page_json(base: &str, releases: &[ServedRelease]) -> Vec<u8> {
+fn page_json(base: &str, releases: &[ServedRelease], redirect_assets: bool) -> Vec<u8> {
     let releases = releases
         .iter()
         .map(|release| {
@@ -171,9 +194,14 @@ fn page_json(base: &str, releases: &[ServedRelease]) -> Vec<u8> {
                 .assets
                 .iter()
                 .map(|asset| {
+                    let path = if redirect_assets {
+                        format!("/redirect/{}", asset.name)
+                    } else {
+                        format!("/assets/{}", asset.name)
+                    };
                     serde_json::json!({
                         "name": asset.name,
-                        "url": format!("{base}/assets/{}", asset.name),
+                        "url": format!("{base}{path}"),
                     })
                 })
                 .collect::<Vec<_>>();
@@ -189,9 +217,16 @@ fn page_json(base: &str, releases: &[ServedRelease]) -> Vec<u8> {
     serde_json::to_vec(&releases).expect("encode release page")
 }
 
+enum ListingMode {
+    Pages { status: u16 },
+    RepeatNext,
+    EndlessDistinct,
+}
+
 struct ServeState {
     base: String,
-    listing_status: u16,
+    mode: ListingMode,
+    close_immediately: bool,
     pages: Vec<Vec<u8>>,
     assets: HashMap<String, Vec<u8>>,
     listing_requests: Arc<AtomicUsize>,
@@ -208,6 +243,10 @@ fn serve(listener: TcpListener, state: &ServeState) {
         if state.shutdown.load(Ordering::SeqCst) {
             break;
         }
+        if state.close_immediately {
+            drop(stream);
+            continue;
+        }
         let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
         let Some(request) = read_headers(&mut stream) else {
             continue;
@@ -223,40 +262,73 @@ fn serve(listener: TcpListener, state: &ServeState) {
         let (path, query) = target.split_once('?').unwrap_or((target.as_str(), ""));
         if path == "/repos/DoubleStyx/Renderide/releases" {
             state.listing_requests.fetch_add(1, Ordering::SeqCst);
-            if state.listing_status != 200 {
-                let _ = write_response(&mut stream, state.listing_status, None, b"");
-                continue;
+            match &state.mode {
+                ListingMode::Pages { status } if *status != 200 => {
+                    let _ = write_response(&mut stream, *status, None, None, b"");
+                }
+                ListingMode::Pages { .. } => {
+                    let page_index = query_page(query).saturating_sub(1);
+                    let Some(body) = state.pages.get(page_index) else {
+                        let _ = write_response(&mut stream, 404, None, None, b"no such page");
+                        continue;
+                    };
+                    let next = page_index
+                        .checked_add(1)
+                        .filter(|next| state.pages.get(*next).is_some())
+                        .map(|next| {
+                            format!(
+                                "<{}/repos/DoubleStyx/Renderide/releases?page={}>; rel=\"next\"",
+                                state.base,
+                                next + 1
+                            )
+                        });
+                    let _ = write_response(&mut stream, 200, next.as_deref(), None, body);
+                }
+                ListingMode::RepeatNext => {
+                    let link = format!("<{base}{target}>; rel=\"next\"", base = state.base);
+                    let _ = write_response(
+                        &mut stream,
+                        200,
+                        Some(&link),
+                        None,
+                        &minimal_release("nightly-repeat"),
+                    );
+                }
+                ListingMode::EndlessDistinct => {
+                    let page_number = state.listing_requests.load(Ordering::SeqCst);
+                    let link = format!(
+                        "<{base}/repos/DoubleStyx/Renderide/releases?page={next}>; rel=\"next\"",
+                        base = state.base,
+                        next = page_number + 1
+                    );
+                    let _ = write_response(
+                        &mut stream,
+                        200,
+                        Some(&link),
+                        None,
+                        &minimal_release(&format!("nightly-page-{page_number}")),
+                    );
+                }
             }
-            let page_index = query_page(query).saturating_sub(1);
-            let Some(body) = state.pages.get(page_index) else {
-                let _ = write_response(&mut stream, 404, None, b"no such page");
-                continue;
-            };
-            let next = page_index
-                .checked_add(1)
-                .filter(|next| state.pages.get(*next).is_some())
-                .map(|next| {
-                    format!(
-                        "<{}/repos/DoubleStyx/Renderide/releases?page={}>; rel=\"next\"",
-                        state.base,
-                        next + 1
-                    )
-                });
-            let _ = write_response(&mut stream, 200, next.as_deref(), body);
+            continue;
+        }
+        if let Some(name) = path.strip_prefix("/redirect/") {
+            let location = format!("{}/assets/{name}", state.base);
+            let _ = write_response(&mut stream, 302, None, Some(&location), b"");
             continue;
         }
         if let Some(name) = path.strip_prefix("/assets/") {
             state.download_requests.fetch_add(1, Ordering::SeqCst);
             match state.assets.get(name) {
                 Some(bytes) => {
-                    let _ = write_response(&mut stream, 200, None, bytes);
+                    let _ = write_response(&mut stream, 200, None, None, bytes);
                 }
                 None => {
-                    let _ = write_response(&mut stream, 404, None, b"missing asset");
+                    let _ = write_response(&mut stream, 404, None, None, b"missing asset");
                 }
             }
         } else {
-            let _ = write_response(&mut stream, 404, None, b"not found");
+            let _ = write_response(&mut stream, 404, None, None, b"not found");
         }
     }
 }
@@ -299,14 +371,25 @@ fn read_headers(stream: &mut TcpStream) -> Option<String> {
     String::from_utf8(buf).ok()
 }
 
+fn minimal_release(tag: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!([{
+        "tag_name": tag,
+        "created_at": "2026-05-27T00:00:00Z",
+        "assets": [],
+    }]))
+    .expect("encode release")
+}
+
 fn write_response(
     stream: &mut TcpStream,
     status: u16,
     link: Option<&str>,
+    location: Option<&str>,
     body: &[u8],
 ) -> std::io::Result<()> {
     let reason = match status {
         200 => "OK",
+        302 => "Found",
         404 => "Not Found",
         500 => "Internal Server Error",
         _ => "Error",
@@ -318,6 +401,11 @@ fn write_response(
     if let Some(link) = link {
         head.push_str("Link: ");
         head.push_str(link);
+        head.push_str("\r\n");
+    }
+    if let Some(location) = location {
+        head.push_str("Location: ");
+        head.push_str(location);
         head.push_str("\r\n");
     }
     head.push_str("\r\n");
