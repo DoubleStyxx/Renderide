@@ -272,6 +272,8 @@ Linux, macOS, and Windows are all tier-1 targets and exercised in CI ([`.github/
 
 Contributions are welcome. The workspace builds with the standard Cargo commands listed above; lints (`cargo clippy --all-targets`, with feature coverage matching CI) and formatting (`cargo fmt`, plus `taplo fmt` when editing `Cargo.toml`) are expected to be clean before opening a pull request, and CI runs the same checks across all three platforms.
 
+Dispatch the diagnostic-only workflow [`.github/workflows/windows-heap-repro.yml`](.github/workflows/windows-heap-repro.yml) with `gh workflow run windows-heap-repro.yml --ref <branch-or-full-sha>` (branch name or full SHA) to rerun the bootstrapper library tests on Windows under full page heap.
+
 Read [`CONTRIBUTING.md`](CONTRIBUTING.md) to learn how to get started. AI use is covered in [`SI_POLICY.md`](SI_POLICY.md).
 
 ## Whitepaper

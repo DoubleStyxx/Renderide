@@ -1,0 +1,582 @@
+# Diagnostic-only. Not a merge gate, and not triggered by push or pull_request.
+# Reproduces the intermittent Windows heap corruption (exit 0xc0000374,
+# STATUS_HEAP_CORRUPTION) in the bootstrapper lib test binary under full page
+# heap, then records a cdb stack. The motivating failure is CI run 40093347852
+# (bootstrapper-e8d6afda6a89b258.exe during cargo test). Linux loops, Miri, and
+# ASan do not reproduce it.
+#
+# Dispatch with a branch name or a full 40-character SHA:
+#   gh workflow run windows-heap-repro.yml --ref <branch-or-full-sha>
+#
+# The main loop runs the test exe `iterations` times (default 50) with
+# `--test-threads` (default 16) and stops that loop on the first nonzero exit.
+# A second, shorter loop sets RUST_TEST_THREADS=1 for max(1, floor(iterations/5))
+# iterations (10 when iterations is 50) so a single-thread run can be compared
+# with the concurrent one. Full page heap is turned off at the end, including
+# when an earlier step failed.
+#
+# Dumps are minidumps (LocalDumps DumpType=1). A full dump of a page-heap
+# process is large enough to blow the artifact upload; minidumps still carry
+# the faulting stacks that !analyze and kb print. The crashing iteration is
+# dumped by WER, and cdb also reruns the exe with -g -G because a later rerun
+# may not hit an intermittent fault.
+name: Windows heap repro
+
+"on":
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: How many times to run the bootstrapper lib test exe in the main loop
+        required: false
+        default: "50"
+        type: string
+      test_threads:
+        description: Value passed to --test-threads in the main loop
+        required: false
+        default: "16"
+        type: string
+      extra_filter:
+        description: Optional libtest filter. Empty runs the whole bootstrapper lib suite.
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  HEAP_REPRO_ITERATIONS: ${{ inputs.iterations }}
+  HEAP_REPRO_TEST_THREADS: ${{ inputs.test_threads }}
+  HEAP_REPRO_FILTER: ${{ inputs.extra_filter }}
+
+jobs:
+  repro:
+    name: page heap repro
+    runs-on: windows-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Enable sccache (Windows)
+        if: runner.os == 'Windows'
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Configure sccache (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >>"${GITHUB_ENV}"
+          echo "RUSTC_WRAPPER=sccache" >>"${GITHUB_ENV}"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          cache-bin: "false"
+
+      - name: Locate Windows SDK Debugging Tools
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $out = Join-Path $env:RUNNER_TEMP 'heap-repro'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+
+          function Find-DebuggerTool([string]$FileName) {
+            $roots = @()
+            $pf86 = ${env:ProgramFiles(x86)}
+            if ($pf86) { $roots += (Join-Path $pf86 'Windows Kits') }
+            if ($env:ProgramFiles) { $roots += (Join-Path $env:ProgramFiles 'Windows Kits') }
+            foreach ($root in $roots) {
+              $direct = Join-Path $root "10\Debuggers\x64\$FileName"
+              if (Test-Path -LiteralPath $direct) { return $direct }
+            }
+            foreach ($root in $roots) {
+              if (-not (Test-Path -LiteralPath $root)) { continue }
+              $hit = Get-ChildItem -LiteralPath $root -Filter $FileName -Recurse -File -Depth 6 -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -match '\\Debuggers\\x64\\' } |
+                Select-Object -First 1
+              if ($hit) { return $hit.FullName }
+            }
+            return $null
+          }
+
+          $gflags = Find-DebuggerTool 'gflags.exe'
+          $cdb = Find-DebuggerTool 'cdb.exe'
+          if (-not $gflags -or -not $cdb) {
+            $pf86 = ${env:ProgramFiles(x86)}
+            $message = @(
+              'Windows SDK Debugging Tools were not found under the Windows Kits directory.'
+              'Full page heap and crash stacks need both gflags.exe and cdb.exe from the x64 Debugging Tools.'
+              'Looked for them in:'
+              "  $(Join-Path $pf86 'Windows Kits\10\Debuggers\x64')"
+              "  $(Join-Path $env:ProgramFiles 'Windows Kits\10\Debuggers\x64')"
+              'and under any Debuggers\x64 directory in those Windows Kits trees.'
+              "gflags.exe: $(if ($gflags) { $gflags } else { 'missing' })"
+              "cdb.exe: $(if ($cdb) { $cdb } else { 'missing' })"
+              'Install the Debugging Tools for Windows component of the Windows SDK on this runner.'
+            ) -join [Environment]::NewLine
+            throw $message
+          }
+          Write-Host "gflags: $gflags"
+          Write-Host "cdb: $cdb"
+          & $cdb -version
+          @{
+            gflags = $gflags
+            cdb    = $cdb
+          } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $out 'tools.json') -Encoding utf8
+
+      - name: Build bootstrapper lib tests
+        shell: pwsh
+        timeout-minutes: 60
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $out = Join-Path $env:RUNNER_TEMP 'heap-repro'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $cargo = (Get-Command cargo).Source
+          $psi = [System.Diagnostics.ProcessStartInfo]::new()
+          $psi.FileName = $cargo
+          $psi.UseShellExecute = $false
+          $psi.RedirectStandardOutput = $true
+          $psi.RedirectStandardError = $true
+          $psi.WorkingDirectory = (Get-Location).Path
+          foreach ($arg in @('test', '-p', 'bootstrapper', '--lib', '--no-run', '--locked', '--message-format=json')) {
+            [void]$psi.ArgumentList.Add($arg)
+          }
+          $proc = [System.Diagnostics.Process]::Start($psi)
+          if (-not $proc) { throw 'failed to start cargo' }
+          $stderrTask = $proc.StandardError.ReadToEndAsync()
+          $script:exe = $null
+          function Consider-ArtifactLine([string]$Line) {
+            if ([string]::IsNullOrWhiteSpace($Line) -or -not $Line.TrimStart().StartsWith('{')) { return }
+            try { $msg = $Line | ConvertFrom-Json } catch { return }
+            if ($msg.reason -ne 'compiler-artifact') { return }
+            if (-not $msg.profile -or $msg.profile.test -ne $true) { return }
+            if (-not $msg.target -or $msg.target.name -ne 'bootstrapper') { return }
+            if (@($msg.target.kind) -notcontains 'lib') { return }
+            $candidate = [string]$msg.executable
+            if ([string]::IsNullOrWhiteSpace($candidate)) { return }
+            $script:exe = $candidate
+            Write-Host "bootstrapper lib test exe: $candidate"
+          }
+          while ($null -ne ($line = $proc.StandardOutput.ReadLine())) {
+            Consider-ArtifactLine $line
+          }
+          [void]$proc.WaitForExit()
+          $stderr = ''
+          try { $stderr = $stderrTask.GetAwaiter().GetResult() } catch { $stderr = $_.Exception.Message }
+          if ($stderr) { Write-Host $stderr }
+          if (-not $script:exe -and $stderr) {
+            foreach ($errLine in ($stderr -split "`r?`n")) { Consider-ArtifactLine $errLine }
+          }
+          if ($proc.ExitCode -ne 0) {
+            throw "cargo test -p bootstrapper --lib --no-run --locked failed with exit $($proc.ExitCode)"
+          }
+          if (-not $script:exe) {
+            throw 'cargo JSON did not include a bootstrapper lib test executable (compiler-artifact with target name bootstrapper, kind lib, profile.test true, and a non-empty executable).'
+          }
+          $exePath = [System.IO.Path]::GetFullPath($script:exe)
+          if (-not (Test-Path -LiteralPath $exePath)) {
+            throw "cargo reported test exe '$exePath' but that file does not exist"
+          }
+          @{
+            exe   = $exePath
+            image = [System.IO.Path]::GetFileName($exePath)
+          } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $out 'test-exe.json') -Encoding utf8
+
+      - name: Run page-heap loops and capture stacks
+        shell: pwsh
+        timeout-minutes: 240
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $script:out = Join-Path $env:RUNNER_TEMP 'heap-repro'
+          $tools = Get-Content -Raw -LiteralPath (Join-Path $script:out 'tools.json') | ConvertFrom-Json
+          $built = Get-Content -Raw -LiteralPath (Join-Path $script:out 'test-exe.json') | ConvertFrom-Json
+          $script:gflags = [string]$tools.gflags
+          $script:cdb = [string]$tools.cdb
+          $script:exe = [string]$built.exe
+          $script:image = [string]$built.image
+          if (-not $script:image.EndsWith('.exe', [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "bootstrapper lib test image '$($script:image)' is not an .exe; refusing to enable page heap"
+          }
+          $script:dumpDir = Join-Path $script:out 'dumps'
+          $script:dumpReg = "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\$($script:image)"
+          $script:filter = ''
+          if (-not [string]::IsNullOrWhiteSpace($env:HEAP_REPRO_FILTER)) {
+            $script:filter = $env:HEAP_REPRO_FILTER.Trim()
+          }
+          New-Item -ItemType Directory -Force -Path $script:dumpDir | Out-Null
+
+          function Parse-PositiveInt([string]$Raw, [string]$Label) {
+            if ($Raw -notmatch '^[1-9][0-9]*$') {
+              throw "$Label must be a positive integer (got '$Raw')"
+            }
+            return [int]$Raw
+          }
+
+          function Format-ExitHex([int]$Code) {
+            $bytes = [System.BitConverter]::GetBytes($Code)
+            $unsigned = [System.BitConverter]::ToUInt32($bytes, 0)
+            return ('{0:X8}' -f $unsigned)
+          }
+
+          function Disable-ReproHooks {
+            if ($script:gflags -and $script:image -and (Test-Path -LiteralPath $script:gflags)) {
+              Write-Host "gflags /p /disable $($script:image)"
+              & $script:gflags /p /disable $script:image
+              Write-Host "gflags disable exit $LASTEXITCODE"
+              & $script:gflags /p
+            } else {
+              Write-Host 'page heap disable skipped (gflags or image name unavailable)'
+            }
+            if ($script:dumpReg -and (Test-Path -LiteralPath $script:dumpReg)) {
+              try {
+                Remove-Item -LiteralPath $script:dumpReg -Recurse -Force
+                Write-Host "removed $($script:dumpReg)"
+              } catch {
+                Write-Host "failed to remove LocalDumps key: $($_.Exception.Message)"
+              }
+            }
+          }
+
+          $iterations = Parse-PositiveInt $env:HEAP_REPRO_ITERATIONS 'iterations'
+          $testThreads = Parse-PositiveInt $env:HEAP_REPRO_TEST_THREADS 'test_threads'
+          $singlePlanned = [Math]::Max(1, [int][Math]::Floor($iterations / 5))
+          Write-Host "exe: $($script:exe)"
+          Write-Host "image: $($script:image)"
+          Write-Host "main loop: $iterations iterations, --test-threads $testThreads"
+          Write-Host "single-thread loop: $singlePlanned iterations, RUST_TEST_THREADS=1"
+          if ($script:filter) { Write-Host "filter: $($script:filter)" }
+
+          @{
+            gflags  = $script:gflags
+            image   = $script:image
+            dumpReg = $script:dumpReg
+          } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $script:out 'state.json') -Encoding utf8
+
+          function Invoke-Libtest {
+            param(
+              [string]$ThreadsFlag,
+              [switch]$SingleThread
+            )
+            $psi = [System.Diagnostics.ProcessStartInfo]::new()
+            $psi.FileName = $script:exe
+            $psi.UseShellExecute = $false
+            $psi.WorkingDirectory = (Get-Location).Path
+            if ($ThreadsFlag) {
+              [void]$psi.ArgumentList.Add('--test-threads')
+              [void]$psi.ArgumentList.Add($ThreadsFlag)
+            }
+            if ($script:filter) {
+              [void]$psi.ArgumentList.Add('--')
+              [void]$psi.ArgumentList.Add($script:filter)
+            }
+            if ($psi.Environment.ContainsKey('RUST_TEST_THREADS')) {
+              [void]$psi.Environment.Remove('RUST_TEST_THREADS')
+            }
+            if ($SingleThread) {
+              $psi.Environment['RUST_TEST_THREADS'] = '1'
+            }
+            $proc = [System.Diagnostics.Process]::Start($psi)
+            if (-not $proc) { throw "failed to start $($script:exe)" }
+            if (-not $proc.WaitForExit(600000)) {
+              Write-Host "test exe timed out after 600s; killing pid $($proc.Id)"
+              & taskkill.exe /F /T /PID $proc.Id | Out-Host
+              [void]$proc.WaitForExit(20000)
+              return @{ TimedOut = $true; Code = $null }
+            }
+            return @{ TimedOut = $false; Code = [int]$proc.ExitCode }
+          }
+
+          function Invoke-ReproLoop {
+            param(
+              [Parameter(Mandatory)][string]$Name,
+              [Parameter(Mandatory)][int]$Planned,
+              [string]$ThreadsFlag,
+              [switch]$SingleThread
+            )
+            $hit = $null
+            $ran = 0
+            for ($i = 1; $i -le $Planned; $i++) {
+              Write-Host "[$Name] iteration $i / $Planned"
+              $sw = [System.Diagnostics.Stopwatch]::StartNew()
+              $result = Invoke-Libtest -ThreadsFlag $ThreadsFlag -SingleThread:$SingleThread
+              $ran = $i
+              $secs = $sw.Elapsed.TotalSeconds.ToString('0.0')
+              if ($result.TimedOut) {
+                Write-Host "[$Name] iteration $i timed out after ${secs}s"
+                $hit = @{ Kind = 'TIMEOUT'; Iteration = $i; Hex = 'TIMEOUT' }
+                break
+              }
+              $hex = Format-ExitHex $result.Code
+              Write-Host "[$Name] iteration $i exit 0x$hex in ${secs}s"
+              if ($result.Code -ne 0) {
+                Write-Host "[$Name] nonzero exit on iteration $i : 0x$hex"
+                $hit = @{ Kind = 'CRASH'; Iteration = $i; Hex = $hex }
+                break
+              }
+            }
+            return @{
+              Name         = $Name
+              Planned      = $Planned
+              Ran          = $ran
+              Hit          = $hit
+              ThreadsFlag  = $ThreadsFlag
+              SingleThread = [bool]$SingleThread
+            }
+          }
+
+          function Invoke-Cdb {
+            param(
+              [Parameter(Mandatory)][string]$LogPath,
+              [Parameter(Mandatory)][string[]]$CdbArgs,
+              [switch]$SingleThread,
+              [int]$TimeoutMs = 900000
+            )
+            $psi = [System.Diagnostics.ProcessStartInfo]::new()
+            $psi.FileName = $script:cdb
+            $psi.UseShellExecute = $false
+            $psi.WorkingDirectory = (Get-Location).Path
+            foreach ($arg in $CdbArgs) { [void]$psi.ArgumentList.Add($arg) }
+            $psi.Environment['_NT_SYMBOL_PATH'] = "srv*$env:RUNNER_TEMP\symcache*https://msdl.microsoft.com/download/symbols"
+            if ($psi.Environment.ContainsKey('RUST_TEST_THREADS')) {
+              [void]$psi.Environment.Remove('RUST_TEST_THREADS')
+            }
+            if ($SingleThread) {
+              $psi.Environment['RUST_TEST_THREADS'] = '1'
+            }
+            Write-Host ("cdb " + ($CdbArgs -join ' '))
+            $proc = [System.Diagnostics.Process]::Start($psi)
+            if (-not $proc) { throw "failed to start $($script:cdb)" }
+            if (-not $proc.WaitForExit($TimeoutMs)) {
+              Write-Host "cdb timed out after $TimeoutMs ms; killing debugger tree"
+              & taskkill.exe /F /T /PID $proc.Id | Out-Host
+              [void]$proc.WaitForExit(20000)
+              return
+            }
+            Write-Host "cdb exit $($proc.ExitCode); log $LogPath"
+          }
+
+          function Test-CapturedLog([string]$Path) {
+            if (-not (Test-Path -LiteralPath $Path)) { return $false }
+            $text = Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue
+            if (-not $text) { return $false }
+            return $text.Contains('REPRO_MARKER_BROKE')
+          }
+
+          function Wait-ForDumps([string]$Tag) {
+            $deadline = (Get-Date).AddSeconds(60)
+            $found = @()
+            do {
+              $fresh = @(Get-ChildItem -LiteralPath $script:dumpDir -Filter *.dmp -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -notmatch '^(main|single)-' })
+              if ($fresh.Count -gt 0) {
+                Start-Sleep -Seconds 2
+                $fresh = @(Get-ChildItem -LiteralPath $script:dumpDir -Filter *.dmp -File -ErrorAction SilentlyContinue |
+                  Where-Object { $_.Name -notmatch '^(main|single)-' })
+                $n = 0
+                foreach ($file in $fresh) {
+                  $n++
+                  $dest = Join-Path $script:dumpDir ("{0}-{1}-{2}" -f $Tag, $n, $file.Name)
+                  Move-Item -LiteralPath $file.FullName -Destination $dest
+                  $last = -1
+                  foreach ($attempt in 1..15) {
+                    $len = (Get-Item -LiteralPath $dest).Length
+                    if ($len -gt 0 -and $len -eq $last) { break }
+                    $last = $len
+                    Start-Sleep -Seconds 1
+                  }
+                  $found += $dest
+                }
+                return $found
+              }
+              Start-Sleep -Seconds 2
+            } while ((Get-Date) -lt $deadline)
+            return @()
+          }
+
+          function Capture-Crash($Loop) {
+            $tag = [string]$Loop.Name
+            $dumps = @(Wait-ForDumps $tag)
+            $captured = $false
+            foreach ($dump in $dumps) {
+              $log = Join-Path $script:out ("cdb-dump-{0}.log" -f [System.IO.Path]::GetFileNameWithoutExtension([string]$dump))
+              $dumpArgs = @(
+                '-z', [string]$dump,
+                '-lines',
+                '-logo', $log,
+                '-c', '.echo REPRO_MARKER_BROKE; !analyze -v; .ecxr; kb; ~*kb; q'
+              )
+              Invoke-Cdb -LogPath $log -CdbArgs $dumpArgs
+              if (Test-CapturedLog $log) { $captured = $true }
+            }
+            $liveBudget = if ($captured) { 1 } else { 3 }
+            for ($n = 1; $n -le $liveBudget; $n++) {
+              $log = Join-Path $script:out "cdb-live-$tag-$n.log"
+              # -g -G skip the initial and exit breakpoints. The leading g in -c
+              # runs to the exception, then !analyze / kb / ~*kb record that stop.
+              # qd leaves without the interactive quit prompt.
+              $liveArgs = @(
+                '-g', '-G', '-lines',
+                '-logo', $log,
+                '-c', '.echo REPRO_MARKER_START; g; .echo REPRO_MARKER_BROKE; !analyze -v; .ecxr; kb; ~*kb; qd',
+                $script:exe
+              )
+              if ($Loop.ThreadsFlag) {
+                $liveArgs += @('--test-threads', [string]$Loop.ThreadsFlag)
+              }
+              if ($script:filter) {
+                $liveArgs += @('--', $script:filter)
+              }
+              Invoke-Cdb -LogPath $log -CdbArgs $liveArgs -SingleThread:([bool]$Loop.SingleThread)
+              if (Test-CapturedLog $log) { break }
+              Write-Host "[$tag] live cdb attempt $n did not break on an exception"
+            }
+          }
+
+          function Get-StackExcerpt([string]$Path) {
+            if (-not (Test-Path -LiteralPath $Path)) { return '' }
+            $lines = @(Get-Content -LiteralPath $Path)
+            $prefer = -1
+            $fallback = -1
+            for ($i = 0; $i -lt $lines.Count; $i++) {
+              if ($lines[$i] -match 'STACK_TEXT:') { $prefer = $i; break }
+              if ($fallback -lt 0 -and $lines[$i] -match 'Child-SP') { $fallback = $i }
+            }
+            $start = if ($prefer -ge 0) { $prefer } else { $fallback }
+            if ($start -lt 0) { return '' }
+            $take = [Math]::Min(18, $lines.Count - $start)
+            return ($lines[$start..($start + $take - 1)] -join "`n")
+          }
+
+          function Write-LoopSummary($Main, $Single) {
+            $rows = @($Main, $Single)
+            $lines = New-Object System.Collections.Generic.List[string]
+            $lines.Add('## Windows heap repro')
+            $lines.Add('')
+            $lines.Add("exe: ``$($script:exe)``")
+            $lines.Add('')
+            $lines.Add('| loop | threads | planned | ran | result | exit | iteration |')
+            $lines.Add('| --- | --- | --- | --- | --- | --- | --- |')
+            foreach ($row in $rows) {
+              $threads = if ($row.SingleThread) { 'RUST_TEST_THREADS=1' } else { "--test-threads $($row.ThreadsFlag)" }
+              if ($row.Hit) {
+                $result = [string]$row.Hit.Kind
+                $exit = if ($row.Hit.Hex -eq 'TIMEOUT') { 'TIMEOUT' } else { "0x$($row.Hit.Hex)" }
+                $iter = [string]$row.Hit.Iteration
+              } else {
+                $result = 'clean'
+                $exit = '-'
+                $iter = '-'
+              }
+              $lines.Add("| $($row.Name) | $threads | $($row.Planned) | $($row.Ran) | $result | $exit | $iter |")
+            }
+            $lines.Add('')
+            $any = @($rows | Where-Object { $_.Hit })
+            if ($any.Count -eq 0) {
+              $lines.Add('reproduced: no')
+            } else {
+              $lines.Add('reproduced: yes')
+            }
+            $logFiles = @(Get-ChildItem -LiteralPath $script:out -Filter 'cdb-*.log' -File -ErrorAction SilentlyContinue)
+            foreach ($logFile in $logFiles) {
+              $excerpt = Get-StackExcerpt $logFile.FullName
+              $lines.Add('')
+              $lines.Add("### $($logFile.Name)")
+              if ($excerpt) {
+                $lines.Add('')
+                $lines.Add('```')
+                $lines.Add($excerpt)
+                $lines.Add('```')
+              } else {
+                $lines.Add('')
+                $lines.Add('(no STACK_TEXT or kb header in this log)')
+              }
+            }
+            $text = $lines -join "`n"
+            Write-Host $text
+            Set-Content -LiteralPath (Join-Path $script:out 'summary.txt') -Value $text -Encoding utf8
+            if ($env:GITHUB_STEP_SUMMARY) {
+              Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value $text -Encoding utf8
+            }
+          }
+
+          $script:crashed = $false
+          try {
+            Write-Host "gflags /p /enable $($script:image) /full"
+            & $script:gflags /p /enable $script:image /full
+            if ($LASTEXITCODE -ne 0) {
+              throw "gflags /p /enable $($script:image) /full failed with exit $LASTEXITCODE"
+            }
+            $listed = (& $script:gflags /p 2>&1 | Out-String)
+            Write-Host $listed
+            if ($listed -notmatch ('(?i)' + [regex]::Escape($script:image))) {
+              throw "gflags did not list $($script:image) after enabling full page heap"
+            }
+            New-Item -Path $script:dumpReg -Force | Out-Null
+            New-ItemProperty -Path $script:dumpReg -Name DumpType -PropertyType DWord -Value 1 -Force | Out-Null
+            New-ItemProperty -Path $script:dumpReg -Name DumpCount -PropertyType DWord -Value 10 -Force | Out-Null
+            New-ItemProperty -Path $script:dumpReg -Name DumpFolder -PropertyType ExpandString -Value $script:dumpDir -Force | Out-Null
+
+            $main = Invoke-ReproLoop -Name 'main' -Planned $iterations -ThreadsFlag ([string]$testThreads)
+            if ($main.Hit -and $main.Hit.Kind -eq 'CRASH') {
+              try { Capture-Crash $main } catch { Write-Host "stack capture failed for main: $($_.Exception.Message)" }
+            }
+            $single = Invoke-ReproLoop -Name 'single' -Planned $singlePlanned -SingleThread
+            if ($single.Hit -and $single.Hit.Kind -eq 'CRASH') {
+              try { Capture-Crash $single } catch { Write-Host "stack capture failed for single: $($_.Exception.Message)" }
+            }
+            Write-LoopSummary $main $single
+            $script:crashed = [bool]($main.Hit -or $single.Hit)
+          } finally {
+            Disable-ReproHooks
+          }
+          if ($script:crashed) { exit 1 }
+
+      - name: Disable page heap
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $statePath = Join-Path $env:RUNNER_TEMP 'heap-repro\state.json'
+          if (-not (Test-Path -LiteralPath $statePath)) {
+            Write-Host 'No page-heap state file; nothing to disable.'
+            exit 0
+          }
+          $state = Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json
+          $gflags = [string]$state.gflags
+          $image = [string]$state.image
+          $dumpReg = [string]$state.dumpReg
+          try {
+            if ($gflags -and $image -and (Test-Path -LiteralPath $gflags)) {
+              Write-Host "gflags /p /disable $image"
+              & $gflags /p /disable $image
+              Write-Host "gflags disable exit $LASTEXITCODE"
+              & $gflags /p
+            } else {
+              Write-Host 'gflags or image name missing; skipped page-heap disable.'
+            }
+            if ($dumpReg -and (Test-Path -LiteralPath $dumpReg)) {
+              Remove-Item -LiteralPath $dumpReg -Recurse -Force -ErrorAction SilentlyContinue
+              Write-Host "removed $dumpReg"
+            }
+          } catch {
+            Write-Host "page heap disable failed: $($_.Exception.Message)"
+          }
+          exit 0
+
+      - name: Upload cdb log and dumps
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-heap-repro
+          retention-days: 7
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/heap-repro/
