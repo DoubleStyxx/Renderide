@@ -12,6 +12,18 @@ use super::{install, remove, target_wgsl};
 
 const KEY: &str = "install-race";
 
+/// Counts a worker as finished when its thread returns or panics.
+///
+/// The watcher waits until this count reaches the worker total. A panic used to skip the
+/// increment and leave that wait spinning for the rest of the CI job.
+struct WorkerFinished(Arc<AtomicUsize>);
+
+impl Drop for WorkerFinished {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::Release);
+    }
+}
+
 #[test]
 fn concurrent_install_keeps_the_stem_wgsl_published() {
     let solid = include_str!("../../../../../RenderideMod/Shaders/example_solid.wgsl");
@@ -50,6 +62,7 @@ fn concurrent_install_keeps_the_stem_wgsl_published() {
             let stem = stem.clone();
             let replaced = replaced.clone();
             scope.spawn(move || {
+                let _finished = WorkerFinished(finished);
                 for round in 0..rounds {
                     let source = if (id + round).is_multiple_of(2) {
                         solid
@@ -64,7 +77,6 @@ fn concurrent_install_keeps_the_stem_wgsl_published() {
                         missing_after_install.fetch_add(1, Ordering::Relaxed);
                     }
                 }
-                finished.fetch_add(1, Ordering::Release);
             });
         }
         watcher.join().expect("watcher");

@@ -10,6 +10,8 @@ mod bench;
 mod bindings;
 mod compose;
 mod keywords;
+#[cfg(feature = "bench-api")]
+mod lookup_bench;
 mod overrides;
 mod passes;
 
@@ -17,6 +19,8 @@ mod passes;
 mod example_shaders;
 #[cfg(test)]
 mod install_race;
+#[cfg(test)]
+mod reflect_failure;
 
 use std::sync::Arc;
 
@@ -34,6 +38,8 @@ use self::passes::OwnedMaterialPass;
 #[cfg(feature = "bench-api")]
 pub use bench::KeywordVariantCacheWorkload;
 pub(crate) use keywords::is_toggle_style_property_name;
+#[cfg(feature = "bench-api")]
+pub use lookup_bench::CustomStemLookupWorkload;
 
 /// Stem prefix for every installed custom material. Host routes store the `_default` stem.
 pub(crate) const CUSTOM_STEM_PREFIX: &str = "renderide_custom_";
