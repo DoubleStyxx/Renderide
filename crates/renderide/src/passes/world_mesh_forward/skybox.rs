@@ -89,7 +89,9 @@ impl SkyboxViewUniforms {
             view_to_world_right: right.inverse().to_cols_array(),
             world_to_view_left: left.to_cols_array(),
             world_to_view_right: right.to_cols_array(),
-            clear_color: frame.view.clear.color.to_array(),
+            clear_color: crate::gpu::warp_black_diag::skybox_clear_color(
+                frame.view.clear.color.to_array(),
+            ),
             ndc_y_sign_pad: [ndc_y_sign, ortho_flag, ortho_flag, 0.0],
         }
     }

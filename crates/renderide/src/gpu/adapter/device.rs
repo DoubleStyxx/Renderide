@@ -60,8 +60,14 @@ pub(crate) fn install_uncaptured_error_handler(
     backend: wgpu::Backend,
 ) {
     let lost_health = Arc::clone(&mapped_buffer_health);
+    logger::info!(
+        "diag-callbacks-installed: device-lost callback and uncaptured-error handler adapter={adapter_name} backend={backend:?}"
+    );
     device.set_device_lost_callback(move |reason, message| {
+        let flags =
+            crate::gpu::warp_black_diag::format_fault_flags(&format!("{reason:?} {message}"));
         logger::error!("wgpu device lost: reason={reason:?} message={message}");
+        logger::error!("diag-device-lost: reason={reason:?} message={message} {flags}");
         lost_health.mark_invalid("wgpu device lost");
         let generation = device_health.mark_lost(format!("{reason:?}: {message}"));
         flight_recorder.record(GpuFlightEventKind::DeviceLost {
@@ -76,6 +82,7 @@ pub(crate) fn install_uncaptured_error_handler(
     device.on_uncaptured_error(Arc::new(move |err: wgpu::Error| match err {
         wgpu::Error::OutOfMemory { source } => {
             logger::error!("wgpu out-of-memory error: {source}");
+            log_diag_uncaptured("out-of-memory", "", &source.to_string());
             mapped_buffer_health.mark_invalid("wgpu out of memory");
         }
         wgpu::Error::Validation {
@@ -87,15 +94,24 @@ pub(crate) fn install_uncaptured_error_handler(
                 mapped_buffer_health.mark_invalid("wgpu mapped buffer validation error");
             }
             logger::error!("wgpu validation error: {description} ({source})");
+            log_diag_uncaptured("validation", &description, &source_text);
         }
         wgpu::Error::Internal {
             description,
             source,
         } => {
             logger::error!("wgpu internal error: {description} ({source})");
+            log_diag_uncaptured("internal", &description, &source.to_string());
             mapped_buffer_health.mark_invalid("wgpu internal error");
         }
     }));
+}
+
+fn log_diag_uncaptured(kind: &str, description: &str, source: &str) {
+    let flags = crate::gpu::warp_black_diag::format_fault_flags(&format!("{description} {source}"));
+    logger::error!(
+        "diag-uncaptured: kind={kind} description={description} source={source} {flags}"
+    );
 }
 
 /// Attempts to create the Tracy GPU profiler and logs a path-specific fallback when unavailable.

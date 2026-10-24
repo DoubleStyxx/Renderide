@@ -61,6 +61,7 @@ fn readback_color_texture(
         copy_padded_rows_to_tight(&view, &layout)
     };
     readback.unmap();
+    crate::gpu::warp_black_diag::log_readback_colors(&tight);
 
     write_png_atomically(
         &tight,
@@ -139,6 +140,7 @@ fn submit_texture_to_buffer_copy(
     readback: &wgpu::Buffer,
 ) {
     gpu.flush_driver();
+    crate::gpu::warp_black_diag::log_after_flush(gpu.device());
 
     let mut encoder = gpu
         .device()
@@ -170,13 +172,16 @@ fn submit_texture_to_buffer_copy(
         profiling::scope!("CommandEncoder::finish::headless_readback");
         encoder.finish()
     };
-    gpu.queue().submit(std::iter::once(command_buffer));
+    let submission = gpu.queue().submit(std::iter::once(command_buffer));
+    crate::gpu::warp_black_diag::watch_submission(gpu.queue(), &submission, "readback-copy", 0, 1);
+    crate::gpu::warp_black_diag::log_copy_submitted(&submission);
 }
 
 fn await_buffer_map(
     slice: wgpu::BufferSlice<'_>,
     device: &wgpu::Device,
 ) -> Result<(), HeadlessReadbackError> {
+    let _map_span = crate::gpu::warp_black_diag::MapAsyncSpan::start();
     let (sender, receiver) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |result| {
         let _ = sender.send(result);

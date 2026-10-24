@@ -39,6 +39,7 @@ pub(crate) mod limits;
 pub(crate) mod msaa_depth_resolve;
 pub(crate) mod present;
 pub(crate) mod profiling;
+pub(crate) mod warp_black_diag;
 
 // --- Cross-layer re-exports (renderide-internal contract; not part of any external API) ---
 pub(crate) use context::{FrameSubmitKind, GpuContext, GpuError, WindowDisplayHandle};

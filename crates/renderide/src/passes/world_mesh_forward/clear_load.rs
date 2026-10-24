@@ -243,7 +243,7 @@ fn loads_for_seed(
         color: if seed_color {
             wgpu::LoadOp::Load
         } else {
-            wgpu::LoadOp::Clear(crate::present::SWAPCHAIN_CLEAR_COLOR)
+            wgpu::LoadOp::Clear(crate::gpu::warp_black_diag::forward_clear_color())
         },
         depth: if seed_color && persistent_depth_target && preserves_scene_depth(mode) {
             wgpu::LoadOp::Load
