@@ -64,18 +64,62 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # mesa-vulkan-drivers provides lavapipe so `renderide-test check-suite` can open a
-      # headless Vulkan adapter. There is no `materials::registry` GPU smoke test.
+      # Linux goldens run on lavapipe. The Mesa package version is pinned so an
+      # ubuntu-latest image bump cannot silently change the software rasterizer.
+      # Windows CI has no Vulkan ICD and wgpu uses DX12 WARP. macOS CI uses Metal.
+      # Those captures are adapter comparisons; they are not the lavapipe behavior gate.
       # GStreamer dev packages are required only when the `video-textures` feature is enabled
       # (Linux clippy does this via `--all-features`); pkg-config resolves the headers/libs at build time.
-      - name: Install Linux system dependencies (Vulkan + GStreamer)
+      - name: Install Linux system dependencies (pinned lavapipe + GStreamer)
         if: runner.os == 'Linux'
         run: |
+          set -euo pipefail
+          # noble-updates, October 2026. Fail closed if ubuntu-latest leaves 24.04
+          # (the runner image is scheduled to move to 26.04 in November 2026).
+          mesa_version="25.2.8-0ubuntu0.24.04.4"
+          . /etc/os-release
+          if [ "${VERSION_ID}" != "24.04" ]; then
+            echo "lavapipe pin ${mesa_version} is for Ubuntu 24.04; this runner is ${VERSION_ID}" >&2
+            exit 1
+          fi
           sudo apt-get update
           sudo apt-get install -y \
-            mesa-vulkan-drivers vulkan-tools \
+            "mesa-vulkan-drivers=${mesa_version}" \
+            vulkan-tools \
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             gstreamer1.0-plugins-base gstreamer1.0-plugins-bad
+          installed="$(dpkg-query -W -f='${Version}' mesa-vulkan-drivers)"
+          if [ "${installed}" != "${mesa_version}" ]; then
+            echo "mesa-vulkan-drivers ${installed} != pin ${mesa_version}" >&2
+            exit 1
+          fi
+          icd=""
+          shopt -s nullglob
+          for candidate in /usr/share/vulkan/icd.d/lvp_icd*.json /etc/vulkan/icd.d/lvp_icd*.json; do
+            if [[ -f "${candidate}" ]]; then
+              icd="${candidate}"
+              break
+            fi
+          done
+          if [[ -z "${icd}" ]]; then
+            echo "lvp_icd json not found after installing mesa-vulkan-drivers" >&2
+            find /usr /etc -name 'lvp_icd*.json' >&2 || true
+            exit 1
+          fi
+          echo "VK_ICD_FILENAMES=${icd}" >> "${GITHUB_ENV}"
+          echo "VK_DRIVER_FILES=${icd}" >> "${GITHUB_ENV}"
+          echo "WGPU_BACKEND=vulkan" >> "${GITHUB_ENV}"
+          {
+            echo "### Lavapipe"
+            echo "Ubuntu ${VERSION_ID}"
+            echo "mesa-vulkan-drivers ${installed}"
+            echo "ICD ${icd}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          VK_ICD_FILENAMES="${icd}" VK_DRIVER_FILES="${icd}" vulkaninfo --summary | tee /tmp/vulkaninfo.txt
+          if ! grep -Eq 'llvmpipe|lavapipe' /tmp/vulkaninfo.txt; then
+            echo "Vulkan loader did not select lavapipe/llvmpipe" >&2
+            exit 1
+          fi
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -137,14 +181,20 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo test --locked -p renderide --features video-textures --lib assets::video::mpegts
 
+      # One suite worker and one rayon worker. Parallel renderers share the
+      # software GPU, and draw collection order follows the rayon pool size.
+      # Scene RNG is already fixed (Perlin seed 0x00C0FFEE; exotic and rainbow
+      # shaders keep `_Speed` at 0). Tolerances are not changed here.
       - name: Run headless renderer suite
         shell: bash
+        env:
+          RAYON_NUM_THREADS: "1"
         run: |
           set -euo pipefail
           if [[ "${RUNNER_OS}" == "Windows" ]]; then
-            ./target/debug/renderide-test.exe check-suite
+            ./target/debug/renderide-test.exe check-suite --jobs 1
           else
-            ./target/debug/renderide-test check-suite
+            ./target/debug/renderide-test check-suite --jobs 1
           fi
 
       - name: Upload headless suite artifacts
