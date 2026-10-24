@@ -211,23 +211,8 @@ impl Tolerance {
             criteria.push(criterion);
         }
 
-        let dominant = dominant_rgb_key(actual);
-        let mut region_criteria: Vec<CriterionResult> =
-            Vec::with_capacity(self.region_floors.len());
-        for region in &self.region_floors {
-            let count = count_non_dominant(actual, dominant, *region)?;
-            let criterion = CriterionResult::RegionNonDominant {
-                x: region.x,
-                y: region.y,
-                width: region.width,
-                height: region.height,
-                count,
-                min_count: region.min_non_dominant,
-                passed: count >= region.min_non_dominant,
-            };
-            region_criteria.push(criterion.clone());
-            criteria.push(criterion);
-        }
+        let region_criteria = region_floor_criteria(actual, &self.region_floors)?;
+        criteria.extend(region_criteria.iter().cloned());
 
         let coverage_passed = coverage_criteria.iter().all(CriterionResult::passed);
         let regions_passed = region_criteria.iter().all(CriterionResult::passed);
@@ -250,6 +235,28 @@ impl Tolerance {
             combine: self.combine,
         })
     }
+}
+
+/// Required per-rectangle floors. Each result is also recorded on the evaluation.
+fn region_floor_criteria(
+    actual: &RgbaImage,
+    regions: &[RegionFloor],
+) -> Result<Vec<CriterionResult>, String> {
+    let dominant = dominant_rgb_key(actual);
+    let mut criteria = Vec::with_capacity(regions.len());
+    for region in regions {
+        let count = count_non_dominant(actual, dominant, *region)?;
+        criteria.push(CriterionResult::RegionNonDominant {
+            x: region.x,
+            y: region.y,
+            width: region.width,
+            height: region.height,
+            count,
+            min_count: region.min_non_dominant,
+            passed: count >= region.min_non_dominant,
+        });
+    }
+    Ok(criteria)
 }
 
 /// Per-criterion result returned by [`Tolerance::evaluate`].
