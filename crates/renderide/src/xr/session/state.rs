@@ -72,10 +72,15 @@ pub struct XrSessionState {
     /// `wait_frame` drains this and returns the recorded error so the existing recovery
     /// path runs one tick later than it would have on the main thread.
     pub(super) finalize_error_slot: XrFinalizeErrorSlot,
+    /// Session-start resolution of `[rendering] vr_swapchain_gpu_wait`.
+    ///
+    /// Copied onto each projection finalize. `true` makes the driver poll the eye copy
+    /// before `xrReleaseSwapchainImage`.
+    pub(super) swapchain_gpu_wait: bool,
 }
 
-/// Bundle of values needed to construct [`XrSessionState`] - `new` takes this instead of seven
-/// separate parameters to keep the bootstrap signature readable.
+/// Bundle of values needed to construct [`XrSessionState`]. `new` takes this bundle so the
+/// bootstrap signature stays readable.
 pub(in crate::xr) struct XrSessionStateDescriptor {
     /// OpenXR instance (retained for the session lifetime).
     pub(in crate::xr) xr_instance: xr::Instance,
@@ -92,6 +97,8 @@ pub(in crate::xr) struct XrSessionStateDescriptor {
     pub(in crate::xr) frame_stream: xr::FrameStream<xr::Vulkan>,
     /// Stage reference space used for view + controller pose location.
     pub(in crate::xr) stage: xr::Space,
+    /// Resolved `[rendering] vr_swapchain_gpu_wait` for this session.
+    pub(in crate::xr) swapchain_gpu_wait: bool,
 }
 
 /// Caller-provided data for one deferred OpenXR projection-layer finalize.
@@ -132,6 +139,7 @@ impl XrSessionState {
             event_storage: xr::EventDataBuffer::new(),
             pending_finalize: None,
             finalize_error_slot: Arc::new(Mutex::new(None)),
+            swapchain_gpu_wait: desc.swapchain_gpu_wait,
         }
     }
 
@@ -258,6 +266,7 @@ impl XrSessionState {
             depth: input.depth,
             frame_open: Arc::clone(&self.frame_open),
             shutdown_requested: Arc::clone(&self.shutdown_requested),
+            wait_for_gpu_writes: self.swapchain_gpu_wait,
         };
         let work = crate::gpu::driver_thread::XrFinalizeWork {
             kind: crate::gpu::driver_thread::XrFinalizeKind::Projection(Box::new(payload)),

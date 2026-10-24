@@ -25,9 +25,12 @@ impl XrSessionState {
     ///
     /// Steps in order:
     /// 1. Drain any pending finalize signal from the previous tick. This is the one place
-    ///    the main thread synchronises with the driver thread for VR finalize. In the
-    ///    steady state the receiver is already signaled (an entire main-thread tick has
-    ///    elapsed since the finalize was queued), so the wait costs nothing.
+    ///    the main thread synchronises with the driver thread for VR finalize. When the
+    ///    session's swapchain GPU wait is enabled, the driver does not signal until that
+    ///    wait, `xrReleaseSwapchainImage`, and `xrEndFrame` have finished, so this blocks
+    ///    and VR pipeline depth is one frame. When the wait is off (`never`, or `auto`
+    ///    that did not match), the driver signals after the queued submit without polling,
+    ///    which is the previous pipelined handoff.
     /// 2. If the driver recorded a finalize error, surface it instead of beginning a new
     ///    frame. The existing recovery paths handle the failure one tick later.
     /// 3. Run the regular `xrWaitFrame` + `xrBeginFrame` sequence under the queue access

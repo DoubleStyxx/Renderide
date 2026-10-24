@@ -25,12 +25,11 @@ pub(crate) use frame::{
     head_output_from_active_main_space,
 };
 pub use geometry::{CameraClipPlanes, CameraPose, EyeView, OrthographicProjectionSpec, Viewport};
+#[cfg(test)]
+pub(crate) use host_camera_frame::OVERLAY_CAMERA_LOCAL_Z;
 pub(crate) use host_camera_frame::overlay_camera_view_matrix;
 pub use host_camera_frame::{CameraProjectionKind, HostCameraFrame};
-#[cfg(test)]
-pub(crate) use host_camera_frame::{
-    OVERLAY_CAMERA_FAR_CLIP, OVERLAY_CAMERA_LOCAL_Z, OVERLAY_CAMERA_NEAR_CLIP,
-};
+pub(crate) use host_camera_frame::{OVERLAY_CAMERA_FAR_CLIP, OVERLAY_CAMERA_NEAR_CLIP};
 pub use portal::{
     CameraPortalMode, CameraPortalSourceView, CameraPortalSurface,
     host_camera_frame_for_camera_portal,
@@ -49,6 +48,7 @@ pub use secondary::{
     camera_state_screen_space_reflections, host_camera_frame_for_render_texture,
 };
 pub use stereo::StereoViewMatrices;
+pub(crate) use view::overlay_canvas_view_origin;
 pub use view::{
     apply_view_handedness_fix, view_matrix_for_host_world_mesh_space,
     view_matrix_for_world_mesh_render_space, view_matrix_from_render_transform,
@@ -125,6 +125,22 @@ mod tests {
         assert!(m.w_axis.w.is_finite());
         assert!(m.x_axis.x > 0.0 && m.y_axis.y > 0.0);
         assert!(m.z_axis.w == -1.0);
+    }
+
+    #[test]
+    fn identity_camera_forward_is_positive_z() {
+        let tr = RenderTransform {
+            position: Vec3::new(0.0, 0.0, -3.0),
+            scale: Vec3::ONE,
+            rotation: Quat::IDENTITY,
+        };
+        let forward = view_matrix_from_render_transform(&tr)
+            .inverse()
+            .transform_vector3(Vec3::new(0.0, 0.0, -1.0));
+        assert!(
+            (forward - Vec3::Z).length() < 1.0e-5,
+            "identity rotation looks along +Z, got {forward}"
+        );
     }
 
     #[test]

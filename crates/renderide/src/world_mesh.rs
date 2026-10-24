@@ -32,8 +32,10 @@ pub use draw_prep::{
     WorldMeshDrawCollectParallelism, WorldMeshDrawItem, draw_filter_from_camera_entry,
 };
 pub(crate) use draw_prep::{
-    QueuedWorldMeshDraws, WorldMeshCommandCache, fingerprint_world_mesh_draws,
-    queue_draws_with_parallelism, queue_prepared_draws_for_views_with_parallelism,
+    QueuedWorldMeshDraws, WorldMeshCommandCache, apply_reverse_z_ndc_bias,
+    assign_canvas_depth_steps, canvas_bias_projection, canvas_ndc_z_bias,
+    fingerprint_world_mesh_draws, queue_draws_with_parallelism,
+    queue_prepared_draws_for_views_with_parallelism,
 };
 pub use instances::{DrawGroup, InstancePlan, MeshPassKind, WorldMeshPhase, build_plan_for_shader};
 pub(crate) use instances::{depth_prepass_group_eligible, depth_prepass_item_eligible};
