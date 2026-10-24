@@ -159,6 +159,7 @@ pub(super) fn many_point_lights_setup() -> SceneSetup {
             ),
             renderables,
             lights,
+            skinned: Vec::new(),
         },
     }
 }
@@ -197,6 +198,7 @@ fn floor_and_cube_scene(cube: Vec<SceneRenderable>) -> SceneSubmission {
         camera_world_pose: super::default_camera_world_pose(),
         renderables,
         lights: Vec::new(),
+        skinned: Vec::new(),
     }
 }
 
@@ -243,6 +245,7 @@ fn wait_for_fresh_png(recapture: &mut ShadowMoveRecapture<'_>) -> Result<(), Har
             scene_submit_instant: Instant::now(),
             overall_timeout: recapture.timeout,
             interval: recapture.interval,
+            non_flat_skips: 0,
         },
         recapture.renderer,
     )?;

@@ -106,6 +106,7 @@ pub(super) fn scene_setup() -> SceneSetup {
                 shadow_cast_mode: ShadowCastMode::Off,
             }],
             lights: Vec::new(),
+            skinned: Vec::new(),
         },
     }
 }
@@ -224,6 +225,7 @@ pub(super) fn recapture_after_property_update(
             scene_submit_instant,
             overall_timeout: recapture.timeout,
             interval: RECAPTURE_INTERVAL,
+            non_flat_skips: 0,
         },
         recapture.renderer,
     )?;

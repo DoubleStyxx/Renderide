@@ -1,14 +1,16 @@
 //! Cached per-renderer CPU cull outcome shared across the renderer's material slots.
 //!
-//! `mesh_draw_passes_cpu_cull` only depends on per-renderer state (scene/space, mesh, transform
-//! chain, overlay flag, render context) -- not on which material slot is being expanded. Computing
-//! it once amortizes frustum + Hi-Z work across slots. Skinned renderers don't run the cull, so
-//! `None` here means "no cull was performed; let downstream code derive the rigid world matrix".
+//! `mesh_draw_passes_cpu_cull` only depends on per-renderer state (scene/space, bone or rest
+//! bounds, transform chain, overlay flag, render context) -- not on which material slot is being
+//! expanded. Skinned and rigid renderers share that result. `None` means no culling pass was
+//! active, which is how shadow and unculled probe walks keep every draw.
 
 use glam::{Mat4, Vec3};
 
+use crate::scene::SceneTransformRead;
+use crate::shared::RenderingContext;
 use crate::world_mesh::culling::{
-    CpuCullFailure, MeshCullTarget, mesh_draw_passes_cpu_cull,
+    CpuCullFailure, MeshCullTarget, WorldMeshCullInput, mesh_draw_passes_cpu_cull,
     mesh_world_geometry_for_cull_with_head,
 };
 
@@ -27,31 +29,15 @@ pub(super) enum CachedCull {
 
 /// Runs the per-renderer CPU cull once and packages the outcome for downstream slot expansion.
 ///
-/// Skinned renderers and frames without a culling pass return `None`; otherwise the result is
-/// translated into [`CachedCull`] so per-slot expansion never reruns the same test.
+/// Frames without a culling pass return `None`. Skinned draws use the posed bone-bounds AABB
+/// and share one [`CachedCull`] across every material slot. A skinned draw with no posed box
+/// stays visible.
 pub(super) fn compute_cached_cull(
     ctx: &DrawCollectionInputs<'_>,
     draw: &StaticMeshDrawSource<'_>,
     is_overlay: bool,
 ) -> Option<CachedCull> {
-    if draw.skinned {
-        return None;
-    }
-    let culling = ctx.view.culling?;
-    let target = MeshCullTarget {
-        scene: ctx.scene_assets.scene,
-        space_id: draw.space_id,
-        mesh: draw.mesh,
-        skinned: draw.skinned,
-        skinned_renderer: draw.skinned_renderer,
-        node_id: draw.renderer.node_id,
-    };
-    match mesh_draw_passes_cpu_cull(&target, is_overlay, culling, ctx.view.render_context, None) {
-        Ok(rigid_world_matrix) => Some(CachedCull::Accepted(rigid_world_matrix)),
-        Err(CpuCullFailure::Frustum) => Some(CachedCull::RejectedFrustum),
-        Err(CpuCullFailure::HiZ) => Some(CachedCull::RejectedHiZ),
-        Err(CpuCullFailure::UiRectMask) => Some(CachedCull::RejectedFrustum),
-    }
+    cull_outcome_for_draw(ctx, draw, is_overlay).map(cache_from_outcome)
 }
 
 /// Returns the cull outcome for a single slot, falling back to an inline cull for single-slot
@@ -63,28 +49,70 @@ pub(super) fn cull_result_for_slot(
     cached_cull: Option<&CachedCull>,
 ) -> Option<Result<Option<Mat4>, CpuCullFailure>> {
     match cached_cull {
-        Some(CachedCull::Accepted(m)) => Some(Ok(*m)),
-        Some(CachedCull::RejectedFrustum) => Some(Err(CpuCullFailure::Frustum)),
-        Some(CachedCull::RejectedHiZ) => Some(Err(CpuCullFailure::HiZ)),
+        Some(cached) => Some(result_from_cached(cached)),
         // Single-slot renderer bypassed the hoist: cull inline so per-slot work matches the
-        // cached path without paying the CachedCull wrapper cost.
-        None if !draw.skinned => ctx.view.culling.map(|culling| {
-            mesh_draw_passes_cpu_cull(
-                &MeshCullTarget {
-                    scene: ctx.scene_assets.scene,
-                    space_id: draw.space_id,
-                    mesh: draw.mesh,
-                    skinned: draw.skinned,
-                    skinned_renderer: draw.skinned_renderer,
-                    node_id: draw.renderer.node_id,
-                },
-                is_overlay,
-                culling,
-                ctx.view.render_context,
-                None,
-            )
-        }),
-        None => None,
+        // cached path. Skinned and rigid draws both take this branch.
+        None => cull_outcome_for_draw(ctx, draw, is_overlay),
+    }
+}
+
+fn cull_outcome_for_draw(
+    ctx: &DrawCollectionInputs<'_>,
+    draw: &StaticMeshDrawSource<'_>,
+    is_overlay: bool,
+) -> Option<Result<Option<Mat4>, CpuCullFailure>> {
+    cull_mesh_target(
+        &MeshCullTarget {
+            scene: ctx.scene_assets.scene,
+            space_id: draw.space_id,
+            mesh_bounds: &draw.mesh.bounds,
+            skinned: draw.skinned,
+            skinned_renderer: draw.skinned_renderer,
+            node_id: draw.renderer.node_id,
+        },
+        is_overlay,
+        ctx.view.culling,
+        ctx.view.render_context,
+    )
+}
+
+/// Frustum and Hi-Z decision for one mesh target.
+///
+/// `None` means the caller did not ask for culling. Skinned targets read
+/// [`crate::scene::SkinnedMeshRenderer::posed_object_bounds`] inside
+/// [`mesh_draw_passes_cpu_cull`].
+pub(super) fn cull_mesh_target<S>(
+    target: &MeshCullTarget<'_, S>,
+    is_overlay: bool,
+    culling: Option<&WorldMeshCullInput<'_>>,
+    render_context: RenderingContext,
+) -> Option<Result<Option<Mat4>, CpuCullFailure>>
+where
+    S: SceneTransformRead + ?Sized,
+{
+    let culling = culling?;
+    Some(mesh_draw_passes_cpu_cull(
+        target,
+        is_overlay,
+        culling,
+        render_context,
+        None,
+    ))
+}
+
+pub(super) fn cache_from_outcome(outcome: Result<Option<Mat4>, CpuCullFailure>) -> CachedCull {
+    match outcome {
+        Ok(rigid_world_matrix) => CachedCull::Accepted(rigid_world_matrix),
+        Err(CpuCullFailure::Frustum | CpuCullFailure::UiRectMask) => CachedCull::RejectedFrustum,
+        Err(CpuCullFailure::HiZ) => CachedCull::RejectedHiZ,
+    }
+}
+
+pub(super) fn result_from_cached(cached: &CachedCull) -> Result<Option<Mat4>, CpuCullFailure> {
+    match cached {
+        CachedCull::Accepted(matrix) => Ok(*matrix),
+        CachedCull::RejectedFrustum => Err(CpuCullFailure::Frustum),
+        CachedCull::RejectedHiZ => Err(CpuCullFailure::HiZ),
     }
 }
 
@@ -101,7 +129,7 @@ pub(super) fn world_aabb_for_reflection_probe_selection(
     let target = MeshCullTarget {
         scene: ctx.scene_assets.scene,
         space_id: draw.space_id,
-        mesh: draw.mesh,
+        mesh_bounds: &draw.mesh.bounds,
         skinned: draw.skinned,
         skinned_renderer: draw.skinned_renderer,
         node_id: draw.renderer.node_id,
