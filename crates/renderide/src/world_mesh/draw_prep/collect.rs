@@ -178,7 +178,9 @@ pub struct DrawCollectionViewInputs<'a> {
     pub reflection_probes: Option<&'a ReflectionProbeFrameSelection>,
     /// When false, collection skips previous-matrix lookup and leaves object velocity off.
     ///
-    /// Color views set this from rigid motion history. Shadow and overlay views leave it false.
+    /// Color views copy the global motion-blur setting (`rigid_motion_history_enabled`), so the
+    /// scan gate is not per view. Shadow and overlay views leave it false. Per-view consumers
+    /// such as TAA (#170) will need their own key.
     pub consumes_motion_vectors: bool,
 }
 

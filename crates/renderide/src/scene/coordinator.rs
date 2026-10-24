@@ -96,8 +96,10 @@ pub struct SceneCoordinator {
     world_flush_scratch: WorldCacheFlushScratch,
     apply_scratch: SceneApplyScratch,
     /// When set, [`Self::flush_world_caches`] publishes previous world matrices for spaces that
-    /// requested rigid object motion. The render thread sets this from motion-blur settings
-    /// before the flush so draw collection can read the snapshot afterward.
+    /// requested rigid object motion. The render thread sets this from the global motion-blur
+    /// setting before the flush. Draw collection uses the same flag for every color view.
+    /// A per-view consumer such as TAA (#170) will need its own key so history still publishes
+    /// when that view wants velocity and motion blur is off.
     rigid_motion_history_enabled: bool,
     /// Host frame index supplied for the flush that is about to publish history.
     pending_object_motion_frame: Option<i32>,

@@ -17,6 +17,11 @@ use crate::shared::FrameSubmitData;
 ///
 /// A poisoned settings lock disables history for the frame rather than propagating the poison
 /// into the render thread.
+/// Global motion-blur gate for rigid object history and the draw-collection scan.
+///
+/// True when post-processing and motion blur are both effectively enabled. Every color view
+/// reads this one flag. A per-view consumer such as TAA (#170) will need its own key so a view
+/// can request velocity while motion blur is off.
 fn rigid_object_motion_history_enabled(settings: &RendererSettingsHandle) -> bool {
     settings.read().is_ok_and(|settings| {
         let post = &settings.post_processing;

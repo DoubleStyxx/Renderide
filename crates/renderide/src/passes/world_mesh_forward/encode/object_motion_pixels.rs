@@ -30,6 +30,7 @@ struct UploadedDraw {
 fn still_camera_moving_object_writes_velocity_only_on_covered_pixels() {
     let Some((device, queue)) = adapter_device() else {
         require_lavapipe_on_linux();
+        eprintln!("object-velocity pixel test skipped: no wgpu adapter is available");
         return;
     };
     let targets = pixel_targets(&device);

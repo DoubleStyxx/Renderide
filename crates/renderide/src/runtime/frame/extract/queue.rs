@@ -230,6 +230,7 @@ fn visible_view_inputs<'a>(
         render_space_scope: prep.render_space_scope,
         layer_policy: prep.layer_policy,
         reflection_probes: Some(setup.reflection_probes),
+        // Global motion-blur setting, shared by every color view. TAA (#170) needs a per-view key.
         consumes_motion_vectors: setup.scene.rigid_motion_history_enabled(),
     }
 }
