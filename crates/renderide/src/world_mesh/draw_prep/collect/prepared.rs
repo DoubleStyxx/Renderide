@@ -219,7 +219,8 @@ fn append_prepared_run_draws(
     is_overlay: bool,
     state: PreparedRunViewState,
     out: &mut Vec<WorldMeshDrawItem>,
-) {
+) -> bool {
+    let mut has_rigid_object_motion = false;
     for d in run {
         let primitive_topology =
             stacked_material_submesh_topology(d.slot_index, &mesh.submesh_topologies);
@@ -254,9 +255,11 @@ fn append_prepared_run_draws(
             state.rigid_world_matrix,
             state.alpha_distance_sq,
         ) {
+            has_rigid_object_motion |= item.previous_rigid_world_matrix.is_some();
             out.push(item);
         }
     }
+    has_rigid_object_motion
 }
 
 /// Collects one prepared renderer run after frame-global slot expansion.
@@ -266,6 +269,7 @@ fn collect_prepared_renderer_run<'a>(
     state: CollectState<'_>,
     cull_cache: &mut SpaceCullCache<'a>,
     out: &mut Vec<WorldMeshDrawItem>,
+    has_rigid_object_motion: &mut bool,
 ) -> (usize, usize, usize) {
     let Some(first) = run.first() else {
         return (0, 0, 0);
@@ -313,7 +317,8 @@ fn collect_prepared_renderer_run<'a>(
     let (view_state, cull_stats) =
         prepared_run_view_state(run, first, is_overlay, mesh, &skinning, ctx, cull_cache);
     if let Some(view_state) = view_state {
-        append_prepared_run_draws(run, ctx, state.cache, mesh, is_overlay, view_state, out);
+        *has_rigid_object_motion |=
+            append_prepared_run_draws(run, ctx, state.cache, mesh, is_overlay, view_state, out);
     }
     cull_stats
 }
@@ -330,7 +335,7 @@ pub(super) fn collect_prepared_chunk<'a>(
     runs: &[FramePreparedRun],
     ctx: &DrawCollectionInputs<'a>,
     state: CollectState<'_>,
-) -> (Vec<WorldMeshDrawItem>, (usize, usize, usize)) {
+) -> (Vec<WorldMeshDrawItem>, (usize, usize, usize), bool) {
     profiling::scope!("mesh::collect_prepared::chunk");
     let chunk_draws = {
         profiling::scope!("mesh::collect_prepared::chunk_capacity");
@@ -340,6 +345,7 @@ pub(super) fn collect_prepared_chunk<'a>(
     };
     let mut out: Vec<WorldMeshDrawItem> = Vec::with_capacity(chunk_draws);
     let mut cull_stats = (0usize, 0usize, 0usize);
+    let mut has_rigid_object_motion = false;
     let mut cull_cache = SpaceCullCache::<'a>::new();
 
     {
@@ -348,15 +354,21 @@ pub(super) fn collect_prepared_chunk<'a>(
             let start = prepared_run.start as usize;
             let end = prepared_run.end as usize;
             let run = &draws[start..end];
-            let run_stats =
-                collect_prepared_renderer_run(run, ctx, state, &mut cull_cache, &mut out);
+            let run_stats = collect_prepared_renderer_run(
+                run,
+                ctx,
+                state,
+                &mut cull_cache,
+                &mut out,
+                &mut has_rigid_object_motion,
+            );
             cull_stats.0 += run_stats.0;
             cull_stats.1 += run_stats.1;
             cull_stats.2 += run_stats.2;
         }
     }
 
-    (out, cull_stats)
+    (out, cull_stats, has_rigid_object_motion)
 }
 
 /// Spaces admitted by prepared collection after private-UI and layer gates.

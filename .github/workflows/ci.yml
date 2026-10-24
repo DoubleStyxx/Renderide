@@ -1,9 +1,11 @@
 # Builds the Rust workspace and the .NET generator solution on all major desktop OSes.
 name: CI
 
-# Path filters intentionally omit `RenderideMod/**`. The mod references FrooxEngine.dll
-# and Renderite.Shared.dll from a Resonite install. Those assemblies are proprietary and
-# are not on hosted runners, so CI does not build the mod.
+# Path filters omit the mod project. It references FrooxEngine.dll and
+# Renderite.Shared.dll from a Resonite install. Those assemblies are proprietary
+# and are not on hosted runners, so CI does not build RenderideMod.csproj.
+# `RenderideMod/Shaders/**` is included: Rust `include_str!` compiles those WGSL
+# files into the renderer and the headless golden suite.
 "on":
   push:
     branches: [master]
@@ -17,6 +19,7 @@ name: CI
       - "crates/**"
       - "generators/**"
       - "third_party/**"
+      - "RenderideMod/Shaders/**"
   pull_request:
     paths:
       - ".github/workflows/ci.yml"
@@ -28,6 +31,7 @@ name: CI
       - "crates/**"
       - "generators/**"
       - "third_party/**"
+      - "RenderideMod/Shaders/**"
   workflow_dispatch:
 
 concurrency:

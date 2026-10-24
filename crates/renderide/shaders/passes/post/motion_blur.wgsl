@@ -1,8 +1,11 @@
 //! Screen-space motion vector production and HDR motion blur resolve.
 //!
-//! Build script emits `motion_blur_default` and `motion_blur_multiview` targets. The velocity
-//! pass writes UV-space motion into an `rg16float` render target. The blur pass samples HDR color
-//! along that vector before tonemapping.
+//! Build script emits `motion_blur_default` and `motion_blur_multiview` targets. The camera
+//! velocity pass writes UV-space motion from depth reprojection into an `rg16float` target.
+//! A later object-velocity pass overwrites pixels of moving rigid draws in that same target.
+//! Pixels it does not touch keep this camera reprojection, which is the fallback for static
+//! geometry and for draws without a previous model matrix. The blur pass samples the combined
+//! target and is unchanged.
 
 #import renderide::core::fullscreen as fs
 

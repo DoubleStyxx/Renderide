@@ -6,8 +6,13 @@
 //! binding lives in [`vertex_binding`].
 
 mod bind_group;
+mod object_motion;
 mod scissor;
 mod vertex_binding;
+
+pub(crate) use object_motion::{
+    ObjectMotionDraw, object_motion_previous_vp_bind_group, record_object_motion_vectors,
+};
 
 use crate::gpu::GpuLimits;
 use crate::materials::MaterialPipelineSet;
