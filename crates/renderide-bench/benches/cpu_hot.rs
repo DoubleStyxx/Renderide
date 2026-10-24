@@ -69,8 +69,22 @@ fn hysteresis_classification(c: &mut Criterion) {
     for count in HYSTERESIS_HISTORY_COUNTS {
         let mut workload = HysteresisHistoryWorkload::all_visible(count);
         let _ = workload.step();
+        let over_cap = count > HYSTERESIS_HISTORY_COUNTS[0];
+        let name = if over_cap {
+            format!("{count}_all_visible_over_cap")
+        } else {
+            format!("{count}_all_visible")
+        };
         history.throughput(Throughput::Elements(u64::try_from(count).unwrap_or(0)));
-        history.bench_function(format!("{count}_all_visible"), |b| {
+        history.bench_function(name, |b| {
+            b.iter(|| black_box(workload.step()));
+        });
+    }
+    {
+        let mut workload = HysteresisHistoryWorkload::visible_grid_subset();
+        let _ = workload.step();
+        history.throughput(Throughput::Elements(676));
+        history.bench_function("676_of_1600_superset", |b| {
             b.iter(|| black_box(workload.step()));
         });
     }

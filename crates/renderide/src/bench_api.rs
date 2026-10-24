@@ -469,6 +469,9 @@ impl HysteresisCullWorkload {
 /// prepared casters in scope, not casters that survive the frustum.
 pub struct HysteresisHistoryWorkload {
     present: Vec<PresentCaster>,
+    /// Frustum survivors. The history bench calls `allows_draw` for these rows only.
+    /// [`Self::present`] may be a larger prepared grid.
+    drawn: Vec<PresentCaster>,
     present_keys: HashSet<CasterKey>,
     movers: Vec<MovedCaster>,
     previous_vp: Mat4,
@@ -486,7 +489,7 @@ impl HysteresisHistoryWorkload {
     /// Builds `count` casters. One quarter start occluded. `moving` separates the cameras.
     #[must_use]
     pub fn new(count: usize, moving: bool) -> Self {
-        Self::build(count, moving, true)
+        Self::build(count, moving, true, |_| true)
     }
 
     /// Builds `count` casters that all start visible, with facts that do not occlude.
@@ -495,7 +498,25 @@ impl HysteresisHistoryWorkload {
     /// culled last frame, and nothing is culled this frame.
     #[must_use]
     pub fn all_visible(count: usize) -> Self {
-        let mut workload = Self::build(count, false, false);
+        let mut workload = Self::build(count, false, false, |_| true);
+        workload.keep_facts = true;
+        workload
+    }
+
+    /// 1,600 prepared casters and the center 26×26 remembered, matching `many_static_meshes`.
+    ///
+    /// Counts above [`crate::occlusion::hysteresis::HISTORY_CASTER_BUDGET`] never arm.
+    /// [`Self::all_visible`] at those counts stays on the full update.
+    #[must_use]
+    pub fn visible_grid_subset() -> Self {
+        const SIDE: usize = 40;
+        const INNER: usize = 26;
+        const ORIGIN: usize = (SIDE - INNER) / 2;
+        let mut workload = Self::build(SIDE * SIDE, false, false, |index| {
+            let row = index / SIDE;
+            let col = index % SIDE;
+            (ORIGIN..ORIGIN + INNER).contains(&row) && (ORIGIN..ORIGIN + INNER).contains(&col)
+        });
         workload.keep_facts = true;
         workload
     }
@@ -506,7 +527,12 @@ impl HysteresisHistoryWorkload {
         self.fast_engaged
     }
 
-    fn build(count: usize, moving: bool, occlude_quarter: bool) -> Self {
+    fn build(
+        count: usize,
+        moving: bool,
+        occlude_quarter: bool,
+        remember: impl Fn(usize) -> bool,
+    ) -> Self {
         let (previous_vp, current_vp) = history_view_projections(moving);
         let mut side = 1_usize;
         while side.saturating_mul(side) < count.max(1) {
@@ -514,6 +540,7 @@ impl HysteresisHistoryWorkload {
         }
         let mut casters = HashMap::with_capacity(count);
         let mut present = Vec::with_capacity(count);
+        let mut drawn = Vec::new();
         for index in 0..count {
             let column = index % side;
             let row = index / side;
@@ -529,22 +556,28 @@ impl HysteresisHistoryWorkload {
                 node_id,
                 false,
             );
+            let remembered = remember(index);
             let class = if occlude_quarter && index % 4 == 0 {
                 VisibilityClass::Occluded
             } else {
                 VisibilityClass::Visible
             };
-            casters.insert(key, CasterRecord::new(class, aabb_min, aabb_max, 1));
-            present.push(PresentCaster {
+            let caster = PresentCaster {
                 key,
                 mesh_asset_id: 1,
                 aabb_min,
                 aabb_max,
                 space_id: RenderSpaceId(1),
-            });
+            };
+            if remembered {
+                casters.insert(key, CasterRecord::new(class, aabb_min, aabb_max, 1));
+                drawn.push(caster);
+            }
+            present.push(caster);
         }
         Self {
             present,
+            drawn,
             present_keys: HashSet::new(),
             movers: Vec::new(),
             previous_vp,
@@ -602,7 +635,7 @@ impl HysteresisHistoryWorkload {
         frame.install_fast(fast_layout);
         let kept = AtomicU32::new(0);
         let keep_facts = self.keep_facts;
-        self.present.par_iter().for_each(|caster| {
+        self.drawn.par_iter().for_each(|caster| {
             let pad =
                 screen_motion_uv_pad(previous_vp, current_vp, caster.aabb_min, caster.aabb_max);
             let facts = if keep_facts {

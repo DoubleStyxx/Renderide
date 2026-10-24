@@ -36,6 +36,9 @@ mod fast_path_tests {
         rows: Vec<Row>,
         armed: bool,
         published_fast: bool,
+        visible_count: u32,
+        epoch: u64,
+        rects: Vec<ScreenRect>,
     }
 
     fn key_in(space: i32, index: u64, skinned: bool) -> CasterKey {
@@ -215,6 +218,9 @@ mod fast_path_tests {
                 rows,
                 armed,
                 published_fast: recycled.buffers.fast_published,
+                visible_count: recycled.history.visible_count,
+                epoch: recycled.history.epoch,
+                rects: recycled.buffers.stale_rects.clone(),
             },
             recycled.history,
             recycled.spare,
@@ -253,6 +259,12 @@ mod fast_path_tests {
                     "frame {index} mesh"
                 );
             }
+            assert_eq!(
+                fast.visible_count, slow.visible_count,
+                "frame {index} visible_count"
+            );
+            assert_eq!(fast.epoch, slow.epoch, "frame {index} epoch");
+            assert_eq!(fast.rects, slow.rects, "frame {index} disocclusion");
         }
     }
 
@@ -691,4 +703,6 @@ mod fast_path_tests {
         assert_eq!(class_of(&fast[0], 1), Some(VisibilityClass::Occluded));
         assert!(class_of(&fast[0], 0).is_none());
     }
+
+    include!("hysteresis_review_tests.rs");
 }

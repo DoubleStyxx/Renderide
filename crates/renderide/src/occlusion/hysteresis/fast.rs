@@ -7,7 +7,9 @@
 //! bit, instead of probing the history map. If every remembered caster was marked and nothing else
 //! was queued, publishing skips the retain scan. A remembered caster missing from the prepared
 //! set, a sparse index, a moved or occluded caster, and any remembered row that was not tested
-//! still take the full update.
+//! still take the full update. A history that mixes render spaces, or static and skinned rows,
+//! never arms. The refusal walks the map until the first mismatched key and repeats that walk
+//! on the next frame, because the table stays invalid.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -307,7 +309,7 @@ pub(super) fn visited_casters(slots: &FastSlots) -> u32 {
 }
 
 /// Writes this frame's epoch onto rows the fast path marked, so a later shard can union with them.
-pub(super) fn stamp_visited_epochs(slots: &FastSlots, history: &VisibilityHistory, epoch: u32) {
+pub(super) fn stamp_visited_epochs(slots: &FastSlots, history: &VisibilityHistory, epoch: u64) {
     if !slots.valid {
         return;
     }
@@ -327,4 +329,10 @@ pub(super) fn stamp_visited_epochs(slots: &FastSlots, history: &VisibilityHistor
 /// Drops the table after a frame that did not keep every row unchanged.
 pub(super) fn invalidate(slots: &mut FastSlots) {
     slots.valid = false;
+}
+
+/// Heap address and capacity of the reused index rows.
+#[cfg(test)]
+pub(super) fn row_storage(slots: &FastSlots) -> (*const (), usize) {
+    (slots.rows.as_ptr().cast(), slots.rows.capacity())
 }

@@ -51,6 +51,7 @@ pub(super) fn view_hysteresis_plan(
         proj,
         temporal,
         scratch,
+        true,
     );
     occlusion.restore_frame_scratch(view.view_id, frame_scratch);
     Some(ViewHysteresisPlan {
@@ -70,6 +71,10 @@ pub(super) fn attached_hysteresis(
     plan.filter(|plan| plan.apply).map(|plan| &plan.frame)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the last argument lets tests run this same planner with the fast path off"
+)]
 fn build_frame(
     scene: &SceneCoordinator,
     prepared: Option<&FramePreparedRenderables>,
@@ -78,6 +83,7 @@ fn build_frame(
     proj: &WorldMeshCullProjParams,
     temporal: Option<&HiZTemporalState>,
     scratch: VisibilityScratch,
+    enable_fast: bool,
 ) -> (VisibilityHysteresis, VisibilityFrameScratch, bool) {
     let VisibilityScratch {
         history,
@@ -123,7 +129,7 @@ fn build_frame(
             );
         }
     }
-    let fast_layout = if track_presence && history.no_occluded_casters() {
+    let fast_layout = if enable_fast && track_presence && history.no_occluded_casters() {
         prepare_fast_visible(&history, &frame_scratch.present, &mut cull_buffers)
     } else {
         None
@@ -419,6 +425,7 @@ mod tests {
             &proj,
             None,
             scratch,
+            true,
         );
         let plan = super::ViewHysteresisPlan {
             view_id: ViewId::Main,
@@ -538,6 +545,7 @@ mod tests {
                 self.proj,
                 Some(self.temporal),
                 scratch,
+                true,
             );
             assert!(apply);
             assert_eq!(!frame_scratch.present.is_empty(), expect_present);
@@ -743,4 +751,6 @@ mod tests {
             assert_eq!(outer.as_ptr(), outer_ptr);
         });
     }
+
+    include!("hysteresis_build_frame_tests.rs");
 }

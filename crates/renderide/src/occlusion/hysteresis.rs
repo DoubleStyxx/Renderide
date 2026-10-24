@@ -47,7 +47,7 @@
 //! scene, headset capture, or discrete-GPU measurement for that issue, so the pass mitigates the
 //! rejection rather than demonstrating that the issue is closed.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use glam::{Mat4, Vec3};
 use hashbrown::{HashMap, HashSet};
@@ -151,7 +151,8 @@ pub(crate) enum VisibilityClass {
 /// Bounds and mesh remembered with [`VisibilityClass`].
 ///
 /// `seen_epoch` is stamped when this frame tests the caster and leaves the row unchanged.
-/// [`VisibilityHysteresis::recycle`] drops rows whose epoch is older than the frame.
+/// [`VisibilityHysteresis::recycle`] drops rows whose epoch is not this frame's stamp. Fast-publish
+/// does not rewrite it. The stamp is a `u64` so a long run of those frames cannot wrap onto it.
 #[derive(Debug)]
 pub(crate) struct CasterRecord {
     /// Classification written at the end of the previous tested frame.
@@ -163,7 +164,7 @@ pub(crate) struct CasterRecord {
     /// Mesh asset at that classification.
     pub mesh_asset_id: i32,
     /// Frame epoch that last tested this caster. Not part of the published classification.
-    seen_epoch: AtomicU32,
+    seen_epoch: AtomicU64,
 }
 
 impl CasterRecord {
@@ -180,8 +181,14 @@ impl CasterRecord {
             aabb_min,
             aabb_max,
             mesh_asset_id,
-            seen_epoch: AtomicU32::new(0),
+            seen_epoch: AtomicU64::new(0),
         }
+    }
+
+    /// Stamps a row as tested at `epoch`. Tests use this to start a history near the wrap.
+    #[cfg(test)]
+    pub(crate) fn set_seen_epoch(&self, epoch: u64) {
+        self.seen_epoch.store(epoch, Ordering::Relaxed);
     }
 }
 
@@ -371,6 +378,14 @@ pub(crate) struct VisibilityCullBuffers {
     fast_slots: fast::FastSlots,
 }
 
+#[cfg(test)]
+impl VisibilityCullBuffers {
+    /// `true` when the last publish skipped the retain scan.
+    pub(crate) fn fast_published(&self) -> bool {
+        self.fast_published
+    }
+}
+
 /// History snapshot plus the cleared map the next [`VisibilityHysteresis::finish`] refills.
 pub(crate) struct VisibilityScratch {
     /// Classification published by the previous tested frame.
@@ -391,8 +406,11 @@ pub(crate) struct VisibilityHistory {
     casters: HashMap<CasterKey, CasterRecord>,
     /// Casters whose class is [`VisibilityClass::Visible`].
     visible_count: u32,
-    /// Epoch stamped on rows written or confirmed by the last [`VisibilityHysteresis::recycle`].
-    epoch: u32,
+    /// Epoch of the last publish, including a fast-publish that did not rewrite row stamps.
+    epoch: u64,
+    /// Epoch written onto row stamps by the last full update. Fast-publish leaves this behind
+    /// [`Self::epoch`]. [`next_epoch`] skips it when the two differ so a wrap cannot alias it.
+    stamped_epoch: u64,
 }
 
 impl VisibilityHistory {
@@ -410,7 +428,15 @@ impl VisibilityHistory {
             casters,
             visible_count: u32::try_from(visible_count).unwrap_or(u32::MAX),
             epoch: 0,
+            stamped_epoch: 0,
         }
+    }
+
+    /// Places the history clock next to a wrap. `stamped_epoch` is the value on the row stamps.
+    #[cfg(test)]
+    pub(crate) fn set_clock(&mut self, epoch: u64, stamped_epoch: u64) {
+        self.epoch = epoch;
+        self.stamped_epoch = stamped_epoch;
     }
 
     /// `true` when any remembered caster was drawn.
@@ -446,6 +472,18 @@ impl VisibilityHistory {
     /// Visits every remembered caster. Order is not significant.
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&CasterKey, &CasterRecord)> {
         self.casters.iter()
+    }
+
+    /// Casters published as [`VisibilityClass::Visible`].
+    #[cfg(test)]
+    pub(crate) fn visible_count(&self) -> u32 {
+        self.visible_count
+    }
+
+    /// Epoch of the last publish.
+    #[cfg(test)]
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch
     }
 }
 
@@ -493,7 +531,7 @@ pub(crate) struct VisibilityHysteresis {
     buffers: VisibilityCullBuffers,
     spare: HashMap<CasterKey, CasterRecord>,
     /// Epoch stamped onto every caster this frame actually tests.
-    epoch: u32,
+    epoch: u64,
     /// Remembered-caster count when the stable-visible fast path is armed. `0` keeps the full update.
     fast_expected: u32,
 }
@@ -540,7 +578,7 @@ impl VisibilityHysteresis {
         spare: HashMap<CasterKey, CasterRecord>,
         mut buffers: VisibilityCullBuffers,
     ) -> Self {
-        let epoch = next_epoch(history.epoch);
+        let epoch = next_epoch(history.epoch, history.stamped_epoch);
         let threads = rayon::current_num_threads().saturating_add(1);
         if buffers.shards.len() < threads {
             buffers.shards.reserve(threads - buffers.shards.len());
@@ -626,7 +664,7 @@ impl VisibilityHysteresis {
                 aabb_min,
                 aabb_max,
                 mesh_asset_id: caster.mesh_asset_id,
-                seen_epoch: AtomicU32::new(self.epoch),
+                seen_epoch: AtomicU64::new(self.epoch),
             },
         ));
     }
@@ -691,6 +729,7 @@ impl VisibilityHysteresis {
         });
         history.visible_count = visible_count;
         history.epoch = epoch;
+        history.stamped_epoch = epoch;
         VisibilityRecycle {
             history,
             spare,
@@ -705,11 +744,20 @@ impl VisibilityHysteresis {
     }
 }
 
-fn next_epoch(epoch: u32) -> u32 {
-    match epoch.wrapping_add(1) {
+fn next_epoch(epoch: u64, stamped_epoch: u64) -> u64 {
+    let mut next = match epoch.wrapping_add(1) {
         0 => 1,
         next => next,
+    };
+    // Row stamps stay at `stamped_epoch` across fast-publish frames. Landing on that value
+    // again would keep an untested row and union a moved caster with its old bounds.
+    if stamped_epoch != epoch && next == stamped_epoch {
+        next = match next.wrapping_add(1) {
+            0 => 1,
+            next => next,
+        };
     }
+    next
 }
 
 /// Keeps the larger of the history map and the spare map as the map `recycle` mutates.
@@ -726,6 +774,7 @@ fn adopt_spare(
         casters,
         visible_count,
         epoch,
+        stamped_epoch,
     } = history;
     for (key, record) in casters {
         spare.insert(key, record);
@@ -735,6 +784,7 @@ fn adopt_spare(
             casters: spare,
             visible_count,
             epoch,
+            stamped_epoch,
         },
         HashMap::new(),
     )

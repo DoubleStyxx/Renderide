@@ -150,6 +150,17 @@ mod tests {
         assert!(visible.fast_path_engaged());
         assert_eq!(visible.step(), u32::try_from(count).unwrap_or(0));
         assert!(visible.fast_path_engaged());
+        let mut over_cap = HysteresisHistoryWorkload::all_visible(10_000);
+        let _ = over_cap.step();
+        assert!(
+            !over_cap.fast_path_engaged(),
+            "10_000 visible casters are over the budget and stay on the full update"
+        );
+        let mut subset = HysteresisHistoryWorkload::visible_grid_subset();
+        assert_eq!(subset.step(), 676);
+        assert!(subset.fast_path_engaged());
+        assert_eq!(subset.step(), 676);
+        assert!(subset.fast_path_engaged());
         assert_eq!(HYSTERESIS_HISTORY_COUNTS[0], 8_192);
         assert!(HYSTERESIS_HISTORY_COUNTS.contains(&10_000));
         assert!(HYSTERESIS_HISTORY_COUNTS.contains(&100_000));
