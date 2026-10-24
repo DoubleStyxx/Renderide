@@ -255,6 +255,7 @@ fn transparent_ui_sorts_farther_items_first() {
         alpha_blended: true,
     });
     far.camera_distance_sq = 9.0;
+    super::sync_transparent_depth_key(&mut far);
     let mut near = dummy_world_mesh_draw_item(DummyDrawItemSpec {
         material_asset_id: 11,
         property_block: None,
@@ -267,6 +268,7 @@ fn transparent_ui_sorts_farther_items_first() {
         alpha_blended: true,
     });
     near.camera_distance_sq = 1.0;
+    super::sync_transparent_depth_key(&mut near);
     let mut v = vec![near, far];
     sort_draws(&mut v);
     assert_eq!(v[0].camera_distance_sq, 9.0);

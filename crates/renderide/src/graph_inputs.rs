@@ -191,10 +191,13 @@ pub trait GraphPerDrawSlabResources {
     ) -> Option<wgpu::Buffer>;
 
     /// Gives callers mutable access to the per-view CPU slab-packing scratch.
+    ///
+    /// The second buffer is the retained canvas depth-step list. Callers clear and refill it
+    /// instead of allocating a new `Vec` for every view every frame.
     fn with_per_view_per_draw_scratch(
         &self,
         view_id: ViewId,
-        f: &mut dyn FnMut(&mut Vec<PaddedPerDrawUniforms>),
+        f: &mut dyn FnMut(&mut Vec<PaddedPerDrawUniforms>, &mut Vec<u32>),
     ) -> bool;
 
     /// Gives callers mutable access to the per-view material-batch boundary scratch so it can be

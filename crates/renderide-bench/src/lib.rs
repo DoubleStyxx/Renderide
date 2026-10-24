@@ -11,9 +11,9 @@ pub use renderide::bench_api::{
     BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload,
     CAMERA_CLEAR_LOAD_OP_CAMERAS, CULL_BATCH, CullWorkload, KeywordVariantCacheWorkload,
     MATERIAL_UNIFORM_BATCH, MaterialUniformUpdateWorkload, SHADOW_CHURN_CASTERS,
-    SHADOW_CHURN_LIGHTS, ShadowChurnWorkload, TRANSFORM_BATCH, TransformWorkload,
-    WORLD_MATRIX_NODES, WorldMatrixWorkload, camera_clear_load_op_checksum,
-    camera_clear_load_op_inputs,
+    SHADOW_CHURN_LIGHTS, ShadowChurnWorkload, TRANSFORM_BATCH, TRANSPARENT_SORT_1K,
+    TRANSPARENT_SORT_10K, TransformWorkload, TransparentSortWorkload, WORLD_MATRIX_NODES,
+    WorldMatrixWorkload, camera_clear_load_op_checksum, camera_clear_load_op_inputs,
 };
 
 #[cfg(test)]
@@ -21,8 +21,9 @@ mod tests {
     use super::{
         BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload,
         CAMERA_CLEAR_LOAD_OP_CAMERAS, CULL_BATCH, CullWorkload, KeywordVariantCacheWorkload,
-        MaterialUniformUpdateWorkload, TransformWorkload, WORLD_MATRIX_NODES, WorldMatrixWorkload,
-        camera_clear_load_op_checksum, camera_clear_load_op_inputs,
+        MaterialUniformUpdateWorkload, TransformWorkload, TransparentSortWorkload,
+        WORLD_MATRIX_NODES, WorldMatrixWorkload, camera_clear_load_op_checksum,
+        camera_clear_load_op_inputs,
     };
 
     #[test]
@@ -132,6 +133,36 @@ mod tests {
         assert_ne!(
             camera_clear_load_op_checksum(&inputs[..128]),
             camera_clear_load_op_checksum(&inputs[128..256])
+        );
+    }
+
+    #[test]
+    fn precomputed_and_recomputed_transparent_sorts_agree() {
+        let workload = TransparentSortWorkload::mixed(64);
+        let precomputed = workload.clone().sort_precomputed();
+        let recomputed = workload.sort_recomputing_depth();
+        assert_ne!(precomputed, 0);
+        assert_eq!(precomputed, recomputed);
+    }
+
+    #[test]
+    fn snap_siblings_checksum_is_stable() {
+        let workload = TransparentSortWorkload::jittered_canvas_planes(64);
+        let first = workload.clone().snap_siblings();
+        let second = workload.snap_siblings();
+        assert_ne!(first, 0);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn master_farthest_corner_sort_can_disagree_with_the_plane_key() {
+        let workload = TransparentSortWorkload::plane_versus_corner();
+        let precomputed = workload.clone().sort_precomputed();
+        let master = workload.sort_master();
+        assert_ne!(precomputed, 0);
+        assert_ne!(
+            precomputed, master,
+            "canvas plane keys and farthest-corner keys must be able to swap"
         );
     }
 }
