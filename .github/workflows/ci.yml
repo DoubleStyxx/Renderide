@@ -93,8 +93,10 @@ jobs:
       # MPEG-TS test only loads tsdemux, whose .so needs libgstreamer-plugins-bad1.0-0
       # plus the base plugins. `--no-install-recommends` still skips VA-API.
       # On master 0104fee7 the full plugins-bad install fetched 96.2 MB in 20 min 31 s.
+      # 10 minutes bounds this apt step. A healthy fetch is a few seconds.
       - name: Install Linux system dependencies (pinned lavapipe + GStreamer)
         if: runner.os == 'Linux'
+        timeout-minutes: 10
         run: |
           set -euo pipefail
           snapshot="https://snapshot.ubuntu.com/ubuntu/20261003T000000Z"
@@ -131,9 +133,14 @@ jobs:
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             gstreamer1.0-plugins-base libgstreamer-plugins-bad1.0-0
           plugindir="$(pkg-config --variable=pluginsdir gstreamer-1.0)"
+          if [[ -z "${plugindir}" || ! -d "${plugindir}" || -z "$(ls -A "${plugindir}")" ]]; then
+            echo "GStreamer plugin directory is missing or empty: '${plugindir}'" >&2
+            exit 1
+          fi
           gsttmp="$(mktemp -d)"
           ( cd "$gsttmp" && apt-get download gstreamer1.0-plugins-bad )
           dpkg-deb -x "$gsttmp"/gstreamer1.0-plugins-bad_*.deb "$gsttmp/root"
+          test -f "$gsttmp"/root/usr/lib/*/gstreamer-1.0/libgstmpegtsdemux.so
           sudo cp "$gsttmp"/root/usr/lib/*/gstreamer-1.0/libgstmpegtsdemux.so "$plugindir/"
           rm -rf "$gsttmp"
           installed_mesa="$(dpkg-query -W -f='${Version}' mesa-vulkan-drivers)"
