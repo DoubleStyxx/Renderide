@@ -5,7 +5,7 @@
 //! pipeline and future per-material bind groups change only on boundaries.
 //!
 //! Optional CPU frustum and Hi-Z culling share one bounds evaluation per draw slot
-//! ([`super::culling::mesh_draw_passes_cpu_cull`]) using the same view-projection rules as the forward pass
+//! ([`super::culling::SpaceCullCache`]) using the same view-projection rules as the forward pass
 //! ([`super::culling::build_world_mesh_cull_proj_params`]).
 //!
 //! Per-space draw collection runs in parallel ([`rayon`]) by default; the merged list is arranged

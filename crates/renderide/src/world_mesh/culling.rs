@@ -16,8 +16,6 @@ use crate::hi_z_cpu::HiZCullData;
 use crate::occlusion::hysteresis::VisibilityHysteresis;
 use crate::scene::SceneSpaceRead;
 
-#[cfg(test)]
-pub(crate) use eval::mesh_draw_passes_cpu_cull;
 pub(crate) use eval::{
     CpuCullFailure, PreparedSpaceCull, SpaceCullCache, overlay_rect_clip_visible,
 };

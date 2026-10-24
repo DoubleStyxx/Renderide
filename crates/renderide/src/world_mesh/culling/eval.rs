@@ -8,13 +8,9 @@
 use glam::{Mat4, Vec3, Vec4};
 
 use crate::scene::{RenderSpaceId, SceneSpaceRead};
-#[cfg(test)]
-use crate::shared::RenderingContext;
 
 use super::frustum::world_aabb_visible_in_homogeneous_clip;
 use super::geometry::MeshCullGeometry;
-#[cfg(test)]
-use super::geometry::{MeshCullTarget, mesh_world_geometry_for_cull};
 use super::{HiZTemporalState, WorldMeshCullInput};
 use crate::camera::{overlay_camera_view_matrix, view_matrix_for_world_mesh_render_space};
 use crate::hi_z_cpu::snapshot::HiZCpuSnapshot;
@@ -472,41 +468,7 @@ pub(crate) enum CpuCullFailure {
     UiRectMask,
 }
 
-/// Frustum + optional Hi-Z culling using a single [`mesh_world_geometry_for_cull`] evaluation.
-///
-/// On success, returns the rigid world matrix when the draw is non-skinned and the matrix was
-/// computed while building bounds (reuse in the forward pass).
-///
-/// `ui_rect_clip_local` is the object-local UI rect (`xMin, yMin, xMax, yMax`) for overlay draws
-/// that opt in to `_RectClip`. When `Some`, the overlay path projects the rect's four corners
-/// through the same desktop overlay camera view-projection used by the draw pass and rejects the
-/// draw when the projected screen-space AABB doesn't intersect the viewport.
-#[cfg(test)]
-pub(crate) fn mesh_draw_passes_cpu_cull<S>(
-    target: &MeshCullTarget<'_, S>,
-    is_overlay: bool,
-    culling: &WorldMeshCullInput<'_>,
-    render_context: RenderingContext,
-    ui_rect_clip_local: Option<Vec4>,
-    caster: Option<CasterRef>,
-) -> Result<Option<Mat4>, CpuCullFailure>
-where
-    S: crate::scene::SceneTransformRead + ?Sized,
-{
-    let geom = mesh_world_geometry_for_cull(target, culling, render_context);
-    mesh_cpu_cull_with_geometry(
-        geom,
-        target.scene,
-        target.space_id,
-        is_overlay,
-        culling,
-        ui_rect_clip_local,
-        caster,
-    )
-}
-
-/// Like [`mesh_draw_passes_cpu_cull`] but skips the [`mesh_world_geometry_for_cull`] call when
-/// the caller already has a frame-time precomputed [`MeshCullGeometry`].
+/// Frustum and Hi-Z test for a [`MeshCullGeometry`] the caller already built.
 ///
 /// Production collection reuses one [`PreparedSpaceCull`] per space through [`SpaceCullCache`].
 /// This wrapper stays for tests that compare the one-shot path with that cache.
