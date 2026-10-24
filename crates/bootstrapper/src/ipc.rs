@@ -121,6 +121,10 @@ pub(crate) fn open_bootstrap_queues_with_host_endpoints(
 
 #[cfg(test)]
 #[expect(
+    unsafe_code,
+    reason = "tests call the unsafe test_env setters while holding EnvLockGuard"
+)]
+#[expect(
     clippy::significant_drop_tightening,
     reason = "queue paths read RENDERIDE_INTERPROCESS_DIR, and the snapshot restores it, only while the process env lock is still held"
 )]
@@ -138,7 +142,10 @@ mod tests {
     fn interprocess_backing_dir_defaults_when_env_unset() {
         let guard = crate::test_env::lock();
         let _snap = guard.capture(&[RENDERIDE_INTERPROCESS_DIR_ENV]);
-        guard.remove_var(RENDERIDE_INTERPROCESS_DIR_ENV);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
+        unsafe {
+            guard.remove_var(RENDERIDE_INTERPROCESS_DIR_ENV);
+        }
         assert_eq!(interprocess_backing_dir(), default_memory_dir());
     }
 
@@ -147,7 +154,10 @@ mod tests {
         let guard = crate::test_env::lock();
         let _snap = guard.capture(&[RENDERIDE_INTERPROCESS_DIR_ENV]);
         let tmp = std::env::temp_dir().join(format!("bootstrapper_ipc_env_{}", std::process::id()));
-        guard.set_var(RENDERIDE_INTERPROCESS_DIR_ENV, &tmp);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
+        unsafe {
+            guard.set_var(RENDERIDE_INTERPROCESS_DIR_ENV, &tmp);
+        }
         assert_eq!(interprocess_backing_dir(), PathBuf::from(&tmp));
     }
 
@@ -155,7 +165,10 @@ mod tests {
     fn interprocess_backing_dir_empty_env_falls_back() {
         let guard = crate::test_env::lock();
         let _snap = guard.capture(&[RENDERIDE_INTERPROCESS_DIR_ENV]);
-        guard.set_var(RENDERIDE_INTERPROCESS_DIR_ENV, "");
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
+        unsafe {
+            guard.set_var(RENDERIDE_INTERPROCESS_DIR_ENV, "");
+        }
         assert_eq!(interprocess_backing_dir(), default_memory_dir());
     }
 
@@ -167,7 +180,10 @@ mod tests {
             std::env::temp_dir().join(format!("bootstrapper_ipc_invalid_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        guard.set_var(RENDERIDE_INTERPROCESS_DIR_ENV, &tmp);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
+        unsafe {
+            guard.set_var(RENDERIDE_INTERPROCESS_DIR_ENV, &tmp);
+        }
 
         // Slash in the prefix flows through to the composed queue name and must be rejected by
         // QueueOptions validation, surfaced as BootstrapError::QueueOptionsInvalid.
@@ -191,7 +207,10 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        guard.set_var(RENDERIDE_INTERPROCESS_DIR_ENV, &tmp);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
+        unsafe {
+            guard.set_var(RENDERIDE_INTERPROCESS_DIR_ENV, &tmp);
+        }
 
         let result = BootstrapQueues::open("bad\0prefix");
         let _ = std::fs::remove_dir_all(&tmp);
@@ -212,7 +231,10 @@ mod tests {
             std::env::temp_dir().join(format!("bootstrapper_ipc_open_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        guard.set_var(RENDERIDE_INTERPROCESS_DIR_ENV, &tmp);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
+        unsafe {
+            guard.set_var(RENDERIDE_INTERPROCESS_DIR_ENV, &tmp);
+        }
 
         let prefix = format!("t{}", std::process::id());
         let (in_name, out_name) = bootstrap_queue_base_names(&prefix);

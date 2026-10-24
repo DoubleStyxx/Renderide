@@ -36,8 +36,11 @@ mod watchdogs;
 
 /// Process-wide environment lock shared with [`interprocess::test_env`].
 ///
-/// Not part of the supported API. Tests use it so environment mutation and
-/// restore reads take one mutex.
+/// Not part of the supported API. Unit tests use it so environment mutation
+/// and restore reads take one mutex. Integration tests call
+/// [`interprocess::test_env`] directly: this re-export exists only while the
+/// library is built for its own unit tests.
+#[cfg(test)]
 #[doc(hidden)]
 pub use interprocess::test_env;
 pub mod vr_prompt;
@@ -111,7 +114,10 @@ mod process_env_lock_reexport {
         let guard = crate::test_env::lock();
         crate::test_env::assert_shared_env_lock_held();
         let _snapshot = guard.capture(&[PROBE]);
-        guard.set_var(PROBE, "bootstrapper");
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
+        unsafe {
+            guard.set_var(PROBE, "bootstrapper");
+        }
         assert_eq!(
             guard.var_os(PROBE).as_deref(),
             Some(OsStr::new("bootstrapper"))

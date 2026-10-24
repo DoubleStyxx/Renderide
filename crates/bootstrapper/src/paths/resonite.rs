@@ -122,7 +122,10 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();
         fs::write(tmp.join(RENDERITE_HOST_DLL), b"").unwrap();
-        guard.set_var("RESONITE_DIR", &tmp);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
+        unsafe {
+            guard.set_var("RESONITE_DIR", &tmp);
+        }
         let got = resolve_resonite_dir(None).expect("env path should resolve");
         assert_eq!(got, tmp);
         let _ = fs::remove_dir_all(&tmp);
@@ -141,7 +144,10 @@ mod tests {
         fs::create_dir_all(&env_dir).unwrap();
         fs::write(cli.join(RENDERITE_HOST_DLL), b"").unwrap();
         fs::write(env_dir.join(RENDERITE_HOST_DLL), b"").unwrap();
-        guard.set_var("RESONITE_DIR", &env_dir);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
+        unsafe {
+            guard.set_var("RESONITE_DIR", &env_dir);
+        }
 
         let got = resolve_resonite_dir(Some(&cli)).expect("cli path should resolve");
 
@@ -176,7 +182,10 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();
-        guard.set_var("RESONITE_DIR", &tmp);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
+        unsafe {
+            guard.set_var("RESONITE_DIR", &tmp);
+        }
 
         let err = resolve_resonite_dir(None).expect_err("invalid env path");
 

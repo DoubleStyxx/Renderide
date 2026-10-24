@@ -135,6 +135,10 @@ mod tests {
 
 #[cfg(test)]
 #[expect(
+    unsafe_code,
+    reason = "tests call the unsafe test_env setters while holding EnvLockGuard"
+)]
+#[expect(
     clippy::significant_drop_tightening,
     reason = "the queue loop reads RENDERIDE_INTERPROCESS_DIR, and the snapshot restores it, only while the process env lock is still held"
 )]
@@ -160,7 +164,10 @@ mod queue_loop_tests {
             std::env::temp_dir().join(format!("bootstrapper_ql_cancel_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).expect("mkdir");
-        guard.set_var(RENDERIDE_INTERPROCESS_DIR_ENV, &tmp);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
+        unsafe {
+            guard.set_var(RENDERIDE_INTERPROCESS_DIR_ENV, &tmp);
+        }
 
         let prefix = format!("cc{}", std::process::id());
         let mut queues = BootstrapQueues::open(&prefix).expect("open queues");
@@ -190,7 +197,10 @@ mod queue_loop_tests {
         let tmp = std::env::temp_dir().join(format!("bootstrapper_ql_sd_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).expect("mkdir");
-        guard.set_var(RENDERIDE_INTERPROCESS_DIR_ENV, &tmp);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
+        unsafe {
+            guard.set_var(RENDERIDE_INTERPROCESS_DIR_ENV, &tmp);
+        }
 
         let prefix = format!("sd{}", std::process::id());
         let (mut queues, mut host_publisher) =
@@ -233,7 +243,10 @@ mod queue_loop_tests {
         let tmp = std::env::temp_dir().join(format!("bootstrapper_ql_hb_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).expect("mkdir");
-        guard.set_var(RENDERIDE_INTERPROCESS_DIR_ENV, &tmp);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
+        unsafe {
+            guard.set_var(RENDERIDE_INTERPROCESS_DIR_ENV, &tmp);
+        }
 
         let prefix = format!("hb{}", std::process::id());
         let (mut queues, mut host_publisher) =
@@ -283,7 +296,10 @@ mod queue_loop_tests {
         let tmp = std::env::temp_dir().join(format!("bootstrapper_ql_gt_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).expect("mkdir");
-        guard.set_var(RENDERIDE_INTERPROCESS_DIR_ENV, &tmp);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
+        unsafe {
+            guard.set_var(RENDERIDE_INTERPROCESS_DIR_ENV, &tmp);
+        }
 
         let prefix = format!("gt{}", std::process::id());
         let (mut queues, mut host_publisher, mut host_subscriber) =

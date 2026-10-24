@@ -221,6 +221,10 @@ impl QueueOptions {
 
 #[cfg(test)]
 #[expect(
+    unsafe_code,
+    reason = "tests call the unsafe test_env setters while holding EnvLockGuard"
+)]
+#[expect(
     clippy::significant_drop_tightening,
     reason = "default_memory_dir reads the environment, and the snapshot restores it, only while the process env lock is still held"
 )]
@@ -233,7 +237,10 @@ mod tests {
     fn default_memory_dir_linux_matches_shm_path() {
         let guard = crate::test_env::lock();
         let _snap = guard.capture(&[RENDERIDE_INTERPROCESS_DIR_ENV]);
-        guard.remove_var(RENDERIDE_INTERPROCESS_DIR_ENV);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
+        unsafe {
+            guard.remove_var(RENDERIDE_INTERPROCESS_DIR_ENV);
+        }
         if !cfg!(target_os = "linux") {
             return;
         }
@@ -244,7 +251,10 @@ mod tests {
     fn default_memory_dir_non_linux_unix_uses_temp_dir() {
         let guard = crate::test_env::lock();
         let _snap = guard.capture(&[RENDERIDE_INTERPROCESS_DIR_ENV]);
-        guard.remove_var(RENDERIDE_INTERPROCESS_DIR_ENV);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
+        unsafe {
+            guard.remove_var(RENDERIDE_INTERPROCESS_DIR_ENV);
+        }
         if !cfg!(unix) || cfg!(target_os = "linux") {
             return;
         }
@@ -256,7 +266,10 @@ mod tests {
     fn default_memory_dir_windows_uses_temp_subdir() {
         let guard = crate::test_env::lock();
         let _snap = guard.capture(&[RENDERIDE_INTERPROCESS_DIR_ENV]);
-        guard.remove_var(RENDERIDE_INTERPROCESS_DIR_ENV);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
+        unsafe {
+            guard.remove_var(RENDERIDE_INTERPROCESS_DIR_ENV);
+        }
         if !cfg!(windows) {
             return;
         }
@@ -273,7 +286,10 @@ mod tests {
         let guard = crate::test_env::lock();
         let _snap = guard.capture(&[RENDERIDE_INTERPROCESS_DIR_ENV]);
         let tmp = tempfile::tempdir().expect("tempdir");
-        guard.set_var(RENDERIDE_INTERPROCESS_DIR_ENV, tmp.path());
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
+        unsafe {
+            guard.set_var(RENDERIDE_INTERPROCESS_DIR_ENV, tmp.path());
+        }
         assert_eq!(default_memory_dir(), tmp.path());
     }
 
@@ -281,59 +297,54 @@ mod tests {
     fn queue_options_new_paths_default_memory_dir() {
         let guard = crate::test_env::lock();
         let _snap = guard.capture(&[RENDERIDE_INTERPROCESS_DIR_ENV]);
-        guard.remove_var(RENDERIDE_INTERPROCESS_DIR_ENV);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
+        unsafe {
+            guard.remove_var(RENDERIDE_INTERPROCESS_DIR_ENV);
+        }
         let o = QueueOptions::new("q", 4096).expect("valid");
         assert_eq!(o.path, default_memory_dir());
     }
 
     #[test]
     fn queue_options_rejects_empty_name() {
-        let _env = crate::test_env::lock();
         assert!(QueueOptions::new("", 4096).is_err());
     }
 
     #[test]
     fn queue_options_rejects_name_with_nul() {
-        let _env = crate::test_env::lock();
         assert!(QueueOptions::new("a\0b", 4096).is_err());
     }
 
     #[test]
     fn queue_options_rejects_name_with_slash() {
-        let _env = crate::test_env::lock();
         assert!(QueueOptions::new("a/b", 4096).is_err());
     }
 
     #[test]
     fn queue_options_rejects_name_with_backslash() {
-        let _env = crate::test_env::lock();
         assert!(QueueOptions::new(r"a\b", 4096).is_err());
     }
 
     #[test]
     fn queue_options_rejects_capacity_at_or_below_min() {
-        let _env = crate::test_env::lock();
         assert!(QueueOptions::new("q", 17).is_err());
         assert!(QueueOptions::new("q", 16).is_err());
     }
 
     #[test]
     fn queue_options_rejects_non_multiple_of_eight() {
-        let _env = crate::test_env::lock();
         assert!(QueueOptions::new("q", 4097).is_err());
         assert!(QueueOptions::new("q", 18).is_err());
     }
 
     #[test]
     fn queue_options_accepts_minimum_valid_capacity() {
-        let _env = crate::test_env::lock();
         let o = QueueOptions::new("q", 24).expect("24 > 17 and aligned");
         assert_eq!(o.capacity, 24);
     }
 
     #[test]
     fn queue_options_rejects_capacity_above_maximum() {
-        let _env = crate::test_env::lock();
         let err = QueueOptions::new("q", QueueOptions::MAX_CAPACITY + 8)
             .expect_err("capacity above maximum must be rejected");
         assert!(
@@ -344,7 +355,6 @@ mod tests {
 
     #[test]
     fn queue_options_actual_storage_size_includes_header() {
-        let _env = crate::test_env::lock();
         let o = QueueOptions::new("q", 4096).expect("valid");
         assert_eq!(
             o.actual_storage_size(),
@@ -354,7 +364,6 @@ mod tests {
 
     #[test]
     fn queue_options_file_path_and_posix_semaphore_name() {
-        let _env = crate::test_env::lock();
         let base = std::env::temp_dir().join("interprocess_opts_path_test");
         let o = QueueOptions::with_path("my_queue", &base, 4096).expect("valid");
         assert_eq!(o.file_path(), base.join("my_queue.qu"));
@@ -363,7 +372,6 @@ mod tests {
 
     #[test]
     fn queue_options_with_destroy_sets_flag() {
-        let _env = crate::test_env::lock();
         let o = QueueOptions::with_destroy("q", 4096, true).expect("valid");
         assert!(o.destroy_on_dispose);
         let o2 = QueueOptions::with_destroy("q", 4096, false).expect("valid");
@@ -372,7 +380,6 @@ mod tests {
 
     #[test]
     fn queue_options_with_path_and_destroy() {
-        let _env = crate::test_env::lock();
         let base = std::env::temp_dir().join("interprocess_opts_destroy");
         let o = QueueOptions::with_path_and_destroy("q", &base, 4096, true).expect("valid");
         assert_eq!(o.path, base);
@@ -381,7 +388,6 @@ mod tests {
 
     #[test]
     fn queue_options_clone_preserves_fields() {
-        let _env = crate::test_env::lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let o = QueueOptions::with_path("q", dir.path(), 4096).expect("valid");
         assert_eq!(o.clone(), o);
@@ -389,7 +395,6 @@ mod tests {
 
     #[test]
     fn queue_options_storage_size_overflow_is_rejected() {
-        let _env = crate::test_env::lock();
         let err = QueueOptions::new("q", i64::MAX - 7).expect_err("oversized capacity must fail");
         assert!(
             err.contains("at most") || err.contains("overflow"),

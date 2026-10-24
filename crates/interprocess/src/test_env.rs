@@ -1,13 +1,16 @@
 #![expect(
     unsafe_code,
-    reason = "test helpers wrap env::set_var and env::remove_var; callers hold PROCESS_ENV_LOCK"
+    reason = "test-only wrappers call env::set_var and env::remove_var while the caller holds PROCESS_ENV_LOCK"
 )]
 
 //! Process-wide lock for test environment changes.
 //!
-//! Unix `setenv` and `getenv` are not thread-safe with each other. Bootstrapper
-//! and interprocess tests share this module so every mutation, and every read
-//! that captures a value to restore, takes the same mutex.
+//! Bootstrapper and interprocess tests share this module so every mutation
+//! takes the same mutex. On Windows [`std::env::set_var`] is safe. On Unix the
+//! remaining hazard is C or FFI `getenv` on another thread, which no Rust lock
+//! covers. [`std::env::var`] and [`std::env::var_os`] take the standard
+//! library's env lock and are not that hazard. The residual risk is accepted
+//! because this module is test-only (`cfg(test)` or the `test-env` feature).
 
 use std::cell::Cell;
 use std::ffi::{OsStr, OsString};
@@ -94,19 +97,33 @@ impl EnvLockGuard {
 
     /// Sets `key` to `value`.
     ///
+    /// # Safety
+    ///
+    /// `self` must be the [`EnvLockGuard`] from [`lock`], still held on the
+    /// thread that acquired it. The guard is `!Send` and `!Sync`, so only that
+    /// thread can call this. Bootstrapper and interprocess tests that mutate
+    /// the environment take that lock, so they do not run this concurrently
+    /// with each other.
+    ///
+    /// On Windows, [`std::env::set_var`] is safe. On Unix, overlapping this call
+    /// with `getenv` is undefined behavior. [`std::env::var`] and
+    /// [`std::env::var_os`] already take the standard library's env lock, so
+    /// they are not the hazard. C or FFI code that calls `getenv` on another
+    /// thread is not covered by any Rust lock. That residual risk is accepted
+    /// because this module is test-only.
+    ///
     /// # Panics
     ///
     /// Debug builds panic when this thread does not hold the lock.
-    pub fn set_var(&self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) {
+    pub unsafe fn set_var(&self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) {
         self.assert_held();
-        // SAFETY: `std::env::set_var` mutates the process environment. On Unix,
-        // overlapping `set_var`, `remove_var`, or `getenv` is undefined behavior.
-        // `self` is an `EnvLockGuard`, and that type is `!Sync`. Only the thread
-        // that called `lock` can use it, and that call holds `PROCESS_ENV_LOCK`
-        // until the guard drops. Every bootstrapper and interprocess test helper
-        // that mutates the environment, or reads it to restore a previous value,
-        // takes this guard, so those helpers do not run this call concurrently
-        // with each other. Other code may still call `std::env::var` or `var_os`.
+        // SAFETY: The caller holds this `EnvLockGuard` (`!Send` and `!Sync`)
+        // from `lock`, so this thread holds `PROCESS_ENV_LOCK` until the guard
+        // drops. On Windows `std::env::set_var` is safe. On Unix it is undefined
+        // behavior if it overlaps `getenv`. `std::env::var` and `var_os` take
+        // the standard library's env lock and are not that hazard. C or FFI
+        // code calling `getenv` on another thread is not covered by any Rust
+        // lock. That residual risk is accepted because this helper is test-only.
         unsafe {
             std::env::set_var(key, value);
         }
@@ -114,19 +131,34 @@ impl EnvLockGuard {
 
     /// Removes `key`.
     ///
+    /// # Safety
+    ///
+    /// `self` must be the [`EnvLockGuard`] from [`lock`], still held on the
+    /// thread that acquired it. The guard is `!Send` and `!Sync`, so only that
+    /// thread can call this. Bootstrapper and interprocess tests that mutate
+    /// the environment take that lock, so they do not run this concurrently
+    /// with each other.
+    ///
+    /// On Windows, [`std::env::remove_var`] is safe. On Unix, overlapping this
+    /// call with `getenv` is undefined behavior. [`std::env::var`] and
+    /// [`std::env::var_os`] already take the standard library's env lock, so
+    /// they are not the hazard. C or FFI code that calls `getenv` on another
+    /// thread is not covered by any Rust lock. That residual risk is accepted
+    /// because this module is test-only.
+    ///
     /// # Panics
     ///
     /// Debug builds panic when this thread does not hold the lock.
-    pub fn remove_var(&self, key: impl AsRef<OsStr>) {
+    pub unsafe fn remove_var(&self, key: impl AsRef<OsStr>) {
         self.assert_held();
-        // SAFETY: `std::env::remove_var` mutates the process environment. On Unix,
-        // overlapping `set_var`, `remove_var`, or `getenv` is undefined behavior.
-        // `self` is an `EnvLockGuard`, and that type is `!Sync`. Only the thread
-        // that called `lock` can use it, and that call holds `PROCESS_ENV_LOCK`
-        // until the guard drops. Every bootstrapper and interprocess test helper
-        // that mutates the environment, or reads it to restore a previous value,
-        // takes this guard, so those helpers do not run this call concurrently
-        // with each other. Other code may still call `std::env::var` or `var_os`.
+        // SAFETY: The caller holds this `EnvLockGuard` (`!Send` and `!Sync`)
+        // from `lock`, so this thread holds `PROCESS_ENV_LOCK` until the guard
+        // drops. On Windows `std::env::remove_var` is safe. On Unix it is
+        // undefined behavior if it overlaps `getenv`. `std::env::var` and
+        // `var_os` take the standard library's env lock and are not that
+        // hazard. C or FFI code calling `getenv` on another thread is not
+        // covered by any Rust lock. That residual risk is accepted because
+        // this helper is test-only.
         unsafe {
             std::env::remove_var(key);
         }
@@ -172,9 +204,15 @@ impl Drop for EnvSnapshot<'_> {
     fn drop(&mut self) {
         for (key, value) in std::mem::take(&mut self.values) {
             if let Some(value) = value {
-                self._guard.set_var(key, value);
+                // SAFETY: `self._guard` holds `PROCESS_ENV_LOCK` on this thread.
+                unsafe {
+                    self._guard.set_var(key, value);
+                }
             } else {
-                self._guard.remove_var(key);
+                // SAFETY: `self._guard` holds `PROCESS_ENV_LOCK` on this thread.
+                unsafe {
+                    self._guard.remove_var(key);
+                }
             }
         }
     }
@@ -197,9 +235,15 @@ mod tests {
         let guard = lock();
         assert_shared_env_lock_held();
         let _snapshot = guard.capture(&[PROBE]);
-        guard.set_var(PROBE, "held");
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
+        unsafe {
+            guard.set_var(PROBE, "held");
+        }
         assert_eq!(guard.var_os(PROBE).as_deref(), Some(OsStr::new("held")));
-        guard.remove_var(PROBE);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
+        unsafe {
+            guard.remove_var(PROBE);
+        }
         assert!(guard.var_os(PROBE).is_none());
     }
 
@@ -207,10 +251,16 @@ mod tests {
     fn capture_restores_the_value_from_before_the_mutation() {
         let guard = lock();
         let _outer = guard.capture(&[PROBE]);
-        guard.set_var(PROBE, "outer");
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
+        unsafe {
+            guard.set_var(PROBE, "outer");
+        }
         {
             let _inner = guard.capture(&[PROBE]);
-            guard.set_var(PROBE, "inner");
+            // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
+            unsafe {
+                guard.set_var(PROBE, "inner");
+            }
             assert_eq!(guard.var_os(PROBE).as_deref(), Some(OsStr::new("inner")));
         }
         assert_eq!(guard.var_os(PROBE).as_deref(), Some(OsStr::new("outer")));

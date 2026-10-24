@@ -14,14 +14,21 @@ use bootstrapper::ipc::{
 /// Opens the bootstrapper queue pair with `RENDERIDE_INTERPROCESS_DIR` set to a temp folder, then
 /// drops the handles so `destroy_on_dispose` removes backing storage where applicable.
 #[test]
+#[expect(
+    unsafe_code,
+    reason = "sets RENDERIDE_INTERPROCESS_DIR while holding the shared env lock"
+)]
 fn bootstrap_queues_open_drop_succeeds_with_env_override() {
-    let guard = bootstrapper::test_env::lock();
+    let guard = interprocess::test_env::lock();
     let _snap = guard.capture(&[RENDERIDE_INTERPROCESS_DIR_ENV]);
 
     let tmp = std::env::temp_dir().join(format!("bootstrapper_it_ipc_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).expect("mkdir");
-    guard.set_var(RENDERIDE_INTERPROCESS_DIR_ENV, &tmp);
+    // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
+    unsafe {
+        guard.set_var(RENDERIDE_INTERPROCESS_DIR_ENV, &tmp);
+    }
 
     let prefix = format!("it{}", std::process::id());
     let (in_name, out_name) = bootstrap_queue_base_names(&prefix);
@@ -68,14 +75,21 @@ fn queue_base_names_match_expected_suffixes() {
 
 /// `incoming` and `outgoing` are different queue names; still verify the publisher accepts a write.
 #[test]
+#[expect(
+    unsafe_code,
+    reason = "sets RENDERIDE_INTERPROCESS_DIR while holding the shared env lock"
+)]
 fn outgoing_try_enqueue_succeeds_on_open_pair() {
-    let guard = bootstrapper::test_env::lock();
+    let guard = interprocess::test_env::lock();
     let _snap = guard.capture(&[RENDERIDE_INTERPROCESS_DIR_ENV]);
 
     let tmp = std::env::temp_dir().join(format!("bootstrapper_it_rt_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).expect("mkdir");
-    guard.set_var(RENDERIDE_INTERPROCESS_DIR_ENV, &tmp);
+    // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
+    unsafe {
+        guard.set_var(RENDERIDE_INTERPROCESS_DIR_ENV, &tmp);
+    }
 
     let prefix = format!("rt{}", std::process::id());
     let mut queues = BootstrapQueues::open(&prefix).expect("open");
