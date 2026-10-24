@@ -21,6 +21,7 @@ use crate::gpu::flight_recorder::{
 use crate::gpu::frame_cpu_gpu_timing::{
     FrameTimingTrack, make_gpu_done_callback, record_frame_bracket_gpu_ms, record_real_submit,
 };
+use crate::gpu::sync::device_health::GpuDeviceHealth;
 
 /// RAII guard that marks the ring's consumer side dead on drop.
 ///
@@ -34,6 +35,10 @@ struct ConsumerLivenessGuard<'a> {
 /// Shared handles used while processing one driver-thread batch.
 #[derive(Clone, Copy)]
 struct DriverLoopContext<'a> {
+    /// Device polled so projection completion callbacks can run.
+    device: &'a wgpu::Device,
+    /// Device-loss flag checked before the swapchain GPU wait polls.
+    device_health: &'a GpuDeviceHealth,
     /// Queue that receives command-buffer submits.
     queue: &'a wgpu::Queue,
     /// Gate used to serialize queue access with OpenXR and uploads.
@@ -67,6 +72,16 @@ impl Drop for ConsumerLivenessGuard<'_> {
     }
 }
 
+/// wgpu device and queue owned by the driver thread.
+pub(super) struct DriverGpuHandles {
+    /// Device used to poll projection submissions before OpenXR release.
+    pub(super) device: Arc<wgpu::Device>,
+    /// Queue that receives command-buffer submits.
+    pub(super) queue: Arc<wgpu::Queue>,
+    /// Device-loss generation shared with the main thread.
+    pub(super) device_health: Arc<GpuDeviceHealth>,
+}
+
 /// Thread entry point spawned from [`super::DriverThread::new`].
 ///
 /// Registers itself as `"renderer-driver"` in the active profiler so Tracy groups its
@@ -74,7 +89,7 @@ impl Drop for ConsumerLivenessGuard<'_> {
 /// [`ConsumerLivenessGuard`] flips the ring's liveness flag on any exit (clean or panic).
 pub(super) fn driver_loop(
     ring: Arc<BoundedRing<DriverMessage>>,
-    queue: Arc<wgpu::Queue>,
+    gpu: DriverGpuHandles,
     gpu_queue_access_gate: GpuQueueAccessGate,
     _errors: Arc<DriverErrorState>,
     surface_counters: Arc<SurfaceCounters>,
@@ -95,7 +110,9 @@ pub(super) fn driver_loop(
         };
         let ring_depth = ring.depth();
         let ctx = DriverLoopContext {
-            queue: queue.as_ref(),
+            device: gpu.device.as_ref(),
+            device_health: gpu.device_health.as_ref(),
+            queue: gpu.queue.as_ref(),
             gpu_queue_access_gate: &gpu_queue_access_gate,
             surface_counters: &surface_counters,
             submit_counters: &submit_counters,
@@ -164,14 +181,14 @@ fn submit_commands(
     ctx: DriverLoopContext<'_>,
     summary: DriverBatchSummary,
     command_buffers: Vec<wgpu::CommandBuffer>,
-) {
+) -> wgpu::SubmissionIndex {
     record_driver_event(
         ctx,
         summary,
         GpuFlightDriverStage::SubmitStart,
         GpuFlightCallResult::Ok,
     );
-    {
+    let submission = {
         profiling::scope!("driver::submit");
         // Serialise against texture uploads and OpenXR queue-access calls via the shared gate.
         let _gate = {
@@ -185,6 +202,8 @@ fn submit_commands(
     };
     // Bumped immediately after the submit returns and the gate is dropped so the backlog
     // plot reflects "in-flight on driver" without waiting on `present` or `xr_finalize`.
+    // The OpenXR projection path waits for this submit later, outside this gate, by
+    // registering `on_submitted_work_done` on the same queue.
     ctx.submit_counters.note_submit_done();
     record_driver_event(
         ctx,
@@ -192,6 +211,7 @@ fn submit_commands(
         GpuFlightDriverStage::SubmitDone,
         GpuFlightCallResult::Ok,
     );
+    submission
 }
 
 /// Runs deferred OpenXR finalize work when the batch carries it.
@@ -204,9 +224,10 @@ fn finalize_xr_if_present(
         return;
     };
     // Deferred OpenXR `xrReleaseSwapchainImage` + `xrEndFrame` for the VR HMD path.
-    // Running it here keeps the main thread out of `flush_driver` so frame N+1's CPU
-    // work overlaps with frame N's compositor handoff. The next tick's `wait_frame`
-    // gates on the matching finalize signal before issuing `xrBeginFrame`.
+    // When the session enabled the swapchain GPU wait, projection finalizes wait for
+    // work already submitted on `ctx.queue` before release. `never` releases without
+    // that wait. The next tick's `wait_frame` gates on the matching finalize signal
+    // before `xrBeginFrame`.
     record_driver_event(
         ctx,
         summary,
@@ -215,6 +236,9 @@ fn finalize_xr_if_present(
     );
     let result = run_xr_finalize(
         ctx.gpu_queue_access_gate,
+        ctx.device,
+        ctx.queue,
+        ctx.device_health,
         finalize,
         Arc::clone(ctx.flight_recorder),
     );

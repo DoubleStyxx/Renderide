@@ -2,7 +2,7 @@
 
 use crate::config::{
     GraphicsApiSetting, MsaaSampleCount, PresentationModeSetting, RendererSettings,
-    SceneColorFormat,
+    SceneColorFormat, VrSwapchainGpuWait,
 };
 
 use super::controls::drag_u32_slider_setting;
@@ -50,6 +50,20 @@ fn rendering_presentation_section(ui: &imgui::Ui, g: &mut RendererSettings, dirt
             .build()
         {
             g.rendering.graphics_api = api;
+            *dirty = true;
+        }
+    }
+    ui.text_disabled(
+        "VR swapchain GPU wait (startup only; Always avoids headset flashing, Auto is Monado/WiVRn on AMD/RADV, Never restores pipelined release).",
+    );
+    for (i, &mode) in VrSwapchainGpuWait::ALL.iter().enumerate() {
+        let _id = ui.push_id_int(500 + i as i32);
+        if ui
+            .selectable_config(mode.label())
+            .selected(g.rendering.vr_swapchain_gpu_wait == mode)
+            .build()
+        {
+            g.rendering.vr_swapchain_gpu_wait = mode;
             *dirty = true;
         }
     }

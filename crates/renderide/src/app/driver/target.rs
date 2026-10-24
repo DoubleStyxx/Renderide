@@ -331,6 +331,7 @@ fn create_openxr_target(
     let handles = crate::xr::init_wgpu_openxr(
         startup_gpu.gpu_validation_layers,
         startup_gpu.power_preference,
+        startup_gpu.vr_swapchain_gpu_wait,
     )
     .map_err(|error| TargetInitError::OpenxrInit(error.to_string()))?;
     let gpu = GpuContext::new_from_openxr_bootstrap(

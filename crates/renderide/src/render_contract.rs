@@ -123,6 +123,25 @@ pub enum RasterPipelineKind {
     Null,
 }
 
+impl RasterPipelineKind {
+    /// Returns whether this pipeline is a UIX canvas stem.
+    ///
+    /// `ui_unlit`, `ui_textunlit`, and `ui_circlesegment` (including `_default` and `_multiview`
+    /// permutations) share one canvas: coplanar elements must keep hierarchy order instead of
+    /// farthest-corner distance.
+    #[inline]
+    pub(crate) fn is_canvas_ui_stem(&self) -> bool {
+        let Self::EmbeddedStem(stem) = self else {
+            return false;
+        };
+        let base = stem
+            .strip_suffix("_default")
+            .or_else(|| stem.strip_suffix("_multiview"))
+            .unwrap_or_else(|| stem.as_ref());
+        matches!(base, "ui_circlesegment" | "ui_textunlit" | "ui_unlit")
+    }
+}
+
 /// Primitive topology selected per submesh for material pipeline and draw-batch keys.
 ///
 /// `wgpu::PrimitiveTopology` does not derive `Ord`/`PartialOrd`, so draw and pipeline keys use
