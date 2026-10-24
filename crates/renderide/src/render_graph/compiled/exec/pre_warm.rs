@@ -19,12 +19,13 @@ use crate::render_graph::HistorySlotId;
 
 /// Compiles pass-owned pipelines before command recording on headless and software adapters.
 ///
-/// Normal and depth prepasses are already warmed from the draw list. Scene compose,
-/// clustered lighting, Hi-Z, and (when the same flag is set) shadow casters are not
-/// part of the material queue, and building them inside an open pass hangs DX12 WARP
-/// even when no submits are queued. Real GPUs return on the flag check.
+/// Normal and depth prepasses are already warmed from the draw list in the backend.
+/// Scene compose, clustered lighting, and Hi-Z are not on the material queue. Building
+/// them inside an open pass hangs DX12 WARP even when no submits are queued. The graph
+/// only reads the attach-time flag and forwards the compose formats. Real GPUs return
+/// on that flag. The backend compiles the pipelines.
 fn precompile_pass_owned_pipelines_before_submit(
-    mv_ctx: &MultiViewExecutionContext<'_>,
+    mv_ctx: &mut MultiViewExecutionContext<'_>,
     views: &[FrameView<'_>],
 ) {
     if !mv_ctx
@@ -34,9 +35,6 @@ fn precompile_pass_owned_pipelines_before_submit(
     {
         return;
     }
-    profiling::scope!("graph::precompile_pass_pipelines");
-    crate::passes::precompile_clustered_light_pipeline(mv_ctx.device);
-    crate::occlusion::gpu::precompile_hi_z_pipelines(mv_ctx.device);
     let mut seen = Vec::new();
     for view in views {
         let layout = view.layout(mv_ctx.gpu);
@@ -45,20 +43,11 @@ fn precompile_pass_owned_pipelines_before_submit(
             continue;
         }
         seen.push(key);
-        crate::passes::precompile_scene_color_compose_pipeline(
-            mv_ctx.device,
-            layout.surface_format,
-            layout.multiview_stereo,
-        );
     }
-    if crate::materials::render_thread_inline_compile_enabled() {
-        mv_ctx
-            .backend
-            .materials()
-            .drain_pipeline_build_completions();
-    }
-    // Later lookups happen while a pass may be open. Leave those queued.
-    crate::materials::set_render_thread_inline_compile(false);
+    let device = mv_ctx.device;
+    mv_ctx
+        .backend
+        .precompile_pass_owned_pipelines_before_submit(device, &seen);
 }
 
 impl CompiledRenderGraph {

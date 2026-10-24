@@ -15,7 +15,8 @@ use crate::passes::{
     WorldMeshForwardDepthPrepassPipelineKey, WorldMeshForwardNormalPipelineKey,
     WorldMeshForwardPipelineState, depth_prepass_pipeline_key_for_draw,
     normal_pipeline_key_for_draw, pre_warm_depth_prepass_pipeline, pre_warm_normal_pipeline,
-    pre_warm_shadow_pipeline,
+    pre_warm_shadow_pipeline, precompile_clustered_light_pipeline,
+    precompile_scene_color_compose_pipeline,
 };
 use crate::render_graph::compiled::{FrameView, FrameViewTarget};
 use crate::shared::ShadowCastMode;
@@ -372,6 +373,33 @@ impl<'a> BackendGraphAccess<'a> {
         );
         self.pre_warm_material_assets_from_blackboards(views, view_layouts, resource_layouts);
         self.pre_warm_world_mesh_prepass_pipelines_from_blackboards(device, views, view_layouts);
+    }
+
+    /// Compiles clustered light, Hi-Z, and scene compose before the first submit.
+    ///
+    /// Depth and normal prepasses are warmed from the draw list just above. Shadow
+    /// casters are warmed there only when this same flag is set. Real GPUs return
+    /// on the flag. In-pass material lookups stay queued: the inline compile bit is
+    /// cleared here so a later lookup cannot call `create_render_pipeline` with a
+    /// pass open.
+    pub(crate) fn precompile_pass_owned_pipelines(
+        &self,
+        device: &wgpu::Device,
+        compose_targets: &[(wgpu::TextureFormat, bool)],
+    ) {
+        if !self.materials.compiles_pipelines_on_render_thread() {
+            return;
+        }
+        profiling::scope!("graph::precompile_pass_pipelines");
+        precompile_clustered_light_pipeline(device);
+        crate::occlusion::gpu::precompile_hi_z_pipelines(device);
+        for &(format, multiview_stereo) in compose_targets {
+            precompile_scene_color_compose_pipeline(device, format, multiview_stereo);
+        }
+        if crate::materials::render_thread_inline_compile_enabled() {
+            self.materials.drain_pipeline_build_completions();
+        }
+        crate::materials::set_render_thread_inline_compile(false);
     }
 
     fn pre_warm_material_assets_from_blackboards(
