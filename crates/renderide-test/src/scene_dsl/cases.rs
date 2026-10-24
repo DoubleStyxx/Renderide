@@ -521,7 +521,7 @@ mod tests {
     }
 
     #[test]
-    fn pbs_lit_requires_1500_non_dominant_pixels_in_each_sphere_band() {
+    fn pbs_lit_band_floor_is_three_quarters_of_the_golden() {
         let case = lookup("pbs_lit_material_matrix").expect("registered");
         let expected = [
             (0, 77, 160, 73),
@@ -532,14 +532,15 @@ mod tests {
         assert_eq!(case.tolerance.region_floors.len(), expected.len());
         for (floor, (x, y, width, height)) in case.tolerance.region_floors.iter().zip(expected) {
             assert_eq!(
-                (
-                    floor.x,
-                    floor.y,
-                    floor.width,
-                    floor.height,
-                    floor.min_non_dominant
-                ),
-                (x, y, width, height, 1_500)
+                (floor.x, floor.y, floor.width, floor.height),
+                (x, y, width, height)
+            );
+            assert_eq!(
+                super::super::band_count::fraction_floor(1_000, floor.min_fraction_of_golden),
+                super::super::band_count::fraction_floor(
+                    1_000,
+                    super::super::tolerance::PBS_BAND_FLOOR_FRACTION
+                )
             );
         }
     }
