@@ -192,7 +192,13 @@ fn print_suite_outcome(
     result_label: &str,
 ) {
     for case in &outcome.report.cases {
-        if case.passed {
+        if case.passed && windows_pbs_adapter_comparison(&case.name) {
+            println!(
+                "ADAPTER {} ({}) Windows WARP is not the behavior gate; lavapipe is",
+                case.name,
+                case.artifacts_dir.display()
+            );
+        } else if case.passed {
             println!(
                 "{} {} ({})",
                 success_label,
@@ -213,6 +219,11 @@ fn print_suite_outcome(
         "Suite result: {}/{} {}",
         outcome.report.passed, outcome.report.total, result_label
     );
+}
+
+/// Windows `pbs_lit` is an adapter comparison. Lavapipe remains the behavior gate.
+fn windows_pbs_adapter_comparison(case_name: &str) -> bool {
+    cfg!(windows) && case_name == "pbs_lit_material_matrix"
 }
 
 /// Cargo build profile selecting which `target/<profile>/renderide-renderer` binary to spawn.
@@ -296,7 +307,17 @@ mod cli_tests {
 
     use super::{
         BuildProfile, Cli, default_renderer_path, default_suite_jobs, resolve_renderer_path,
+        windows_pbs_adapter_comparison,
     };
+
+    #[test]
+    fn windows_pbs_lit_is_an_adapter_comparison_only_on_windows() {
+        assert_eq!(
+            windows_pbs_adapter_comparison("pbs_lit_material_matrix"),
+            cfg!(windows)
+        );
+        assert!(!windows_pbs_adapter_comparison("unlit_sphere"));
+    }
 
     #[test]
     fn default_suite_jobs_stays_within_available_parallelism() {
