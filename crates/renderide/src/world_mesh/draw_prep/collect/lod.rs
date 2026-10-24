@@ -534,7 +534,7 @@ fn world_aabb_for_lod_renderer(
     let target = MeshCullTarget {
         scene: ctx.scene_assets.scene,
         space_id,
-        mesh,
+        mesh_bounds: &mesh.bounds,
         skinned: renderer.kind == LodRendererKind::Skinned,
         skinned_renderer: renderer.skinned_renderer,
         node_id: renderer.node_id,
@@ -671,6 +671,10 @@ fn sanitized_transition_height(value: f32) -> f32 {
         0.0
     }
 }
+
+#[cfg(test)]
+#[path = "lod_boxless_skinned_tests.rs"]
+mod lod_boxless_skinned_tests;
 
 #[cfg(test)]
 mod tests {

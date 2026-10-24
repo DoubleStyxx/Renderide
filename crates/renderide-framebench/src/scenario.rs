@@ -8,6 +8,17 @@
 /// Scenario names the runner accepts when `--scenario` is omitted.
 pub const DEFAULT_SCENARIOS: [&str; 2] = ["unlit_sphere", "multi_primitive_unlit"];
 
+/// Extra scenarios selectable with `--scenario`. They are not in the default CI gate set.
+#[cfg(test)]
+const EXTRA_SCENARIOS: [&str; 6] = [
+    "pbs_lit_material_matrix",
+    "many_static_meshes",
+    "lights_shadows",
+    "offscreen_skinned_avatars",
+    "onscreen_skinned_avatars",
+    "secondary_camera_copy",
+];
+
 /// Transport name recorded in every report. The socket is not implemented.
 pub const CONTROL_TRANSPORT: &str = "localhost-tcp-jsonrpc";
 
@@ -37,6 +48,49 @@ const MULTI_PRIMITIVE_UNLIT: Scenario = Scenario {
     camera_rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
 };
 
+const PBS_LIT_MATERIAL_MATRIX: Scenario = Scenario {
+    name: "pbs_lit_material_matrix",
+    camera_position: [0.0, 0.0, -4.0],
+    camera_rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+};
+
+const MANY_STATIC_MESHES: Scenario = Scenario {
+    name: "many_static_meshes",
+    camera_position: [0.0, 0.0, -24.0],
+    camera_rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+};
+
+const LIGHTS_SHADOWS: Scenario = Scenario {
+    name: "lights_shadows",
+    camera_position: [0.0, 6.0, -14.0],
+    camera_rotation_xyzw: [0.130_526_2, 0.0, 0.0, 0.991_444_9],
+};
+
+/// 16 visible plus 256 behind-the-camera one-bone skinned avatars, all shadow casters.
+const OFFSCREEN_SKINNED_AVATARS: Scenario = Scenario {
+    name: "offscreen_skinned_avatars",
+    camera_position: [0.0, 4.0, -12.0],
+    camera_rotation_xyzw: [0.099_833_42, 0.0, 0.0, 0.995_004_2],
+};
+
+/// Control for [`OFFSCREEN_SKINNED_AVATARS`]: the same 272 avatars all in view.
+const ONSCREEN_SKINNED_AVATARS: Scenario = Scenario {
+    name: "onscreen_skinned_avatars",
+    camera_position: [0.0, 4.0, -12.0],
+    camera_rotation_xyzw: [0.099_833_42, 0.0, 0.0, 0.995_004_2],
+};
+
+/// The `unlit_sphere` scene with the main `Skybox` camera plus two enabled secondary cameras
+/// (`Depth` clear, `Nothing` clear), each rendering the sphere into its own 512x512 render
+/// texture. On fork master since 66421146 both non-clearing secondary cameras seed their target
+/// with a full-target `Rgba16Float` previous-colour copy (the `WorldMeshForwardColorPreserve`
+/// pass); 0104fee7 is the pre-copy base for an A/B.
+const SECONDARY_CAMERA_COPY: Scenario = Scenario {
+    name: "secondary_camera_copy",
+    camera_position: [0.0, 0.0, -3.0],
+    camera_rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+};
+
 /// Thirty shadowed point lights. Opt-in: absent from [`DEFAULT_SCENARIOS`] so the default CI
 /// window stays on the unshadowed scenes. The host raises `per_pixel_lights` to 32 and asks for
 /// 128-texel shadow faces.
@@ -51,7 +105,13 @@ pub fn by_name(name: &str) -> Option<&'static Scenario> {
     match name {
         "unlit_sphere" => Some(&UNLIT_SPHERE),
         "multi_primitive_unlit" => Some(&MULTI_PRIMITIVE_UNLIT),
+        "pbs_lit_material_matrix" => Some(&PBS_LIT_MATERIAL_MATRIX),
+        "many_static_meshes" => Some(&MANY_STATIC_MESHES),
+        "lights_shadows" => Some(&LIGHTS_SHADOWS),
         "many_shadowed_point_lights" => Some(&MANY_SHADOWED_POINT_LIGHTS),
+        "offscreen_skinned_avatars" => Some(&OFFSCREEN_SKINNED_AVATARS),
+        "onscreen_skinned_avatars" => Some(&ONSCREEN_SKINNED_AVATARS),
+        "secondary_camera_copy" => Some(&SECONDARY_CAMERA_COPY),
         _ => None,
     }
 }
@@ -113,7 +173,9 @@ pub fn pose_from_script(steps: &[ScriptStep]) -> Option<([f32; 3], [f32; 4])> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_SCENARIOS, ScriptStep, by_name, pose_from_script, script};
+    use super::{
+        DEFAULT_SCENARIOS, EXTRA_SCENARIOS, ScriptStep, by_name, pose_from_script, script,
+    };
 
     fn method_names(steps: &[ScriptStep]) -> Vec<&'static str> {
         steps
@@ -142,6 +204,14 @@ mod tests {
             assert!(json.contains("\"method\":\"camera.set_pose\""), "{json}");
             assert!(json.contains("\"method\":\"frames.wait\""), "{json}");
             assert!(json.contains("\"method\":\"stats.query\""), "{json}");
+        }
+    }
+
+    #[test]
+    fn extra_scenarios_resolve_and_stay_out_of_the_default_set() {
+        for name in EXTRA_SCENARIOS {
+            assert!(by_name(name).is_some(), "{name} must resolve");
+            assert!(!DEFAULT_SCENARIOS.contains(&name));
         }
     }
 
