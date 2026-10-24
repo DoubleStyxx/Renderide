@@ -36,6 +36,7 @@ pub(super) struct MockServer {
     listing_requests: Arc<AtomicUsize>,
     download_requests: Arc<AtomicUsize>,
     targets: Arc<Mutex<Vec<String>>>,
+    raw_requests: Arc<Mutex<Vec<String>>>,
     shutdown: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -110,6 +111,19 @@ impl MockServer {
             .clone()
     }
 
+    /// Values of `header_name` on requests whose target contains `path_fragment`.
+    ///
+    /// Header names are matched without regard to case. The value is trimmed.
+    pub(super) fn header_values(&self, path_fragment: &str, header_name: &str) -> Vec<String> {
+        self.raw_requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .filter(|raw| request_target(raw).is_some_and(|target| target.contains(path_fragment)))
+            .filter_map(|raw| header_value(raw, header_name))
+            .collect()
+    }
+
     fn start(
         pages: Vec<Vec<ServedRelease>>,
         mode: ListingMode,
@@ -134,6 +148,7 @@ impl MockServer {
         let listing_requests = Arc::new(AtomicUsize::new(0));
         let download_requests = Arc::new(AtomicUsize::new(0));
         let targets = Arc::new(Mutex::new(Vec::new()));
+        let raw_requests = Arc::new(Mutex::new(Vec::new()));
         let shutdown = Arc::new(AtomicBool::new(false));
         let thread = {
             let state = ServeState {
@@ -145,6 +160,7 @@ impl MockServer {
                 listing_requests: Arc::clone(&listing_requests),
                 download_requests: Arc::clone(&download_requests),
                 targets: Arc::clone(&targets),
+                raw_requests: Arc::clone(&raw_requests),
                 shutdown: Arc::clone(&shutdown),
             };
             thread::spawn(move || serve(listener, &state))
@@ -154,6 +170,7 @@ impl MockServer {
             listing_requests,
             download_requests,
             targets,
+            raw_requests,
             shutdown,
             thread: Some(thread),
         }
@@ -232,6 +249,7 @@ struct ServeState {
     listing_requests: Arc<AtomicUsize>,
     download_requests: Arc<AtomicUsize>,
     targets: Arc<Mutex<Vec<String>>>,
+    raw_requests: Arc<Mutex<Vec<String>>>,
     shutdown: Arc<AtomicBool>,
 }
 
@@ -259,6 +277,11 @@ fn serve(listener: TcpListener, state: &ServeState) {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(target.clone());
+        state
+            .raw_requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(request.clone());
         let (path, query) = target.split_once('?').unwrap_or((target.as_str(), ""));
         if path == "/repos/DoubleStyx/Renderide/releases" {
             state.listing_requests.fetch_add(1, Ordering::SeqCst);
@@ -338,6 +361,15 @@ fn query_page(query: &str) -> usize {
         .split('&')
         .find_map(|part| part.strip_prefix("page=")?.parse().ok())
         .unwrap_or(1)
+}
+
+fn header_value(request: &str, name: &str) -> Option<String> {
+    request.lines().skip(1).find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.trim()
+            .eq_ignore_ascii_case(name)
+            .then(|| value.trim().to_owned())
+    })
 }
 
 fn request_target(request: &str) -> Option<String> {

@@ -308,6 +308,11 @@ fn asset_url_redirect_is_followed_before_the_archive_is_checked() {
         targets.iter().any(|target| target.contains("/assets/")),
         "redirect should be followed to the download path: {targets:?}"
     );
+    assert_eq!(
+        server.header_values("/assets/", "accept"),
+        vec!["application/octet-stream".to_owned()],
+        "the download after the redirect must still send Accept"
+    );
     assert_eq!(read_file(&launcher), OLD_LAUNCHER);
     assert_eq!(read_file(&renderer), OLD_RENDERER);
 }
