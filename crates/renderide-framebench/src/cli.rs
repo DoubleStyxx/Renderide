@@ -11,29 +11,31 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use serde::Serialize;
 
-use crate::compare::{CompareOptions, DEFAULT_THRESHOLD_PERCENT, compare_reports};
-use crate::error::BenchError;
+use crate::compare::{ABS_FLOOR_MS, CompareOptions, DEFAULT_THRESHOLD_PERCENT, compare_reports};
+use crate::error::{BenchError, exit_code};
+use crate::report::SCHEMA;
 use crate::runner::{RunConfig, resolve_renderer_path, run_bench};
+use crate::runner_env::{self, RunnerInfo};
 
-/// Binary entry point.
+/// Binary entry point. Exit codes are listed in [`exit_code`].
 pub fn cli_main() -> ExitCode {
     let cli = Cli::parse();
-    match dispatch(cli) {
-        Ok(code) => code,
-        Err(err) => {
-            eprintln!("renderide-framebench: {err}");
-            ExitCode::FAILURE
-        }
-    }
+    ExitCode::from(match cli.command {
+        Command::Run(opts) => run_command(opts),
+        Command::Compare(opts) => compare_command(opts),
+    })
 }
 
-fn dispatch(cli: Cli) -> Result<ExitCode, BenchError> {
-    match cli.command {
-        Command::Run(opts) => {
-            let output_path = resolve_output(&opts.output);
-            let (width, height) = parse_resolution(&opts.resolution)?;
-            let report = run_bench(&RunConfig {
+fn run_command(opts: RunOpts) -> u8 {
+    let json = opts.json;
+    let runner = runner_env::detect();
+    eprintln!("{}", runner_env::env_line(&runner));
+    let output_path = resolve_output(&opts.output);
+    let result = parse_resolution(&opts.resolution).and_then(|(width, height)| {
+        run_bench(
+            &RunConfig {
                 renderer_path: resolve_renderer_path(opts.renderer, opts.release),
                 scenarios: opts.scenario,
                 warmup_frames: opts.warmup,
@@ -43,38 +45,104 @@ fn dispatch(cli: Cli) -> Result<ExitCode, BenchError> {
                 height,
                 timeout: Duration::from_secs(opts.timeout_seconds),
                 verbose_renderer: opts.verbose_renderer,
+                renderer_stdout_to_stderr: json,
                 windowed: opts.windowed,
                 output_path: output_path.clone(),
-            })?;
-            println!("{}", output_path.display());
-            println!(
+            },
+            runner.clone(),
+        )
+    });
+    match result {
+        Ok(report) => {
+            let summary = format!(
                 "runs={} scenarios={} timestamp_query={}",
                 report.runs,
                 report.scenarios.len(),
                 report.timestamp_query
             );
-            Ok(ExitCode::SUCCESS)
-        }
-        Command::Compare(opts) => {
-            let gate = if opts.gate.is_empty() {
-                Vec::new()
+            if json {
+                // `--json`: stdout is exactly one JSON document (the report also on disk).
+                match serde_json::to_string_pretty(&report) {
+                    Ok(body) => println!("{body}"),
+                    Err(err) => {
+                        eprintln!("renderide-framebench: json: {err}");
+                        return exit_code::ENVIRONMENT;
+                    }
+                }
+                eprintln!("{}", output_path.display());
+                eprintln!("{summary}");
             } else {
-                opts.gate
-            };
-            let outcome = compare_reports(
-                &opts.baseline,
-                &opts.candidate,
-                &CompareOptions {
-                    threshold_percent: opts.threshold,
-                    gate,
-                },
-            )?;
+                println!("{}", output_path.display());
+                println!("{summary}");
+            }
+            exit_code::OK
+        }
+        Err(err) => {
+            let code = err.run_exit_code();
+            eprintln!("renderide-framebench: {err} (exit {code})");
+            if json {
+                print_error_document(&err, code, runner);
+            }
+            code
+        }
+    }
+}
+
+/// `--json` failure document: same `schema` and `runner` as a report, plus `error`, no
+/// `scenarios`. `frame_bench_gate.py` rejects it as an input error.
+#[derive(Serialize)]
+struct ErrorDocument {
+    schema: u32,
+    error: ErrorBody,
+    runner: RunnerInfo,
+}
+
+#[derive(Serialize)]
+struct ErrorBody {
+    exit_code: u8,
+    kind: &'static str,
+    message: String,
+}
+
+fn print_error_document(err: &BenchError, code: u8, runner: RunnerInfo) {
+    let doc = ErrorDocument {
+        schema: SCHEMA,
+        error: ErrorBody {
+            exit_code: code,
+            kind: err.kind(),
+            message: err.to_string(),
+        },
+        runner,
+    };
+    match serde_json::to_string_pretty(&doc) {
+        Ok(body) => println!("{body}"),
+        Err(json_err) => eprintln!("renderide-framebench: json: {json_err}"),
+    }
+}
+
+fn compare_command(opts: CompareOpts) -> u8 {
+    let outcome = compare_reports(
+        &opts.baseline,
+        &opts.candidate,
+        &CompareOptions {
+            threshold_percent: opts.threshold,
+            gate: opts.gate,
+            abs_floor_ms: opts.abs_floor_ms,
+        },
+    );
+    match outcome {
+        Ok(outcome) => {
             print!("{}", outcome.markdown);
             if outcome.failed {
-                Ok(ExitCode::from(1))
+                exit_code::REGRESSION
             } else {
-                Ok(ExitCode::SUCCESS)
+                exit_code::OK
             }
+        }
+        Err(err) => {
+            // Unreadable or invalid inputs, like frame_bench_gate.py's exit 2.
+            eprintln!("renderide-framebench: {err} (exit {})", exit_code::USAGE);
+            exit_code::USAGE
         }
     }
 }
@@ -89,18 +157,18 @@ fn resolve_output(path: &std::path::Path) -> PathBuf {
 
 fn parse_resolution(text: &str) -> Result<(u32, u32), BenchError> {
     let Some((width, height)) = text.split_once(['x', 'X']) else {
-        return Err(BenchError::Message(format!(
+        return Err(BenchError::Usage(format!(
             "resolution `{text}` must look like 256x256"
         )));
     };
     let width = width
         .parse::<u32>()
-        .map_err(|_err| BenchError::Message(format!("resolution width `{width}` is not a u32")))?;
-    let height = height.parse::<u32>().map_err(|_err| {
-        BenchError::Message(format!("resolution height `{height}` is not a u32"))
-    })?;
+        .map_err(|_err| BenchError::Usage(format!("resolution width `{width}` is not a u32")))?;
+    let height = height
+        .parse::<u32>()
+        .map_err(|_err| BenchError::Usage(format!("resolution height `{height}` is not a u32")))?;
     if width == 0 || height == 0 {
-        return Err(BenchError::Message(
+        return Err(BenchError::Usage(
             "resolution width and height must be >= 1".to_string(),
         ));
     }
@@ -110,7 +178,10 @@ fn parse_resolution(text: &str) -> Result<(u32, u32), BenchError> {
 #[derive(Parser, Debug)]
 #[command(
     name = "renderide-framebench",
-    about = "Renderer frame benchmarks. Gates are relative percent only, never absolute milliseconds.",
+    about = "Renderer frame benchmarks. Gates are relative percent; deltas at or under an absolute ms floor never fail.",
+    after_help = "Exit codes: 0 ok, 1 compare found a gated regression, 2 usage or input error, \
+3 run failure (renderer ran, no usable measurement), 5 environment (renderer missing, spawn or \
+filesystem failure).",
     disable_help_subcommand = true
 )]
 struct Cli {
@@ -120,7 +191,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Run fixed scenarios and write one JSON report.
+    /// Run fixed scenarios and write one JSON report (schema 2).
     Run(RunOpts),
     /// Compare two reports and exit 1 when a gated metric regresses.
     Compare(CompareOpts),
@@ -158,9 +229,14 @@ struct RunOpts {
     /// Seconds to wait for the raw report after the scene submit.
     #[arg(long, default_value_t = 180)]
     timeout_seconds: u64,
-    /// Inherit renderer stdout and stderr.
+    /// Inherit renderer stdout and stderr. With `--json`, renderer stdout goes to stderr.
     #[arg(long, default_value_t = false)]
     verbose_renderer: bool,
+    /// Print the report as the only stdout output (human lines go to stderr). On failure,
+    /// stdout is one error document `{schema, error{exit_code, kind, message}, runner}`.
+    /// `--output` is still written on success.
+    #[arg(long, default_value_t = false)]
+    json: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -177,4 +253,7 @@ struct CompareOpts {
     /// Metric to gate, repeatable. Default: cpu_frame_ms.p95.
     #[arg(long)]
     gate: Vec<String>,
+    /// Millisecond-metric deltas at or below this never fail, whatever their percent. 0 disables.
+    #[arg(long, default_value_t = ABS_FLOOR_MS)]
+    abs_floor_ms: f64,
 }

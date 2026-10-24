@@ -1,17 +1,33 @@
-//! Final frame-benchmark report. Schema version 1.
+//! Final frame-benchmark report. Schema version 2.
 //!
 //! Percentiles inside a run use linear interpolation. The published percentile is the median
 //! of those per-run values. Absolute milliseconds are descriptive only.
+//!
+//! Schema 2 is a strict superset of schema 1: every schema-1 field keeps its name, type and
+//! meaning, and schema 2 adds the top-level `runner` object ([`RunnerInfo`]: `os`, `cpu_model`,
+//! `icd{path, source, var}`, `rayon_threads`, `rayon_threads_source`). Readers accept both.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::runner_env::RunnerInfo;
 use crate::scenario::{CONTROL_METHODS, CONTROL_TRANSPORT, ScriptStep};
 use crate::stats::{Percentiles, median, percentiles};
 
 /// Report schema written by this crate.
-pub const SCHEMA: u32 = 1;
+pub const SCHEMA: u32 = 2;
+
+/// Report schemas `compare` and other readers accept. Schema 1 has no `runner` block.
+pub const SUPPORTED_SCHEMAS: [u32; 2] = [1, 2];
+
+/// Schema of the raw per-frame file the renderer writes (`app/frame_bench.rs`). Unchanged.
+pub(crate) const RAW_SCHEMA: u32 = 1;
+
+/// True when `schema` is one [`SUPPORTED_SCHEMAS`] lists.
+pub fn schema_supported(schema: u32) -> bool {
+    SUPPORTED_SCHEMAS.contains(&schema)
+}
 
 /// Adapter and driver strings copied from the renderer.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -87,7 +103,7 @@ pub struct ScenarioReport {
 /// One `renderide-framebench run` report.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FrameBenchReport {
-    /// Schema version. Currently 1.
+    /// Schema version. Written as 2; 1 is still read.
     pub schema: u32,
     /// Always `relative`. Absolute milliseconds are not a gate.
     pub scale: String,
@@ -107,6 +123,9 @@ pub struct FrameBenchReport {
     pub runs: u32,
     /// Adapter from the first run.
     pub adapter: AdapterInfo,
+    /// Schema 2: machine and environment the runs used. Absent in schema-1 reports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner: Option<RunnerInfo>,
     /// True when at least one scenario published GPU pass times.
     pub timestamp_query: bool,
     /// Unimplemented dev control API.

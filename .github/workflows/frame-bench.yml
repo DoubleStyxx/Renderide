@@ -1,6 +1,8 @@
 # Manual lavapipe frame benchmark. Does not run on push or pull_request.
 # The job builds master and the selected head on one runner and gates only on
-# relative regression of cpu_frame_ms.p95. Absolute milliseconds are not a gate.
+# relative regression of cpu_frame_ms.p95. Absolute milliseconds are not a gate; they only
+# clear rows: a head-minus-base median delta <= 0.05 ms never flags or fails (the gate's
+# --abs-floor-ms default).
 #
 # Gate (scripts/ci/frame_bench_gate.py, taken from the ref that dispatched this workflow;
 # its docstring is the full rule). delta = (median head per-run p95 - median base per-run p95)
@@ -282,7 +284,8 @@ jobs:
           }
 
           # Each tree is measured with ITS OWN renderide-framebench binary. Reports from different
-          # trees are only ever compared through the schema-1 JSON.
+          # trees are only ever compared through the report JSON (schema 1 or 2; the gate accepts
+          # both, in any mix). The gate script comes from the dispatching ref.
           # usage: run_tree <target dir> <out json> [scenario ...]
           run_tree() {
             local target="$1"
