@@ -74,6 +74,7 @@ fn test_draw_context<'a>(
             render_space_scope,
             layer_policy,
             reflection_probes: None,
+            consumes_motion_vectors: false,
         },
         caches: DrawCollectionFrameCaches {
             material_cache: None,

@@ -165,6 +165,7 @@ fn collection_inputs<'a>(
             render_space_scope: ViewRenderSpaceScope::AllActive,
             layer_policy: ViewLayerPolicy::MainView,
             reflection_probes: None,
+            consumes_motion_vectors: false,
         },
         caches: DrawCollectionFrameCaches {
             material_cache: None,
