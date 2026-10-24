@@ -671,7 +671,7 @@ fn world_aabb_for_lod_renderer(
     let target = MeshCullTarget {
         scene: ctx.scene_assets.scene,
         space_id,
-        mesh,
+        mesh_bounds: &mesh.bounds,
         skinned: renderer.kind == LodRendererKind::Skinned,
         skinned_renderer: renderer.skinned_renderer,
         node_id: renderer.node_id,
@@ -792,6 +792,10 @@ fn select_prepared_lod_index_at(
 fn first_non_empty_prepared_lod(lods: &[FramePreparedLodEntry]) -> Option<usize> {
     lods.iter().position(|lod| !lod.renderers.is_empty())
 }
+
+#[cfg(test)]
+#[path = "lod_boxless_skinned_tests.rs"]
+mod lod_boxless_skinned_tests;
 
 #[cfg(test)]
 mod tests {

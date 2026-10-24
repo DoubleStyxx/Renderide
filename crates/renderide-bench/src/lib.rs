@@ -7,6 +7,7 @@
 //! GPU-device benches, when they exist, compile only with `--features gpu` and are not part of
 //! the default command.
 
+pub use renderide::bench_api::SkinnedGeometryWorkload;
 pub use renderide::bench_api::{
     BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload,
     CAMERA_CLEAR_LOAD_OP_CAMERAS, CULL_BATCH, CullWorkload, KeywordVariantCacheWorkload,
@@ -22,9 +23,9 @@ mod tests {
     use super::{
         BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload,
         CAMERA_CLEAR_LOAD_OP_CAMERAS, CULL_BATCH, CullWorkload, KeywordVariantCacheWorkload,
-        MaterialUniformUpdateWorkload, TransformWorkload, TransparentSortWorkload,
-        WORLD_MATRIX_NODES, WorldMatrixWorkload, camera_clear_load_op_checksum,
-        camera_clear_load_op_inputs,
+        MaterialUniformUpdateWorkload, SkinnedGeometryWorkload, TransformWorkload,
+        TransparentSortWorkload, WORLD_MATRIX_NODES, WorldMatrixWorkload,
+        camera_clear_load_op_checksum, camera_clear_load_op_inputs,
     };
 
     #[test]
@@ -132,6 +133,16 @@ mod tests {
         assert_eq!(workload.cache_hit(), hit);
         let composed = workload.compose();
         assert!(composed > 0);
+    }
+
+    #[test]
+    fn skinned_geometry_fold_uses_the_posed_box() {
+        let folded = SkinnedGeometryWorkload::standard().fold();
+        assert!(folded.is_finite());
+        // Rest boxes sit near x=400. Posed boxes are a unit box at the root translation, so the
+        // folded minima stay well below a rest-box sum.
+        assert!(folded > 0.0);
+        assert!(folded < 1.0e6);
     }
 
     #[test]

@@ -10,7 +10,8 @@
 use crate::scene::overrides::RenderTransformOverrideEntry;
 use crate::scene::render_space::{LayerAssignmentEntry, RenderSpaceState};
 use crate::scene::{
-    CameraRenderableEntry, ReflectionProbeEntry, SkinnedMeshRenderer, StaticMeshRenderer,
+    CameraRenderableEntry, LodGroupEntry, ReflectionProbeEntry, SkinnedMeshRenderer,
+    StaticMeshRenderer,
 };
 use crate::shared::{CameraPortalState, LayerType, RenderTransform, RenderingContext};
 
@@ -168,6 +169,22 @@ impl SceneCoordinator {
     ) {
         let space = self.spaces.get_mut(&id).expect("seeded space");
         space.reflection_probes.extend(probes);
+    }
+
+    /// Replaces skinned renderers on a seeded space without dropping its world cache.
+    pub(crate) fn test_set_skinned_mesh_renderers(
+        &mut self,
+        id: RenderSpaceId,
+        renderers: Vec<SkinnedMeshRenderer>,
+    ) {
+        let space = self.spaces.get_mut(&id).expect("seeded space");
+        space.skinned_mesh_renderers = renderers;
+    }
+
+    /// Replaces LOD groups on a seeded space without dropping its world cache.
+    pub(crate) fn test_set_lod_groups(&mut self, id: RenderSpaceId, groups: Vec<LodGroupEntry>) {
+        let space = self.spaces.get_mut(&id).expect("seeded space");
+        space.lod_groups = groups;
     }
 
     /// Inserts a render space with skinned mesh renderers (unit tests only).

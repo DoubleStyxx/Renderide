@@ -3,6 +3,8 @@
 mod cull_cache;
 mod per_renderer;
 mod per_slot;
+#[cfg(test)]
+mod skinned_cull_tests;
 
 use crate::scene::{RenderSpaceId, SkinnedMeshRenderer, StaticMeshRenderer};
 
@@ -40,8 +42,7 @@ struct OverlayDeformCullFlags<'a> {
     pub blendshape_deformed: bool,
     /// Active blendshape tangent deltas should run when a material reads tangents.
     pub tangent_blendshape_deform_active: bool,
-    /// Cached cull outcome for this renderer; `None` when the cull was skipped (skinned or no
-    /// culling pass active).
+    /// Cached cull outcome for this renderer; `None` when no culling pass is active.
     pub cached_cull: Option<&'a CachedCull>,
     /// Signed LOD stipple weight. `0` disables stippling.
     pub lod_fade: f32,
