@@ -118,8 +118,12 @@ fn run_suite_command(opts: &SuiteOpts) -> Result<(), HarnessError> {
         config.runner.output_root.display()
     );
 
-    let outcome = run_suite(config)?;
-    print_suite_outcome(&outcome, "PASS", "passed");
+    let mut outcome = run_suite(config)?;
+    let adapter = crate::adapter_gate::adapter_from_directory(&logger::log_dir_for(
+        logger::LogComponent::Renderer,
+    ));
+    stamp_adapter_gate(&mut outcome, adapter.as_ref());
+    print_check_suite(&outcome);
     if outcome.passed() {
         Ok(())
     } else {
@@ -141,8 +145,12 @@ fn run_update_suite_command(opts: &SuiteOpts) -> Result<(), HarnessError> {
         config.runner.output_root.display()
     );
 
-    let outcome = update_suite(config)?;
-    print_suite_outcome(&outcome, "UPDATE", "updated");
+    let mut outcome = update_suite(config)?;
+    let adapter = crate::adapter_gate::adapter_from_directory(&logger::log_dir_for(
+        logger::LogComponent::Renderer,
+    ));
+    stamp_adapter_gate(&mut outcome, adapter.as_ref());
+    print_update_suite(&outcome);
     if outcome.passed() {
         Ok(())
     } else {
@@ -186,44 +194,71 @@ fn suite_config_from_opts(opts: &SuiteOpts) -> Result<SuiteConfig, HarnessError>
     })
 }
 
-fn print_suite_outcome(
-    outcome: &crate::scene_dsl::suite::SuiteRunOutcome,
-    success_label: &str,
-    result_label: &str,
+fn stamp_adapter_gate(
+    outcome: &mut crate::scene_dsl::suite::SuiteRunOutcome,
+    adapter: Option<&crate::adapter_gate::ObservedAdapter>,
 ) {
-    for case in &outcome.report.cases {
-        if case.passed && windows_pbs_adapter_comparison(&case.name) {
-            println!(
-                "ADAPTER {} ({}) Windows WARP is not the behavior gate; lavapipe is",
-                case.name,
-                case.artifacts_dir.display()
-            );
-        } else if case.passed {
-            println!(
-                "{} {} ({})",
-                success_label,
-                case.name,
-                case.artifacts_dir.display()
-            );
-        } else {
-            println!(
-                "FAIL {} ({}) {}",
-                case.name,
-                case.artifacts_dir.display(),
-                case.error.as_deref().unwrap_or("case failed")
+    let label = adapter
+        .map(crate::adapter_gate::ObservedAdapter::label)
+        .unwrap_or_default();
+    for case in &mut outcome.report.cases {
+        let gate = crate::adapter_gate::gate_for(&case.name, adapter);
+        case.gate = gate.as_str().to_string();
+        case.adapter.clone_from(&label);
+        if !crate::adapter_gate::stamp_case_report(&case.report_json, gate, &label) {
+            logger::warn!(
+                "Suite: could not record the adapter gate on {}",
+                case.report_json.display()
             );
         }
     }
-    println!("Suite report: {}", outcome.report_path.display());
-    println!(
-        "Suite result: {}/{} {}",
-        outcome.report.passed, outcome.report.total, result_label
-    );
+    if let Err(err) =
+        crate::scene_dsl::suite::rewrite_suite_report(&outcome.report_path, &outcome.report)
+    {
+        logger::warn!("Suite: could not record the adapter gate on the suite report: {err}");
+    }
 }
 
-/// Windows `pbs_lit` is an adapter comparison. Lavapipe remains the behavior gate.
-fn windows_pbs_adapter_comparison(case_name: &str) -> bool {
-    cfg!(windows) && case_name == "pbs_lit_material_matrix"
+fn print_check_suite(outcome: &crate::scene_dsl::suite::SuiteRunOutcome) {
+    let cases = print_cases(outcome);
+    let printed = crate::adapter_gate::format_check_suite(&cases);
+    for line in &printed.case_lines {
+        println!("{line}");
+    }
+    println!("Suite report: {}", outcome.report_path.display());
+    println!("{}", printed.summary);
+}
+
+fn print_update_suite(outcome: &crate::scene_dsl::suite::SuiteRunOutcome) {
+    let cases = print_cases(outcome);
+    let printed = crate::adapter_gate::format_update_suite(&cases);
+    for line in &printed.case_lines {
+        println!("{line}");
+    }
+    println!("Suite report: {}", outcome.report_path.display());
+    println!("{}", printed.summary);
+}
+
+fn print_cases(
+    outcome: &crate::scene_dsl::suite::SuiteRunOutcome,
+) -> Vec<crate::adapter_gate::PrintCase<'_>> {
+    outcome
+        .report
+        .cases
+        .iter()
+        .map(|case| crate::adapter_gate::PrintCase {
+            name: &case.name,
+            passed: case.passed,
+            artifacts_dir: &case.artifacts_dir,
+            error: case.error.as_deref(),
+            gate: if case.gate == crate::adapter_gate::ADAPTER_COMPARISON {
+                crate::adapter_gate::Gate::AdapterComparison
+            } else {
+                crate::adapter_gate::Gate::Behavior
+            },
+            adapter: &case.adapter,
+        })
+        .collect()
 }
 
 /// Cargo build profile selecting which `target/<profile>/renderide-renderer` binary to spawn.
@@ -307,17 +342,7 @@ mod cli_tests {
 
     use super::{
         BuildProfile, Cli, default_renderer_path, default_suite_jobs, resolve_renderer_path,
-        windows_pbs_adapter_comparison,
     };
-
-    #[test]
-    fn windows_pbs_lit_is_an_adapter_comparison_only_on_windows() {
-        assert_eq!(
-            windows_pbs_adapter_comparison("pbs_lit_material_matrix"),
-            cfg!(windows)
-        );
-        assert!(!windows_pbs_adapter_comparison("unlit_sphere"));
-    }
 
     #[test]
     fn default_suite_jobs_stays_within_available_parallelism() {

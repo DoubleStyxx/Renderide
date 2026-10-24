@@ -100,6 +100,16 @@ pub struct CaseReport {
     /// Optional error message when `passed = false` and `evaluation = None` (e.g. capture
     /// failure, harness error).
     pub error: Option<String>,
+    /// `behavior` or `adapter_comparison`. Stamped after the renderer log names the adapter.
+    #[serde(default = "default_behavior_gate")]
+    pub gate: String,
+    /// Selected adapter label. Empty until the renderer log is read.
+    #[serde(default)]
+    pub adapter: String,
+}
+
+fn default_behavior_gate() -> String {
+    crate::adapter_gate::BEHAVIOR.to_string()
 }
 
 /// Writes a `report.json` describing the comparison outcome.
@@ -118,6 +128,8 @@ pub fn report_from_evaluation(case: &IntegrationCase, eval: ToleranceEvaluation)
         passed: eval.passed,
         evaluation: Some(eval),
         error: None,
+        gate: default_behavior_gate(),
+        adapter: String::new(),
     }
 }
 
@@ -131,6 +143,8 @@ pub fn report_from_error(case: &IntegrationCase, message: impl Into<String>) -> 
         passed: false,
         evaluation: None,
         error: Some(message.into()),
+        gate: default_behavior_gate(),
+        adapter: String::new(),
     }
 }
 

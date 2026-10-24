@@ -96,6 +96,16 @@ pub struct SuiteCaseReport {
     pub report_json: PathBuf,
     /// Error summary when the case failed before or during comparison.
     pub error: Option<String>,
+    /// `behavior` or `adapter_comparison`.
+    #[serde(default = "default_behavior_gate")]
+    pub gate: String,
+    /// Selected adapter label. Empty until the renderer log is read.
+    #[serde(default)]
+    pub adapter: String,
+}
+
+fn default_behavior_gate() -> String {
+    crate::adapter_gate::BEHAVIOR.to_string()
 }
 
 /// Resolves requested case names against the registry.
@@ -181,6 +191,8 @@ fn run_case_for_suite(case: &IntegrationCase, runner: &RunnerConfig) -> SuiteCas
             artifacts_dir: fallback_layout.root,
             report_json: fallback_layout.report_json,
             error: Some(err.to_string()),
+            gate: default_behavior_gate(),
+            adapter: String::new(),
         },
     }
 }
@@ -195,6 +207,8 @@ fn run_case_for_update(case: &IntegrationCase, runner: &RunnerConfig) -> SuiteCa
             artifacts_dir: fallback_layout.root,
             report_json: fallback_layout.report_json,
             error: Some(err.to_string()),
+            gate: default_behavior_gate(),
+            adapter: String::new(),
         },
     }
 }
@@ -208,6 +222,8 @@ fn report_from_update_outcome(case: &IntegrationCase, outcome: CaseRunOutcome) -
             artifacts_dir: outcome.layout.root,
             report_json: outcome.layout.report_json,
             error: Some(format!("golden update: {err}")),
+            gate: default_behavior_gate(),
+            adapter: String::new(),
         },
     }
 }
@@ -257,6 +273,8 @@ fn promote_case_golden(
         artifacts_dir: outcome.layout.root.clone(),
         report_json: outcome.layout.report_json.clone(),
         error: None,
+        gate: default_behavior_gate(),
+        adapter: String::new(),
     })
 }
 
@@ -276,15 +294,26 @@ fn report_from_outcome(outcome: CaseRunOutcome) -> SuiteCaseReport {
         artifacts_dir: outcome.layout.root,
         report_json: outcome.layout.report_json,
         error,
+        gate: outcome.report.gate,
+        adapter: outcome.report.adapter,
     }
 }
 
 fn write_suite_report(output_root: &Path, report: &SuiteReport) -> Result<PathBuf, HarnessError> {
     let report_path = output_root.join(SUITE_REPORT_FILENAME);
+    rewrite_suite_report(&report_path, report)?;
+    Ok(report_path)
+}
+
+/// Rewrites an existing suite report after the adapter gate is known.
+pub(crate) fn rewrite_suite_report(
+    report_path: &Path,
+    report: &SuiteReport,
+) -> Result<(), HarnessError> {
     let json = serde_json::to_string_pretty(report)
         .map_err(|e| HarnessError::QueueOptions(format!("serialize suite report: {e}")))?;
-    std::fs::write(&report_path, json)?;
-    Ok(report_path)
+    std::fs::write(report_path, json)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -300,6 +329,8 @@ mod tests {
                 .join(name)
                 .join("report.json"),
             error: (!passed).then(|| "failed".to_string()),
+            gate: default_behavior_gate(),
+            adapter: String::new(),
         }
     }
 

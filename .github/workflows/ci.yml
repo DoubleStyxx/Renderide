@@ -74,9 +74,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Linux goldens run on lavapipe. Windows CI has no Vulkan ICD and wgpu uses
-      # DX12 WARP. macOS CI uses Metal. Those captures are adapter comparisons.
-      # Lavapipe is the behavior gate.
+      # Linux goldens run on lavapipe, and lavapipe is the behavior gate.
+      # pbs_lit_material_matrix is an adapter comparison when the renderer
+      # selected WARP (Microsoft Basic Render Driver, Cpu, vendor 0x1414,
+      # device 0x008c, Dx12) or Metal. Other cases stay behavior gates.
+      # A real Windows GPU keeps pbs_lit on the behavior gate.
       #
       # noble-updates only lists the newest mesa-vulkan-drivers, so
       # `apt-get install mesa-vulkan-drivers=<version>` breaks when a newer Mesa
