@@ -207,6 +207,7 @@ pub(super) fn run_lockstep_until_png_stable(
     let mut last_log_at = Instant::now();
     let mut flat_candidate_seen = false;
     let mut pending_pipeline_seen = false;
+    let mut chunks = ObservedChunks::default();
 
     while Instant::now() < deadline {
         let _ = lockstep.tick(queues);
@@ -237,7 +238,11 @@ pub(super) fn run_lockstep_until_png_stable(
                     );
                 }
                 flat_candidate_seen = true;
-                pending_pipeline_seen |= !pipeline_frame_is_ready(output_path);
+                let pending_text = pipeline_pending_text(output_path);
+                pending_pipeline_seen |= !pending_text
+                    .as_deref()
+                    .is_some_and(|text| text.trim() == "0");
+                chunks.note(pending_text.as_deref());
                 state.reject_candidate();
                 std::thread::sleep(timing::POLL_INTERVAL);
                 continue;
@@ -249,10 +254,12 @@ pub(super) fn run_lockstep_until_png_stable(
                     );
                 }
                 pending_pipeline_seen = true;
+                chunks.note(pipeline_pending_text(output_path).as_deref());
                 state.reject_candidate();
                 std::thread::sleep(timing::POLL_INTERVAL);
                 continue;
             }
+            chunks.note(pipeline_pending_text(output_path).as_deref());
             logger::info!(
                 "Session: fresh PNG stabilized at {} after {:?}",
                 output_path.display(),
@@ -276,31 +283,146 @@ pub(super) fn run_lockstep_until_png_stable(
         std::thread::sleep(timing::POLL_INTERVAL);
     }
 
-    if pending_pipeline_seen {
-        return Err(HarnessError::PipelineNotReady {
+    match classify_capture_timeout(&chunks, pending_pipeline_seen, flat_candidate_seen) {
+        CaptureTimeout::FlatOrUnstable => Err(HarnessError::FlatOrUnstableFrame {
             path: PathBuf::from(output_path),
             wait: wait_timing.overall_timeout,
-        });
+            last_pending: chunks.last_pending.unwrap_or(0),
+            ready_chunks: chunks.ready,
+            pending_chunks: chunks.pending,
+            missing_chunks: chunks.missing,
+            frame_count: chunks.frames,
+        }),
+        CaptureTimeout::PipelineNotReady => Err(HarnessError::PipelineNotReady {
+            path: PathBuf::from(output_path),
+            wait: wait_timing.overall_timeout,
+        }),
+        CaptureTimeout::FlatHandedOff => {
+            // Never rendered anything but a flat frame, and the pending chunk was not
+            // zero: hand it to the golden check so the failure is "flat single color".
+            Ok(SceneSessionOutcome {
+                png_path: output_path.to_path_buf(),
+            })
+        }
+        CaptureTimeout::Missing => Err(HarnessError::PngOutputMissing {
+            path: PathBuf::from(output_path),
+            wait: wait_timing.overall_timeout,
+        }),
+    }
+}
+
+/// Stable-frame pending chunks seen before the capture deadline.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ObservedChunks {
+    frames: u64,
+    ready: u64,
+    pending: u64,
+    missing: u64,
+    last_pending: Option<u64>,
+}
+
+impl ObservedChunks {
+    fn note(&mut self, text: Option<&str>) {
+        self.frames = self.frames.saturating_add(1);
+        match text
+            .map(str::trim)
+            .and_then(|text| text.parse::<u64>().ok())
+        {
+            Some(0) => {
+                self.ready = self.ready.saturating_add(1);
+                self.last_pending = Some(0);
+            }
+            Some(count) => {
+                self.pending = self.pending.saturating_add(1);
+                self.last_pending = Some(count);
+            }
+            None => {
+                self.missing = self.missing.saturating_add(1);
+                self.last_pending = None;
+            }
+        }
+    }
+}
+
+/// How a capture that reached its deadline is reported.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CaptureTimeout {
+    /// The last frame's pending count was zero. The image was flat or still changing.
+    FlatOrUnstable,
+    /// A frame was still compiling or had skipped draws when the deadline hit.
+    PipelineNotReady,
+    /// Only flat frames were seen, and none of them recorded pending=0.
+    FlatHandedOff,
+    /// No stable PNG arrived.
+    Missing,
+}
+
+/// A timeout whose last pending count is zero is a flat or unstable frame, not
+/// [`HarnessError::PipelineNotReady`].
+fn classify_capture_timeout(
+    chunks: &ObservedChunks,
+    pending_pipeline_seen: bool,
+    flat_candidate_seen: bool,
+) -> CaptureTimeout {
+    if chunks.frames > 0 && chunks.last_pending == Some(0) {
+        return CaptureTimeout::FlatOrUnstable;
+    }
+    if pending_pipeline_seen {
+        return CaptureTimeout::PipelineNotReady;
     }
     if flat_candidate_seen {
-        // Never rendered anything but a flat frame: hand it to the golden check so the
-        // failure is reported as "flat single color" rather than "missing PNG".
-        return Ok(SceneSessionOutcome {
-            png_path: output_path.to_path_buf(),
-        });
+        return CaptureTimeout::FlatHandedOff;
     }
-
-    Err(HarnessError::PngOutputMissing {
-        path: PathBuf::from(output_path),
-        wait: wait_timing.overall_timeout,
-    })
+    CaptureTimeout::Missing
 }
 
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant, SystemTime};
 
-    use super::{PngObservation, PngStabilityState, PngStabilityVerdict, PngStabilityWaitTiming};
+    use super::{
+        CaptureTimeout, ObservedChunks, PngObservation, PngStabilityState, PngStabilityVerdict,
+        PngStabilityWaitTiming, classify_capture_timeout,
+    };
+
+    fn chunks_with_last(last_pending: Option<u64>, frames: u64) -> ObservedChunks {
+        let mut chunks = ObservedChunks::default();
+        match last_pending {
+            Some(0) => chunks.note(Some("0")),
+            Some(count) => {
+                let text = count.to_string();
+                chunks.note(Some(&text));
+            }
+            None => chunks.note(None),
+        }
+        chunks.frames = frames;
+        chunks
+    }
+
+    #[test]
+    fn timeout_with_pending_zero_is_flat_or_unstable_not_pipeline_not_ready() {
+        let ready = chunks_with_last(Some(0), 5);
+        assert_eq!(
+            classify_capture_timeout(&ready, true, true),
+            CaptureTimeout::FlatOrUnstable
+        );
+        assert_eq!(
+            classify_capture_timeout(&ready, false, true),
+            CaptureTimeout::FlatOrUnstable
+        );
+
+        let still_pending = chunks_with_last(Some(3), 2);
+        assert_eq!(
+            classify_capture_timeout(&still_pending, true, false),
+            CaptureTimeout::PipelineNotReady
+        );
+
+        let unseen = ObservedChunks::default();
+        assert_eq!(
+            classify_capture_timeout(&unseen, false, false),
+            CaptureTimeout::Missing
+        );
+    }
 
     /// Builds a timing where `interval=1s` -> `min_wall_after_submit=2s`
     /// (since `interval*2 = 2s > MIN_WALL_AFTER_SUBMIT_FLOOR = 1.5s`).

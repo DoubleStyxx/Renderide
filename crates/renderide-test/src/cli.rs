@@ -192,7 +192,14 @@ fn print_suite_outcome(
     result_label: &str,
 ) {
     for case in &outcome.report.cases {
-        if case.passed {
+        if crate::scene_dsl::warp_pbs_is_expected(case) {
+            println!(
+                "EXPECTED FAIL {} ({}) {}",
+                case.name,
+                case.artifacts_dir.display(),
+                crate::scene_dsl::WARP_EXPECTED_FAILURE_LABEL
+            );
+        } else if case.passed {
             println!(
                 "{} {} ({})",
                 success_label,
@@ -209,10 +216,21 @@ fn print_suite_outcome(
         }
     }
     println!("Suite report: {}", outcome.report_path.display());
-    println!(
-        "Suite result: {}/{} {}",
-        outcome.report.passed, outcome.report.total, result_label
-    );
+    if outcome.report.expected_failures > 0 {
+        println!(
+            "Suite result: {}/{} {}, {} {}",
+            outcome.report.passed,
+            outcome.report.total,
+            result_label,
+            outcome.report.expected_failures,
+            crate::scene_dsl::WARP_EXPECTED_FAILURE_LABEL
+        );
+    } else {
+        println!(
+            "Suite result: {}/{} {}",
+            outcome.report.passed, outcome.report.total, result_label
+        );
+    }
 }
 
 /// Cargo build profile selecting which `target/<profile>/renderide-renderer` binary to spawn.

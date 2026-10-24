@@ -59,8 +59,11 @@ pub struct SuiteReport {
     pub total: usize,
     /// Number of passing cases.
     pub passed: usize,
-    /// Number of failing cases.
+    /// Number of failing cases. An expected WARP failure is not counted here.
     pub failed: usize,
+    /// Cases reported as `expected failure (WARP, #212)`. These are not passes.
+    #[serde(default)]
+    pub expected_failures: usize,
     /// Per-case results, in registry or CLI selection order.
     pub cases: Vec<SuiteCaseReport>,
 }
@@ -68,17 +71,34 @@ pub struct SuiteReport {
 impl SuiteReport {
     /// Builds an aggregate report from per-case results.
     pub fn from_cases(cases: Vec<SuiteCaseReport>) -> Self {
-        let passed = cases.iter().filter(|case| case.passed).count();
-        let total = cases.len();
-        Self {
-            total,
-            passed,
-            failed: total.saturating_sub(passed),
+        let mut report = Self {
+            total: 0,
+            passed: 0,
+            failed: 0,
+            expected_failures: 0,
             cases,
-        }
+        };
+        report.recompute();
+        report
     }
 
-    /// Returns whether every case in the report passed.
+    /// Recounts pass, failure, and expected-failure totals from `cases`.
+    pub fn recompute(&mut self) {
+        self.total = self.cases.len();
+        self.passed = self.cases.iter().filter(|case| case.passed).count();
+        self.expected_failures = self
+            .cases
+            .iter()
+            .filter(|case| super::warp_pbs::case_is_expected_failure(case))
+            .count();
+        self.failed = self
+            .total
+            .saturating_sub(self.passed + self.expected_failures);
+    }
+
+    /// Returns whether every case passed or was an expected WARP failure.
+    ///
+    /// An expected failure keeps `passed == false` on that case. It does not fail the suite.
     pub const fn passed(&self) -> bool {
         self.failed == 0
     }
@@ -97,6 +117,10 @@ pub struct SuiteCaseReport {
     pub report_json: PathBuf,
     /// Error summary when the case failed before or during comparison.
     pub error: Option<String>,
+    /// `expected failure (WARP, #212)` when that case is the known WARP mismatch.
+    /// Absent on a pass and on a hard failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
 }
 
 /// Resolves requested case names against the registry.
@@ -165,7 +189,8 @@ fn run_suite_with(
                 .collect::<Vec<_>>()
         };
 
-    let report = SuiteReport::from_cases(case_reports);
+    let mut report = SuiteReport::from_cases(case_reports);
+    super::warp_pbs::apply_expected_failure(&mut report);
     let report_path = write_suite_report(&config.runner.output_root, &report)?;
     Ok(SuiteRunOutcome {
         report,
@@ -183,6 +208,7 @@ fn run_case_for_suite(case: &IntegrationCase, runner: &RunnerConfig) -> SuiteCas
             artifacts_dir: fallback_layout.root,
             report_json: fallback_layout.report_json,
             error: Some(err.to_string()),
+            result: None,
         },
     }
 }
@@ -197,6 +223,7 @@ fn run_case_for_update(case: &IntegrationCase, runner: &RunnerConfig) -> SuiteCa
             artifacts_dir: fallback_layout.root,
             report_json: fallback_layout.report_json,
             error: Some(err.to_string()),
+            result: None,
         },
     }
 }
@@ -210,6 +237,7 @@ fn report_from_update_outcome(case: &IntegrationCase, outcome: CaseRunOutcome) -
             artifacts_dir: outcome.layout.root,
             report_json: outcome.layout.report_json,
             error: Some(format!("golden update: {err}")),
+            result: None,
         },
     }
 }
@@ -259,6 +287,7 @@ fn promote_case_golden(
         artifacts_dir: outcome.layout.root.clone(),
         report_json: outcome.layout.report_json.clone(),
         error: None,
+        result: None,
     })
 }
 
@@ -278,6 +307,7 @@ fn report_from_outcome(outcome: CaseRunOutcome) -> SuiteCaseReport {
         artifacts_dir: outcome.layout.root,
         report_json: outcome.layout.report_json,
         error,
+        result: None,
     }
 }
 
@@ -302,6 +332,7 @@ mod tests {
                 .join(name)
                 .join("report.json"),
             error: (!passed).then(|| "failed".to_string()),
+            result: None,
         }
     }
 

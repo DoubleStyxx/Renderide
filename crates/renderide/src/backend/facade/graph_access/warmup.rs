@@ -303,7 +303,9 @@ struct MaterialPipelineWarmupKey {
 struct WorldMeshPrepassPipelineWarmupKeys {
     depth: HashSet<WorldMeshForwardDepthPrepassPipelineKey>,
     normal: HashSet<WorldMeshForwardNormalPipelineKey>,
-    shadow: HashSet<WorldMeshForwardDepthPrepassPipelineKey>,
+    /// Allocated only when this frame compiles shadow keys. Real GPUs leave it empty
+    /// so the per-frame shadow `HashSet` is not created.
+    shadow: Option<HashSet<WorldMeshForwardDepthPrepassPipelineKey>>,
 }
 
 impl WorldMeshPrepassPipelineWarmupKeys {
@@ -322,13 +324,14 @@ impl WorldMeshPrepassPipelineWarmupKeys {
             self.normal.insert(key);
         }
         // Real GPUs compile shadows on the background pool. Building the key
-        // hashes the draw, so skip that work unless this frame will compile here.
+        // hashes the draw and allocates the set, so skip both unless this frame
+        // will compile shadows here.
         if record_shadows
             && item.shadow_cast_mode != ShadowCastMode::Off
             && let Some(key) =
                 WorldMeshForwardDepthPrepassPipelineKey::for_shadow_draw(item, pipeline)
         {
-            self.shadow.insert(key);
+            self.shadow.get_or_insert_with(HashSet::new).insert(key);
         }
     }
 
@@ -341,8 +344,8 @@ impl WorldMeshPrepassPipelineWarmupKeys {
         for key in self.normal {
             pre_warm_normal_pipeline(device, key);
         }
-        if compile_shadows {
-            for key in self.shadow {
+        if compile_shadows && let Some(shadow) = self.shadow {
+            for key in shadow {
                 pre_warm_shadow_pipeline(device, key);
             }
         }
@@ -833,11 +836,11 @@ mod tests {
 
         keys.record_item(&item, &pipeline, false);
 
-        assert!(keys.shadow.is_empty());
+        assert!(keys.shadow.is_none());
         assert_eq!(keys.depth.len(), 1);
 
         keys.record_item(&item, &pipeline, true);
 
-        assert_eq!(keys.shadow.len(), 1);
+        assert_eq!(keys.shadow.expect("shadow keys").len(), 1);
     }
 }
