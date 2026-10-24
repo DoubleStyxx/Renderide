@@ -56,6 +56,7 @@ where
         host_camera: &cull.host_camera,
         hi_z: None,
         hi_z_temporal: None,
+        hysteresis: None,
     };
     let mut keep = vec![false; lights.len()];
     let mut indexed = Vec::new();

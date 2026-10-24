@@ -6,8 +6,6 @@ use crate::bounds::world_aabb_from_local_bounds;
 use crate::scene::{RenderSpaceId, SceneCoordinator, SceneTransformRead, SkinnedMeshRenderer};
 use crate::shared::{RenderBoundingBox, RenderingContext};
 
-#[cfg(test)]
-use super::WorldMeshCullInput;
 use super::frustum::mesh_bounds_degenerate_for_cull;
 
 /// Identity of a mesh renderable being evaluated for CPU frustum / Hi-Z culling.
@@ -49,25 +47,10 @@ pub(crate) struct MeshCullGeometry {
     pub front_face_world_matrix: Option<Mat4>,
 }
 
-/// World-space AABB (and rigid matrix when applicable) for culling, evaluated once per draw slot.
-#[cfg(test)]
-pub(crate) fn mesh_world_geometry_for_cull<S>(
-    target: &MeshCullTarget<'_, S>,
-    culling: &WorldMeshCullInput<'_>,
-    render_context: RenderingContext,
-) -> MeshCullGeometry
-where
-    S: SceneTransformRead + ?Sized,
-{
-    mesh_world_geometry_for_cull_with_head(
-        target,
-        culling.host_camera.head_output_transform,
-        render_context,
-    )
-}
-
-/// Same as [`mesh_world_geometry_for_cull`] but takes the per-view `head_output_transform`
-/// directly so non-overlay frame-time precompute (which has no view yet) can pass `Mat4::IDENTITY`.
+/// World-space AABB (and rigid matrix when applicable) for one draw slot.
+///
+/// Takes the per-view `head_output_transform` directly so non-overlay frame-time precompute
+/// (which has no view yet) can pass `Mat4::IDENTITY`.
 ///
 /// Caller is responsible for ensuring overlay spaces use the live per-view transform; the result
 /// is only view-invariant when `target.scene.space(target.space_id).is_overlay() == false`.

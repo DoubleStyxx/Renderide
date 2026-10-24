@@ -279,6 +279,7 @@ fn spatial_query_uses_bvh_for_large_spaces_and_filters_frustum() {
         host_camera: &host_camera,
         hi_z: None,
         hi_z_temporal: None,
+        hysteresis: None,
     };
     let mut draws = Vec::new();
     for idx in 0..80 {
@@ -312,6 +313,7 @@ fn spatial_query_keeps_small_spaces_on_linear_path() {
         host_camera: &host_camera,
         hi_z: None,
         hi_z_temporal: None,
+        hysteresis: None,
     };
     let draws = (0..8)
         .map(|idx| {
@@ -343,6 +345,7 @@ fn spatial_query_counts_rejected_material_slots() {
         host_camera: &host_camera,
         hi_z: None,
         hi_z_temporal: None,
+        hysteresis: None,
     };
     let outside_slot0 =
         prepared_draw_with_bounds(0, Vec3::new(2.0, -0.5, -0.5), Vec3::new(3.0, 0.5, 0.5));
@@ -375,6 +378,7 @@ fn spatial_query_keeps_overlay_runs_conservative() {
         host_camera: &host_camera,
         hi_z: None,
         hi_z_temporal: None,
+        hysteresis: None,
     };
     let draws = (0..80)
         .map(|idx| {
@@ -415,6 +419,7 @@ fn spatial_query_preserves_run_order_across_multiple_spaces() {
         host_camera: &host_camera,
         hi_z: None,
         hi_z_temporal: None,
+        hysteresis: None,
     };
     let mut prepared = FramePreparedRenderables::empty(RenderingContext::UserView);
     let mut first_draw = prepared_draw_with_bounds(
@@ -461,6 +466,7 @@ fn spatial_query_dedups_duplicate_space_queries_in_prepared_order() {
         host_camera: &host_camera,
         hi_z: None,
         hi_z_temporal: None,
+        hysteresis: None,
     };
     let first = prepared_draw_with_bounds(
         0,
@@ -520,4 +526,30 @@ fn estimated_draw_count_includes_skinned_shadow_only_renderers() {
     scene.test_insert_skinned_mesh_renderers(id, vec![visible, shadow_only]);
 
     assert_eq!(estimated_draw_count(&scene, id), 4);
+}
+
+#[test]
+fn world_caster_count_at_most_stops_past_the_cap_and_honors_scope() {
+    use crate::occlusion::hysteresis::HISTORY_CASTER_BUDGET;
+
+    let cap = HISTORY_CASTER_BUDGET;
+    let at_cap = FramePreparedRenderables::test_with_caster_runs(&[(RenderSpaceId(1), cap)]);
+    assert_eq!(at_cap.world_caster_count_at_most(cap, |_| true), Some(cap));
+
+    let over = FramePreparedRenderables::test_with_caster_runs(&[(RenderSpaceId(1), cap + 1)]);
+    assert_eq!(over.world_caster_count_at_most(cap, |_| true), None);
+
+    let mixed = FramePreparedRenderables::test_with_caster_runs(&[
+        (RenderSpaceId(1), cap),
+        (RenderSpaceId(2), 40),
+    ]);
+    assert_eq!(
+        mixed.world_caster_count_at_most(cap, |space_id| space_id == RenderSpaceId(1)),
+        Some(cap)
+    );
+    assert_eq!(
+        mixed.world_caster_count_at_most(cap, |space_id| space_id == RenderSpaceId(2)),
+        Some(40)
+    );
+    assert_eq!(mixed.world_caster_count_at_most(cap, |_| true), None);
 }

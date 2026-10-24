@@ -26,7 +26,7 @@ use crate::materials::{MaterialPipelinePropertyIds, MaterialRouter, RasterPipeli
 use crate::scene::{RenderSpaceId, SceneCoordinator, SkinnedMeshRenderer, StaticMeshRenderer};
 use crate::shared::{RenderBoundingBox, RenderTransform, RenderingContext};
 use crate::world_mesh::culling::{
-    CpuCullFailure, MeshCullTarget, WorldMeshCullInput, WorldMeshCullProjParams,
+    CpuCullFailure, MeshCullTarget, SpaceCullCache, WorldMeshCullInput, WorldMeshCullProjParams,
     mesh_world_geometry_for_cull_with_head,
 };
 
@@ -80,6 +80,7 @@ fn mono_culling(host_camera: &HostCameraFrame) -> WorldMeshCullInput<'_> {
         host_camera,
         hi_z: None,
         hi_z_temporal: None,
+        hysteresis: None,
     }
 }
 
@@ -90,6 +91,7 @@ fn decide(
     culling: Option<&WorldMeshCullInput<'_>>,
     is_overlay: bool,
 ) -> Option<Result<Option<Mat4>, CpuCullFailure>> {
+    let mut cull_cache = SpaceCullCache::new();
     cull_mesh_target(
         &MeshCullTarget {
             scene,
@@ -102,6 +104,8 @@ fn decide(
         is_overlay,
         culling,
         RenderingContext::UserView,
+        None,
+        &mut cull_cache,
     )
 }
 
@@ -257,6 +261,7 @@ fn hi_z_uses_the_posed_aabb_not_the_rest_aabb() {
             prev_view_by_space: Arc::new(prev_view_by_space),
             depth_viewport_px: (4, 4),
         }),
+        hysteresis: None,
     };
 
     let decision = decide(&scene, &rest, Some(&posed), Some(&culling), false);
