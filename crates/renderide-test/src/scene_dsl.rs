@@ -40,5 +40,7 @@ pub(crate) use warp_pbs::output_warp_decision;
 pub use cases::{CaseTemplate, IntegrationCase};
 pub use output::CaseOutputLayout;
 pub use runner::run_integration_case;
-pub use suite::{SuiteCaseReport, SuiteConfig, SuiteReport, SuiteRunOutcome, run_suite};
+pub use suite::{
+    SuiteCaseReport, SuiteConfig, SuiteFailureKind, SuiteReport, SuiteRunOutcome, run_suite,
+};
 pub use tolerance::{Combine, CriterionResult, Tolerance, ToleranceEvaluation};

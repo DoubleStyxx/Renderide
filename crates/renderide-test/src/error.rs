@@ -65,6 +65,16 @@ pub enum HarnessError {
         missing_chunks: u64,
         /// Stable frames observed before the deadline.
         frame_count: u64,
+        /// Pending count on the frame the harness timed out on.
+        ///
+        /// `None` means no frame was observed. It is not zero.
+        frame_pending: Option<u64>,
+        /// Whether that frame's GPU submission had finished.
+        ///
+        /// False when no frame was observed.
+        gpu_done: bool,
+        /// Dropped draws on that frame. `None` is not zero.
+        dropped_draws: Option<u64>,
     },
     /// Reading or decoding the PNG output failed.
     #[error("read png {path}: {source}")]
@@ -200,6 +210,9 @@ mod tests {
             pending_chunks: 1,
             missing_chunks: 0,
             frame_count: 5,
+            frame_pending: Some(0),
+            gpu_done: true,
+            dropped_draws: Some(0),
         };
         let s = e.to_string();
         assert!(s.contains("flat or unstable"));
