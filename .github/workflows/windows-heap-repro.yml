@@ -23,11 +23,6 @@
 name: Windows heap repro
 
 "on":
-  # push is a one-shot so this branch can run before GitHub allows
-  # workflow_dispatch (the integration token cannot create that event).
-  # Removed once that run is recorded; the workflow stays dispatch-only.
-  push:
-    branches: [cursor/windows-heap-repro-8b62]
   workflow_dispatch:
     inputs:
       iterations:
@@ -50,8 +45,7 @@ permissions:
   contents: read
 
 env:
-  # Dispatch defaults are 50 / 16 / empty. `||` also covers a push run,
-  # where the inputs context is empty.
+  # Blank dispatch inputs fall back to the documented defaults.
   HEAP_REPRO_ITERATIONS: ${{ inputs.iterations || '50' }}
   HEAP_REPRO_TEST_THREADS: ${{ inputs.test_threads || '16' }}
   HEAP_REPRO_FILTER: ${{ inputs.extra_filter }}
