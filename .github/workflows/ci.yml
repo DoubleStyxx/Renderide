@@ -84,19 +84,28 @@ jobs:
       # libgstreamer-plugins-bad1.0-0 plus the base plugins. Install that library and
       # copy the one plugin instead of the plugins-bad package. `--no-install-recommends`
       # still skips VA-API drivers. pkg-config is named so the -dev packages resolve.
+      # 10 minutes bounds the apt download. The 0104fee crawl took 20 minutes
+      # inside this step; a healthy fetch is a few seconds.
       - name: Install Linux system dependencies (Vulkan + GStreamer)
         if: runner.os == 'Linux'
+        timeout-minutes: 10
         run: |
+          set -euo pipefail
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             mesa-vulkan-drivers vulkan-tools pkg-config \
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             gstreamer1.0-plugins-base libgstreamer-plugins-bad1.0-0
           plugindir="$(pkg-config --variable=pluginsdir gstreamer-1.0)"
+          if [[ -z "${plugindir}" || ! -d "${plugindir}" || -z "$(ls -A "${plugindir}")" ]]; then
+            echo "GStreamer plugin directory is missing or empty: '${plugindir}'" >&2
+            exit 1
+          fi
           tmp="$(mktemp -d)"
           ( cd "$tmp" && apt-get download gstreamer1.0-plugins-bad )
           dpkg-deb -x "$tmp"/gstreamer1.0-plugins-bad_*.deb "$tmp/root"
           sudo cp "$tmp"/root/usr/lib/*/gstreamer-1.0/libgstmpegtsdemux.so "$plugindir/"
+          test -f "$plugindir/libgstmpegtsdemux.so"
           rm -rf "$tmp"
 
       - uses: dtolnay/rust-toolchain@stable
