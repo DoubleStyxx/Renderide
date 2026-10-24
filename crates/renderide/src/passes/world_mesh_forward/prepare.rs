@@ -103,6 +103,7 @@ struct PackedForwardDraws {
     plan: InstancePlan,
     overlay_view_proj: glam::Mat4,
     precomputed_batches: Vec<MaterialBatchPacket>,
+    has_rigid_object_motion: bool,
 }
 
 struct ForwardViewFinalizeInputs {
@@ -339,6 +340,7 @@ pub(crate) fn prepare_world_mesh_forward_frame(
             },
         },
         prefetched.collection.items,
+        prefetched.collection.has_rigid_object_motion,
         scratch,
     ) else {
         return PreparedWorldMeshForwardView {
@@ -390,6 +392,7 @@ fn prepared_forward_view_from_pack(
         plan,
         overlay_view_proj,
         precomputed_batches,
+        has_rigid_object_motion,
     } = packed;
     let ForwardViewFinalizeInputs {
         pipeline,
@@ -414,6 +417,7 @@ fn prepared_forward_view_from_pack(
             skybox,
             overlay_view_proj,
             viewport_px,
+            has_rigid_object_motion,
         }),
         hud_outputs,
     }
@@ -465,6 +469,7 @@ fn update_world_mesh_draw_stats_from_plan(
 fn pack_forward_draws_for_view(
     inputs: ForwardDrawPackInputs<'_, '_>,
     draws: Vec<WorldMeshDrawItem>,
+    has_rigid_object_motion: bool,
     scratch: &mut WorldMeshForwardPrepareScratch,
 ) -> Option<PackedForwardDraws> {
     let ForwardDrawPackInputs {
@@ -558,6 +563,7 @@ fn pack_forward_draws_for_view(
         plan,
         overlay_view_proj,
         precomputed_batches,
+        has_rigid_object_motion,
     })
 }
 

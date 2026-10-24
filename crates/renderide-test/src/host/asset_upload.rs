@@ -17,7 +17,7 @@ pub(super) use material::{
     pack_render_texture_handle, pack_texture2d_handle, request_property_ids,
 };
 pub(super) use mesh::{MeshUploadRequest, UploadedMesh, upload_mesh};
-pub(super) use render_texture::upload_render_texture;
+pub(super) use render_texture::{create_render_texture, upload_render_texture};
 pub(super) use shader::{upload_shader, upload_shader_file};
 pub(super) use texture::{Texture2DUploadRequest, upload_texture2d_rgba8};
 

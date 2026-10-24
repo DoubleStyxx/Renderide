@@ -7,9 +7,7 @@
 
 use glam::{Quat, Vec3, Vec4};
 use renderide_shared::ipc::HostDualQueueIpc;
-use renderide_shared::shared::{
-    CameraClearMode, CameraProjection, CameraState, RenderRect, ShadowCastMode,
-};
+use renderide_shared::shared::{CameraClearMode, ShadowCastMode};
 
 use crate::error::HarnessError;
 use crate::scene::primitives::{centered_bounds, generate_quad};
@@ -99,6 +97,7 @@ pub(super) fn scene_setup() -> SceneSetup {
             camera_world_pose: camera_pose,
             renderables,
             lights: Vec::new(),
+            skinned: Vec::new(),
             cameras: vec![
                 stacked_camera(0.0, CameraClearMode::Skybox, false),
                 stacked_camera(1.0, CameraClearMode::Nothing, true),
@@ -140,37 +139,22 @@ fn render_texture_quad_material() -> MaterialAsset {
 }
 
 fn stacked_camera(depth: f32, clear_mode: CameraClearMode, double_buffered: bool) -> SceneCamera {
-    let mut flags = 1_u16;
+    let mut camera = SceneCamera::secondary(
+        CAMERA_TRANSFORM,
+        default_camera_world_pose(),
+        RENDER_TEXTURE_ASSET,
+        clear_mode,
+        depth,
+    );
+    camera.near_clip = 0.1;
+    camera.selective_transform_ids = vec![SPHERE_TRANSFORM];
     if double_buffered {
-        flags |= 1 << 2;
+        camera.flags |= 1 << 2;
     }
-    let background_color = if clear_mode == CameraClearMode::Skybox {
-        Vec4::new(0.15, 0.75, 0.95, 1.0)
+    if clear_mode == CameraClearMode::Skybox {
+        camera.background_color = Vec4::new(0.15, 0.75, 0.95, 1.0);
     } else {
-        Vec4::ZERO
-    };
-    SceneCamera {
-        transform_id: CAMERA_TRANSFORM,
-        pose: default_camera_world_pose(),
-        selective_transform_ids: vec![SPHERE_TRANSFORM],
-        state: CameraState {
-            field_of_view: 60.0,
-            orthographic_size: 1.0,
-            near_clip: 0.1,
-            far_clip: 100.0,
-            background_color,
-            viewport: RenderRect {
-                x: 0.0,
-                y: 0.0,
-                width: 1.0,
-                height: 1.0,
-            },
-            depth,
-            render_texture_asset_id: RENDER_TEXTURE_ASSET,
-            clear_mode,
-            projection: CameraProjection::Perspective,
-            flags,
-            ..CameraState::default()
-        },
+        camera.background_color = Vec4::ZERO;
     }
+    camera
 }

@@ -372,8 +372,13 @@ fn full_post_processing_orders_exposure_before_bloom_and_tonemap_last() {
     assert!(auto_compute_pos < auto_apply_pos);
     assert!(auto_apply_pos < bloom_downsample_pos);
     assert!(bloom_downsample_pos < bloom_composite_pos);
+    let object_motion_pos = pass_names
+        .iter()
+        .position(|name| *name == "ObjectMotionVectors")
+        .expect("object motion vectors pass");
     assert!(bloom_composite_pos < motion_vectors_pos);
-    assert!(motion_vectors_pos < motion_blur_pos);
+    assert!(motion_vectors_pos < object_motion_pos);
+    assert!(object_motion_pos < motion_blur_pos);
     assert!(motion_blur_pos < agx_tonemap_pos);
 }
 

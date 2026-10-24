@@ -256,6 +256,18 @@ impl WorldMatrixWorkload {
             .map(|matrix| matrix.w_axis.x)
             .unwrap_or(0.0)
     }
+
+    /// Publishes rigid-motion history for `nodes` into reused previous-matrix storage.
+    ///
+    /// Returns that storage's capacity. After the first publish for a fixed node count, further
+    /// publishes must return the same capacity. `nodes` is the object-mode subset; it is not
+    /// allocated inside the method.
+    #[must_use]
+    pub fn publish_motion_history(&mut self, nodes: &[usize]) -> usize {
+        self.cache.seal_motion_history(nodes);
+        self.cache.publish_previous_world_matrices(nodes);
+        self.cache.previous_world_matrix_capacity()
+    }
 }
 
 /// Free-list reuse of transient-pool buffer keys. No GPU buffer is allocated.

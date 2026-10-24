@@ -33,6 +33,7 @@ use super::ipc_setup::{DEFAULT_QUEUE_CAPACITY_BYTES, connect_session};
 use super::lockstep::{FrameSubmitScalars, LockstepDriver};
 
 mod bench_drive;
+mod bench_scenes;
 mod canvas_ui;
 mod capture;
 mod config;
@@ -44,6 +45,7 @@ mod shadowed_caster;
 
 pub use bench_drive::{BenchDriveConfig, drive_bench};
 pub mod png_readback;
+mod scene_ids;
 mod scene_state;
 mod shutdown;
 pub mod spawn;
@@ -52,6 +54,11 @@ pub use config::SceneSessionConfig;
 
 use config::SceneSessionOutcome;
 use consts::{asset_ids, shader_variants, sphere_tessellation, torus_geometry};
+use scene_ids::{
+    scene_material_id, scene_material_update_buffer_id, scene_mesh_buffer_id, scene_mesh_id,
+    scene_property_request_id, scene_shader_id, scene_texture_buffer_id, scene_texture_id,
+    scene_update_batch_id,
+};
 use scene_state::{
     SceneLight, SceneRenderable, SceneSubmission, default_camera_world_pose, directional_light,
     identity_transform, point_light,
@@ -82,6 +89,10 @@ pub enum SessionTemplate {
     },
     /// PBS material matrix lit by regular scene lights.
     PbsLitMaterialMatrix,
+    /// Frame-bench only: a 40x40 grid of 1,600 unlit draws sharing one mesh and material.
+    ManyStaticMeshes,
+    /// Frame-bench only: 64 lit spheres on a floor with one shadowed directional and four shadowed point lights.
+    LightsShadows,
     /// Alpha-test quads driven by a generated alpha mask.
     AlphaCutoutMaskedQuads {
         /// Alpha mask RGBA8 pixels.
@@ -119,6 +130,11 @@ pub enum SessionTemplate {
     /// Normal Skybox camera with a higher-depth double-buffered Nothing camera on one texture.
     /// The main view displays that texture.
     DoubleBufferNothingOnSkybox,
+    /// One-bone skinned avatars; `offscreen` puts 256 of 272 behind the camera.
+    SkinnedAvatars {
+        /// Whether the bulk of the avatars sit outside the camera frustum.
+        offscreen: bool,
+    },
 }
 
 /// Drives the full session end-to-end. The renderer process is killed on `Err` via [`Drop`] of
@@ -208,6 +224,8 @@ struct MeshAsset {
     buffer_id: i32,
     mesh: Mesh,
     bounds: RenderBoundingBox,
+    /// Upload as a one-bone skinned mesh (framebench skinned scenes).
+    skinned: bool,
 }
 
 struct MaterialAsset {
@@ -271,6 +289,8 @@ fn template_label(template: &SessionTemplate) -> &'static str {
         SessionTemplate::Torus { .. } => "Torus",
         SessionTemplate::MultiPrimitiveUnlitGrid { .. } => "MultiPrimitiveUnlitGrid",
         SessionTemplate::PbsLitMaterialMatrix => "PbsLitMaterialMatrix",
+        SessionTemplate::ManyStaticMeshes => "ManyStaticMeshes",
+        SessionTemplate::LightsShadows => "LightsShadows",
         SessionTemplate::AlphaCutoutMaskedQuads { .. } => "AlphaCutoutMaskedQuads",
         SessionTemplate::GltfTexturedStaticMesh { .. } => "GltfTexturedStaticMesh",
         SessionTemplate::CustomShaderPropertyUpdate => "CustomShaderPropertyUpdate",
@@ -282,6 +302,7 @@ fn template_label(template: &SessionTemplate) -> &'static str {
         SessionTemplate::ShadowedCasterMove => "ShadowedCasterMove",
         SessionTemplate::ManyShadowedPointLights => "ManyShadowedPointLights",
         SessionTemplate::DoubleBufferNothingOnSkybox => "DoubleBufferNothingOnSkybox",
+        SessionTemplate::SkinnedAvatars { .. } => "SkinnedAvatars",
     }
 }
 
@@ -298,6 +319,8 @@ fn build_scene_setup(template: SessionTemplate) -> SceneSetup {
             texture_size,
         } => multi_primitive_unlit_grid_setup(checker_rgba, uv_ramp_rgba, texture_size),
         SessionTemplate::PbsLitMaterialMatrix => pbs_lit_material_matrix_setup(),
+        SessionTemplate::ManyStaticMeshes => bench_scenes::many_static_meshes_setup(),
+        SessionTemplate::LightsShadows => bench_scenes::lights_shadows_setup(),
         SessionTemplate::AlphaCutoutMaskedQuads {
             mask_rgba,
             texture_size,
@@ -316,6 +339,9 @@ fn build_scene_setup(template: SessionTemplate) -> SceneSetup {
         SessionTemplate::ShadowedCasterMove => shadowed_caster::scene_setup(),
         SessionTemplate::ManyShadowedPointLights => shadowed_caster::many_point_lights_setup(),
         SessionTemplate::DoubleBufferNothingOnSkybox => double_buffer_stack::scene_setup(),
+        SessionTemplate::SkinnedAvatars { offscreen } => {
+            bench_scenes::skinned_avatars_setup(offscreen)
+        }
     }
 }
 
@@ -330,6 +356,11 @@ fn upload_scene_meshes(
     for mesh in &setup.meshes {
         let upload = pack_mesh_upload(&mesh.mesh, mesh.bounds)
             .map_err(|e| HarnessError::QueueOptions(format!("pack mesh upload: {e}")))?;
+        let upload = if mesh.skinned {
+            upload.with_single_bone_skin()
+        } else {
+            upload
+        };
         uploaded.push(upload_mesh(
             queues,
             lockstep,
@@ -377,6 +408,7 @@ fn sphere_setup() -> SceneSetup {
         meshes: vec![MeshAsset {
             asset_id: mesh_asset_id,
             buffer_id: asset_ids::MESH_BUFFER,
+            skinned: false,
             mesh: generate_sphere(
                 sphere_tessellation::LATITUDE_BANDS,
                 sphere_tessellation::LONGITUDE_BANDS,
@@ -405,6 +437,7 @@ fn torus_setup(texture_rgba: Vec<u8>, texture_size: (u32, u32)) -> SceneSetup {
         meshes: vec![MeshAsset {
             asset_id: mesh_asset_id,
             buffer_id: asset_ids::MESH_BUFFER,
+            skinned: false,
             mesh: generate_torus(
                 torus_geometry::MAJOR_SEGMENTS,
                 torus_geometry::MINOR_SEGMENTS,
@@ -510,6 +543,7 @@ fn multi_primitive_unlit_grid_setup(
             renderables,
             lights: Vec::new(),
             cameras: Vec::new(),
+            skinned: Vec::new(),
         },
     }
 }
@@ -574,6 +608,7 @@ fn pbs_lit_material_matrix_setup() -> SceneSetup {
             renderables,
             lights,
             cameras: Vec::new(),
+            skinned: Vec::new(),
         },
     }
 }
@@ -628,6 +663,7 @@ fn alpha_cutout_masked_quads_setup(mask_rgba: Vec<u8>, texture_size: (u32, u32))
             renderables,
             lights: Vec::new(),
             cameras: Vec::new(),
+            skinned: Vec::new(),
         },
     }
 }
@@ -642,6 +678,7 @@ fn gltf_textured_static_mesh_setup(
         meshes: vec![MeshAsset {
             asset_id: scene_mesh_id(0),
             buffer_id: scene_mesh_buffer_id(0),
+            skinned: false,
             mesh,
             bounds,
         }],
@@ -664,6 +701,7 @@ fn gltf_textured_static_mesh_setup(
             }],
             lights: Vec::new(),
             cameras: Vec::new(),
+            skinned: Vec::new(),
         },
     }
 }
@@ -672,6 +710,7 @@ fn mesh_asset(index: i32, mesh: Mesh, bounds: RenderBoundingBox) -> MeshAsset {
     MeshAsset {
         asset_id: scene_mesh_id(index),
         buffer_id: scene_mesh_buffer_id(index),
+        skinned: false,
         mesh,
         bounds,
     }
@@ -947,42 +986,6 @@ fn bounds_for_mesh(mesh: &Mesh) -> RenderBoundingBox {
     let center = (min + max) * 0.5;
     let extents = ((max - min) * 0.5).max(Vec3::splat(0.05));
     RenderBoundingBox { center, extents }
-}
-
-const fn scene_mesh_id(index: i32) -> i32 {
-    asset_ids::SCENE_MESH_BASE + index
-}
-
-const fn scene_material_id(index: i32) -> i32 {
-    asset_ids::SCENE_MATERIAL_BASE + index
-}
-
-const fn scene_shader_id(index: i32) -> i32 {
-    asset_ids::SCENE_SHADER_BASE + index
-}
-
-const fn scene_texture_id(index: i32) -> i32 {
-    asset_ids::SCENE_TEXTURE_BASE + index
-}
-
-const fn scene_mesh_buffer_id(index: i32) -> i32 {
-    asset_ids::SCENE_MESH_BUFFER_BASE + index
-}
-
-const fn scene_texture_buffer_id(index: i32) -> i32 {
-    asset_ids::SCENE_TEXTURE_BUFFER_BASE + index
-}
-
-const fn scene_material_update_buffer_id(index: i32) -> i32 {
-    asset_ids::SCENE_MATERIAL_UPDATE_BUFFER_BASE + index * 4
-}
-
-const fn scene_update_batch_id(index: i32) -> i32 {
-    asset_ids::SCENE_MATERIAL_UPDATE_BATCH_BASE + index
-}
-
-const fn scene_property_request_id(index: i32) -> i32 {
-    asset_ids::SCENE_PROPERTY_ID_REQUEST_BASE + index
 }
 
 #[cfg(test)]

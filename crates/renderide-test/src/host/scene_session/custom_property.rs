@@ -108,6 +108,7 @@ pub(super) fn scene_setup() -> SceneSetup {
             }],
             lights: Vec::new(),
             cameras: Vec::new(),
+            skinned: Vec::new(),
         },
     }
 }

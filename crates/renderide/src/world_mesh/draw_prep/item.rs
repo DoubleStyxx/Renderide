@@ -64,6 +64,11 @@ pub struct WorldMeshDrawCollection {
     pub visibility: WorldMeshVisibilityStats,
     /// CPU arrangement counters for the final draw list.
     pub arrangement: WorldMeshDrawArrangementStats,
+    /// Set while collecting when this view consumes motion vectors and a draw carries a previous matrix.
+    ///
+    /// Prepare reads this instead of scanning the draw list again. Views that do not consume motion
+    /// vectors leave it false and skip the previous-matrix lookup.
+    pub has_rigid_object_motion: bool,
 }
 
 impl WorldMeshDrawCollection {
@@ -76,6 +81,7 @@ impl WorldMeshDrawCollection {
             draws_hi_z_culled: 0,
             visibility: WorldMeshVisibilityStats::default(),
             arrangement: WorldMeshDrawArrangementStats::default(),
+            has_rigid_object_motion: false,
         }
     }
 }
@@ -212,6 +218,12 @@ pub struct WorldMeshDrawItem {
     /// Rigid-body world matrix for non-skinned draws, filled during draw collection to avoid
     /// recomputing [`crate::scene::SceneCoordinator::world_matrix_for_render_context`] in the forward pass.
     pub rigid_world_matrix: Option<Mat4>,
+    /// Previous rigid world matrix when this draw should write object velocity.
+    ///
+    /// `None` keeps the camera-reprojection velocity already stored for the pixel. Set only for
+    /// rigid, non-overlay, non-particle static draws in [`crate::shared::MotionVectorMode::Object`]
+    /// whose current matrix matches the cached hierarchy matrix and differs from the previous one.
+    pub previous_rigid_world_matrix: Option<Mat4>,
     /// CPU-selected specular reflection probes for this draw.
     pub reflection_probes: ReflectionProbeDrawSelection,
     /// Object-local UI rect clip. `Some` enables overlay rect-clip cull and per-draw scissor.

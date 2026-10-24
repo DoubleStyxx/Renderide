@@ -43,6 +43,7 @@ pub(super) fn coplanar_canvas_ui_quads_setup() -> SceneSetup {
             renderables,
             lights: Vec::new(),
             cameras: Vec::new(),
+            skinned: Vec::new(),
         },
     }
 }
@@ -77,6 +78,7 @@ pub(super) fn tilted_canvas_ui_quads_setup() -> SceneSetup {
             renderables,
             lights: Vec::new(),
             cameras: Vec::new(),
+            skinned: Vec::new(),
         },
     }
 }
@@ -150,6 +152,7 @@ pub(super) fn canvas_offset_bias_quad_setup() -> SceneSetup {
             renderables,
             lights: Vec::new(),
             cameras: Vec::new(),
+            skinned: Vec::new(),
         },
     }
 }
@@ -198,6 +201,7 @@ pub(super) fn tilted_canvas_distance_bias_setup() -> SceneSetup {
             renderables,
             lights: Vec::new(),
             cameras: Vec::new(),
+            skinned: Vec::new(),
         },
     }
 }

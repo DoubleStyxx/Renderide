@@ -77,6 +77,8 @@ pub(crate) struct PreparedWorldMeshForwardFrame {
     pub overlay_view_proj: glam::Mat4,
     /// Main surface extent in pixels for the GPU scissor optimisation.
     pub viewport_px: (u32, u32),
+    /// Whether any prepared draw carries a previous rigid matrix for object motion blur.
+    pub has_rigid_object_motion: bool,
 }
 
 blackboard_slot! {
