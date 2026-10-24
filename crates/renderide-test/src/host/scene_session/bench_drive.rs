@@ -18,7 +18,9 @@ use super::super::asset_upload::{DEFAULT_ASSET_UPLOAD_TIMEOUT, create_render_tex
 use super::super::handshake::{DEFAULT_HANDSHAKE_TIMEOUT, run_handshake};
 use super::super::ipc_setup::{DEFAULT_QUEUE_CAPACITY_BYTES, connect_session};
 use super::super::lockstep::{FrameSubmitScalars, LockstepDriver};
-use super::bench_scenes::{SECONDARY_RT_SIZE, secondary_camera_copy_rig};
+use super::bench_scenes::{
+    SECONDARY_RT_SIZE, secondary_camera_copy_rig, secondary_camera_double_buffer_rig,
+};
 use super::consts::timing;
 use super::scene_state::{build_scene_state_with_cameras, ensure_scene_submitted};
 use super::shutdown::request_shutdown_and_wait;
@@ -29,6 +31,8 @@ use super::{
 
 /// Scenario that adds two render-texture secondary cameras to the `unlit_sphere` scene.
 const SECONDARY_CAMERA_COPY: &str = "secondary_camera_copy";
+/// Two stacked double-buffered cameras (Depth, then Nothing) writing one 512² texture.
+const SECONDARY_CAMERA_DOUBLE_BUFFER: &str = "secondary_camera_double_buffer";
 
 /// One scenario invocation. The caller owns warmup, measured-frame, and pose choices.
 #[derive(Clone, Debug)]
@@ -37,7 +41,7 @@ pub struct BenchDriveConfig {
     pub renderer_path: PathBuf,
     /// `unlit_sphere`, `multi_primitive_unlit`, `pbs_lit_material_matrix`, `many_static_meshes`,
     /// `lights_shadows`, `many_shadowed_point_lights`, `offscreen_skinned_avatars`,
-    /// `onscreen_skinned_avatars`, or `secondary_camera_copy`.
+    /// `onscreen_skinned_avatars`, `secondary_camera_copy`, or `secondary_camera_double_buffer`.
     pub scenario: String,
     /// Raw per-frame JSON path the renderer writes when the measured window completes.
     pub report_path: PathBuf,
@@ -114,8 +118,14 @@ pub fn drive_bench(cfg: &BenchDriveConfig) -> Result<(), HarnessError> {
         &backing_dir,
         &setup,
     )?;
-    let cameras = if cfg.scenario == SECONDARY_CAMERA_COPY {
-        let rig = secondary_camera_copy_rig(&setup.scene);
+    let rig = if cfg.scenario == SECONDARY_CAMERA_COPY {
+        Some(secondary_camera_copy_rig(&setup.scene))
+    } else if cfg.scenario == SECONDARY_CAMERA_DOUBLE_BUFFER {
+        Some(secondary_camera_double_buffer_rig(&setup.scene))
+    } else {
+        None
+    };
+    let cameras = if let Some(rig) = rig {
         for asset_id in &rig.render_textures {
             create_render_texture(
                 &mut session.queues,
@@ -160,7 +170,9 @@ pub fn drive_bench(cfg: &BenchDriveConfig) -> Result<(), HarnessError> {
 
 fn scenario_template(name: &str) -> Result<SessionTemplate, HarnessError> {
     match name {
-        "unlit_sphere" | SECONDARY_CAMERA_COPY => Ok(SessionTemplate::Sphere),
+        "unlit_sphere" | SECONDARY_CAMERA_COPY | SECONDARY_CAMERA_DOUBLE_BUFFER => {
+            Ok(SessionTemplate::Sphere)
+        }
         "pbs_lit_material_matrix" => Ok(SessionTemplate::PbsLitMaterialMatrix),
         "many_static_meshes" => Ok(SessionTemplate::ManyStaticMeshes),
         "lights_shadows" => Ok(SessionTemplate::LightsShadows),
@@ -334,8 +346,9 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        BenchDriveConfig, SECONDARY_CAMERA_COPY, SessionTemplate, bench_renderer_args,
-        build_scene_setup, drive_bench, scenario_template, secondary_camera_copy_rig,
+        BenchDriveConfig, SECONDARY_CAMERA_COPY, SECONDARY_CAMERA_DOUBLE_BUFFER, SessionTemplate,
+        bench_renderer_args, build_scene_setup, drive_bench, scenario_template,
+        secondary_camera_copy_rig, secondary_camera_double_buffer_rig,
     };
 
     fn cfg(scenario: &str, windowed: bool) -> BenchDriveConfig {
@@ -374,6 +387,7 @@ mod tests {
         );
         for (camera, rt) in rig.cameras.iter().zip(&rig.render_textures) {
             assert_eq!(camera.render_texture_asset_id, *rt);
+            assert_eq!(camera.flags, 1);
             assert!(
                 setup
                     .scene
@@ -381,6 +395,33 @@ mod tests {
                     .iter()
                     .all(|r| r.transform_id != camera.transform_id)
             );
+        }
+    }
+
+    #[test]
+    fn secondary_camera_double_buffer_stacks_depth_then_nothing_on_one_texture() {
+        assert!(matches!(
+            scenario_template(SECONDARY_CAMERA_DOUBLE_BUFFER),
+            Ok(SessionTemplate::Sphere)
+        ));
+        let setup = build_scene_setup(SessionTemplate::Sphere);
+        let rig = secondary_camera_double_buffer_rig(&setup.scene);
+        assert_eq!(rig.render_textures, vec![900]);
+        assert_eq!(rig.cameras.len(), 2);
+        assert_eq!(
+            rig.cameras[0].clear_mode,
+            renderide_shared::shared::CameraClearMode::Depth
+        );
+        assert_eq!(
+            rig.cameras[1].clear_mode,
+            renderide_shared::shared::CameraClearMode::Nothing
+        );
+        assert_eq!(rig.cameras[0].depth, 0.0);
+        assert_eq!(rig.cameras[1].depth, 1.0);
+        for camera in &rig.cameras {
+            assert_eq!(camera.render_texture_asset_id, 900);
+            assert_eq!(camera.flags, 1 | (1 << 2));
+            assert!(camera.selective_transform_ids.is_empty());
         }
     }
 

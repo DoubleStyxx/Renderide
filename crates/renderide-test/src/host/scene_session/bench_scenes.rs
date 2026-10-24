@@ -7,6 +7,8 @@
 //! - `secondary_camera_copy`: the `unlit_sphere` scene plus two enabled secondary cameras that
 //!   render into their own render textures, one with a `Depth` clear and one with `Nothing`
 //!   (see [`secondary_camera_copy_rig`]).
+//! - `secondary_camera_double_buffer`: the same sphere and pose, with two double-buffered
+//!   cameras (`Depth` then `Nothing`, flags `1 | 4`) writing one 512² texture.
 
 use glam::{Quat, Vec3};
 use renderide_shared::shared::{CameraClearMode, RenderBoundingBox, ShadowCastMode, ShadowType};
@@ -288,6 +290,36 @@ pub(super) fn secondary_camera_copy_rig(scene: &SceneSubmission) -> SecondaryCam
         cameras: vec![
             camera(0, SECONDARY_RT_DEPTH_CLEAR, CameraClearMode::Depth, 0.0),
             camera(1, SECONDARY_RT_NOTHING_CLEAR, CameraClearMode::Nothing, 1.0),
+        ],
+    }
+}
+
+/// Enabled (bit 0) and double-buffered (bit 2).
+const DOUBLE_BUFFERED_ENABLED: u16 = 1 | (1 << 2);
+
+/// Two stacked double-buffered secondary cameras writing one 512² render texture.
+///
+/// The `Depth` camera is depth 0, so it is the first writer and seeds history. The `Nothing`
+/// camera is depth 1 and seeds the published image. Both use flags [`DOUBLE_BUFFERED_ENABLED`].
+/// The pose is the scene camera pose, which the bench drive has already set.
+pub(super) fn secondary_camera_double_buffer_rig(scene: &SceneSubmission) -> SecondaryCameraRig {
+    let first = next_free_transform_id(scene);
+    let camera = |offset: i32, clear_mode, depth| {
+        let mut camera = SceneCamera::secondary(
+            first + offset,
+            scene.camera_world_pose,
+            SECONDARY_RT_DEPTH_CLEAR,
+            clear_mode,
+            depth,
+        );
+        camera.flags = DOUBLE_BUFFERED_ENABLED;
+        camera
+    };
+    SecondaryCameraRig {
+        render_textures: vec![SECONDARY_RT_DEPTH_CLEAR],
+        cameras: vec![
+            camera(0, CameraClearMode::Depth, 0.0),
+            camera(1, CameraClearMode::Nothing, 1.0),
         ],
     }
 }
