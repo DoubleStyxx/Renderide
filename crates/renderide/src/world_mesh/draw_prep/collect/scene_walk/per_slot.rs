@@ -27,7 +27,7 @@ enum SlotCullDecision {
     RejectedFrustum,
     /// Draw is rejected by Hi-Z culling.
     RejectedHiZ,
-    /// No cull pass was active for this draw (skinned, or no culling config); skip cull bookkeeping.
+    /// No cull pass was active for this draw; skip cull bookkeeping.
     NotApplicable,
 }
 

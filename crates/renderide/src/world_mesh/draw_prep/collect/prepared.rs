@@ -144,7 +144,7 @@ fn prepared_run_view_state<'a>(
             let target = MeshCullTarget {
                 scene: ctx.scene_assets.scene,
                 space_id: first.space_id,
-                mesh,
+                mesh_bounds: &mesh.bounds,
                 skinned: first.skinned,
                 skinned_renderer: skinning.as_renderer(),
                 node_id: first.node_id,

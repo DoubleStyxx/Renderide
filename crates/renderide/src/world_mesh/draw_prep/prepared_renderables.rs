@@ -848,4 +848,6 @@ fn populate_renderer_ordinals_from_runs(
 }
 
 #[cfg(test)]
+mod skinned_cull_tests;
+#[cfg(test)]
 mod tests;
