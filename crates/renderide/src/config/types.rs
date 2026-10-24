@@ -29,7 +29,7 @@ pub use post_processing::{
 };
 pub use rendering::{
     GraphicsApiSetting, MsaaSampleCount, PresentationModeSetting, RenderingSettings,
-    SceneColorFormat,
+    ResolvedVrSwapchainGpuWait, SceneColorFormat, VrSwapchainGpuWait, VrSwapchainGpuWaitQuery,
 };
 pub use watchdog::{WatchdogAction, WatchdogSettings};
 

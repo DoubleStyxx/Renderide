@@ -280,6 +280,21 @@ pub(crate) enum GpuFlightEventKind {
         /// Predicted display time in OpenXR nanoseconds.
         predicted_display_time_nanos: Option<i64>,
     },
+    /// The VR swapchain GPU wait timed out before `xrReleaseSwapchainImage`.
+    ///
+    /// Device-loss is not recorded here. That path logs its own error and skips the poll.
+    SwapchainGpuWaitTimedOut {
+        /// Frame sequence on the projection finalize.
+        frame_seq: u64,
+        /// Acquired color swapchain image.
+        image_index: u32,
+        /// Command buffers in the batch that was supposed to write the image.
+        command_buffers: usize,
+        /// Elapsed time spent in the wait before it gave up, in milliseconds.
+        waited_ms: u32,
+        /// Why the wait gave up.
+        detail: String,
+    },
     /// Render-graph submit summary.
     RenderGraphSubmit {
         /// Whether the submit targets the window swapchain.
@@ -375,6 +390,16 @@ impl fmt::Display for GpuFlightEventKind {
                 "openxr call={call} result={result} image_index={} predicted_time_ns={}",
                 optional_u32(*image_index),
                 optional_i64(*predicted_display_time_nanos)
+            ),
+            Self::SwapchainGpuWaitTimedOut {
+                frame_seq,
+                image_index,
+                command_buffers,
+                waited_ms,
+                detail,
+            } => write!(
+                f,
+                "swapchain_gpu_wait_timed_out frame_seq={frame_seq} image_index={image_index} command_buffers={command_buffers} waited_ms={waited_ms} detail=\"{detail}\""
             ),
             Self::RenderGraphSubmit {
                 swapchain,
