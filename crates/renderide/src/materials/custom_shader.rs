@@ -10,11 +10,17 @@ mod bench;
 mod bindings;
 mod compose;
 mod keywords;
+#[cfg(feature = "bench-api")]
+mod lookup_bench;
 mod overrides;
 mod passes;
 
 #[cfg(test)]
 mod example_shaders;
+#[cfg(test)]
+mod install_race;
+#[cfg(test)]
+mod reflect_failure;
 
 use std::sync::Arc;
 
@@ -32,6 +38,8 @@ use self::passes::OwnedMaterialPass;
 #[cfg(feature = "bench-api")]
 pub use bench::KeywordVariantCacheWorkload;
 pub(crate) use keywords::is_toggle_style_property_name;
+#[cfg(feature = "bench-api")]
+pub use lookup_bench::CustomStemLookupWorkload;
 
 /// Stem prefix for every installed custom material. Host routes store the `_default` stem.
 pub(crate) const CUSTOM_STEM_PREFIX: &str = "renderide_custom_";
@@ -144,30 +152,109 @@ pub(crate) fn install(key: &str, wgsl: &str) -> Result<InstalledCustomShader, St
         return Ok(installed);
     }
 
+    let prepared = prepare_install(
+        key,
+        base_stem,
+        default_stem,
+        multiview_stem,
+        wgsl,
+        parsed_keywords,
+        composed,
+    )?;
+    Ok(commit_install(prepared))
+}
+
+struct PreparedInstall {
+    key: String,
+    base_stem: String,
+    default_stem: String,
+    multiview_stem: String,
+    source: Arc<str>,
+    keywords: Arc<[String]>,
+    default_wgsl: Arc<str>,
+    multiview_wgsl: Arc<str>,
+    default_passes: Arc<[MaterialPassDesc]>,
+    multiview_passes: Arc<[MaterialPassDesc]>,
+    default_reflection: crate::embedded_shaders::EmbeddedShaderReflection,
+    multiview_reflection: crate::embedded_shaders::EmbeddedShaderReflection,
+    default_render_queue: i32,
+    material_defaults: Arc<[EmbeddedMaterialDefault]>,
+}
+
+/// Reflects the composed program before any registry mutation.
+///
+/// A failed reflection leaves the previously published stem in place.
+fn prepare_install(
+    key: String,
+    base_stem: String,
+    default_stem: String,
+    multiview_stem: String,
+    wgsl: &str,
+    parsed_keywords: Vec<String>,
+    composed: compose::ComposedCustomShader,
+) -> Result<PreparedInstall, String> {
     let default_wgsl = Arc::<str>::from(composed.default_wgsl);
     let multiview_wgsl = Arc::<str>::from(composed.multiview_wgsl);
-    // Reflect and reject unsupported @group(1) types before swapping the published program,
-    // so a bad replace leaves the previous stem in place.
     validate_composed_bindings(&default_wgsl, &composed.material_defaults)?;
     validate_composed_bindings(&multiview_wgsl, &composed.material_defaults)?;
     let default_passes = owned_passes(composed.default_passes);
     let multiview_passes = owned_passes(composed.multiview_passes);
     let material_defaults = owned_material_defaults(composed.material_defaults);
-    let source = Arc::<str>::from(wgsl);
-    let keywords = Arc::<[String]>::from(parsed_keywords);
-
-    let replaced_generation = {
-        let mut registry = registry().write();
-        let replaced_generation = remove_target(&mut registry, &default_stem);
-        let _multiview_generation = remove_target(&mut registry, &multiview_stem);
-        registry.keys.remove(&key);
-        replaced_generation
-    };
-
     let default_reflection = reflect_authored_material(&default_wgsl, &default_passes)?;
     let multiview_reflection = reflect_authored_material(&multiview_wgsl, &multiview_passes)?;
+    Ok(PreparedInstall {
+        key,
+        base_stem,
+        default_stem,
+        multiview_stem,
+        source: Arc::from(wgsl),
+        keywords: Arc::from(parsed_keywords),
+        default_wgsl,
+        multiview_wgsl,
+        default_passes,
+        multiview_passes,
+        default_reflection,
+        multiview_reflection,
+        default_render_queue: composed.default_render_queue,
+        material_defaults,
+    })
+}
+
+/// Swaps the published stems in one write-lock critical section.
+///
+/// Concurrent installs must not observe the stem with no WGSL between removal and insertion.
+fn commit_install(prepared: PreparedInstall) -> InstalledCustomShader {
+    let PreparedInstall {
+        key,
+        base_stem,
+        default_stem,
+        multiview_stem,
+        source,
+        keywords,
+        default_wgsl,
+        multiview_wgsl,
+        default_passes,
+        multiview_passes,
+        default_reflection,
+        multiview_reflection,
+        default_render_queue,
+        material_defaults,
+    } = prepared;
 
     let mut registry = registry().write();
+    if let Some(generation) = registry.published_generation(
+        &default_stem,
+        &multiview_stem,
+        source.as_ref(),
+        keywords.as_ref(),
+        default_wgsl.as_ref(),
+        multiview_wgsl.as_ref(),
+    ) {
+        return unchanged_shader(&key, &base_stem, &default_stem, generation);
+    }
+    let replaced_generation = remove_target(&mut registry, &default_stem);
+    let _multiview_generation = remove_target(&mut registry, &multiview_stem);
+    registry.keys.remove(&key);
     let generation = registry.next_generation.saturating_add(1);
     registry.next_generation = generation;
     registry.targets.insert(
@@ -180,7 +267,7 @@ pub(crate) fn install(key: &str, wgsl: &str) -> Result<InstalledCustomShader, St
             multiview: false,
             passes: default_passes,
             reflection: default_reflection,
-            default_render_queue: composed.default_render_queue,
+            default_render_queue,
             material_defaults: material_defaults.clone(),
             variants: keywords::KeywordVariantCache::default(),
         },
@@ -195,7 +282,7 @@ pub(crate) fn install(key: &str, wgsl: &str) -> Result<InstalledCustomShader, St
             multiview: true,
             passes: multiview_passes,
             reflection: multiview_reflection,
-            default_render_queue: composed.default_render_queue,
+            default_render_queue,
             material_defaults,
             variants: keywords::KeywordVariantCache::default(),
         },
@@ -210,14 +297,14 @@ pub(crate) fn install(key: &str, wgsl: &str) -> Result<InstalledCustomShader, St
     drop(registry);
 
     logger::info!("custom shader installed key={key} stem={default_stem}");
-    Ok(InstalledCustomShader {
+    InstalledCustomShader {
         key,
         base_stem,
         default_stem,
         source_changed: true,
         generation,
         replaced_generation,
-    })
+    }
 }
 
 fn remove_target(registry: &mut CustomShaderRegistry, stem: &str) -> Option<u64> {
@@ -237,38 +324,61 @@ fn unchanged_install(
     keywords: &[String],
     composed: &compose::ComposedCustomShader,
 ) -> Option<InstalledCustomShader> {
-    let copied = {
-        let registry = registry().read();
-        match (
-            registry.targets.get(default_stem),
-            registry.targets.get(multiview_stem),
-        ) {
-            (Some(previous), Some(multiview)) => Some((
-                Arc::clone(&previous.wgsl),
-                Arc::clone(&multiview.wgsl),
-                Arc::clone(&previous.source),
-                Arc::clone(&previous.keywords),
-                previous.generation,
-            )),
-            _ => None,
-        }
-    };
-    let (default_wgsl, multiview_wgsl, previous_source, previous_keywords, generation) = copied?;
-    if previous_source.as_ref() != source
-        || previous_keywords.as_ref() != keywords
-        || default_wgsl.as_ref() != composed.default_wgsl
-        || multiview_wgsl.as_ref() != composed.multiview_wgsl
-    {
-        return None;
-    }
-    Some(InstalledCustomShader {
+    let registry = registry().read();
+    registry
+        .published_generation(
+            default_stem,
+            multiview_stem,
+            source,
+            keywords,
+            &composed.default_wgsl,
+            &composed.multiview_wgsl,
+        )
+        .map(|generation| unchanged_shader(key, base_stem, default_stem, generation))
+}
+
+fn unchanged_shader(
+    key: &str,
+    base_stem: &str,
+    default_stem: &str,
+    generation: u64,
+) -> InstalledCustomShader {
+    InstalledCustomShader {
         key: key.to_string(),
         base_stem: base_stem.to_string(),
         default_stem: default_stem.to_string(),
         source_changed: false,
         generation,
         replaced_generation: None,
-    })
+    }
+}
+
+impl CustomShaderRegistry {
+    /// Generation when both stems are already published with this source and composed WGSL.
+    fn published_generation(
+        &self,
+        default_stem: &str,
+        multiview_stem: &str,
+        source: &str,
+        keywords: &[String],
+        default_wgsl: &str,
+        multiview_wgsl: &str,
+    ) -> Option<u64> {
+        let (Some(previous), Some(multiview)) = (
+            self.targets.get(default_stem),
+            self.targets.get(multiview_stem),
+        ) else {
+            return None;
+        };
+        if previous.source.as_ref() != source
+            || previous.keywords.as_ref() != keywords
+            || previous.wgsl.as_ref() != default_wgsl
+            || multiview.wgsl.as_ref() != multiview_wgsl
+        {
+            return None;
+        }
+        Some(previous.generation)
+    }
 }
 
 /// Pipeline to store for a host shader name.
