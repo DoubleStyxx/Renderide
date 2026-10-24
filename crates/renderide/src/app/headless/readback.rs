@@ -15,16 +15,29 @@ static ATLAS_SIDECAR_STAMP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(()
 
 use crate::gpu::GpuContext;
 
+/// PNG `tEXt` keyword storing the pending-pipeline draw count for this frame.
+///
+/// The harness in `renderide-test` reads the same keyword. The count lives in the
+/// PNG so it cannot be paired with a different frame's sidecar.
+pub(crate) const PIPELINE_PENDING_TEXT_KEYWORD: &str = "renderide_pipeline_pending";
+
 /// Copies the headless primary color texture to CPU memory and writes a PNG atomically.
 pub(super) fn readback_and_write_png_atomically(
     gpu: &GpuContext,
     output_path: &Path,
     shadow_atlas_passes: Option<(u32, u64)>,
+    pending_pipeline_draws: u64,
 ) -> Result<(), HeadlessReadbackError> {
     let color_texture = gpu
         .headless_color_texture()
         .ok_or(HeadlessReadbackError::NoOffscreenTexture)?;
-    readback_color_texture(gpu, color_texture, output_path, shadow_atlas_passes)
+    readback_color_texture(
+        gpu,
+        color_texture,
+        output_path,
+        shadow_atlas_passes,
+        pending_pipeline_draws,
+    )
 }
 
 /// Copies one color texture to CPU memory and writes a PNG atomically.
@@ -33,6 +46,7 @@ fn readback_color_texture(
     color_texture: &wgpu::Texture,
     output_path: &Path,
     shadow_atlas_passes: Option<(u32, u64)>,
+    pending_pipeline_draws: u64,
 ) -> Result<(), HeadlessReadbackError> {
     let layout = compute_readback_layout(color_texture.size(), gpu.limits().max_buffer_size())?;
     let readback = create_readback_buffer(gpu, &layout);
@@ -47,6 +61,7 @@ fn readback_color_texture(
         copy_padded_rows_to_tight(&view, &layout)
     };
     readback.unmap();
+    crate::gpu::warp_black_diag::log_readback_colors(&tight);
 
     write_png_atomically(
         &tight,
@@ -54,6 +69,7 @@ fn readback_color_texture(
         layout.height,
         output_path,
         shadow_atlas_passes,
+        pending_pipeline_draws,
     )
 }
 
@@ -64,7 +80,7 @@ pub(crate) fn readback_texture_png(
     color_texture: &wgpu::Texture,
     output_path: &Path,
 ) -> Result<(), HeadlessReadbackError> {
-    readback_color_texture(gpu, color_texture, output_path, None)
+    readback_color_texture(gpu, color_texture, output_path, None, 0)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -124,6 +140,7 @@ fn submit_texture_to_buffer_copy(
     readback: &wgpu::Buffer,
 ) {
     gpu.flush_driver();
+    crate::gpu::warp_black_diag::log_after_flush(gpu.device());
 
     let mut encoder = gpu
         .device()
@@ -155,13 +172,16 @@ fn submit_texture_to_buffer_copy(
         profiling::scope!("CommandEncoder::finish::headless_readback");
         encoder.finish()
     };
-    gpu.queue().submit(std::iter::once(command_buffer));
+    let submission = gpu.queue().submit(std::iter::once(command_buffer));
+    crate::gpu::warp_black_diag::watch_submission(gpu.queue(), &submission, "readback-copy", 0, 1);
+    crate::gpu::warp_black_diag::log_copy_submitted(&submission);
 }
 
 fn await_buffer_map(
     slice: wgpu::BufferSlice<'_>,
     device: &wgpu::Device,
 ) -> Result<(), HeadlessReadbackError> {
+    let _map_span = crate::gpu::warp_black_diag::MapAsyncSpan::start();
     let (sender, receiver) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |result| {
         let _ = sender.send(result);
@@ -199,22 +219,20 @@ fn write_png_atomically(
     height: u32,
     output_path: &Path,
     shadow_atlas_passes: Option<(u32, u64)>,
+    pending_pipeline_draws: u64,
 ) -> Result<(), HeadlessReadbackError> {
     if let Some(parent) = output_path.parent()
         && !parent.as_os_str().is_empty()
     {
         std::fs::create_dir_all(parent).map_err(HeadlessReadbackError::Io)?;
     }
-    let buffer = image::RgbaImage::from_raw(width, height, rgba_bytes.to_vec())
-        .ok_or(HeadlessReadbackError::EncodeBufferSize)?;
     let tmp_path = output_path.with_extension("png.tmp");
-    buffer
-        .save_with_format(&tmp_path, image::ImageFormat::Png)
-        .map_err(|e| HeadlessReadbackError::Encode(format!("{e:?}")))?;
+    encode_png_with_pending_count(&tmp_path, rgba_bytes, width, height, pending_pipeline_draws)?;
     if let Some(passes) = shadow_atlas_passes {
         // Publish the pass count before the PNG rename so a stable PNG has its stat.
         publish_atlas_pass_record(output_path, passes)?;
     }
+    // The pending count is inside the PNG bytes, so this rename publishes both together.
     std::fs::rename(&tmp_path, output_path).map_err(HeadlessReadbackError::Io)?;
     if shadow_atlas_passes.is_some() {
         // `rename` keeps the temp PNG's mtime, which is earlier than the sidecar write.
@@ -244,6 +262,47 @@ fn align_atlas_pass_sidecar_mtime(output_path: &Path) -> Result<(), HeadlessRead
         .open(&sidecar)
         .and_then(|file| file.set_modified(png_mtime))
         .map_err(HeadlessReadbackError::Io)
+}
+
+/// Writes one RGBA PNG whose `tEXt` chunk carries `pending_pipeline_draws`.
+///
+/// `0` means no draw was still compiling and no draw was skipped for lack of a pipeline.
+/// A positive count means a pipeline was still compiling, or a draw was skipped because
+/// no pipeline was available and that skip was not already counted as pending. A failed
+/// lookup that still draws through a ready Null pipeline stays at zero.
+fn encode_png_with_pending_count(
+    tmp_path: &Path,
+    rgba_bytes: &[u8],
+    width: u32,
+    height: u32,
+    pending_pipeline_draws: u64,
+) -> Result<(), HeadlessReadbackError> {
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or(HeadlessReadbackError::EncodeBufferSize)?;
+    if rgba_bytes.len() != expected {
+        return Err(HeadlessReadbackError::EncodeBufferSize);
+    }
+    let file = std::fs::File::create(tmp_path).map_err(HeadlessReadbackError::Io)?;
+    let mut encoder = png::Encoder::new(file, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .add_text_chunk(
+            PIPELINE_PENDING_TEXT_KEYWORD.to_string(),
+            pending_pipeline_draws.to_string(),
+        )
+        .map_err(|err| HeadlessReadbackError::Encode(err.to_string()))?;
+    let mut writer = encoder
+        .write_header()
+        .map_err(|err| HeadlessReadbackError::Encode(err.to_string()))?;
+    writer
+        .write_image_data(rgba_bytes)
+        .map_err(|err| HeadlessReadbackError::Encode(err.to_string()))?;
+    writer
+        .finish()
+        .map_err(|err| HeadlessReadbackError::Encode(err.to_string()))
 }
 
 /// Writes `this_frame total` beside the PNG and appends the same line to the pass log.
@@ -420,12 +479,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let png = dir.path().join("frame.png");
         let pixels = [9u8, 8, 7, 255];
-        super::write_png_atomically(&pixels, 1, 1, &png, None).expect("png only");
+        super::write_png_atomically(&pixels, 1, 1, &png, None, 0).expect("png only");
         assert!(png.is_file());
         assert!(!png.with_extension("atlas-passes").exists());
         assert!(!png.with_extension("atlas-pass-log").exists());
+        assert!(!png.with_extension("pipeline-pending").exists());
+        assert_eq!(pending_text(&png), Some("0".to_string()));
 
-        super::write_png_atomically(&pixels, 1, 1, &png, Some((1, 4))).expect("with count");
+        super::write_png_atomically(&pixels, 1, 1, &png, Some((1, 4)), 3).expect("with count");
         assert_eq!(
             std::fs::read_to_string(png.with_extension("atlas-passes")).expect("sidecar"),
             "1 4\n"
@@ -434,6 +495,8 @@ mod tests {
             std::fs::read_to_string(png.with_extension("atlas-pass-log")).expect("log"),
             "1 4\n"
         );
+        assert!(!png.with_extension("pipeline-pending").exists());
+        assert_eq!(pending_text(&png), Some("3".to_string()));
     }
 
     #[test]
@@ -444,12 +507,24 @@ mod tests {
         let pixels = [1u8, 2, 3, 255];
         let _guard = FailStampGuard;
         super::FAIL_ATLAS_SIDECAR_MTIME_STAMP.store(true, super::Ordering::Relaxed);
-        super::write_png_atomically(&pixels, 1, 1, &png, Some((0, 2))).expect("png published");
+        super::write_png_atomically(&pixels, 1, 1, &png, Some((0, 2)), 0).expect("png published");
         assert!(png.is_file());
         assert_eq!(
             std::fs::read_to_string(png.with_extension("atlas-passes")).expect("sidecar"),
             "0 2\n"
         );
+    }
+
+    fn pending_text(path: &std::path::Path) -> Option<String> {
+        let file = std::fs::File::open(path).expect("png");
+        let decoder = png::Decoder::new(std::io::BufReader::new(file));
+        let reader = decoder.read_info().expect("png info");
+        reader
+            .info()
+            .uncompressed_latin1_text
+            .iter()
+            .find(|chunk| chunk.keyword == super::PIPELINE_PENDING_TEXT_KEYWORD)
+            .map(|chunk| chunk.text.clone())
     }
 
     struct FailStampGuard;

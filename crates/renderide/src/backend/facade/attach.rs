@@ -52,6 +52,13 @@ pub struct RenderBackendAttachDesc {
     pub suppress_renderer_config_disk_writes: bool,
     /// `true` when the renderer is attached to an offscreen headless target.
     pub headless: bool,
+    /// Headless and software adapters compile material pipelines on the render thread.
+    /// Real GPUs leave this false and use the background pool.
+    pub compile_pipelines_on_render_thread: bool,
+    /// Render-thread compiles allowed in one drain. Headless is [`usize::MAX`].
+    /// A windowed software adapter is one. Ignored when
+    /// `compile_pipelines_on_render_thread` is false.
+    pub render_thread_compiles_per_frame: usize,
 }
 
 impl RenderBackend {
@@ -82,6 +89,8 @@ impl RenderBackend {
             config_save_path,
             suppress_renderer_config_disk_writes,
             headless,
+            compile_pipelines_on_render_thread,
+            render_thread_compiles_per_frame,
         } = desc;
         self.renderer_settings = Some(renderer_settings.clone());
         self.surface_format = Some(surface_format);
@@ -114,8 +123,29 @@ impl RenderBackend {
                 suppress_renderer_config_disk_writes,
             );
         }
-        self.materials
-            .try_attach_gpu(device.clone(), &queue, Arc::clone(&gpu_limits))?;
+        logger::info!(
+            "material pipelines: compile_on_render_thread={compile_pipelines_on_render_thread} per_frame={render_thread_compiles_per_frame}"
+        );
+        self.materials.try_attach_gpu(
+            device.clone(),
+            &queue,
+            Arc::clone(&gpu_limits),
+            compile_pipelines_on_render_thread,
+            render_thread_compiles_per_frame,
+        )?;
+        // The device has not submitted yet. Headless and software adapters build the
+        // pass-owned pipelines now so the first frame does not call
+        // create_render_pipeline after Queue::submit. Real GPUs skip on the flag
+        // and keep the lazy path.
+        if compile_pipelines_on_render_thread {
+            crate::passes::precompile_clustered_light_pipeline(device.as_ref());
+            crate::passes::precompile_scene_color_compose_pipeline(
+                device.as_ref(),
+                surface_format,
+                false,
+            );
+            crate::occlusion::gpu::precompile_hi_z_pipelines(device.as_ref());
+        }
         self.reflection_probes
             .pre_warm_sh2_projection_pipelines(&device);
         asset_uploads::attach_flush_pending_asset_uploads(

@@ -97,7 +97,62 @@ jobs:
         echo '  make release'
         exit 1
 
+    # The pull-request "CodeQL" check is the comparison of uploaded results. Uploading
+    # from this matrix marks that check complete as soon as the first language
+    # finishes, which is before Analyze (rust). Keep the SARIF here and upload it
+    # only after every language, including rust, has finished.
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v4
       with:
         category: "/language:${{matrix.language}}"
+        upload: never
+        post-processed-sarif-path: codeql-sarif
+
+    - name: Save SARIF for the comparison upload
+      uses: actions/upload-artifact@v7
+      with:
+        name: codeql-sarif-${{ matrix.language }}
+        path: codeql-sarif
+        if-no-files-found: error
+        retention-days: 1
+
+  # Runs only after Analyze (rust) and the other languages have finished, so the
+  # CodeQL comparison check completes after Analyze (rust).
+  codeql-comparison:
+    name: CodeQL comparison
+    needs: analyze
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v7
+
+    - name: Download SARIF
+      uses: actions/download-artifact@v8
+      with:
+        pattern: codeql-sarif-*
+        path: codeql-sarif
+
+    - name: Upload actions results
+      uses: github/codeql-action/upload-sarif@v4
+      with:
+        sarif_file: codeql-sarif/codeql-sarif-actions
+        category: /language:actions
+        wait-for-processing: true
+
+    - name: Upload csharp results
+      uses: github/codeql-action/upload-sarif@v4
+      with:
+        sarif_file: codeql-sarif/codeql-sarif-csharp
+        category: /language:csharp
+        wait-for-processing: true
+
+    - name: Upload rust results
+      uses: github/codeql-action/upload-sarif@v4
+      with:
+        sarif_file: codeql-sarif/codeql-sarif-rust
+        category: /language:rust
+        wait-for-processing: true

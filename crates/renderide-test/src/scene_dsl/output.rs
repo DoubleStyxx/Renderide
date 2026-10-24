@@ -18,6 +18,11 @@ pub const DEFAULT_OUTPUT_SUBDIR: &str = "renderide-test-out";
 
 /// Filenames written within a per-case output directory.
 const ACTUAL_FILENAME: &str = "actual.png";
+
+/// Path of the captured PNG inside a case artifact directory.
+pub(crate) fn actual_png_in(artifacts_dir: &Path) -> PathBuf {
+    artifacts_dir.join(ACTUAL_FILENAME)
+}
 const GOLDEN_FILENAME: &str = "golden.png";
 const DIFF_FILENAME: &str = "diff.png";
 const REPORT_FILENAME: &str = "report.json";
@@ -101,6 +106,10 @@ pub struct CaseReport {
     /// Optional error message when `passed = false` and `evaluation = None` (e.g. capture
     /// failure, harness error).
     pub error: Option<String>,
+    /// Set when a failure is an expected WARP mismatch. A pass leaves this empty.
+    /// The text is `expected failure (WARP, #212)` and `passed` stays false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
     /// Runner CPU model. Empty only for reports written before this field existed.
     #[serde(default)]
     pub cpu_model: String,
@@ -131,6 +140,7 @@ pub fn report_from_evaluation(case: &IntegrationCase, eval: ToleranceEvaluation)
         passed: eval.passed,
         evaluation: Some(eval),
         error: None,
+        result: None,
         cpu_model: String::new(),
         adapter: String::new(),
     }
@@ -146,6 +156,7 @@ pub fn report_from_error(case: &IntegrationCase, message: impl Into<String>) -> 
         passed: false,
         evaluation: None,
         error: Some(message.into()),
+        result: None,
         cpu_model: String::new(),
         adapter: String::new(),
     }

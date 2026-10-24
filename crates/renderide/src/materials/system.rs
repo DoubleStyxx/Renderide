@@ -143,6 +143,8 @@ impl MaterialSystem {
         device: Arc<wgpu::Device>,
         queue: &Arc<wgpu::Queue>,
         limits: Arc<crate::gpu::GpuLimits>,
+        compile_on_render_thread: bool,
+        render_thread_compiles_per_frame: usize,
     ) -> Result<(), EmbeddedMaterialBindError> {
         let embedded = EmbeddedMaterialBindResources::new(
             device.clone(),
@@ -150,7 +152,10 @@ impl MaterialSystem {
             limits.clone(),
         )?;
         self.material_registry = Some(crate::materials::MaterialRegistry::with_default_families(
-            device, limits,
+            device,
+            limits,
+            compile_on_render_thread,
+            render_thread_compiles_per_frame,
         ));
         if let Some(reg) = self.material_registry.as_mut() {
             for (asset_id, (pipeline, shader_asset_name, shader_variant_bits)) in
@@ -186,6 +191,28 @@ impl MaterialSystem {
         self.material_registry.as_ref()
     }
 
+    /// Attach-time flag. False before GPU attach and on real GPUs.
+    pub fn compiles_pipelines_on_render_thread(&self) -> bool {
+        self.material_registry
+            .as_ref()
+            .is_some_and(|registry| registry.compiles_on_render_thread())
+    }
+
+    /// Headless captures compile the whole render-thread queue before submit.
+    pub fn compiles_full_render_thread_queue(&self) -> bool {
+        self.material_registry
+            .as_ref()
+            .is_some_and(|registry| registry.compiles_full_render_thread_queue())
+    }
+
+    /// Takes this material system's pending-draw count. Zero before GPU attach.
+    pub fn take_pending_pipeline_draws(&self) -> u64 {
+        self.material_registry
+            .as_ref()
+            .map(crate::materials::MaterialRegistry::take_pending_pipeline_draws)
+            .unwrap_or(0)
+    }
+
     /// Drains finished background pipeline builds into the cache (no-op before GPU attach).
     ///
     /// Recording threads call into the cache concurrently; pulling completions here keeps the
@@ -193,6 +220,13 @@ impl MaterialSystem {
     pub fn drain_pipeline_build_completions(&self) {
         if let Some(reg) = self.material_registry.as_ref() {
             reg.drain_pipeline_build_completions();
+        }
+    }
+
+    /// Drains finished pipeline builds without starting a render-thread compile.
+    pub fn drain_finished_pipeline_builds(&self) {
+        if let Some(reg) = self.material_registry.as_ref() {
+            reg.drain_finished_pipeline_builds();
         }
     }
 

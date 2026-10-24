@@ -205,7 +205,6 @@ pub(super) fn run_session(
         cfg,
         property_recapture,
         shadow_move,
-        exotic_pair,
     )?;
 
     request_shutdown_and_wait(&mut session.queues, &mut spawned)?;

@@ -196,6 +196,10 @@ fn handle_slot(inner: &WatchdogInner, slot: &Arc<HeartbeatSlot>) {
             // Flush so the report is on disk before any subsequent abort.
             logger::flush();
             record_hang_reported(slot, pet_value);
+            logger::error!(
+                "diag-watchdog-hang: thread '{}' elapsed_ms={elapsed_ms}",
+                slot.name
+            );
 
             let action = inner.settings.read().action;
             if matches!(action, WatchdogAction::LogAndAbort) {

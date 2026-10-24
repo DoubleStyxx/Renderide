@@ -201,8 +201,31 @@ impl Drop for CpuRenderPhaseScope {
 }
 
 /// Runs global asset/material preparation for a schedule-backed render submission.
-pub(in crate::runtime) fn prepare_assets_for_schedule(backend: &mut RenderBackend) {
+///
+/// Headless compiles every pipeline already queued for this thread at frame
+/// start. It does not flush or poll first, and a lookup during this frame stays
+/// pending until the next drain. A windowed software adapter still compiles at
+/// most one pipeline and bounds its idle wait to a single short budget. Real
+/// GPUs read the attach-time flag and skip the build-queue lock.
+pub(in crate::runtime) fn prepare_assets_for_schedule(
+    backend: &mut RenderBackend,
+    gpu: &GpuContext,
+) {
     backend.sync_material_shader_hot_reload();
+    if !backend.material_pipelines_compile_on_render_thread() {
+        backend.drain_pipeline_build_completions();
+        return;
+    }
+    if backend.compiles_full_render_thread_queue() {
+        backend.drain_pipeline_build_completions();
+        return;
+    }
+    if crate::materials::render_thread_builds_queued()
+        && !gpu.wait_until_idle_for_windowed_software_pipeline_compile()
+    {
+        backend.drain_finished_pipeline_builds();
+        return;
+    }
     backend.drain_pipeline_build_completions();
 }
 
@@ -238,7 +261,7 @@ pub(in crate::runtime) fn execute_one_shot_view_plans<'a>(
     let one_shot_views = view_ids_for_plans(&plans);
     schedule.run_phase(CpuRenderPhase::Extract, || {});
     schedule.run_phase(CpuRenderPhase::AssetPrepare, || {
-        prepare_assets_for_schedule(backend);
+        prepare_assets_for_schedule(backend, gpu);
     });
     let prepared_views = schedule.run_phase(CpuRenderPhase::ViewPlanning, || {
         let frame_global = plans

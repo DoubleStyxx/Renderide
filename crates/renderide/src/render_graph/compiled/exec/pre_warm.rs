@@ -17,6 +17,39 @@ use crate::hi_z_cpu::{hi_z_pyramid_dimensions, mip_levels_for_extent};
 use crate::occlusion::gpu::HIZ_MAX_MIPS;
 use crate::render_graph::HistorySlotId;
 
+/// Compiles pass-owned pipelines before command recording on headless and software adapters.
+///
+/// Normal and depth prepasses are already warmed from the draw list in the backend.
+/// Scene compose, clustered lighting, and Hi-Z are not on the material queue. Building
+/// them inside an open pass hangs DX12 WARP even when no submits are queued. The graph
+/// only reads the attach-time flag and forwards the compose formats. Real GPUs return
+/// on that flag. The backend compiles the pipelines.
+fn precompile_pass_owned_pipelines_before_submit(
+    mv_ctx: &mut MultiViewExecutionContext<'_>,
+    views: &[FrameView<'_>],
+) {
+    if !mv_ctx
+        .backend
+        .materials()
+        .compiles_pipelines_on_render_thread()
+    {
+        return;
+    }
+    let mut seen = Vec::new();
+    for view in views {
+        let layout = view.layout(mv_ctx.gpu);
+        let key = (layout.surface_format, layout.multiview_stereo);
+        if seen.contains(&key) {
+            continue;
+        }
+        seen.push(key);
+    }
+    let device = mv_ctx.device;
+    mv_ctx
+        .backend
+        .precompile_pass_owned_pipelines_before_submit(device, &seen);
+}
+
 impl CompiledRenderGraph {
     /// Prepares shared frame resources, per-view resource slots, mesh streams, and material
     /// pipelines for every view before command recording begins.
@@ -120,6 +153,7 @@ impl CompiledRenderGraph {
             view_layouts,
             resource_layouts,
         );
+        precompile_pass_owned_pipelines_before_submit(mv_ctx, views);
         Ok(())
     }
 

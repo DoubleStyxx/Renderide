@@ -406,6 +406,14 @@ impl GraphViewPreparationBackend for BackendGraphAccess<'_> {
         );
     }
 
+    fn precompile_pass_owned_pipelines_before_submit(
+        &mut self,
+        device: &wgpu::Device,
+        compose_targets: &[(wgpu::TextureFormat, bool)],
+    ) {
+        self.precompile_pass_owned_pipelines(device, compose_targets);
+    }
+
     fn pre_record_sync_for_views(
         &mut self,
         device: &wgpu::Device,

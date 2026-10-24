@@ -267,6 +267,15 @@ jobs:
           set -euo pipefail
           if [[ "${RUNNER_OS}" == "Windows" ]]; then
             ./target/debug/renderide-test.exe check-suite --jobs 1
+          elif [[ "${RUNNER_OS}" == "Linux" ]]; then
+            # Defer one non-Null material pipeline for 12s without blocking the
+            # render thread. The suite must still match the lit golden, which
+            # requires the pending==0 wait, and that wait must log a rejection
+            # before the ready frame. Release builds ignore the env.
+            RENDERIDE_TEST_PIPELINE_STALL_MS=12000 \
+              ./target/debug/renderide-test check-suite --jobs 1
+            grep -R -q "still has compiling or skipped material draws" logs/renderer-test \
+              || grep -R -q "stable PNG is flat; waiting for a later frame" logs/renderer-test
           else
             ./target/debug/renderide-test check-suite --jobs 1
           fi

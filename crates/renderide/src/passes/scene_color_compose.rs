@@ -52,6 +52,18 @@ impl SceneColorComposePass {
     }
 }
 
+/// Compiles the scene-color compose pipeline before the compose pass records it.
+///
+/// Headless and software adapters call this so `create_render_pipeline` does not
+/// run inside the open compose render pass. Real GPUs keep the lazy path.
+pub(crate) fn precompile_scene_color_compose_pipeline(
+    device: &wgpu::Device,
+    output_format: wgpu::TextureFormat,
+    multiview_stereo: bool,
+) {
+    let _ = compose_pipelines().pipeline(device, output_format, multiview_stereo);
+}
+
 fn compose_pipelines() -> &'static SceneColorComposePipelineCache {
     static CACHE: LazyLock<SceneColorComposePipelineCache> =
         LazyLock::new(SceneColorComposePipelineCache::default);
@@ -103,6 +115,19 @@ impl RasterPass for SceneColorComposePass {
         b.never_merge();
         b.never_parallel();
         b.parameters(&self.resources)
+    }
+
+    fn color_load_op_override(
+        &self,
+        _ctx: &RasterPassCtx<'_, '_>,
+        attachment_index: usize,
+    ) -> Option<wgpu::LoadOp<wgpu::Color>> {
+        if attachment_index != 0 || !crate::gpu::warp_black_diag::distinctive_clear_enabled() {
+            return None;
+        }
+        Some(wgpu::LoadOp::Clear(
+            crate::gpu::warp_black_diag::forward_clear_color(),
+        ))
     }
 
     fn multiview_mask_override(
