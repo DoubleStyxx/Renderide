@@ -41,7 +41,7 @@
 use std::sync::Arc;
 
 use glam::{Mat4, Vec3};
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 use parking_lot::Mutex;
 
 use crate::hi_z_cpu::project_world_aabb_uv;
@@ -285,6 +285,30 @@ impl OcclusionFacts {
     }
 }
 
+/// Per-view buffers for the serial hysteresis plan.
+///
+/// [`VisibilityFrameScratch::clear`] keeps the allocation. The occlusion system parks one of
+/// these on the view and hands it back next frame, so a steady scene does not allocate the
+/// motion list, the present list, or the present-key set again.
+#[derive(Default)]
+pub(crate) struct VisibilityFrameScratch {
+    /// One resolved camera pair per in-scope render space, including `None` when the pair is missing.
+    pub resolved_motion: Vec<(RenderSpaceId, Option<SpaceMotion>)>,
+    /// Prepared casters in scope. Filled only when history still has a visible caster.
+    pub present: Vec<PresentCaster>,
+    /// Keys inserted while planning disocclusion. Cleared and refilled with the present list.
+    pub present_keys: HashSet<CasterKey>,
+}
+
+impl VisibilityFrameScratch {
+    /// Drops this frame's rows without releasing the buffers.
+    pub(crate) fn clear(&mut self) {
+        self.resolved_motion.clear();
+        self.present.clear();
+        self.present_keys.clear();
+    }
+}
+
 /// History snapshot plus the cleared map the next [`VisibilityHysteresis::finish`] refills.
 pub(crate) struct VisibilityScratch {
     /// Classification published by the previous tested frame.
@@ -293,6 +317,8 @@ pub(crate) struct VisibilityScratch {
     pub spare: HashMap<CasterKey, CasterRecord>,
     /// `true` when the previous frame skipped history because the prepared count was over the cap.
     pub suspended: bool,
+    /// Motion, present-caster, and present-key buffers reused across frames for this view.
+    pub frame_scratch: VisibilityFrameScratch,
 }
 
 /// Per-view classification carried from the previous tested frame.
@@ -304,11 +330,21 @@ pub(crate) struct VisibilityHistory {
 impl VisibilityHistory {
     /// Builds a history from an existing caster map.
     ///
-    /// Only the bench API constructs a history from an outside map. The renderer fills history
-    /// through [`VisibilityHysteresis::finish`].
-    #[cfg(feature = "bench-api")]
+    /// The bench API and tests construct a history from an outside map. The renderer fills
+    /// history through [`VisibilityHysteresis::finish`].
+    #[cfg(any(test, feature = "bench-api"))]
     pub(crate) fn from_casters(casters: HashMap<CasterKey, CasterRecord>) -> Self {
         Self { casters }
+    }
+
+    /// `true` when any remembered caster was drawn.
+    ///
+    /// Disocclusion only punches holes for previously visible casters. A history with none of
+    /// them has nothing to plan, so the frame can skip the present-caster set.
+    pub(crate) fn any_visible(&self) -> bool {
+        self.casters
+            .values()
+            .any(|record| record.class == VisibilityClass::Visible)
     }
 
     /// Record stored for `key`, if this caster was tested last frame.
@@ -397,32 +433,18 @@ impl VisibilityHysteresis {
         }
     }
 
-    /// Previous classification for `key`.
-    pub(crate) fn previous(&self, key: &CasterKey) -> Option<&CasterRecord> {
-        self.history.get(key)
-    }
-
-    /// Clip planes used to interpret Hi-Z depth in `space_id`.
-    pub(crate) fn depth_clip(&self, space_id: RenderSpaceId) -> Option<DepthClip> {
-        self.motions.get(&space_id).map(|motion| motion.clip)
-    }
-
-    /// UV expansion that keeps a small camera motion from disabling the occlusion test.
-    ///
-    /// `None` when this space has no comparable cameras or either projection fails. Callers then
-    /// keep the draw.
-    pub(crate) fn motion_pad(&self, space_id: RenderSpaceId, min: Vec3, max: Vec3) -> Option<f32> {
-        let motion = self.motions.get(&space_id)?;
-        if motion.stereo.is_some() {
-            stereo_motion_pad(motion, min, max)
-        } else {
-            mono_motion_pad(motion, min, max)
-        }
+    /// Camera pair cached for `space_id` while this view's plan was built.
+    pub(crate) fn space_motion(&self, space_id: RenderSpaceId) -> Option<&SpaceMotion> {
+        self.motions.get(&space_id)
     }
 
     /// Decides whether `caster` is drawn and records the class to commit at the end of the view.
     ///
-    /// A missing `caster` id cannot be tracked, so the draw is kept.
+    /// A missing `caster` id cannot be tracked, so the draw is kept. A caster the pyramid does
+    /// not occlude is drawn and stored as visible without a history lookup: the rejection gate
+    /// requires `facts.occluded`, and a non-occluded sample is not another occluder, so the next
+    /// class is visible either way. The record is still written, or the caster can never become
+    /// previously occluded.
     pub(crate) fn allows_draw(
         &self,
         caster: Option<CasterRef>,
@@ -433,7 +455,11 @@ impl VisibilityHysteresis {
         let Some(caster) = caster else {
             return true;
         };
-        let previous = self.previous(&caster.key);
+        if !facts.occluded {
+            self.remember(caster, aabb_min, aabb_max, VisibilityClass::Visible);
+            return true;
+        }
+        let previous = self.history.get(&caster.key);
         let caster_moved = previous.is_some_and(|record| {
             record.mesh_asset_id != caster.mesh_asset_id
                 || bounds_moved((record.aabb_min, record.aabb_max), (aabb_min, aabb_max))
@@ -445,16 +471,20 @@ impl VisibilityHysteresis {
             hi_z_occludes: facts.occluded,
             other_occluder: facts.other_occluder,
         });
+        self.remember(caster, aabb_min, aabb_max, decision.next_class);
+        decision.action != HistoryAction::Culled
+    }
+
+    fn remember(&self, caster: CasterRef, aabb_min: Vec3, aabb_max: Vec3, class: VisibilityClass) {
         self.shard().lock().push((
             caster.key,
             CasterRecord {
-                class: decision.next_class,
+                class,
                 aabb_min,
                 aabb_max,
                 mesh_asset_id: caster.mesh_asset_id,
             },
         ));
-        decision.action != HistoryAction::Culled
     }
 
     /// Replaces the view history with the casters tested this frame.
@@ -565,14 +595,19 @@ pub(crate) fn covering_depth_is_other_occluder(
 
 /// Chebyshev UV expansion from reprojecting one AABB through two view-projections.
 ///
-/// `None` when either projection fails, which includes a box that left the frustum. Identical
-/// cameras return a pad near zero.
+/// `None` when a projection fails, which includes a box that left the frustum. Identical
+/// cameras still project once: a box that straddles the near plane fails that project and must
+/// not cull, and a successful project is a pad of zero.
 pub(crate) fn screen_motion_uv_pad(
     previous_vp: Mat4,
     current_vp: Mat4,
     aabb_min: Vec3,
     aabb_max: Vec3,
 ) -> Option<f32> {
+    if previous_vp == current_vp {
+        project_world_aabb_uv(current_vp, aabb_min, aabb_max)?;
+        return Some(0.0);
+    }
     let previous = project_world_aabb_uv(previous_vp, aabb_min, aabb_max)?;
     let current = project_world_aabb_uv(current_vp, aabb_min, aabb_max)?;
     let du = (previous.0.0 - current.0.0)
@@ -583,6 +618,18 @@ pub(crate) fn screen_motion_uv_pad(
         .max((previous.1.1 - current.1.1).abs());
     let pad = du.max(dv);
     pad.is_finite().then_some(pad)
+}
+
+/// UV expansion for one space's cached camera pair.
+///
+/// `None` when this space has no comparable cameras or a projection fails. Callers then keep
+/// the draw.
+pub(crate) fn space_motion_pad(motion: &SpaceMotion, min: Vec3, max: Vec3) -> Option<f32> {
+    if motion.stereo.is_some() {
+        stereo_motion_pad(motion, min, max)
+    } else {
+        mono_motion_pad(motion, min, max)
+    }
 }
 
 /// `true` when a view with `caster_count` prepared casters may run history confirmation.
@@ -654,9 +701,11 @@ pub(crate) fn parallax_adjusted_pad(
 pub(crate) fn plan_disocclusion(
     history: &VisibilityHistory,
     present: &[PresentCaster],
+    present_keys: &mut HashSet<CasterKey>,
     mut include_space: impl FnMut(RenderSpaceId) -> bool,
 ) -> Vec<MovedCaster> {
-    let mut present_keys = hashbrown::HashSet::with_capacity(present.len());
+    present_keys.clear();
+    present_keys.reserve(present.len());
     let mut movers = Vec::new();
     for caster in present {
         if !include_space(caster.space_id) {

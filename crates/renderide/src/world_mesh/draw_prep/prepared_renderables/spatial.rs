@@ -42,10 +42,18 @@ impl Drop for PreparedSpatialRunCandidates {
     }
 }
 
+/// One prepared world caster plus the run whose first draw owns its bounds.
+struct StoredWorldCaster {
+    run_index: usize,
+    bounds: super::PreparedCasterBounds,
+}
+
 /// Per-render-space BVH and linear fallback buckets for prepared renderer runs.
 #[derive(Default)]
 pub(super) struct PreparedSpatialIndex {
     spaces: HashMap<RenderSpaceId, PreparedSpatialSpace>,
+    /// World casters in run order. Rebuilt with the index and refit when dynamic bounds move.
+    stored_world_casters: Vec<StoredWorldCaster>,
 }
 
 impl PreparedSpatialIndex {
@@ -53,6 +61,7 @@ impl PreparedSpatialIndex {
     pub(super) fn rebuild(&mut self, draws: &[FramePreparedDraw], runs: &[FramePreparedRun]) {
         profiling::scope!("mesh::prepared_renderables::spatial_rebuild");
         self.spaces.clear();
+        self.fill_world_casters(draws, runs);
         let mut builders: HashMap<RenderSpaceId, PreparedSpatialSpaceBuilder> = HashMap::new();
         for (run_index, run) in runs.iter().copied().enumerate() {
             let Some(first) = draws.get(run.start as usize) else {
@@ -146,9 +155,65 @@ impl PreparedSpatialIndex {
             };
             profiling::scope!("mesh::prepared_renderables::spatial_refit");
             space.refit(draws, runs);
+            self.refresh_world_casters(draws, runs, space_id);
             refit_count = refit_count.saturating_add(1);
         }
         refit_count
+    }
+
+    /// Fills the compact world-caster list from prepared runs without building a BVH.
+    ///
+    /// The predicate matches the hysteresis caster walk: not overlay, not hidden, and a world
+    /// AABB is present. Zero-extent boxes stay in the list. [`Self::rebuild`] calls this before
+    /// the spatial buckets, and tests that never build a BVH call it directly.
+    pub(super) fn fill_world_casters(
+        &mut self,
+        draws: &[FramePreparedDraw],
+        runs: &[FramePreparedRun],
+    ) {
+        self.stored_world_casters.clear();
+        for (run_index, run) in runs.iter().copied().enumerate() {
+            let Some(first) = draws.get(run.start as usize) else {
+                continue;
+            };
+            let Some(bounds) = prepared_world_caster(first) else {
+                continue;
+            };
+            self.stored_world_casters
+                .push(StoredWorldCaster { run_index, bounds });
+        }
+    }
+
+    /// Prepared world casters in run order.
+    pub(super) fn world_casters(&self) -> impl Iterator<Item = &super::PreparedCasterBounds> {
+        self.stored_world_casters.iter().map(|entry| &entry.bounds)
+    }
+
+    /// Rewrites caster bounds for `space_id` from the current draws, dropping rows that no longer qualify.
+    fn refresh_world_casters(
+        &mut self,
+        draws: &[FramePreparedDraw],
+        runs: &[FramePreparedRun],
+        space_id: RenderSpaceId,
+    ) {
+        let mut index = 0;
+        while index < self.stored_world_casters.len() {
+            if self.stored_world_casters[index].bounds.space_id != space_id {
+                index += 1;
+                continue;
+            }
+            let run_index = self.stored_world_casters[index].run_index;
+            let bounds = runs
+                .get(run_index)
+                .and_then(|run| draws.get(run.start as usize))
+                .and_then(prepared_world_caster);
+            if let Some(bounds) = bounds {
+                self.stored_world_casters[index].bounds = bounds;
+                index += 1;
+            } else {
+                self.stored_world_casters.swap_remove(index);
+            }
+        }
     }
 
     /// Returns whether `space_id` uses a BVH instead of only linear buckets.
@@ -571,6 +636,23 @@ fn record_spatial_frustum_reject(
         .saturating_add(slot_count);
 }
 
+fn prepared_world_caster(first: &FramePreparedDraw) -> Option<super::PreparedCasterBounds> {
+    if first.is_overlay || first.is_hidden {
+        return None;
+    }
+    let (aabb_min, aabb_max) = first.cull_geometry?.world_aabb?;
+    Some(super::PreparedCasterBounds {
+        space_id: first.space_id,
+        renderable_index: first.renderable_index,
+        instance_id: first.instance_id.0,
+        node_id: first.node_id,
+        skinned: first.skinned,
+        mesh_asset_id: first.mesh_asset_id,
+        aabb_min,
+        aabb_max,
+    })
+}
+
 fn indexable_run_bounds(first: &FramePreparedDraw) -> Option<(Vec3A, Vec3A)> {
     if first.is_overlay {
         return None;
@@ -730,6 +812,12 @@ mod tests {
         assert_eq!(refit_count, 1);
         assert_eq!(after.runs.len(), 1);
         assert_eq!(after.runs[0], FramePreparedRun { start: 0, end: 1 });
+        let updated = spatial
+            .world_casters()
+            .find(|bounds| bounds.renderable_index == 0)
+            .expect("refit keeps the caster");
+        assert_eq!(updated.aabb_min, Vec3::new(-0.25, -0.25, -0.25));
+        assert_eq!(updated.aabb_max, Vec3::new(0.25, 0.25, 0.25));
     }
 
     #[test]

@@ -511,29 +511,11 @@ impl FramePreparedRenderables {
         mut include_space: impl FnMut(RenderSpaceId) -> bool,
         mut visit: impl FnMut(PreparedCasterBounds) -> bool,
     ) -> bool {
-        for run in &self.runs {
-            let Some(first) = self.draws.get(run.start as usize) else {
-                continue;
-            };
-            if first.is_overlay || first.is_hidden || !include_space(first.space_id) {
+        for bounds in self.spatial.world_casters() {
+            if !include_space(bounds.space_id) {
                 continue;
             }
-            let Some(geometry) = first.cull_geometry else {
-                continue;
-            };
-            let Some((aabb_min, aabb_max)) = geometry.world_aabb else {
-                continue;
-            };
-            if !visit(PreparedCasterBounds {
-                space_id: first.space_id,
-                renderable_index: first.renderable_index,
-                instance_id: first.instance_id.0,
-                node_id: first.node_id,
-                skinned: first.skinned,
-                mesh_asset_id: first.mesh_asset_id,
-                aabb_min,
-                aabb_max,
-            }) {
+            if !visit(*bounds) {
                 return false;
             }
         }
@@ -771,12 +753,16 @@ impl FramePreparedRenderables {
 
     /// One world-caster run per requested renderer, for the history-budget tests.
     ///
-    /// Each run has a finite world AABB and is neither overlay nor hidden. The spatial index is
-    /// left empty; [`Self::world_caster_count_at_most`] only walks runs and draws.
+    /// Each run has a finite world AABB and is neither overlay nor hidden. The compact caster
+    /// list is filled without building a BVH. Active space ids match the groups so the hysteresis
+    /// plan can resolve one camera pair per space.
     #[cfg(test)]
     pub(crate) fn test_with_caster_runs(groups: &[(RenderSpaceId, usize)]) -> Self {
         let mut prepared = Self::empty(RenderingContext::UserView);
         for &(space_id, count) in groups {
+            if count > 0 && !prepared.active_space_ids.contains(&space_id) {
+                prepared.active_space_ids.push(space_id);
+            }
             for _ in 0..count {
                 let index = prepared.draws.len();
                 let start = u32::try_from(index).unwrap_or(u32::MAX);
@@ -815,6 +801,9 @@ impl FramePreparedRenderables {
                 });
             }
         }
+        prepared
+            .spatial
+            .fill_world_casters(&prepared.draws, &prepared.runs);
         prepared
     }
 }

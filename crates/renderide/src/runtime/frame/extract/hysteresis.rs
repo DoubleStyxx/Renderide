@@ -15,8 +15,8 @@ use crate::cull_contract::HiZTemporalState;
 use crate::hi_z_cpu::project_world_aabb_uv;
 use crate::occlusion::hysteresis::{
     CasterKey, DepthClip, HISTORY_CASTER_BUDGET, MovedCaster, PresentCaster, ScreenRect,
-    SpaceMotion, VisibilityHysteresis, VisibilityScratch, disocclusion_rects,
-    history_confirmation_applies, plan_disocclusion,
+    SpaceMotion, VisibilityFrameScratch, VisibilityHysteresis, VisibilityScratch,
+    disocclusion_rects, history_confirmation_applies, plan_disocclusion,
 };
 use crate::scene::{RenderSpaceId, SceneCoordinator};
 use crate::world_mesh::draw_prep::PreparedCasterBounds;
@@ -55,7 +55,7 @@ pub(super) fn build_view_hysteresis_plans(
             let temporal = temporals.get(index).and_then(|temporal| temporal.as_ref());
             let scratch = occlusion.begin_visibility(view.view_id);
             let prepared = prepared_renderables.get(index).copied().flatten();
-            let (frame, apply) = build_frame(
+            let (frame, frame_scratch, apply) = build_frame(
                 scene,
                 prepared,
                 view.render_space_scope,
@@ -64,6 +64,7 @@ pub(super) fn build_view_hysteresis_plans(
                 temporal,
                 scratch,
             );
+            occlusion.restore_frame_scratch(view.view_id, frame_scratch);
             Some(ViewHysteresisPlan {
                 view_id: view.view_id,
                 frame,
@@ -91,7 +92,14 @@ fn build_frame(
     proj: &WorldMeshCullProjParams,
     temporal: Option<&HiZTemporalState>,
     scratch: VisibilityScratch,
-) -> (VisibilityHysteresis, bool) {
+) -> (VisibilityHysteresis, VisibilityFrameScratch, bool) {
+    let VisibilityScratch {
+        history,
+        spare,
+        suspended,
+        mut frame_scratch,
+    } = scratch;
+    frame_scratch.clear();
     let caster_count = prepared
         .map(|prepared| {
             prepared.world_caster_count_at_most(HISTORY_CASTER_BUDGET, |space_id| {
@@ -99,63 +107,59 @@ fn build_frame(
             })
         })
         .unwrap_or(Some(0));
-    if !history_confirmation_applies(caster_count, scratch.suspended) {
+    if !history_confirmation_applies(caster_count, suspended) {
         return (
-            VisibilityHysteresis::new(scratch.history, scratch.spare, HashMap::new(), Vec::new()),
+            VisibilityHysteresis::new(history, spare, HashMap::new(), Vec::new()),
+            frame_scratch,
             false,
         );
     }
-    let mut resolved_motion = Vec::new();
-    let mut present = Vec::new();
+    let track_presence = history.any_visible();
     if let Some(prepared) = prepared {
-        prepared.for_each_world_caster_bounds(
-            |space_id| scope.includes(space_id),
-            |caster| {
-                note_caster(
-                    scene,
-                    host_camera,
-                    proj,
-                    temporal,
-                    caster,
-                    &mut resolved_motion,
-                    &mut present,
-                );
-            },
-        );
+        for &space_id in prepared.active_space_ids() {
+            if !scope.includes(space_id) {
+                continue;
+            }
+            frame_scratch.resolved_motion.push((
+                space_id,
+                space_motion(scene, space_id, host_camera, proj, temporal),
+            ));
+        }
+        if track_presence {
+            prepared.for_each_world_caster_bounds(
+                |space_id| scope.includes(space_id),
+                |caster| {
+                    frame_scratch.present.push(present_caster(caster));
+                },
+            );
+        }
     }
-    let movers = plan_disocclusion(&scratch.history, &present, |space_id| {
-        scope.includes(space_id)
-    });
+    let movers = if track_presence {
+        plan_disocclusion(
+            &history,
+            &frame_scratch.present,
+            &mut frame_scratch.present_keys,
+            |space_id| scope.includes(space_id),
+        )
+    } else {
+        Vec::new()
+    };
     let stale_rects = stale_rects_for_movers(scene, host_camera, proj, &movers);
-    let motions = resolved_motion
-        .into_iter()
-        .filter_map(|(space_id, motion)| motion.map(|motion| (space_id, motion)))
-        .collect();
+    let mut motions = HashMap::with_capacity(frame_scratch.resolved_motion.len());
+    for (space_id, motion) in &frame_scratch.resolved_motion {
+        if let Some(motion) = motion {
+            motions.insert(*space_id, *motion);
+        }
+    }
     (
-        VisibilityHysteresis::new(scratch.history, scratch.spare, motions, stale_rects),
+        VisibilityHysteresis::new(history, spare, motions, stale_rects),
+        frame_scratch,
         true,
     )
 }
 
-fn note_caster(
-    scene: &SceneCoordinator,
-    host_camera: &HostCameraFrame,
-    proj: &WorldMeshCullProjParams,
-    temporal: Option<&HiZTemporalState>,
-    caster: PreparedCasterBounds,
-    resolved_motion: &mut Vec<(RenderSpaceId, Option<SpaceMotion>)>,
-    present: &mut Vec<PresentCaster>,
-) {
-    if !resolved_motion
-        .iter()
-        .any(|(space_id, _)| *space_id == caster.space_id)
-    {
-        resolved_motion.push((
-            caster.space_id,
-            space_motion(scene, caster.space_id, host_camera, proj, temporal),
-        ));
-    }
-    present.push(PresentCaster {
+fn present_caster(caster: PreparedCasterBounds) -> PresentCaster {
+    PresentCaster {
         key: CasterKey::new(
             caster.space_id,
             caster.renderable_index,
@@ -167,7 +171,7 @@ fn note_caster(
         aabb_min: caster.aabb_min,
         aabb_max: caster.aabb_max,
         space_id: caster.space_id,
-    });
+    }
 }
 
 fn stale_rects_for_movers(
@@ -403,7 +407,9 @@ mod tests {
         suspended: bool,
     ) -> bool {
         use crate::camera::ViewId;
-        use crate::occlusion::hysteresis::{VisibilityHistory, VisibilityScratch};
+        use crate::occlusion::hysteresis::{
+            VisibilityFrameScratch, VisibilityHistory, VisibilityScratch,
+        };
         use crate::world_mesh::culling::WorldMeshCullInput;
         use crate::world_mesh::draw_prep::FramePreparedRenderables;
 
@@ -414,8 +420,9 @@ mod tests {
             history: Arc::new(VisibilityHistory::default()),
             spare: HashMap::new(),
             suspended,
+            frame_scratch: VisibilityFrameScratch::default(),
         };
-        let (frame, apply) = super::build_frame(
+        let (frame, _frame_scratch, apply) = super::build_frame(
             &SceneCoordinator::new(),
             Some(&prepared),
             scope,
@@ -476,5 +483,80 @@ mod tests {
             ),
             "a suspended view stays on the legacy Hi-Z test through the resume band"
         );
+    }
+
+    #[test]
+    fn visibility_frame_scratch_reuses_storage_across_a_second_frame() {
+        use crate::camera::ViewId;
+        use crate::occlusion::OcclusionSystem;
+        use crate::occlusion::hysteresis::{
+            CasterKey, CasterRecord, VisibilityClass, VisibilityHistory,
+        };
+        use crate::world_mesh::ViewRenderSpaceScope;
+        use crate::world_mesh::draw_prep::FramePreparedRenderables;
+
+        let occlusion = OcclusionSystem::new();
+        let view = ViewId::Main;
+        let space_id = RenderSpaceId(1);
+        let key = CasterKey::new(space_id, 0, 0, 0, false);
+        let visible_history = || {
+            let mut casters = HashMap::new();
+            casters.insert(
+                key,
+                CasterRecord {
+                    class: VisibilityClass::Visible,
+                    aabb_min: glam::Vec3::ZERO,
+                    aabb_max: glam::Vec3::ONE,
+                    mesh_asset_id: 1,
+                },
+            );
+            VisibilityHistory::from_casters(casters)
+        };
+        occlusion.store_visibility_history(view, visible_history(), false);
+        let prepared = FramePreparedRenderables::test_with_caster_runs(&[(space_id, 3)]);
+        let host = HostCameraFrame::default();
+        let proj = proj_with(60.0, None);
+
+        let drive = || {
+            let scratch = occlusion.begin_visibility(view);
+            let (frame, frame_scratch, apply) = super::build_frame(
+                &SceneCoordinator::new(),
+                Some(&prepared),
+                ViewRenderSpaceScope::AllActive,
+                &host,
+                &proj,
+                None,
+                scratch,
+            );
+            assert!(apply);
+            assert!(!frame_scratch.present.is_empty());
+            assert!(frame_scratch.present_keys.contains(&key));
+            drop(frame);
+            occlusion.store_visibility_history(view, visible_history(), false);
+            frame_scratch
+        };
+
+        let first = drive();
+        let motion_ptr = first.resolved_motion.as_ptr();
+        let motion_cap = first.resolved_motion.capacity();
+        let present_ptr = first.present.as_ptr();
+        let present_cap = first.present.capacity();
+        let stored = first.present_keys.get(&key).expect("present key");
+        let key_ptr: *const CasterKey = stored;
+        let key_cap = first.present_keys.capacity();
+        assert!(motion_cap > 0);
+        assert!(present_cap > 0);
+        assert!(key_cap > 0);
+        occlusion.restore_frame_scratch(view, first);
+
+        let second = drive();
+        assert_eq!(second.resolved_motion.as_ptr(), motion_ptr);
+        assert_eq!(second.resolved_motion.capacity(), motion_cap);
+        assert_eq!(second.present.as_ptr(), present_ptr);
+        assert_eq!(second.present.capacity(), present_cap);
+        let stored = second.present_keys.get(&key).expect("present key");
+        let second_ptr: *const CasterKey = stored;
+        assert_eq!(second_ptr, key_ptr);
+        assert_eq!(second.present_keys.capacity(), key_cap);
     }
 }

@@ -15,7 +15,9 @@ use crate::gpu::OutputDepthMode;
 use crate::hi_z_cpu::HiZCullData;
 use crate::history_texture::HistoryTextureMipViews;
 use crate::occlusion::gpu::{HiZBuildRecord, HiZGpuState, HiZHistoryTarget, encode_hi_z_build};
-use crate::occlusion::hysteresis::{CasterKey, CasterRecord, VisibilityHistory, VisibilityScratch};
+use crate::occlusion::hysteresis::{
+    CasterKey, CasterRecord, VisibilityFrameScratch, VisibilityHistory, VisibilityScratch,
+};
 
 /// Depth source, layout, and logical view for [`OcclusionSystem::encode_hi_z_build_pass`].
 pub(crate) struct HiZBuildInput<'a> {
@@ -47,6 +49,17 @@ struct VisibilitySlot {
     spare: HashMap<CasterKey, CasterRecord>,
     /// Previous frame skipped history because the prepared caster count was over the cap.
     suspended: bool,
+    /// Serial-plan buffers returned by [`OcclusionSystem::restore_frame_scratch`].
+    frame_scratch: VisibilityFrameScratch,
+}
+
+fn empty_visibility_slot() -> VisibilitySlot {
+    VisibilitySlot {
+        published: Arc::new(VisibilityHistory::default()),
+        spare: HashMap::new(),
+        suspended: false,
+        frame_scratch: VisibilityFrameScratch::default(),
+    }
 }
 
 impl Default for OcclusionSystem {
@@ -148,25 +161,39 @@ impl OcclusionSystem {
         removed
     }
 
-    /// Borrows the published classification and takes the spare map for `view`.
+    /// Borrows the published classification and takes the spare map and frame buffers for `view`.
     ///
     /// Missing history is an empty snapshot: every caster is treated as newly revealed.
     /// The spare map keeps its allocation across frames when [`Self::store_visibility_history`]
-    /// can unwrap the previous publication.
+    /// can unwrap the previous publication. The frame buffers keep theirs when
+    /// [`Self::restore_frame_scratch`] puts them back before the next begin.
     pub(crate) fn begin_visibility(&self, view: ViewId) -> VisibilityScratch {
         let mut slots = self.visibility.lock();
-        let slot = slots.entry(view).or_insert_with(|| VisibilitySlot {
-            published: Arc::new(VisibilityHistory::default()),
-            spare: HashMap::new(),
-            suspended: false,
-        });
+        let slot = slots.entry(view).or_insert_with(empty_visibility_slot);
         let scratch = VisibilityScratch {
             history: Arc::clone(&slot.published),
             spare: std::mem::take(&mut slot.spare),
             suspended: slot.suspended,
+            frame_scratch: std::mem::take(&mut slot.frame_scratch),
         };
         drop(slots);
         scratch
+    }
+
+    /// Returns the serial-plan buffers taken by [`Self::begin_visibility`].
+    ///
+    /// The view's slot already exists because begin created it. Retiring the view drops the slot,
+    /// including these buffers.
+    pub(crate) fn restore_frame_scratch(
+        &self,
+        view: ViewId,
+        frame_scratch: VisibilityFrameScratch,
+    ) {
+        let mut slots = self.visibility.lock();
+        if let Some(slot) = slots.get_mut(&view) {
+            slot.frame_scratch = frame_scratch;
+        }
+        drop(slots);
     }
 
     /// Stores the classification produced by this frame's fine cull.
@@ -182,11 +209,7 @@ impl OcclusionSystem {
         suspended: bool,
     ) {
         let mut slots = self.visibility.lock();
-        let slot = slots.entry(view).or_insert_with(|| VisibilitySlot {
-            published: Arc::new(VisibilityHistory::default()),
-            spare: HashMap::new(),
-            suspended: false,
-        });
+        let slot = slots.entry(view).or_insert_with(empty_visibility_slot);
         slot.suspended = suspended;
         let old = std::mem::replace(&mut slot.published, Arc::new(history));
         if let Ok(old_history) = Arc::try_unwrap(old) {

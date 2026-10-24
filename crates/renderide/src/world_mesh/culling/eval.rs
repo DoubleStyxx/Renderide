@@ -23,8 +23,8 @@ use crate::hi_z_cpu::{
     sample_aabb_occlusion_with_pad, stereo_hiz_keeps_draw,
 };
 use crate::occlusion::hysteresis::{
-    CasterRef, DepthClip, OcclusionFacts, ScreenRect, covering_depth_is_other_occluder,
-    parallax_adjusted_pad,
+    CasterRef, DepthClip, OcclusionFacts, ScreenRect, SpaceMotion,
+    covering_depth_is_other_occluder, parallax_adjusted_pad, space_motion_pad,
 };
 
 /// Clip matrices for one render space, built once and reused across every AABB in that space.
@@ -35,14 +35,14 @@ use crate::occlusion::hysteresis::{
 /// per-call path, including "missing space stays visible" and stereo OR.
 #[derive(Clone, Copy)]
 pub(crate) struct PreparedSpaceCull<'a> {
-    /// Render space this plan was built for.
-    space_id: RenderSpaceId,
     /// Frustum half-spaces for this space.
     frustum: SpaceFrustum,
     /// Previous-frame Hi-Z test, when the temporal snapshot applies to this space.
     hi_z: Option<PreparedSpaceHiZ<'a>>,
     /// History confirmation for this view. Absent on broadphase, overlays, and over-budget views.
     hysteresis: Option<&'a crate::occlusion::hysteresis::VisibilityHysteresis>,
+    /// Camera pair for this space, resolved once when the hysteresis plan is attached.
+    motion: Option<&'a SpaceMotion>,
 }
 
 /// Precomputed homogeneous clip matrices for one space.
@@ -94,10 +94,10 @@ impl<'a> PreparedSpaceCull<'a> {
         S: SceneSpaceRead + ?Sized,
     {
         Self {
-            space_id,
             frustum: space_frustum(scene, space_id, is_overlay, culling),
             hi_z: None,
             hysteresis: None,
+            motion: None,
         }
     }
 
@@ -112,7 +112,6 @@ impl<'a> PreparedSpaceCull<'a> {
         S: SceneSpaceRead + ?Sized,
     {
         Self {
-            space_id,
             frustum: space_frustum(scene, space_id, is_overlay, culling),
             hi_z: if is_overlay {
                 None
@@ -120,6 +119,13 @@ impl<'a> PreparedSpaceCull<'a> {
                 prepare_space_hi_z(space_id, culling)
             },
             hysteresis: if is_overlay { None } else { culling.hysteresis },
+            motion: if is_overlay {
+                None
+            } else {
+                culling
+                    .hysteresis
+                    .and_then(|frame| frame.space_motion(space_id))
+            },
         }
     }
 
@@ -166,30 +172,33 @@ impl<'a> PreparedSpaceCull<'a> {
     /// pyramid was written. A closer covering surface widens that pad again. No motion bound
     /// means the previous pyramid is not confirmation, so the caster is kept.
     fn occlusion_facts(&self, wmin: Vec3, wmax: Vec3) -> OcclusionFacts {
-        let Some(frame) = self.hysteresis else {
+        if self.hysteresis.is_none() {
+            return OcclusionFacts::keep();
+        }
+        let Some(hi_z) = self.hi_z else {
             return OcclusionFacts::keep();
         };
-        let Some(clip) = frame.depth_clip(self.space_id) else {
+        let Some(motion) = self.motion else {
             return OcclusionFacts::keep();
         };
-        let Some(pad) = frame.motion_pad(self.space_id, wmin, wmax) else {
+        let Some(pad) = space_motion_pad(motion, wmin, wmax) else {
             return OcclusionFacts::keep();
         };
-        match self.hi_z {
-            None => OcclusionFacts::keep(),
-            Some(PreparedSpaceHiZ::Desktop {
+        let clip = motion.clip;
+        match hi_z {
+            PreparedSpaceHiZ::Desktop {
                 snapshot,
                 view_proj,
-            }) => facts_from_mono(
+            } => facts_from_mono(
                 confirm_sample(snapshot, view_proj, wmin, wmax, pad, clip),
                 clip,
             ),
-            Some(PreparedSpaceHiZ::Stereo {
+            PreparedSpaceHiZ::Stereo {
                 left,
                 right,
                 left_vp,
                 right_vp,
-            }) => facts_from_stereo(
+            } => facts_from_stereo(
                 confirm_sample(left, left_vp, wmin, wmax, pad, clip),
                 confirm_sample(right, right_vp, wmin, wmax, pad, clip),
                 clip,

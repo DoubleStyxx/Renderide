@@ -375,7 +375,8 @@ mod tests {
                 space_id: RenderSpaceId(1),
             },
         ];
-        let movers = plan_disocclusion(&history, &present, |_| true);
+        let mut present_keys = HashSet::new();
+        let movers = plan_disocclusion(&history, &present, &mut present_keys, |_| true);
         assert!(movers.iter().any(|mover| {
             mover.previous_aabb == (min, max) && mover.current_aabb == (min, max)
         }));

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use glam::{Mat4, Quat, Vec3};
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 use rayon::prelude::*;
 
 use crate::camera::reverse_z_perspective;
@@ -431,6 +431,7 @@ impl HysteresisCullWorkload {
 /// prepared casters in scope, not casters that survive the frustum.
 pub struct HysteresisHistoryWorkload {
     present: Vec<PresentCaster>,
+    present_keys: HashSet<CasterKey>,
     previous_vp: Mat4,
     current_vp: Mat4,
     history: Arc<VisibilityHistory>,
@@ -487,6 +488,7 @@ impl HysteresisHistoryWorkload {
         }
         Self {
             present,
+            present_keys: HashSet::new(),
             previous_vp,
             current_vp,
             history: Arc::new(VisibilityHistory::from_casters(casters)),
@@ -500,7 +502,10 @@ impl HysteresisHistoryWorkload {
     /// [`crate::occlusion::OcclusionSystem::store_visibility_history`].
     #[must_use]
     pub fn step(&mut self) -> u32 {
-        let movers = plan_disocclusion(&self.history, &self.present, |_| true);
+        let movers =
+            plan_disocclusion(&self.history, &self.present, &mut self.present_keys, |_| {
+                true
+            });
         let current_vp = self.current_vp;
         let previous_vp = self.previous_vp;
         let stale = disocclusion_rects(&movers, |min, max| project_screen(current_vp, min, max));
