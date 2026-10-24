@@ -8,6 +8,9 @@
 use std::time::{Duration, SystemTime};
 
 /// Consecutive good frames required before a candidate is accepted.
+///
+/// "Two in a row" means two frames the harness observed, each with its own PNG
+/// mtime. Frames the renderer drew between those observations do not count.
 pub(crate) const GPU_SETTLE_FRAMES: u32 = 2;
 
 /// Readiness budget used when the selected adapter is WARP.
@@ -64,16 +67,16 @@ impl GpuFrameSettle {
     }
 
     /// Consecutive good frames counted so far.
-    #[cfg(test)]
     pub(crate) const fn completed_frames(&self) -> u32 {
         self.completed
     }
 
-    /// Updates the settle from one stable PNG.
+    /// Updates the settle from one stable PNG the harness observed.
     ///
     /// A good frame is GPU-done, pending=0, zero dropped draws, and not flat.
-    /// Two consecutive good frames, each with its own mtime, are accepted. Any
-    /// other frame resets the count. Repeating the same mtime does not count again.
+    /// Two consecutive good observations, each with its own mtime, are accepted.
+    /// Any other observed frame resets the count. Repeating the same mtime does
+    /// not count again.
     pub(crate) fn observe(&mut self, mtime: SystemTime, frame: FrameReadiness) -> SettleDecision {
         self.longest_stall_ms = self.longest_stall_ms.max(frame.stall_ms);
         if self.last_mtime == Some(mtime) {

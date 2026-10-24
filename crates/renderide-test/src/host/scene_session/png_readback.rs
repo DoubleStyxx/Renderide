@@ -381,6 +381,7 @@ struct CaptureProgress {
     pending_pipeline_seen: bool,
     gpu_not_done_logged: bool,
     settle_hold_logged: bool,
+    last_observed: Option<ObservedSettleState>,
     chunks: ObservedChunks,
 }
 
@@ -405,7 +406,15 @@ fn settle_stable_frame(
         progress,
     );
     stats.sync(settle.longest_stall_ms(), warp_used);
+    let completed_before = settle.completed_frames();
     let decision = settle.observe(mtime, decoded.readiness);
+    log_settle_rejection(
+        mtime,
+        &decoded.readiness,
+        decision,
+        completed_before > 0,
+        progress,
+    );
     stats.sync(settle.longest_stall_ms(), warp_used);
     if decision == SettleDecision::Accept {
         logger::info!(
@@ -495,6 +504,72 @@ fn extend_warp_budget(
         "Session: WARP adapter; readiness budget is {:?} (#216, #214)",
         budget
     );
+}
+
+/// Readiness facts that distinguish a flat stretch from an alternating one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ObservedSettleState {
+    flat: bool,
+    pending: Option<u64>,
+    gpu_done: bool,
+    dropped_draws: Option<u64>,
+}
+
+impl ObservedSettleState {
+    fn from_frame(frame: &FrameReadiness) -> Self {
+        Self {
+            flat: frame.flat,
+            pending: frame.pending,
+            gpu_done: frame.gpu_done,
+            dropped_draws: frame.dropped_draws,
+        }
+    }
+}
+
+/// Logs a settle rejection when its readiness state differs from the last observation.
+///
+/// Repeated identical frames produce one line. `good` then `flat` then `good`
+/// then `flat` produces a line on each return to `flat`, with `reset` set when
+/// a counted frame was cleared. `stall_ms` is printed but does not by itself
+/// open a new line.
+fn log_settle_rejection(
+    mtime: SystemTime,
+    frame: &FrameReadiness,
+    decision: SettleDecision,
+    had_counted_frame: bool,
+    progress: &mut CaptureProgress,
+) {
+    let observed = ObservedSettleState::from_frame(frame);
+    let changed = progress.last_observed != Some(observed);
+    progress.last_observed = Some(observed);
+    if decision != SettleDecision::Reject || !changed {
+        return;
+    }
+    let reset = had_counted_frame;
+    logger::info!(
+        "Session: settle reject mtime={} flat={} pending={} gpu_done={} dropped={} stall_ms={} reset={}",
+        mtime_millis(mtime),
+        frame.flat,
+        format_count(frame.pending),
+        frame.gpu_done,
+        format_count(frame.dropped_draws),
+        frame.stall_ms,
+        reset,
+    );
+}
+
+fn mtime_millis(mtime: SystemTime) -> u128 {
+    mtime
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or(0)
+}
+
+fn format_count(count: Option<u64>) -> String {
+    match count {
+        Some(count) => count.to_string(),
+        None => "none".to_string(),
+    }
 }
 
 fn reported_wait(overall: Duration, warp_budget_used: bool, deadline_floor: Duration) -> Duration {
@@ -643,305 +718,4 @@ fn classify_capture_timeout(
 }
 
 #[cfg(test)]
-mod tests {
-    use std::time::{Duration, Instant, SystemTime};
-
-    use super::{
-        CaptureTimeout, ObservedChunks, PngObservation, PngStabilityState, PngStabilityVerdict,
-        PngStabilityWaitTiming, classify_capture_timeout,
-    };
-
-    fn chunks_with_last(last_pending: Option<u64>, frames: u64) -> ObservedChunks {
-        let mut chunks = ObservedChunks::default();
-        match last_pending {
-            Some(0) => chunks.note(Some("0")),
-            Some(count) => {
-                let text = count.to_string();
-                chunks.note(Some(&text));
-            }
-            None => chunks.note(None),
-        }
-        chunks.frames = frames;
-        chunks
-    }
-
-    #[test]
-    fn reported_wait_includes_the_deadline_floor() {
-        let floor = Duration::from_millis(3500);
-        let short = Duration::from_millis(500);
-        assert_eq!(super::reported_wait(short, false, floor), floor);
-        let base = Duration::from_secs(180);
-        assert_eq!(super::reported_wait(base, false, floor), base);
-        assert_eq!(
-            super::reported_wait(base, true, floor),
-            Duration::from_secs(300)
-        );
-    }
-
-    #[test]
-    fn non_warp_adapter_timeout_still_reports_flat_or_unstable() {
-        let budget =
-            super::super::gpu_ready::warp_readiness_budget(false, Duration::from_secs(180));
-        assert_eq!(budget, Duration::from_secs(180));
-        let ready = chunks_with_last(Some(0), 5);
-        assert_eq!(
-            classify_capture_timeout(&ready, false, true),
-            CaptureTimeout::FlatOrUnstable
-        );
-        let err = crate::error::HarnessError::FlatOrUnstableFrame {
-            path: std::path::PathBuf::from("actual.png"),
-            wait: budget,
-            last_pending: 0,
-            ready_chunks: ready.ready,
-            pending_chunks: ready.pending,
-            missing_chunks: ready.missing,
-            frame_count: ready.frames,
-        };
-        let text = err.to_string();
-        assert!(text.contains("flat or unstable"), "{text}");
-        assert!(text.contains("last pending=0"), "{text}");
-        assert!(text.contains("frames="), "{text}");
-        assert!(!text.contains("pipeline-pending"), "{text}");
-    }
-
-    #[test]
-    fn timeout_with_pending_zero_is_flat_or_unstable_not_pipeline_not_ready() {
-        let ready = chunks_with_last(Some(0), 5);
-        assert_eq!(
-            classify_capture_timeout(&ready, true, true),
-            CaptureTimeout::FlatOrUnstable
-        );
-        assert_eq!(
-            classify_capture_timeout(&ready, false, true),
-            CaptureTimeout::FlatOrUnstable
-        );
-
-        let still_pending = chunks_with_last(Some(3), 2);
-        assert_eq!(
-            classify_capture_timeout(&still_pending, true, false),
-            CaptureTimeout::PipelineNotReady
-        );
-
-        let unseen = ObservedChunks::default();
-        assert_eq!(
-            classify_capture_timeout(&unseen, false, false),
-            CaptureTimeout::Missing
-        );
-    }
-
-    /// Builds a timing where `interval=1s` -> `min_wall_after_submit=2s`
-    /// (since `interval*2 = 2s > MIN_WALL_AFTER_SUBMIT_FLOOR = 1.5s`).
-    fn make_timing(
-        scene_submitted_at: SystemTime,
-        scene_submit_instant: Instant,
-    ) -> PngStabilityWaitTiming {
-        PngStabilityWaitTiming {
-            scene_submitted_at,
-            scene_submit_instant,
-            overall_timeout: Duration::from_secs(10),
-            interval: Duration::from_secs(1),
-        }
-    }
-
-    fn fresh_state() -> (PngStabilityState, Instant, SystemTime) {
-        let i0 = Instant::now();
-        let t0 = SystemTime::now();
-        let state = PngStabilityState::new(&make_timing(t0, i0));
-        (state, i0, t0)
-    }
-
-    #[test]
-    fn pending_before_render_window_opens() {
-        let (mut s, i0, t0) = fresh_state();
-        let now = i0 + Duration::from_millis(500);
-        let mtime = t0 + Duration::from_millis(100);
-        let v = s.observe(now, PngObservation::Present { mtime, size: 1024 });
-        assert_eq!(v, PngStabilityVerdict::Pending);
-    }
-
-    #[test]
-    fn pending_when_mtime_not_advanced_past_scene() {
-        let (mut s, i0, t0) = fresh_state();
-        let now = i0 + Duration::from_millis(2500);
-        let mtime = t0 - Duration::from_millis(100);
-        let v = s.observe(now, PngObservation::Present { mtime, size: 1024 });
-        assert_eq!(v, PngStabilityVerdict::Pending);
-    }
-
-    #[test]
-    fn pending_when_size_zero() {
-        let (mut s, i0, t0) = fresh_state();
-        let now = i0 + Duration::from_millis(2500);
-        let mtime = t0 + Duration::from_millis(100);
-        let v = s.observe(now, PngObservation::Present { mtime, size: 0 });
-        assert_eq!(v, PngStabilityVerdict::Pending);
-    }
-
-    #[test]
-    fn pending_within_stability_window() {
-        let (mut s, i0, t0) = fresh_state();
-        let mtime = t0 + Duration::from_millis(2200);
-        assert_eq!(
-            s.observe(
-                i0 + Duration::from_millis(2300),
-                PngObservation::Present { mtime, size: 1024 }
-            ),
-            PngStabilityVerdict::Pending
-        );
-        assert_eq!(
-            s.observe(
-                i0 + Duration::from_millis(2400),
-                PngObservation::Present { mtime, size: 1024 }
-            ),
-            PngStabilityVerdict::Pending
-        );
-    }
-
-    #[test]
-    fn stable_after_window_elapses() {
-        let (mut s, i0, t0) = fresh_state();
-        let mtime = t0 + Duration::from_millis(2200);
-        assert_eq!(
-            s.observe(
-                i0 + Duration::from_millis(2300),
-                PngObservation::Present { mtime, size: 1024 }
-            ),
-            PngStabilityVerdict::Pending
-        );
-        assert_eq!(
-            s.observe(
-                i0 + Duration::from_millis(2500),
-                PngObservation::Present { mtime, size: 1024 }
-            ),
-            PngStabilityVerdict::Stable
-        );
-    }
-
-    #[test]
-    fn stable_since_resets_when_mtime_changes() {
-        let (mut s, i0, t0) = fresh_state();
-        let mtime1 = t0 + Duration::from_millis(2200);
-        assert_eq!(
-            s.observe(
-                i0 + Duration::from_millis(2300),
-                PngObservation::Present {
-                    mtime: mtime1,
-                    size: 1024,
-                }
-            ),
-            PngStabilityVerdict::Pending
-        );
-
-        let mtime2 = t0 + Duration::from_millis(2400);
-        assert_eq!(
-            s.observe(
-                i0 + Duration::from_millis(2450),
-                PngObservation::Present {
-                    mtime: mtime2,
-                    size: 1024,
-                }
-            ),
-            PngStabilityVerdict::Pending
-        );
-        // Past the original `stable_since` by >200ms, but mtime changed so the window restarted.
-        assert_eq!(
-            s.observe(
-                i0 + Duration::from_millis(2600),
-                PngObservation::Present {
-                    mtime: mtime2,
-                    size: 1024,
-                }
-            ),
-            PngStabilityVerdict::Pending
-        );
-        assert_eq!(
-            s.observe(
-                i0 + Duration::from_millis(2650),
-                PngObservation::Present {
-                    mtime: mtime2,
-                    size: 1024,
-                }
-            ),
-            PngStabilityVerdict::Stable
-        );
-    }
-
-    #[test]
-    fn reject_candidate_reopens_the_window_for_the_same_mtime() {
-        let (mut s, i0, t0) = fresh_state();
-        let mtime = t0 + Duration::from_millis(2200);
-        assert_eq!(
-            s.observe(
-                i0 + Duration::from_millis(2300),
-                PngObservation::Present { mtime, size: 1024 }
-            ),
-            PngStabilityVerdict::Pending
-        );
-        assert_eq!(
-            s.observe(
-                i0 + Duration::from_millis(2600),
-                PngObservation::Present { mtime, size: 1024 }
-            ),
-            PngStabilityVerdict::Stable
-        );
-        s.reject_candidate();
-        assert_eq!(
-            s.observe(
-                i0 + Duration::from_millis(2610),
-                PngObservation::Present { mtime, size: 1024 }
-            ),
-            PngStabilityVerdict::Pending
-        );
-        assert_eq!(
-            s.observe(
-                i0 + Duration::from_millis(2900),
-                PngObservation::Present { mtime, size: 1024 }
-            ),
-            PngStabilityVerdict::Stable
-        );
-    }
-
-    #[test]
-    fn missing_file_keeps_pending() {
-        let (mut s, i0, _t0) = fresh_state();
-        let now = i0 + Duration::from_millis(2500);
-        assert_eq!(
-            s.observe(now, PngObservation::Missing),
-            PngStabilityVerdict::Pending
-        );
-        assert!(s.last_seen_mtime().is_none());
-    }
-
-    #[test]
-    fn pipeline_text_chunk_zero_is_ready_and_anything_else_waits() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let png = dir.path().join("actual.png");
-        assert!(!super::pipeline_frame_is_ready(&png));
-        write_pending_png(&png, "2");
-        assert!(!super::pipeline_frame_is_ready(&png));
-        write_pending_png(&png, "0");
-        assert!(super::pipeline_frame_is_ready(&png));
-        // A sidecar must not override the count stored in the PNG.
-        std::fs::write(png.with_extension("pipeline-pending"), "0\n").expect("sidecar");
-        write_pending_png(&png, "4");
-        assert!(!super::pipeline_frame_is_ready(&png));
-        write_pending_png(&png, "nope");
-        assert!(!super::pipeline_frame_is_ready(&png));
-    }
-
-    fn write_pending_png(path: &std::path::Path, pending: &str) {
-        let file = std::fs::File::create(path).expect("create png");
-        let mut encoder = png::Encoder::new(file, 1, 1);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        encoder
-            .add_text_chunk(
-                super::PIPELINE_PENDING_TEXT_KEYWORD.to_string(),
-                pending.to_string(),
-            )
-            .expect("text chunk");
-        let mut writer = encoder.write_header().expect("header");
-        writer.write_image_data(&[0, 0, 0, 255]).expect("pixels");
-        writer.finish().expect("finish");
-    }
-}
+mod tests;
