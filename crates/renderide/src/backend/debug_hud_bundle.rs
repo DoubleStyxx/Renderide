@@ -7,6 +7,7 @@ use crate::config::RendererSettingsHandle;
 use crate::diagnostics::{
     DebugHud, DebugHudInput, DebugHudOverlayContext, FrameDiagnosticsSnapshot,
     FrameTimingHudSnapshot, RendererInfoSnapshot, SceneTransformsSnapshot, TextureDebugSnapshot,
+    note_snapshot_clone,
 };
 use crate::hud_contract::WorldMeshViewHudStats;
 use crate::hud_contract::{DebugHudEncodeError, PerViewHudConfig, PerViewHudOutputs};
@@ -123,8 +124,10 @@ impl DebugHudBundle {
             self.set_last_world_mesh_draw_stats(stats);
         }
         if let Some(view_stats) = outputs.world_mesh_view_stats.as_ref() {
+            note_snapshot_clone();
             self.set_last_world_mesh_view_stats(view_stats.clone());
         }
+        note_snapshot_clone();
         if let Some(rows) = outputs.world_mesh_draw_state_rows.clone() {
             self.set_last_world_mesh_draw_state_rows(rows);
         }
@@ -239,6 +242,7 @@ impl DebugHudBundle {
     }
 
     pub(crate) fn last_world_mesh_view_stats(&self) -> Vec<WorldMeshViewHudStats> {
+        note_snapshot_clone();
         self.last_world_mesh_view_stats.clone()
     }
 
@@ -247,6 +251,7 @@ impl DebugHudBundle {
     }
 
     pub(crate) fn last_world_mesh_draw_state_rows(&self) -> Vec<WorldMeshDrawStateRow> {
+        note_snapshot_clone();
         self.last_world_mesh_draw_state_rows.clone()
     }
 
@@ -326,5 +331,34 @@ impl DebugHudBundle {
             }
             Err(e) => Err(e),
         }
+    }
+}
+
+#[cfg(test)]
+mod snapshot_clone_counter_tests {
+    use super::DebugHudBundle;
+    use crate::diagnostics::{
+        lock_hud_work_counters, reset_hud_work_counters, snapshot_hud_work_counters,
+    };
+    use crate::hud_contract::PerViewHudOutputs;
+
+    #[test]
+    fn per_view_and_getter_clones_are_counted() {
+        let _guard = lock_hud_work_counters();
+        reset_hud_work_counters();
+        let mut bundle = DebugHudBundle::new();
+        bundle.apply_per_view_outputs(&PerViewHudOutputs {
+            world_mesh_draw_stats: None,
+            world_mesh_view_stats: None,
+            world_mesh_draw_state_rows: Some(Vec::new()),
+            current_view_texture_2d_asset_ids: Vec::new(),
+        });
+        let _stats = bundle.last_world_mesh_view_stats();
+        let _rows = bundle.last_world_mesh_draw_state_rows();
+        let clones = snapshot_hud_work_counters().snapshot_clones;
+        assert!(
+            clones >= 3,
+            "apply_per_view_outputs and the getters should count their clones, got {clones}"
+        );
     }
 }
