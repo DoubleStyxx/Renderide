@@ -2,9 +2,11 @@
 //!
 //! Forward shading writes a transient HDR image, and compose then blits that image over the
 //! camera target. Loading the transient does not keep the render texture. Depth-only and
-//! clear-none cameras therefore copy the current color in first, then load it. Skybox and color
-//! cameras skip this pass.
+//! clear-none cameras therefore copy the current color in first, then load it. A double-buffered
+//! camera copies its history image, not the image this frame writes. Skybox and color cameras
+//! skip this pass.
 
+use crate::frame_contract::RenderTextureSelfSampling;
 use crate::passes::helpers::missing_pass_resource;
 use crate::render_graph::context::EncoderPassCtx;
 use crate::render_graph::error::{RenderPassError, SetupError};
@@ -48,11 +50,15 @@ impl EncoderPass for WorldMeshForwardColorPreservePass {
 
     fn record(&self, ctx: &mut EncoderPassCtx<'_, '_, '_>) -> Result<(), RenderPassError> {
         let extent = ctx.frame.view.viewport_px;
-        let source = ctx
-            .frame
-            .view
-            .color_texture
-            .ok_or_else(|| missing_pass_resource(self.name(), "offscreen color texture"))?;
+        let source = preserved_color_texture(
+            ctx.frame
+                .view
+                .offscreen_write_target
+                .render_texture_self_sampling(),
+            ctx.frame.view.color_texture,
+            ctx.frame.view.history_color_texture,
+        )
+        .ok_or_else(|| missing_pass_resource(self.name(), "preserved color texture"))?;
         let destination = ctx
             .graph_resources
             .transient_texture(self.scene_color_hdr)
@@ -113,4 +119,20 @@ pub(crate) fn copy_preserved_scene_color(
             depth_or_array_layers: 1,
         },
     );
+}
+
+/// Color image a Nothing or Depth camera copies into HDR scene color.
+///
+/// Double-buffered cameras return `history` and never the write image. Every other camera
+/// returns `write`. `None` means this view has no image to preserve.
+pub(crate) fn preserved_color_texture<'a>(
+    self_sampling: Option<RenderTextureSelfSampling>,
+    write: Option<&'a wgpu::Texture>,
+    history: Option<&'a wgpu::Texture>,
+) -> Option<&'a wgpu::Texture> {
+    if self_sampling == Some(RenderTextureSelfSampling::AllowPreviousContents) {
+        history
+    } else {
+        write
+    }
 }

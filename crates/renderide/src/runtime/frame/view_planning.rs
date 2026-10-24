@@ -268,6 +268,8 @@ fn log_camera_portal_disable_per_pixel_lights(rt_id: i32) {
 struct ResidentSecondaryRenderTexture {
     /// Host render texture color storage.
     color_texture: Arc<wgpu::Texture>,
+    /// Previous-frame color image after a double-buffer swap. Absent for every other camera.
+    history_color_texture: Option<Arc<wgpu::Texture>>,
     /// Full host render texture color view.
     color_view: Arc<wgpu::TextureView>,
     /// Full host render texture depth storage.
@@ -304,6 +306,7 @@ impl RendererRuntime {
         };
         Some(ResidentSecondaryRenderTexture {
             color_texture: rt.color_texture.clone(),
+            history_color_texture: None,
             color_view: rt.color_view.clone(),
             depth_format: depth_texture.format(),
             depth_texture,
@@ -334,6 +337,7 @@ impl RendererRuntime {
         };
         Some(ResidentSecondaryRenderTexture {
             color_texture: rt.color_texture.clone(),
+            history_color_texture: None,
             color_view: rt.color_view.clone(),
             depth_format: depth_texture.format(),
             depth_texture,

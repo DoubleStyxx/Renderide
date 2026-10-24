@@ -772,6 +772,11 @@ pub struct GraphPassFrameView<'a> {
     /// `None` for the swapchain, multiview, and partial-viewport scratch targets. Those paths
     /// cannot preserve the previous color by loading the HDR transient.
     pub color_texture: Option<&'a wgpu::Texture>,
+    /// Previous-frame color image for a double-buffered camera.
+    ///
+    /// Nothing and Depth clear modes copy this into HDR scene color. [`Self::color_texture`] is
+    /// the image this frame writes, so seeding that image would copy the back buffer.
+    pub history_color_texture: Option<&'a wgpu::Texture>,
     /// `true` when [`Self::depth_texture`] is the persistent camera depth target.
     ///
     /// Window, OpenXR, and full render-texture views own that image. A partial viewport renders

@@ -104,6 +104,7 @@ fn refresh_published_color(
     };
     rt.color_texture = Arc::clone(&texture.color_texture);
     rt.color_view = Arc::clone(&texture.color_view);
+    rt.history_color_texture = texture.history_color_texture();
 }
 
 /// Owned inputs for one secondary camera that is going to render.
@@ -251,30 +252,47 @@ fn assemble_secondary_rt_handles(
     scratch: Option<crate::backend::SecondaryRtScratchTargets>,
 ) -> OffscreenTargetHandles {
     let Some(scratch) = scratch else {
-        return OffscreenTargetHandles::new(
-            write_target,
-            rt.color_texture.as_ref().clone(),
-            rt.color_view.as_ref().clone(),
-            rt.depth_texture.as_ref().clone(),
-            rt.depth_view.as_ref().clone(),
-            rt.extent_px,
-            rt.color_format,
+        return with_history_color(
+            OffscreenTargetHandles::new(
+                write_target,
+                rt.color_texture.as_ref().clone(),
+                rt.color_view.as_ref().clone(),
+                rt.depth_texture.as_ref().clone(),
+                rt.depth_view.as_ref().clone(),
+                rt.extent_px,
+                rt.color_format,
+            ),
+            &rt,
         );
     };
-    OffscreenTargetHandles::new(
-        write_target,
-        scratch.color_texture.as_ref().clone(),
-        scratch.color_view.as_ref().clone(),
-        scratch.depth_texture.as_ref().clone(),
-        scratch.depth_view.as_ref().clone(),
-        render_rect.extent_px,
-        rt.color_format,
+    with_history_color(
+        OffscreenTargetHandles::new(
+            write_target,
+            scratch.color_texture.as_ref().clone(),
+            scratch.color_view.as_ref().clone(),
+            scratch.depth_texture.as_ref().clone(),
+            scratch.depth_view.as_ref().clone(),
+            render_rect.extent_px,
+            rt.color_format,
+        )
+        .with_copy_to_color(OffscreenColorCopy {
+            destination_texture: rt.color_texture.as_ref().clone(),
+            destination_origin_px: render_rect.origin_px,
+            extent_px: render_rect.extent_px,
+        }),
+        &rt,
     )
-    .with_copy_to_color(OffscreenColorCopy {
-        destination_texture: rt.color_texture.as_ref().clone(),
-        destination_origin_px: render_rect.origin_px,
-        extent_px: render_rect.extent_px,
-    })
+}
+
+/// Attaches the post-swap history image when this camera double-buffered the texture.
+fn with_history_color(
+    handles: OffscreenTargetHandles,
+    rt: &ResidentSecondaryRenderTexture,
+) -> OffscreenTargetHandles {
+    match rt.history_color_texture.as_ref() {
+        Some(texture) => handles.with_history_color(texture.as_ref().clone()),
+        None => handles,
+    }
 }
 
 /// Finishes the [`FrameViewPlan`] for a camera that already has post-swap handles.

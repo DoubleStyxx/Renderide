@@ -35,6 +35,9 @@ pub(in crate::runtime) struct OffscreenTargetHandles {
     pub(in crate::runtime) write_target: OffscreenWriteTarget,
     /// Color texture backing `color_view`.
     pub(in crate::runtime) color_texture: wgpu::Texture,
+    /// Previous-frame color image for a double-buffered camera. The preserve pass copies this
+    /// instead of `color_texture`, which is the image this frame writes.
+    pub(in crate::runtime) history_color_texture: Option<wgpu::Texture>,
     /// Color attachment view for this render texture.
     pub(in crate::runtime) color_view: wgpu::TextureView,
     /// Depth attachment backing texture.
@@ -68,8 +71,18 @@ impl OffscreenTargetHandles {
             depth_view,
             extent_px,
             color_format,
+            history_color_texture: None,
             copy_to_color: None,
         }
+    }
+
+    /// Records the previous-frame color image a double-buffered camera seeds from.
+    pub(in crate::runtime) fn with_history_color(
+        mut self,
+        history_color_texture: wgpu::Texture,
+    ) -> Self {
+        self.history_color_texture = Some(history_color_texture);
+        self
     }
 
     /// Adds a post-render color copy destination.
@@ -264,6 +277,7 @@ impl<'a> FrameViewPlan<'a> {
                 FrameViewTarget::OffscreenRt(ExternalOffscreenTargets {
                     write_target: handles.write_target,
                     color_texture: &handles.color_texture,
+                    history_color_texture: handles.history_color_texture.as_ref(),
                     color_view: &handles.color_view,
                     depth_texture: &handles.depth_texture,
                     depth_view: &handles.depth_view,

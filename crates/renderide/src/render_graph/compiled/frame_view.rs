@@ -22,6 +22,11 @@ pub struct ExternalOffscreenTargets<'a> {
     pub write_target: OffscreenWriteTarget,
     /// Color texture backing `color_view`.
     pub color_texture: &'a wgpu::Texture,
+    /// Previous-frame color image when this camera is double-buffered.
+    ///
+    /// Nothing and Depth clear modes copy this texture into HDR scene color. `color_texture` is
+    /// the image this frame writes.
+    pub history_color_texture: Option<&'a wgpu::Texture>,
     /// Color attachment (`Rgba16Float` for Unity `ARGBHalf` parity).
     pub color_view: &'a wgpu::TextureView,
     /// Depth texture backing `depth_view`.

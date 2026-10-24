@@ -192,6 +192,18 @@ impl GpuRenderTexture {
         self.previous_color.is_some()
     }
 
+    /// Color image completed on the previous double-buffered frame.
+    ///
+    /// `None` until the first rendered double-buffered pass allocates it, and again after idle
+    /// release. This is the image a Nothing or Depth camera must seed from, not the published
+    /// write image.
+    #[inline]
+    pub(crate) fn history_color_texture(&self) -> Option<Arc<wgpu::Texture>> {
+        self.previous_color
+            .as_ref()
+            .map(|previous| Arc::clone(&previous.texture))
+    }
+
     /// View a material should sample.
     ///
     /// `allow_previous` selects the image completed on the prior double-buffered frame. Callers
