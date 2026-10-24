@@ -1,3 +1,5 @@
+//! Homogeneous-clip frustum culling workload.
+
 use glam::{Mat4, Vec3};
 
 use crate::world_mesh::culling::frustum::world_aabb_visible_in_homogeneous_clip;

@@ -1,3 +1,5 @@
+//! Transparent draw sorting workloads.
+
 use std::sync::Arc;
 
 /// Mixed transparent draws sorted by one [`TransparentSortWorkload`] sample at about a thousand rows.

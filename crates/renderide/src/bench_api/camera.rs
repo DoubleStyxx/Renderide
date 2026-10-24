@@ -1,3 +1,5 @@
+//! Camera clear load-op and render-texture double-buffer workloads.
+
 use crate::gpu_pools::pools::render_texture::{claim_double_buffer_swap, swap_ping_pong};
 
 /// Double-buffered cameras swapped by one [`DoubleBufferWorkload::steady_frame`] sample.

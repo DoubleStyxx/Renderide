@@ -1,3 +1,5 @@
+//! Transient-pool reuse and static shadow-plan workloads.
+
 use crate::render_graph::resources::BufferSizePolicy;
 use crate::render_graph::{BufferKey, TransientPool};
 

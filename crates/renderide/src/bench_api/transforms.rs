@@ -1,3 +1,5 @@
+//! Local TRS and world-matrix workloads.
+
 use glam::{Quat, Vec3};
 
 use crate::scene::{

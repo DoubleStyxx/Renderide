@@ -1,3 +1,5 @@
+//! Occlusion hysteresis classification and history workloads.
+
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use glam::{Mat4, Vec3};
