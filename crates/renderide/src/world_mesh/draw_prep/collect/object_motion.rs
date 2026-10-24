@@ -28,11 +28,16 @@ pub(super) struct RigidMotionQuery {
     pub(super) particle_kind: ParticleDrawKind,
     /// Current rigid matrix that the forward pass will upload.
     pub(super) current: Option<Mat4>,
+    /// False for views whose velocity target is not sampled by motion blur.
+    pub(super) consumes_motion_vectors: bool,
 }
 
 /// Returns the previous rigid matrix when this draw should overwrite camera velocity.
 pub(super) fn previous_for_draw(scene: &SceneCoordinator, query: RigidMotionQuery) -> Option<Mat4> {
-    if !scene.rigid_motion_history_enabled() || !query.shape_eligible() {
+    if !query.consumes_motion_vectors
+        || !scene.rigid_motion_history_enabled()
+        || !query.shape_eligible()
+    {
         return None;
     }
     let current = query.current?;

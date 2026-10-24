@@ -64,6 +64,11 @@ pub struct WorldMeshDrawCollection {
     pub visibility: WorldMeshVisibilityStats,
     /// CPU arrangement counters for the final draw list.
     pub arrangement: WorldMeshDrawArrangementStats,
+    /// Set while collecting when this view consumes motion vectors and a draw carries a previous matrix.
+    ///
+    /// Prepare reads this instead of scanning the draw list again. Views that do not consume motion
+    /// vectors leave it false and skip the previous-matrix lookup.
+    pub has_rigid_object_motion: bool,
 }
 
 impl WorldMeshDrawCollection {
@@ -76,6 +81,7 @@ impl WorldMeshDrawCollection {
             draws_hi_z_culled: 0,
             visibility: WorldMeshVisibilityStats::default(),
             arrangement: WorldMeshDrawArrangementStats::default(),
+            has_rigid_object_motion: false,
         }
     }
 }

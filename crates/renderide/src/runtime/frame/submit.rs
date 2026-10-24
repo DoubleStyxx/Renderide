@@ -97,6 +97,7 @@ impl RendererRuntime {
                     .set_rigid_motion_history_enabled(rigid_object_motion_history_enabled(
                         &self.config.settings,
                     ));
+                self.scene.set_pending_object_motion_frame(frame_index);
                 match self.scene.flush_world_caches() {
                     Ok(report) => self.backend.note_scene_cache_flush_report(&report),
                     Err(e) => {

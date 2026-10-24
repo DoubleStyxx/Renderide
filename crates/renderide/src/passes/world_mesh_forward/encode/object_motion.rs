@@ -258,3 +258,7 @@ fn object_motion_draw_eligible(item: &WorldMeshDrawItem) -> bool {
     item.previous_rigid_world_matrix.is_some()
         && item.shadow_cast_mode != ShadowCastMode::ShadowOnly
 }
+
+#[cfg(test)]
+#[path = "object_motion_pixels.rs"]
+mod pixels;

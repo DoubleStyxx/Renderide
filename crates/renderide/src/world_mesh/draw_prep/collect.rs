@@ -107,7 +107,7 @@ fn scene_collect_admission(
 type WorldMeshChunkCullStats = (usize, usize, usize);
 
 /// Draw items and cull counters produced by one collection worker.
-type WorldMeshDrawChunk = (Vec<WorldMeshDrawItem>, WorldMeshChunkCullStats);
+type WorldMeshDrawChunk = (Vec<WorldMeshDrawItem>, WorldMeshChunkCullStats, bool);
 
 /// Draw chunks plus broadphase visibility counters produced by collection.
 struct WorldMeshCollectedChunks {
@@ -175,6 +175,10 @@ pub struct DrawCollectionViewInputs<'a> {
     pub layer_policy: ViewLayerPolicy,
     /// Optional frame reflection-probe selector used to choose the set of specular IBL probes to use per draw.
     pub reflection_probes: Option<&'a ReflectionProbeFrameSelection>,
+    /// When false, collection skips previous-matrix lookup and leaves object velocity off.
+    ///
+    /// Color views set this from rigid motion history. Shadow and overlay views leave it false.
+    pub consumes_motion_vectors: bool,
 }
 
 /// Frame-level caches shared by all draw collection workers for one view.
@@ -242,6 +246,8 @@ pub struct QueuedWorldMeshDraws {
     draws_hi_z_culled: usize,
     /// Visibility broadphase counters gathered before per-renderer prepared draw expansion.
     visibility: WorldMeshVisibilityStats,
+    /// Whether collection attached a previous rigid matrix to any draw.
+    has_rigid_object_motion: bool,
 }
 
 /// Per-view derived lookup state shared by every chunk-collection worker for one queue call.
@@ -394,6 +400,7 @@ impl QueuedWorldMeshDraws {
             draws_culled: 0,
             draws_hi_z_culled: 0,
             visibility: WorldMeshVisibilityStats::default(),
+            has_rigid_object_motion: false,
         }
     }
 
@@ -439,6 +446,7 @@ impl QueuedWorldMeshDraws {
             draws_hi_z_culled: self.draws_hi_z_culled,
             visibility: self.visibility,
             arrangement,
+            has_rigid_object_motion: self.has_rigid_object_motion,
         }
     }
 }
@@ -588,8 +596,10 @@ fn merge_collected_chunks(
     let mut chunks = Vec::with_capacity(collected.chunks.len());
     let mut len = 0usize;
     let mut cull_stats = (0usize, 0usize, 0usize);
+    let mut has_rigid_object_motion = false;
     profiling::scope!("mesh::collect::package_chunks");
-    for (items, cs) in collected.chunks {
+    for (items, cs, chunk_motion) in collected.chunks {
+        has_rigid_object_motion |= chunk_motion;
         cull_stats.0 += cs.0;
         cull_stats.1 += cs.1;
         cull_stats.2 += cs.2;
@@ -605,6 +615,7 @@ fn merge_collected_chunks(
         draws_culled: cull_stats.1,
         draws_hi_z_culled: cull_stats.2,
         visibility: collected.visibility,
+        has_rigid_object_motion,
     }
 }
 
@@ -799,7 +810,7 @@ fn collect_prepared_chunks(
     state: CollectState<'_>,
     cap_hint: usize,
     allow_parallel_chunks: bool,
-) -> Vec<(Vec<WorldMeshDrawItem>, (usize, usize, usize))> {
+) -> Vec<WorldMeshDrawChunk> {
     let run_chunks = prepared.run_chunks();
     let draws = prepared.draws();
     let admission =
@@ -883,12 +894,12 @@ fn merge_spatial_candidate_cull_stats(
     if cull_stats == (0, 0, 0) {
         return;
     }
-    if let Some((_, stats)) = chunks.first_mut() {
+    if let Some((_, stats, _)) = chunks.first_mut() {
         stats.0 += cull_stats.0;
         stats.1 += cull_stats.1;
         stats.2 += cull_stats.2;
     } else {
-        chunks.push((Vec::new(), cull_stats));
+        chunks.push((Vec::new(), cull_stats, false));
     }
 }
 

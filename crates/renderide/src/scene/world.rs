@@ -191,22 +191,20 @@ impl Default for WorldTransformCache {
 }
 
 impl WorldTransformCache {
-    /// Copies the last solved world pose into reused previous-matrix storage.
+    /// Copies the last solved world pose for `nodes` into reused previous-matrix storage.
     ///
-    /// Call this before the current flush overwrites `world_matrices`. The copy stays inside the
-    /// existing allocation when the node count is unchanged.
-    pub(crate) fn publish_previous_world_matrices(&mut self) {
+    /// Call this before the current flush overwrites `world_matrices`. Only the listed nodes are
+    /// written. Those nodes are the rigid `MotionVectorMode::Object` transforms, which includes
+    /// both dirty and clean ones so a stopped object’s previous matrix catches up to current.
+    /// Dirty nodes with no object-mode renderer are left alone. The copy stays inside the existing
+    /// allocation when the node count is unchanged.
+    pub(crate) fn publish_previous_world_matrices(&mut self, nodes: &[usize]) {
         let count = self.world_matrices.len();
-        if self.previous_world_matrices.len() != count {
-            self.previous_world_matrices.resize(count, Mat4::IDENTITY);
-        }
-        if self.previous_valid.len() != count {
-            self.previous_valid.resize(count, false);
-        }
-        if self.motion_history_ready.len() != count {
-            self.motion_history_ready.resize(count, false);
-        }
-        for index in 0..count {
+        self.ensure_motion_history_len(count);
+        for &index in nodes {
+            if index >= count {
+                continue;
+            }
             if self.motion_history_ready[index] {
                 self.previous_world_matrices[index] = self.world_matrices[index];
                 self.previous_valid[index] = true;
@@ -216,19 +214,29 @@ impl WorldTransformCache {
         }
     }
 
-    /// Marks nodes whose current world matrix came from a completed solve.
+    /// Marks listed nodes whose current world matrix came from a completed solve.
     ///
     /// Dirty nodes keep a previous `true` until the next successful solve replaces it. That is
     /// what makes the following publish see the pre-solve matrix.
-    pub(crate) fn seal_motion_history(&mut self) {
+    pub(crate) fn seal_motion_history(&mut self, nodes: &[usize]) {
         let count = self.world_matrices.len();
+        self.ensure_motion_history_len(count);
+        for &index in nodes {
+            if index < count && self.computed[index] {
+                self.motion_history_ready[index] = true;
+            }
+        }
+    }
+
+    fn ensure_motion_history_len(&mut self, count: usize) {
+        if self.previous_world_matrices.len() != count {
+            self.previous_world_matrices.resize(count, Mat4::IDENTITY);
+        }
+        if self.previous_valid.len() != count {
+            self.previous_valid.resize(count, false);
+        }
         if self.motion_history_ready.len() != count {
             self.motion_history_ready.resize(count, false);
-        }
-        for (ready, computed) in self.motion_history_ready.iter_mut().zip(&self.computed) {
-            if *computed {
-                *ready = true;
-            }
         }
     }
 
@@ -242,6 +250,7 @@ impl WorldTransformCache {
     }
 
     /// Capacity of the reused previous-matrix buffer. Steady-state publishes do not grow it.
+    #[cfg(any(test, feature = "bench-api"))]
     pub(crate) fn previous_world_matrix_capacity(&self) -> usize {
         self.previous_world_matrices.capacity()
     }

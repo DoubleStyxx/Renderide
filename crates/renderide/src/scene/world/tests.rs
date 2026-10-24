@@ -464,8 +464,9 @@ fn motion_history_publish_reuses_storage_and_keeps_the_pre_solve_pose() {
     ];
     let parents = vec![-1, 0];
     compute_world_matrices_for_space(0, &nodes, &parents, &mut cache).expect("initial solve");
-    cache.seal_motion_history();
-    cache.publish_previous_world_matrices();
+    let listed = [0usize, 1];
+    cache.seal_motion_history(&listed);
+    cache.publish_previous_world_matrices(&listed);
     let capacity = cache.previous_world_matrix_capacity();
     assert!(capacity >= nodes.len());
     let settled = cache.world_matrices[1];
@@ -474,11 +475,31 @@ fn motion_history_publish_reuses_storage_and_keeps_the_pre_solve_pose() {
     nodes[1] = translation_xform(3.0, 0.0, 0.0);
     cache.computed[1] = false;
     cache.local_dirty[1] = true;
-    cache.publish_previous_world_matrices();
+    cache.publish_previous_world_matrices(&listed);
     assert_eq!(cache.previous_world_matrix_capacity(), capacity);
     let previous = cache.previous_world_matrix(1).expect("previous pose");
     compute_world_matrices_for_space(0, &nodes, &parents, &mut cache).expect("moved solve");
     assert_ne!(cache.world_matrices[1], previous);
-    cache.publish_previous_world_matrices();
+    cache.publish_previous_world_matrices(&listed);
+    assert_eq!(cache.previous_world_matrix_capacity(), capacity);
+}
+
+#[test]
+fn motion_history_publish_copies_only_listed_nodes() {
+    let mut cache = WorldTransformCache::default();
+    let nodes = vec![
+        translation_xform(0.0, 0.0, 0.0),
+        translation_xform(1.0, 0.0, 0.0),
+        translation_xform(2.0, 0.0, 0.0),
+    ];
+    let parents = vec![-1, 0, 0];
+    compute_world_matrices_for_space(0, &nodes, &parents, &mut cache).expect("solve");
+    cache.seal_motion_history(&[0, 1, 2]);
+    cache.publish_previous_world_matrices(&[1]);
+    assert!(cache.previous_world_matrix(1).is_some());
+    assert!(cache.previous_world_matrix(0).is_none());
+    assert!(cache.previous_world_matrix(2).is_none());
+    let capacity = cache.previous_world_matrix_capacity();
+    cache.publish_previous_world_matrices(&[1]);
     assert_eq!(cache.previous_world_matrix_capacity(), capacity);
 }

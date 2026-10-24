@@ -239,11 +239,16 @@ pub(in crate::scene) struct RenderSpaceState {
     pub(in crate::scene) render_material_overrides: Vec<RenderMaterialOverrideEntry>,
     /// Host `BlitToDisplay` renderables; dense by host `renderable_index`.
     pub(in crate::scene) blit_to_displays: Vec<BlitToDisplayEntry>,
-    /// Sticky: some static renderer in this space has requested [`crate::shared::MotionVectorMode::Object`].
+    /// Some static renderer in this space currently uses [`crate::shared::MotionVectorMode::Object`].
     ///
-    /// Not cleared when a later row uses camera or no-motion mode. While set, and while rigid
-    /// motion history is enabled, the world-cache flush publishes previous matrices for the space.
+    /// Cleared by [`Self::refresh_rigid_object_motion_nodes`] when none do. While set, and while
+    /// rigid motion history is enabled, the world-cache flush publishes previous matrices for
+    /// [`Self::rigid_object_motion_nodes`] only.
     pub(in crate::scene) requests_rigid_object_motion: bool,
+    /// Unique dense transform indices of static renderers in `Object` motion mode.
+    ///
+    /// Reused across updates. Publish walks this list instead of every hierarchy node.
+    pub(in crate::scene) rigid_object_motion_nodes: Vec<usize>,
 }
 
 impl RenderSpaceState {
@@ -312,7 +317,29 @@ impl Default for RenderSpaceState {
             render_material_overrides: Vec::new(),
             blit_to_displays: Vec::new(),
             requests_rigid_object_motion: false,
+            rigid_object_motion_nodes: Vec::new(),
         }
+    }
+}
+
+impl RenderSpaceState {
+    /// Rebuilds the object-motion node list from the current static renderers.
+    ///
+    /// Clears [`Self::requests_rigid_object_motion`] when no renderer uses object mode.
+    pub(in crate::scene) fn refresh_rigid_object_motion_nodes(&mut self) {
+        use crate::shared::MotionVectorMode;
+
+        self.rigid_object_motion_nodes.clear();
+        for renderer in &self.static_mesh_renderers {
+            if renderer.motion_vector_mode != MotionVectorMode::Object || renderer.node_id < 0 {
+                continue;
+            }
+            self.rigid_object_motion_nodes
+                .push(renderer.node_id as usize);
+        }
+        self.rigid_object_motion_nodes.sort_unstable();
+        self.rigid_object_motion_nodes.dedup();
+        self.requests_rigid_object_motion = !self.rigid_object_motion_nodes.is_empty();
     }
 }
 
@@ -453,5 +480,31 @@ mod tests {
         let entry = LayerAssignmentEntry::default();
         assert_eq!(entry.node_id, -1);
         assert!(matches!(entry.layer, LayerType::Hidden));
+    }
+
+    #[test]
+    fn object_motion_flag_clears_when_no_renderer_uses_object_mode() {
+        use crate::shared::MotionVectorMode;
+
+        let mut state = RenderSpaceState::default();
+        state.static_mesh_renderers.push(StaticMeshRenderer {
+            node_id: 4,
+            motion_vector_mode: MotionVectorMode::Object,
+            ..StaticMeshRenderer::default()
+        });
+        state.static_mesh_renderers.push(StaticMeshRenderer {
+            node_id: 4,
+            motion_vector_mode: MotionVectorMode::Object,
+            ..StaticMeshRenderer::default()
+        });
+        state.refresh_rigid_object_motion_nodes();
+        assert!(state.requests_rigid_object_motion);
+        assert_eq!(state.rigid_object_motion_nodes, vec![4]);
+
+        state.static_mesh_renderers[0].motion_vector_mode = MotionVectorMode::Camera;
+        state.static_mesh_renderers[1].motion_vector_mode = MotionVectorMode::NoMotion;
+        state.refresh_rigid_object_motion_nodes();
+        assert!(!state.requests_rigid_object_motion);
+        assert!(state.rigid_object_motion_nodes.is_empty());
     }
 }

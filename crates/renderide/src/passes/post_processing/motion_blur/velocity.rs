@@ -15,7 +15,9 @@ pub(crate) fn rigid_clip_velocity(
     let local = local.extend(1.0);
     let current_clip = current_vp * (current_model * local);
     let previous_clip = previous_vp * (previous_model * local);
-    if current_clip.w.abs() < 1.0e-6 || previous_clip.w.abs() < 1.0e-6 {
+    // Non-positive w is behind the near plane. The shader discards those fragments so camera
+    // velocity remains. TAA (#170) must pass unjittered view-projections on both sides.
+    if current_clip.w <= 1.0e-6 || previous_clip.w <= 1.0e-6 {
         return None;
     }
     let current_uv = clip_xy_to_uv(
@@ -63,5 +65,25 @@ mod tests {
         )
         .expect("finite clip");
         assert!(velocity.length() < 1.0e-5);
+    }
+
+    #[test]
+    fn negative_clip_w_falls_back_instead_of_streaking() {
+        let previous_vp = Mat4::from_cols(
+            glam::Vec4::X,
+            glam::Vec4::Y,
+            glam::Vec4::Z,
+            glam::Vec4::new(0.0, 0.0, 0.0, -1.0),
+        );
+        assert!(
+            rigid_clip_velocity(
+                Mat4::IDENTITY,
+                previous_vp,
+                Mat4::IDENTITY,
+                Mat4::IDENTITY,
+                Vec3::ZERO,
+            )
+            .is_none()
+        );
     }
 }

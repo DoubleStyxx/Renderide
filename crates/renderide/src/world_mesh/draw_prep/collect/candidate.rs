@@ -211,6 +211,7 @@ fn previous_rigid_world_matrix(
             world_space_deformed: candidate.world_space_deformed,
             particle_kind: candidate.particle_draw.kind,
             current: rigid_world_matrix,
+            consumes_motion_vectors: ctx.view.consumes_motion_vectors,
         },
     )
 }
@@ -295,6 +296,7 @@ mod tests {
                 render_space_scope: crate::world_mesh::ViewRenderSpaceScope::AllActive,
                 layer_policy: crate::world_mesh::ViewLayerPolicy::MainView,
                 reflection_probes: None,
+                consumes_motion_vectors: false,
             },
             caches: DrawCollectionFrameCaches {
                 material_cache: None,

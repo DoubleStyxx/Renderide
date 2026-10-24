@@ -63,6 +63,7 @@ pub(crate) use depth_prepass::{
     WorldMeshForwardDepthPrepassPipelineKey, depth_prepass_pipeline_key_for_draw,
     pre_warm_depth_prepass_pipeline,
 };
+// `object_motion_*` re-exports will conflict with #181. Merge the `encode` use list by hand.
 pub(crate) use encode::{
     ObjectMotionDraw, ShadowDepthDrawBatch, draw_shadow_depth_subset,
     object_motion_previous_vp_bind_group, record_object_motion_vectors,

@@ -371,6 +371,10 @@ pub(crate) struct MotionBlurViewState {
     /// `None` when that history cannot be used. The object-velocity pass reads this after the
     /// camera pass has already replaced [`Self::history`] with the current frame.
     object_motion_previous_vp: Mutex<Option<(Mat4, Mat4)>>,
+    /// Host frame index that already emitted object velocity for this view.
+    ///
+    /// A second render in the same submit sees the same index and leaves camera velocity in place.
+    object_velocity_emitted_frame: Mutex<Option<i32>>,
 }
 
 impl MotionBlurViewState {
@@ -391,6 +395,7 @@ impl MotionBlurViewState {
             previous_vp_bind_group,
             history: Mutex::new(None),
             object_motion_previous_vp: Mutex::new(None),
+            object_velocity_emitted_frame: Mutex::new(None),
         }
     }
 }

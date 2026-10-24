@@ -4,6 +4,11 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// `#[cfg(test)]` device tests. They open their own device and are not frame-graph passes, so the
+/// frame profiler does not wrap them. Production object velocity is recorded by the render graph.
+const CFG_TEST_GPU_FILES: &[&str] =
+    &["src/passes/world_mesh_forward/encode/object_motion_pixels.rs"];
+
 /// Files whose copy commands are covered by a caller-level GPU profiler scope.
 const PARENT_SCOPED_COPY_FILES: &[&str] = &[
     "src/app/headless/readback.rs",
@@ -115,11 +120,19 @@ fn direct_queue_submit_file_allowed(label: &str) -> bool {
     DIRECT_QUEUE_SUBMIT_FILES.contains(&label)
 }
 
+/// Returns whether `label` is a cfg(test) GPU unit test outside the frame profiler.
+fn cfg_test_gpu_file(label: &str) -> bool {
+    CFG_TEST_GPU_FILES.contains(&label)
+}
+
 #[test]
 fn gpu_passes_have_timestamp_writes() -> io::Result<()> {
     let mut offenders = Vec::new();
     for path in rust_sources()? {
         let label = file_label(&path);
+        if cfg_test_gpu_file(&label) {
+            continue;
+        }
         let src = fs::read_to_string(&path)?;
         let lines: Vec<&str> = src.lines().collect();
         for (idx, line) in lines.iter().enumerate() {
@@ -144,6 +157,9 @@ fn gpu_copies_and_clears_have_profiler_scopes() -> io::Result<()> {
     let mut offenders = Vec::new();
     for path in rust_sources()? {
         let label = file_label(&path);
+        if cfg_test_gpu_file(&label) {
+            continue;
+        }
         let src = fs::read_to_string(&path)?;
         let lines: Vec<&str> = src.lines().collect();
         for (idx, line) in lines.iter().enumerate() {

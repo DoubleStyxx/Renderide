@@ -27,6 +27,14 @@ const PER_DRAW_POSITION_STREAM_WORLD_SPACE_PAD_SLOT: usize = 0;
 /// Packed reflection-probe atlas indices offset inside [`PaddedPerDrawUniforms::_pad`].
 const PER_DRAW_REFLECTION_PROBE_INDICES_PAD_SLOT: usize = 1;
 
+/// First `_pad2` row of the previous rigid model (four column vectors, rows 0..4).
+const PER_DRAW_PREVIOUS_MODEL_ROW: usize = 0;
+/// `_pad2` row whose `.x` is `1.0` when a previous rigid model was written.
+const PER_DRAW_PREVIOUS_MODEL_VALID_ROW: usize = 4;
+/// `_pad2` row reserved for the LOD fade weight (`#182`). Object velocity never writes it.
+#[cfg(test)]
+const PER_DRAW_LOD_FADE_WEIGHT_ROW: usize = 5;
+
 /// GPU layout: left/right view-projection, `model`, inverse-transpose normal matrix, and metadata.
 ///
 /// Matches composed `null_*` shader package targets (`PerDrawUniforms` at `@group(2)`).
@@ -69,6 +77,12 @@ pub struct PaddedPerDrawUniforms {
     /// Particle draw metadata rows consumed by generated render-buffer shaders.
     pub particle: [[f32; 4]; 4],
     /// Padding to keep every dynamic storage offset aligned across supported adapters.
+    ///
+    /// WGSL `particle_padding` is this array (`vec4` × 12). Layout:
+    /// - `[0..4]`: previous rigid model, column vectors (object velocity).
+    /// - `[4].x`: `1.0` when that previous model was written; `[4].yzw` unused.
+    /// - `[5].x`: reserved for the LOD fade weight (`#182`). Object velocity must not write row 5.
+    /// - `[6..12]`: unused.
     pub _pad2: [[f32; 4]; 12],
 }
 
@@ -147,8 +161,8 @@ impl PaddedPerDrawUniforms {
 
     /// Packs a previous rigid model into unused per-draw padding for the object-velocity pass.
     ///
-    /// Columns occupy `_pad2[0..4]`. `_pad2[4].x` is `1.0` when `previous` is `Some`. Shaders that
-    /// do not read this padding are unchanged, and the struct size stays 512 bytes.
+    /// Columns occupy `_pad2[0..4]`. `_pad2[4].x` is `1.0` when `previous` is `Some`. Row 5 stays
+    /// untouched so the LOD fade weight (`#182`) can share this struct. The size stays 512 bytes.
     #[inline]
     #[must_use]
     pub fn with_previous_model(mut self, previous: Option<Mat4>) -> Self {
@@ -158,14 +172,14 @@ impl PaddedPerDrawUniforms {
         let columns = previous.to_cols_array();
         for column in 0..4 {
             let base = column * 4;
-            self._pad2[column] = [
+            self._pad2[PER_DRAW_PREVIOUS_MODEL_ROW + column] = [
                 columns[base],
                 columns[base + 1],
                 columns[base + 2],
                 columns[base + 3],
             ];
         }
-        self._pad2[4][0] = 1.0;
+        self._pad2[PER_DRAW_PREVIOUS_MODEL_VALID_ROW][0] = 1.0;
         self
     }
 
@@ -377,5 +391,47 @@ mod tests {
             slab.copy_from_slice(bytemuck::bytes_of(slot));
         }
         assert_eq!(parallel, serial);
+    }
+
+    #[test]
+    fn previous_model_leaves_lod_fade_slot_untouched() {
+        let mut slot = PaddedPerDrawUniforms::new_single(Mat4::IDENTITY, Mat4::IDENTITY);
+        slot._pad2[PER_DRAW_LOD_FADE_WEIGHT_ROW] = [0.37, 0.0, 0.0, 0.0];
+        let previous = Mat4::from_translation(glam::Vec3::new(0.2, 0.0, 0.0));
+        let packed = slot.with_previous_model(Some(previous));
+        assert_eq!(
+            packed._pad2[PER_DRAW_LOD_FADE_WEIGHT_ROW],
+            [0.37, 0.0, 0.0, 0.0]
+        );
+        assert_eq!(packed._pad2[PER_DRAW_PREVIOUS_MODEL_VALID_ROW][0], 1.0);
+        let mut restored = [0.0; 16];
+        for column in 0..4 {
+            restored[column * 4..column * 4 + 4]
+                .copy_from_slice(&packed._pad2[PER_DRAW_PREVIOUS_MODEL_ROW + column]);
+        }
+        assert_eq!(restored, previous.to_cols_array());
+    }
+
+    #[test]
+    fn lod_fade_weight_and_previous_model_round_trip_on_one_draw() {
+        let fade = -0.25;
+        let previous = Mat4::from_scale(glam::Vec3::new(2.0, 3.0, 4.0));
+        let mut slot = PaddedPerDrawUniforms::new_single(Mat4::IDENTITY, Mat4::IDENTITY);
+        slot._pad2[PER_DRAW_LOD_FADE_WEIGHT_ROW][0] = fade;
+        let packed = slot.with_previous_model(Some(previous));
+        assert_eq!(packed._pad2[PER_DRAW_LOD_FADE_WEIGHT_ROW][0], fade);
+        assert_eq!(packed._pad2[4][0], 1.0);
+        let columns = previous.to_cols_array();
+        for column in 0..4 {
+            assert_eq!(
+                packed._pad2[column],
+                [
+                    columns[column * 4],
+                    columns[column * 4 + 1],
+                    columns[column * 4 + 2],
+                    columns[column * 4 + 3],
+                ]
+            );
+        }
     }
 }

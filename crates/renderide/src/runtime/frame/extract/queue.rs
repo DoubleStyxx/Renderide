@@ -230,6 +230,7 @@ fn visible_view_inputs<'a>(
         render_space_scope: prep.render_space_scope,
         layer_policy: prep.layer_policy,
         reflection_probes: Some(setup.reflection_probes),
+        consumes_motion_vectors: setup.scene.rigid_motion_history_enabled(),
     }
 }
 
@@ -330,6 +331,7 @@ pub(super) fn desktop_overlay_view_inputs<'a>(
         render_space_scope: ViewRenderSpaceScope::AllActive,
         layer_policy: ViewLayerPolicy::DesktopOverlay,
         reflection_probes: None,
+        consumes_motion_vectors: false,
     }
 }
 
@@ -349,6 +351,7 @@ pub(super) fn shadow_caster_view_inputs<'a>(
         render_space_scope: prep.render_space_scope,
         layer_policy: prep.layer_policy,
         reflection_probes: None,
+        consumes_motion_vectors: false,
     }
 }
 

@@ -131,6 +131,7 @@ mod tests {
             draws_hi_z_culled: 0,
             visibility: Default::default(),
             arrangement: Default::default(),
+            has_rigid_object_motion: false,
         };
         assert_eq!(
             WorldMeshHelperNeeds::from_collection(&collection),
@@ -144,6 +145,7 @@ mod tests {
             draws_hi_z_culled: 0,
             visibility: Default::default(),
             arrangement: Default::default(),
+            has_rigid_object_motion: false,
         };
         assert_eq!(
             WorldMeshHelperNeeds::from_collection(&collection),
@@ -163,6 +165,7 @@ mod tests {
             draws_hi_z_culled: 0,
             visibility: Default::default(),
             arrangement: Default::default(),
+            has_rigid_object_motion: false,
         };
         assert_eq!(
             WorldMeshHelperNeeds::from_collection(&collection),
@@ -199,6 +202,7 @@ mod tests {
             draws_hi_z_culled: 0,
             visibility: Default::default(),
             arrangement: Default::default(),
+            has_rigid_object_motion: false,
         };
         let plan = WorldMeshDrawPlan::Prefetched(Box::new(
             super::PrefetchedWorldMeshViewDraws::new(collection, None),

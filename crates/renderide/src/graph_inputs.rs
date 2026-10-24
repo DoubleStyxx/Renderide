@@ -510,6 +510,11 @@ impl<'a> FrameSceneRead<'a> {
     pub(crate) fn new(coordinator: &'a SceneCoordinator) -> Self {
         Self { coordinator }
     }
+
+    /// Host frame the current previous rigid matrices were published for.
+    pub(crate) fn object_motion_published_frame(self) -> Option<i32> {
+        self.coordinator.object_motion_published_frame()
+    }
 }
 
 impl SceneSpaceRead for FrameSceneRead<'_> {

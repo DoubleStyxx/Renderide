@@ -3,6 +3,11 @@
 //! Runs after the camera velocity pass and loads that `Rg16Float` target. Rigid draws with a
 //! previous model matrix are re-rasterized with a depth-equal test so only their pixels are
 //! overwritten. Every other pixel keeps the camera reprojection.
+//!
+//! Previous matrices advance once per host submit. A second render of the same view in that
+//! submit emits no object velocity. TAA (#170) must keep both view-projections unjittered.
+//! Near-plane crossings (`w <= 0`) discard in the shader and keep camera velocity; the blur
+//! radius clamp bounds any streak that still gets through.
 
 use std::num::NonZeroU32;
 
@@ -21,6 +26,26 @@ use crate::render_graph::resources::{
 };
 
 use super::{MotionBlurStateCache, motion_blur_settings, view_motion_blur_active};
+
+/// Returns whether this view should write object velocity for `rendered_frame`.
+///
+/// Previous matrices are published once per host submit. The first render of a view for that
+/// frame emits velocity. A repeat render of the same view keeps the camera vector, which is
+/// already zero when the camera did not move between the two renders.
+pub(super) fn take_object_velocity_emission(
+    published_frame: Option<i32>,
+    rendered_frame: i32,
+    last_emitted_frame: &mut Option<i32>,
+) -> bool {
+    if published_frame != Some(rendered_frame) {
+        return false;
+    }
+    if *last_emitted_frame == Some(rendered_frame) {
+        return false;
+    }
+    *last_emitted_frame = Some(rendered_frame);
+    true
+}
 
 /// Previous view-projection pair uploaded once per recorded object-velocity pass.
 #[repr(C)]
@@ -146,6 +171,16 @@ impl RasterPass for ObjectMotionVectorsPass {
         let Some((left, right)) = *state.object_motion_previous_vp.lock() else {
             return Ok(());
         };
+        let published = frame.systems.scene.object_motion_published_frame();
+        let mut emitted = state.object_velocity_emitted_frame.lock();
+        if !take_object_velocity_emission(
+            published,
+            frame.view.host_camera.frame_index,
+            &mut emitted,
+        ) {
+            return Ok(());
+        }
+        drop(emitted);
         let params = PreviousViewProjGpu {
             left: left.to_cols_array_2d(),
             right: right.to_cols_array_2d(),
@@ -164,5 +199,20 @@ impl RasterPass for ObjectMotionVectorsPass {
             multiview_stereo: frame.view.multiview_stereo,
         });
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::take_object_velocity_emission;
+
+    #[test]
+    fn repeat_render_of_one_submit_emits_object_velocity_once() {
+        let mut emitted = None;
+        assert!(take_object_velocity_emission(Some(7), 7, &mut emitted));
+        assert!(!take_object_velocity_emission(Some(7), 7, &mut emitted));
+        assert!(take_object_velocity_emission(Some(8), 8, &mut emitted));
+        assert!(!take_object_velocity_emission(None, 8, &mut emitted));
+        assert_eq!(emitted, Some(8));
     }
 }

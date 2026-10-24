@@ -22,6 +22,7 @@ pub(crate) use post_processing::{
 };
 pub(crate) use scene_color_compose::{SceneColorComposeGraphResources, SceneColorComposePass};
 pub(crate) use world_mesh_forward::ForwardMsaaResources;
+// Re-exports here and in `world_mesh_forward.rs` will conflict with #181. Merge those lists by hand.
 pub(crate) use world_mesh_forward::{
     GTAO_VIEW_NORMAL_FORMAT, MaterialBatchBoundary, ObjectMotionDraw,
     PreparedWorldMeshForwardFrame, ShadowDepthDrawBatch, WorldMeshDepthSnapshotPass,
