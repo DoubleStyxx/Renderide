@@ -154,6 +154,28 @@ mod tests {
         let mut moving = HysteresisHistoryWorkload::new(count, true);
         let moving_kept = moving.step();
         assert_eq!(moving_kept, u32::try_from(count).unwrap_or(0));
+        // `8192_quarter_occluded` is this unmoving set at the budget.
+        assert!(!stable.fast_path_engaged());
+        assert!(!moving.fast_path_engaged());
+        // `8192_after_motion_all_visible` measures the step after this warm-up.
+        assert_eq!(moving.step(), u32::try_from(count).unwrap_or(0));
+        assert!(moving.fast_path_engaged());
+        let mut visible = HysteresisHistoryWorkload::all_visible(count);
+        assert_eq!(visible.step(), u32::try_from(count).unwrap_or(0));
+        assert!(visible.fast_path_engaged());
+        assert_eq!(visible.step(), u32::try_from(count).unwrap_or(0));
+        assert!(visible.fast_path_engaged());
+        let mut over_cap = HysteresisHistoryWorkload::all_visible(10_000);
+        let _ = over_cap.step();
+        assert!(
+            !over_cap.fast_path_engaged(),
+            "10_000 visible casters are over the budget and stay on the full update"
+        );
+        let mut subset = HysteresisHistoryWorkload::visible_grid_subset();
+        assert_eq!(subset.step(), 676);
+        assert!(subset.fast_path_engaged());
+        assert_eq!(subset.step(), 676);
+        assert!(subset.fast_path_engaged());
         assert_eq!(HYSTERESIS_HISTORY_COUNTS[0], 8_192);
         assert!(HYSTERESIS_HISTORY_COUNTS.contains(&10_000));
         assert!(HYSTERESIS_HISTORY_COUNTS.contains(&100_000));

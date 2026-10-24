@@ -61,12 +61,43 @@ fn hysteresis_classification(c: &mut Criterion) {
         for moving in [false, true] {
             let mut workload = HysteresisHistoryWorkload::new(count, moving);
             let _ = workload.step();
-            let label = if moving { "moving" } else { "stable" };
+            // Camera motion fails open, so the warm-up step leaves every caster visible and the
+            // measured loop takes the fast path (`8192_after_motion_all_visible`). The unmoving
+            // set keeps its occluded quarter and stays on the full update (`8192_quarter_occluded`).
+            let at_budget = count == HYSTERESIS_HISTORY_COUNTS[0];
+            let label = match (at_budget, moving) {
+                (true, true) => "after_motion_all_visible",
+                (true, false) => "quarter_occluded",
+                (false, true) => "moving",
+                (false, false) => "stable",
+            };
             history.throughput(Throughput::Elements(u64::try_from(count).unwrap_or(0)));
             history.bench_function(format!("{count}_{label}"), |b| {
                 b.iter(|| black_box(workload.step()));
             });
         }
+    }
+    for count in HYSTERESIS_HISTORY_COUNTS {
+        let mut workload = HysteresisHistoryWorkload::all_visible(count);
+        let _ = workload.step();
+        let over_cap = count > HYSTERESIS_HISTORY_COUNTS[0];
+        let name = if over_cap {
+            format!("{count}_all_visible_over_cap")
+        } else {
+            format!("{count}_all_visible")
+        };
+        history.throughput(Throughput::Elements(u64::try_from(count).unwrap_or(0)));
+        history.bench_function(name, |b| {
+            b.iter(|| black_box(workload.step()));
+        });
+    }
+    {
+        let mut workload = HysteresisHistoryWorkload::visible_grid_subset();
+        let _ = workload.step();
+        history.throughput(Throughput::Elements(676));
+        history.bench_function("676_of_1600_superset", |b| {
+            b.iter(|| black_box(workload.step()));
+        });
     }
     history.finish();
 }

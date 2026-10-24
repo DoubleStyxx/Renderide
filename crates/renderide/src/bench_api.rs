@@ -18,7 +18,7 @@ use crate::occlusion::hysteresis::{
     CasterKey, CasterRecord, CasterRef, DepthClip, HistoryAction, HistoryInputs, MovedCaster,
     OcclusionFacts, PresentCaster, ScreenRect, SpaceMotion, VisibilityClass, VisibilityCullBuffers,
     VisibilityHistory, VisibilityHysteresis, append_disocclusion_rects, decide_visibility,
-    plan_disocclusion, screen_motion_uv_pad,
+    plan_disocclusion, prepare_fast_visible, screen_motion_uv_pad,
 };
 use crate::render_graph::resources::BufferSizePolicy;
 use crate::render_graph::{BufferKey, TransientPool};
@@ -469,6 +469,9 @@ impl HysteresisCullWorkload {
 /// prepared casters in scope, not casters that survive the frustum.
 pub struct HysteresisHistoryWorkload {
     present: Vec<PresentCaster>,
+    /// Frustum survivors. The history bench calls `allows_draw` for these rows only.
+    /// [`Self::present`] may be a larger prepared grid.
+    drawn: Vec<PresentCaster>,
     present_keys: HashSet<CasterKey>,
     movers: Vec<MovedCaster>,
     previous_vp: Mat4,
@@ -476,12 +479,60 @@ pub struct HysteresisHistoryWorkload {
     history: VisibilityHistory,
     spare: HashMap<CasterKey, CasterRecord>,
     buffers: VisibilityCullBuffers,
+    /// `true` when occlusion facts are forced visible. The gauge scene culls nothing.
+    keep_facts: bool,
+    /// `true` when the last [`Self::step`] armed the stable-visible fast path.
+    fast_engaged: bool,
 }
 
 impl HysteresisHistoryWorkload {
     /// Builds `count` casters. One quarter start occluded. `moving` separates the cameras.
     #[must_use]
     pub fn new(count: usize, moving: bool) -> Self {
+        Self::build(count, moving, true, |_| true)
+    }
+
+    /// Builds `count` casters that all start visible, with facts that do not occlude.
+    ///
+    /// This is the bookkeeping the all-visible `many_static_meshes` frame pays: nothing was
+    /// culled last frame, and nothing is culled this frame.
+    #[must_use]
+    pub fn all_visible(count: usize) -> Self {
+        let mut workload = Self::build(count, false, false, |_| true);
+        workload.keep_facts = true;
+        workload
+    }
+
+    /// 1,600 prepared casters and the center 26×26 remembered, matching `many_static_meshes`.
+    ///
+    /// Counts above [`crate::occlusion::hysteresis::HISTORY_CASTER_BUDGET`] never arm.
+    /// [`Self::all_visible`] at those counts stays on the full update.
+    #[must_use]
+    pub fn visible_grid_subset() -> Self {
+        const SIDE: usize = 40;
+        const INNER: usize = 26;
+        const ORIGIN: usize = (SIDE - INNER) / 2;
+        let mut workload = Self::build(SIDE * SIDE, false, false, |index| {
+            let row = index / SIDE;
+            let col = index % SIDE;
+            (ORIGIN..ORIGIN + INNER).contains(&row) && (ORIGIN..ORIGIN + INNER).contains(&col)
+        });
+        workload.keep_facts = true;
+        workload
+    }
+
+    /// `true` when [`Self::step`] last armed the stable-visible fast path.
+    #[must_use]
+    pub fn fast_path_engaged(&self) -> bool {
+        self.fast_engaged
+    }
+
+    fn build(
+        count: usize,
+        moving: bool,
+        occlude_quarter: bool,
+        remember: impl Fn(usize) -> bool,
+    ) -> Self {
         let (previous_vp, current_vp) = history_view_projections(moving);
         let mut side = 1_usize;
         while side.saturating_mul(side) < count.max(1) {
@@ -489,6 +540,7 @@ impl HysteresisHistoryWorkload {
         }
         let mut casters = HashMap::with_capacity(count);
         let mut present = Vec::with_capacity(count);
+        let mut drawn = Vec::new();
         for index in 0..count {
             let column = index % side;
             let row = index / side;
@@ -504,22 +556,28 @@ impl HysteresisHistoryWorkload {
                 node_id,
                 false,
             );
-            let class = if index % 4 == 0 {
+            let remembered = remember(index);
+            let class = if occlude_quarter && index % 4 == 0 {
                 VisibilityClass::Occluded
             } else {
                 VisibilityClass::Visible
             };
-            casters.insert(key, CasterRecord::new(class, aabb_min, aabb_max, 1));
-            present.push(PresentCaster {
+            let caster = PresentCaster {
                 key,
                 mesh_asset_id: 1,
                 aabb_min,
                 aabb_max,
                 space_id: RenderSpaceId(1),
-            });
+            };
+            if remembered {
+                casters.insert(key, CasterRecord::new(class, aabb_min, aabb_max, 1));
+                drawn.push(caster);
+            }
+            present.push(caster);
         }
         Self {
             present,
+            drawn,
             present_keys: HashSet::new(),
             movers: Vec::new(),
             previous_vp,
@@ -527,6 +585,8 @@ impl HysteresisHistoryWorkload {
             history: VisibilityHistory::from_casters(casters),
             spare: HashMap::new(),
             buffers: VisibilityCullBuffers::default(),
+            keep_facts: false,
+            fast_engaged: false,
         }
     }
 
@@ -539,19 +599,25 @@ impl HysteresisHistoryWorkload {
         let history = std::mem::take(&mut self.history);
         let spare = std::mem::take(&mut self.spare);
         let mut buffers = std::mem::take(&mut self.buffers);
-        plan_disocclusion(
-            &history,
-            &self.present,
-            &mut self.present_keys,
-            |_| true,
-            &mut self.movers,
-        );
+        let fast_layout = prepare_fast_visible(&history, &self.present, &mut buffers);
+        self.fast_engaged = fast_layout.is_some();
         let current_vp = self.current_vp;
         let previous_vp = self.previous_vp;
         buffers.stale_rects.clear();
-        append_disocclusion_rects(&mut buffers.stale_rects, &self.movers, |min, max| {
-            project_screen(current_vp, min, max)
-        });
+        if fast_layout.is_none() {
+            plan_disocclusion(
+                &history,
+                &self.present,
+                &mut self.present_keys,
+                |_| true,
+                &mut self.movers,
+            );
+            append_disocclusion_rects(&mut buffers.stale_rects, &self.movers, |min, max| {
+                project_screen(current_vp, min, max)
+            });
+        } else {
+            self.movers.clear();
+        }
         buffers.motions.clear();
         buffers.motions.insert(
             RenderSpaceId(1),
@@ -565,15 +631,19 @@ impl HysteresisHistoryWorkload {
                 },
             },
         );
-        let frame = VisibilityHysteresis::from_parts(history, spare, buffers);
+        let mut frame = VisibilityHysteresis::from_parts(history, spare, buffers);
+        frame.install_fast(fast_layout);
         let kept = AtomicU32::new(0);
-        self.present.par_iter().for_each(|caster| {
-            let facts = facts_for_motion_pad(screen_motion_uv_pad(
-                previous_vp,
-                current_vp,
-                caster.aabb_min,
-                caster.aabb_max,
-            ));
+        let keep_facts = self.keep_facts;
+        self.drawn.par_iter().for_each(|caster| {
+            let pad =
+                screen_motion_uv_pad(previous_vp, current_vp, caster.aabb_min, caster.aabb_max);
+            let facts = if keep_facts {
+                let _ = std::hint::black_box(pad);
+                OcclusionFacts::keep()
+            } else {
+                facts_for_motion_pad(pad)
+            };
             if frame.allows_draw(
                 Some(CasterRef {
                     key: caster.key,
