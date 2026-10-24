@@ -128,6 +128,12 @@ pub struct CaseReport {
     /// True when this case ran on WARP and the harness applied the WARP readiness budget.
     #[serde(default)]
     pub warp_readiness_budget_used: bool,
+    /// `quarantined` when the #216 rule covers this case. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// `quarantined:#216` while that quarantine applies. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Writes a `report.json` describing the comparison outcome.
@@ -159,6 +165,8 @@ pub fn report_from_evaluation(case: &IntegrationCase, eval: ToleranceEvaluation)
         adapter: String::new(),
         longest_submission_stall_ms: 0,
         warp_readiness_budget_used: false,
+        status: None,
+        reason: None,
     }
 }
 
@@ -177,6 +185,8 @@ pub fn report_from_error(case: &IntegrationCase, message: impl Into<String>) -> 
         adapter: String::new(),
         longest_submission_stall_ms: 0,
         warp_readiness_budget_used: false,
+        status: None,
+        reason: None,
     }
 }
 

@@ -14,12 +14,19 @@ pub mod band_count;
 pub mod cases;
 pub mod host_info;
 pub mod output;
+mod quarantine_216;
 pub mod region_color;
 pub mod runner;
 pub mod suite;
 pub mod tolerance;
 mod warp_pbs;
 
+/// Whether a suite case is the time-limited #216 quarantine and not a pass.
+pub(crate) use quarantine_216::case_is_quarantined as case_is_quarantined_216;
+/// Loud `QUARANTINED` line for one quarantined case.
+pub(crate) use quarantine_216::quarantined_line;
+/// Loud `WARN` line while the #216 quarantine is inside its last 48 hours.
+pub(crate) use quarantine_216::warn_line;
 /// Summary text for the known WARP `pbs_lit` image mismatch.
 pub(crate) use warp_pbs::EXPECTED_FAILURE_LABEL as WARP_EXPECTED_FAILURE_LABEL;
 /// Vendor `0x1414` and device `0x008c`, including a log that prints `0x8c`.
