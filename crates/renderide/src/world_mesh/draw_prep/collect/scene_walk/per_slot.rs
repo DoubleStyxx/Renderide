@@ -168,13 +168,18 @@ fn resolve_cull_decision<'a>(
     match outcome {
         Err(CpuCullFailure::Frustum | CpuCullFailure::UiRectMask) => {
             acc.cull_stats.1 += 1;
+            crate::diagnostics::pbs_capture::note_cull(draw.renderable_index, "frustum");
             SlotCullDecision::RejectedFrustum
         }
         Err(CpuCullFailure::HiZ) => {
             acc.cull_stats.2 += 1;
+            crate::diagnostics::pbs_capture::note_cull(draw.renderable_index, "hiz");
             SlotCullDecision::RejectedHiZ
         }
-        Ok(m) => SlotCullDecision::Visible(m),
+        Ok(m) => {
+            crate::diagnostics::pbs_capture::note_cull(draw.renderable_index, "visible");
+            SlotCullDecision::Visible(m)
+        }
     }
 }
 

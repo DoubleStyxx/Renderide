@@ -1,6 +1,7 @@
 //! Headless offscreen driver loop.
 
 mod driver;
+mod pbs_depth;
 mod readback;
 mod schedule;
 

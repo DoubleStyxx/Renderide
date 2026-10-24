@@ -8,6 +8,7 @@
 
 mod hud;
 pub(crate) mod log_once;
+pub(crate) mod pbs_capture;
 mod per_view;
 mod snapshots;
 mod watchdog;
