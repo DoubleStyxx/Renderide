@@ -1,36 +1,62 @@
 //! GitHub release selection for update candidates.
+//!
+//! Listing does not go through `self_update::backends::github::ReleaseList`. That 1.x API parses
+//! each tag as semver and skips the rest, and [`self_update::ReleaseBuilder`] rejects a non-semver
+//! version. Nightly tags (`nightly-*`) are not semver. [`ListedRelease`] keeps the 0.44 shape:
+//! GitHub list order, a leading `v` stripped from the tag, and the asset `url`.
 
-use self_update::backends::github::ReleaseList;
-use self_update::update::Release;
+use self_update::update::ReleaseAsset;
 
+use super::github_api::list_releases;
 use super::release_metadata::is_full_sha;
 use super::{
     NIGHTLY_PREFIX, REPO_NAME, REPO_OWNER, ReleaseBuildMetadata, UpdateCandidate, UpdateError,
-    to_self_update_error,
 };
+
+/// One GitHub release in the shape `self_update` 0.44 exposed as `Release`.
+///
+/// `tag` is `tag_name` with leading `v` characters removed, matching 0.44's
+/// `trim_start_matches('v')`. A `nightly-*` tag has no such prefix, so it is unchanged.
+#[derive(Clone, Debug)]
+pub(super) struct ListedRelease {
+    /// Tag used for comparison and for the asset file name.
+    pub(super) tag: String,
+    /// Release body, when GitHub sent one.
+    pub(super) body: Option<String>,
+    /// Assets in API order. Download URLs are the asset `url` field.
+    pub(super) assets: Vec<ReleaseAsset>,
+}
 
 /// Fetches GitHub releases and selects the newest eligible update candidate.
 pub(super) fn fetch_latest_candidate(
     metadata: &ReleaseBuildMetadata,
 ) -> Result<Option<UpdateCandidate>, UpdateError> {
-    let releases = ReleaseList::configure()
-        .repo_owner(REPO_OWNER)
-        .repo_name(REPO_NAME)
-        .build()
-        .map_err(to_self_update_error)?
-        .fetch()
-        .map_err(to_self_update_error)?;
+    fetch_latest_candidate_from(super::github_api::GITHUB_API_BASE, metadata)
+}
+
+/// Same selection as [`fetch_latest_candidate`], against an API base URL.
+///
+/// Tests point this at a local mock. Production uses `https://api.github.com`.
+pub(super) fn fetch_latest_candidate_from(
+    api_base: &str,
+    metadata: &ReleaseBuildMetadata,
+) -> Result<Option<UpdateCandidate>, UpdateError> {
+    let releases = list_releases(api_base, REPO_OWNER, REPO_NAME)?;
     Ok(select_update_candidate(&releases, metadata))
 }
 
 /// Selects the newest eligible release asset when it is newer than the running build.
+///
+/// "Newest" is GitHub's list order (newest first), not a semver comparison. The first `nightly-*`
+/// release that has this platform's asset and a commit line wins. The same tag or the same commit
+/// is not an update.
 pub(super) fn select_update_candidate(
-    releases: &[Release],
+    releases: &[ListedRelease],
     metadata: &ReleaseBuildMetadata,
 ) -> Option<UpdateCandidate> {
     let candidate = releases
         .iter()
-        .filter(|release| release.version.starts_with(NIGHTLY_PREFIX))
+        .filter(|release| release.tag.starts_with(NIGHTLY_PREFIX))
         .find_map(|release| candidate_from_release(release, metadata))?;
     if candidate.tag == metadata.tag || candidate.commit == metadata.commit {
         None
@@ -41,20 +67,20 @@ pub(super) fn select_update_candidate(
 
 /// Converts a GitHub release into an update candidate when it has this platform's asset.
 fn candidate_from_release(
-    release: &Release,
+    release: &ListedRelease,
     metadata: &ReleaseBuildMetadata,
 ) -> Option<UpdateCandidate> {
     let body = release.body.as_deref();
     let commit = release_commit(body)?;
     let changelog = release_changelog(body).unwrap_or_else(no_changelog_available);
-    let asset_name = asset_name_for(&metadata.platform, &release.version);
+    let asset_name = asset_name_for(&metadata.platform, &release.tag);
     let asset = release
         .assets
         .iter()
-        .find(|asset| asset.name == asset_name)
+        .find(|asset| asset.name() == asset_name)
         .cloned()?;
     Some(UpdateCandidate {
-        tag: release.version.clone(),
+        tag: release.tag.clone(),
         commit,
         changelog,
         asset,
@@ -105,34 +131,42 @@ fn no_changelog_available() -> String {
 
 #[cfg(test)]
 mod tests {
-    use self_update::update::{Release, ReleaseAsset};
-
     use super::*;
     use crate::updater::RELEASE_CHANNEL;
 
-    fn metadata() -> ReleaseBuildMetadata {
+    const RELEASE_PLATFORMS: [&str; 6] = [
+        "linux-x86_64",
+        "linux-aarch64",
+        "windows-x86_64",
+        "windows-aarch64",
+        "macos-x86_64",
+        "macos-aarch64",
+    ];
+
+    fn metadata_for(platform: &str) -> ReleaseBuildMetadata {
         ReleaseBuildMetadata {
             channel: RELEASE_CHANNEL.to_owned(),
             tag: "nightly-2026-05-26-1111111".to_owned(),
             commit: "1111111111111111111111111111111111111111".to_owned(),
-            platform: "linux-x86_64".to_owned(),
+            platform: platform.to_owned(),
         }
     }
 
-    fn release(tag: &str, commit: &str, asset_name: &str) -> Release {
-        Release {
-            name: tag.to_owned(),
-            version: tag.to_owned(),
-            date: "2026-05-27T00:00:00Z".to_owned(),
+    fn metadata() -> ReleaseBuildMetadata {
+        metadata_for("linux-x86_64")
+    }
+
+    fn release(tag: &str, commit: &str, asset_name: &str) -> ListedRelease {
+        ListedRelease {
+            tag: tag.to_owned(),
             body: Some(format!(
                 "Commit: {commit}\n\n## Changelog\n\n- [{short}](https://github.com/DoubleStyx/Renderide/commit/{commit}) Add updater changelog by Renderer Developer\n",
                 short = &commit[..8]
             )),
-            assets: vec![ReleaseAsset {
-                name: asset_name.to_owned(),
-                download_url: "https://api.github.com/repos/DoubleStyx/Renderide/releases/assets/1"
-                    .to_owned(),
-            }],
+            assets: vec![ReleaseAsset::new(
+                asset_name,
+                "https://api.github.com/repos/DoubleStyx/Renderide/releases/assets/1",
+            )],
         }
     }
 
@@ -222,20 +256,89 @@ No previous release commit was available, so no commit changelog was generated f
     }
 
     #[test]
+    fn candidate_selection_keeps_github_list_order_not_semver() {
+        let metadata = metadata();
+        let first_commit = "2222222222222222222222222222222222222222";
+        let later_commit = "3333333333333333333333333333333333333333";
+        let releases = vec![
+            release(
+                "nightly-2026-05-27-2222222",
+                first_commit,
+                &asset_name_for(&metadata.platform, "nightly-2026-05-27-2222222"),
+            ),
+            release(
+                "nightly-2026-05-28-3333333",
+                later_commit,
+                &asset_name_for(&metadata.platform, "nightly-2026-05-28-3333333"),
+            ),
+        ];
+
+        let candidate = select_update_candidate(&releases, &metadata).expect("candidate");
+
+        assert_eq!(candidate.tag, "nightly-2026-05-27-2222222");
+        assert_eq!(candidate.commit, first_commit);
+    }
+
+    #[test]
+    fn candidate_selection_uses_exact_asset_name_on_every_platform() {
+        let commit = "2222222222222222222222222222222222222222";
+        let tag = "nightly-2026-05-27-2222222";
+        let assets: Vec<ReleaseAsset> = RELEASE_PLATFORMS
+            .iter()
+            .map(|platform| {
+                ReleaseAsset::new(
+                    asset_name_for(platform, tag),
+                    format!("https://example.invalid/{platform}"),
+                )
+            })
+            .chain(std::iter::once(ReleaseAsset::new(
+                "renderide-notes.txt",
+                "https://example.invalid/notes",
+            )))
+            .collect();
+        let release = ListedRelease {
+            tag: tag.to_owned(),
+            body: Some(format!("Commit: {commit}\n")),
+            assets,
+        };
+
+        for platform in RELEASE_PLATFORMS {
+            let metadata = metadata_for(platform);
+            let candidate = select_update_candidate(std::slice::from_ref(&release), &metadata)
+                .unwrap_or_else(|| panic!("expected asset for {platform}"));
+            assert_eq!(candidate.asset.name(), asset_name_for(platform, tag));
+            assert_eq!(
+                candidate.asset.download_url(),
+                format!("https://example.invalid/{platform}")
+            );
+        }
+    }
+
+    #[test]
+    fn candidate_selection_skips_a_nightly_that_lacks_this_platforms_asset() {
+        let metadata = metadata();
+        let commit = "2222222222222222222222222222222222222222";
+        let releases = vec![release(
+            "nightly-2026-05-27-2222222",
+            commit,
+            "renderide-windows-x86_64-nightly-2026-05-27-2222222.zip",
+        )];
+
+        assert!(select_update_candidate(&releases, &metadata).is_none());
+    }
+
+    #[test]
     fn candidate_selection_uses_fallback_when_changelog_is_missing() {
         let metadata = metadata();
         let commit = "2222222222222222222222222222222222222222";
         let tag = "nightly-2026-05-27-2222222";
-        let releases = vec![Release {
-            name: tag.to_owned(),
-            version: tag.to_owned(),
-            date: "2026-05-27T00:00:00Z".to_owned(),
+        let releases = vec![ListedRelease {
+            tag: tag.to_owned(),
             body: Some(format!("Commit: {commit}\n\nNightly build.")),
-            assets: vec![ReleaseAsset {
-                name: asset_name_for(&metadata.platform, tag),
-                download_url: "https://api.github.com/repos/DoubleStyx/Renderide/releases/assets/1"
-                    .to_owned(),
-            }],
+            assets: vec![ReleaseAsset::new(
+                asset_name_for(&metadata.platform, tag),
+                "https://api.github.com/repos/DoubleStyx/Renderide/releases/assets/1",
+            )],
         }];
 
         let candidate = select_update_candidate(&releases, &metadata).expect("candidate");
