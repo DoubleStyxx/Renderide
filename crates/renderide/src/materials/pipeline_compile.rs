@@ -3,17 +3,16 @@
 //! Real GPUs keep the background pool. Headless captures and software adapters
 //! (WARP, lavapipe, llvmpipe) compile on the render thread instead: a background
 //! `create_render_pipeline` deadlocks DX12 WARP while the render thread is inside
-//! a frame. The caller waits until the driver thread has finished `Queue::submit`
-//! and the device is idle before that compile. On DX12 WARP, overlapping the two
-//! hangs the render thread and can cache a pipeline that under-draws.
+//! a frame. Headless compiles the whole queued set at the start of the frame and
+//! does not flush or poll first. Doing that wait on DX12 WARP cached a PBS
+//! pipeline that drew only the lower hemisphere of each sphere (1119 unique
+//! colors, 5.9% non-background). The same queue compiled here with no flush and
+//! no poll drew the full spheres (3780 colors, 8.8%).
 //!
 //! A windowed software adapter compiles at most
 //! [`RENDER_THREAD_PIPELINE_COMPILES_PER_FRAME`] pipelines per drain so one frame
-//! cannot absorb a whole scene. Headless captures compile the whole queued set in
-//! that drain. Splitting the same set across submitted frames on DX12 WARP published
-//! a steady PBS frame under the golden coverage gate (1119 unique colors, 5.9%
-//! non-background) where compiling the queue before the submit passed (3780 colors,
-//! 8.8%). Queued builds that do not fit in this drain stay pending.
+//! cannot absorb a whole scene, and its idle wait is one short budget. Queued
+//! builds that do not fit in this drain stay pending.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};

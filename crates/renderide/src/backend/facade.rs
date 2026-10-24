@@ -425,14 +425,9 @@ impl RenderBackend {
         self.materials.compiles_pipelines_on_render_thread()
     }
 
-    /// Headless captures compile every queued pipeline before the frame submits.
+    /// Headless captures compile every queued pipeline at the start of the frame.
     pub fn compiles_full_render_thread_queue(&self) -> bool {
         self.materials.compiles_full_render_thread_queue()
-    }
-
-    /// Swapchain or headless color format chosen at attach.
-    pub(crate) fn attached_surface_format(&self) -> Option<wgpu::TextureFormat> {
-        self.surface_format
     }
 
     /// Pending material draws since the previous headless PNG write.

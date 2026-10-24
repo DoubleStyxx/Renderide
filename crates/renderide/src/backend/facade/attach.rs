@@ -133,6 +133,19 @@ impl RenderBackend {
             compile_pipelines_on_render_thread,
             render_thread_compiles_per_frame,
         )?;
+        // The device has not submitted yet. Headless and software adapters build the
+        // pass-owned pipelines now so the first frame does not call
+        // create_render_pipeline after Queue::submit. Real GPUs skip on the flag
+        // and keep the lazy path.
+        if compile_pipelines_on_render_thread {
+            crate::passes::precompile_clustered_light_pipeline(device.as_ref());
+            crate::passes::precompile_scene_color_compose_pipeline(
+                device.as_ref(),
+                surface_format,
+                false,
+            );
+            crate::occlusion::gpu::precompile_hi_z_pipelines(device.as_ref());
+        }
         self.reflection_probes
             .pre_warm_sh2_projection_pipelines(&device);
         asset_uploads::attach_flush_pending_asset_uploads(

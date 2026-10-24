@@ -523,9 +523,9 @@ impl MaterialPipelineCache {
         }
 
         self.queue_pipeline_build(key.clone(), kind.clone(), *desc, variant, wgsl_override);
-        // Headless compiles this lookup before the draw is counted pending, and before
-        // command recording opens a pass. The idle wait earlier in the frame is what
-        // allows it. Windowed software keeps the per-frame budget instead.
+        // Inline compile is off for headless: the PBS pipeline is built on the next
+        // frame-start drain, not in the middle of this frame. Windowed software
+        // keeps the per-frame budget and does not set the flag.
         if self.compiles_full_render_thread_queue() && render_thread_inline_compile_enabled() {
             drain_render_thread_pipeline_builds(usize::MAX);
             self.drain_completed_pipeline_builds();

@@ -9,15 +9,12 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-/// How long a headless render-thread compile waits for the previous `Queue::submit`
-/// and the device poll together. One budget covers both, so the wait cannot stack
-/// to 240s. The readback flush stays on its own shorter timeout.
-const PIPELINE_COMPILE_HEADLESS_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
-
 /// Worst-case block for one windowed software frame while a compile waits for idle.
 ///
 /// Flush and device poll share this budget. A windowed software adapter used to
-/// wait 120s for the driver and another 120s for the device.
+/// wait 120s for the driver and another 120s for the device. Headless does not use
+/// this wait: flushing and polling before `create_render_pipeline` on DX12 WARP
+/// cached the under-drawn PBS pipeline.
 const PIPELINE_COMPILE_WINDOWED_SOFTWARE_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 
 use super::GpuContext;
@@ -337,18 +334,11 @@ impl GpuContext {
         self.submission.driver_thread.flush();
     }
 
-    /// Waits until the driver thread has finished every queued submit and the device
-    /// reports no pending GPU work, or the headless budget runs out.
+    /// Waits until the driver thread has finished `Queue::submit` and the device
+    /// reports no pending GPU work, or the windowed budget runs out.
     ///
-    /// Render-thread `create_render_pipeline` calls this first. A timed-out driver
-    /// flush or device poll returns false so the caller leaves the compile queued
-    /// instead of overlapping `Queue::submit` on DX12 WARP.
-    pub fn wait_until_idle_for_pipeline_compile(&self) -> bool {
-        self.wait_until_idle_for_pipeline_compile_within(PIPELINE_COMPILE_HEADLESS_IDLE_TIMEOUT)
-    }
-
-    /// Same idle wait as [`Self::wait_until_idle_for_pipeline_compile`], capped so a
-    /// windowed software frame cannot block for a driver flush plus a second poll.
+    /// One budget covers the flush and the poll. A timeout returns false so the
+    /// caller leaves the compile queued. Headless captures do not call this.
     pub fn wait_until_idle_for_windowed_software_pipeline_compile(&self) -> bool {
         self.wait_until_idle_for_pipeline_compile_within(
             PIPELINE_COMPILE_WINDOWED_SOFTWARE_IDLE_TIMEOUT,
@@ -412,10 +402,7 @@ impl GpuContext {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        FrameSubmitKind, PIPELINE_COMPILE_HEADLESS_IDLE_TIMEOUT,
-        PIPELINE_COMPILE_WINDOWED_SOFTWARE_IDLE_TIMEOUT,
-    };
+    use super::{FrameSubmitKind, PIPELINE_COMPILE_WINDOWED_SOFTWARE_IDLE_TIMEOUT};
 
     #[test]
     fn windowed_software_pipeline_compile_wait_is_a_single_short_budget() {
@@ -423,7 +410,6 @@ mod tests {
             PIPELINE_COMPILE_WINDOWED_SOFTWARE_IDLE_TIMEOUT <= std::time::Duration::from_secs(2),
             "windowed software must not stack a 120s flush and a 120s poll"
         );
-        assert!(PIPELINE_COMPILE_HEADLESS_IDLE_TIMEOUT <= std::time::Duration::from_secs(120));
     }
 
     #[test]
