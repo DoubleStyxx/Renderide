@@ -264,6 +264,11 @@ impl MaterialRegistry {
             .variant_bits_for_shader_asset(shader_asset_id)
     }
 
+    /// Attach-time flag. Real GPUs are false.
+    pub(crate) fn compiles_on_render_thread(&self) -> bool {
+        self.cache.compiles_on_render_thread()
+    }
+
     /// Drains finished pipeline builds into the cache.
     ///
     /// Invoked once per frame from the renderer's tick before per-view recording so worker

@@ -207,14 +207,16 @@ impl Drop for CpuRenderPhaseScope {
 /// driver thread has finished `Queue::submit` and the device is idle. On DX12 WARP,
 /// compiling during that submit hangs the render thread and can cache a pipeline that
 /// under-draws. If the driver does not go idle, this frame only collects builds that
-/// already finished and leaves the queue for a later frame. An empty queue does not
-/// wait, so real GPUs and idle headless frames keep their normal submit overlap.
+/// already finished and leaves the queue for a later frame. Real GPUs read the
+/// attach-time flag and skip the build-queue lock. An empty headless queue does
+/// not wait, so those frames keep their normal submit overlap.
 pub(in crate::runtime) fn prepare_assets_for_schedule(
     backend: &mut RenderBackend,
     gpu: &GpuContext,
 ) {
     backend.sync_material_shader_hot_reload();
-    if crate::materials::render_thread_builds_queued()
+    if backend.material_pipelines_compile_on_render_thread()
+        && crate::materials::render_thread_builds_queued()
         && !gpu.wait_until_idle_for_pipeline_compile()
     {
         backend.drain_finished_pipeline_builds();

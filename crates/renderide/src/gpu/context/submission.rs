@@ -331,11 +331,12 @@ impl GpuContext {
     }
 
     /// Waits until the driver thread has finished every queued submit and the device
-    /// reports no pending GPU work.
+    /// reports no pending GPU work, or the wait exceeds
+    /// [`PIPELINE_COMPILE_DRIVER_IDLE_TIMEOUT`].
     ///
-    /// Render-thread `create_render_pipeline` calls this first. A timed-out wait
-    /// returns false so the caller leaves the compile queued instead of overlapping
-    /// `Queue::submit` on DX12 WARP.
+    /// Render-thread `create_render_pipeline` calls this first. A timed-out driver
+    /// flush or device poll returns false so the caller leaves the compile queued
+    /// instead of overlapping `Queue::submit` on DX12 WARP.
     pub fn wait_until_idle_for_pipeline_compile(&self) -> bool {
         if !self
             .submission
@@ -348,13 +349,25 @@ impl GpuContext {
             );
             return false;
         }
-        if let Err(err) = self.device().poll(wgpu::PollType::wait_indefinitely()) {
-            logger::warn!(
-                "material pipeline compile deferred: device poll failed before create_render_pipeline: {err}"
-            );
-            return false;
+        match self.device().poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(PIPELINE_COMPILE_DRIVER_IDLE_TIMEOUT),
+        }) {
+            Ok(_) => true,
+            Err(wgpu::PollError::Timeout) => {
+                logger::warn!(
+                    "material pipeline compile deferred: device poll timed out after {}s",
+                    PIPELINE_COMPILE_DRIVER_IDLE_TIMEOUT.as_secs()
+                );
+                false
+            }
+            Err(err) => {
+                logger::warn!(
+                    "material pipeline compile deferred: device poll failed before create_render_pipeline: {err}"
+                );
+                false
+            }
         }
-        true
     }
 
     /// Blocks only until the most recently submitted surface-carrying batch has reached

@@ -435,6 +435,13 @@ pub struct MaterialPipelineCache {
 }
 
 impl MaterialPipelineCache {
+    /// Attach-time flag. Real GPUs are false and never take the render-thread build queue lock.
+    pub(super) fn compiles_on_render_thread(&self) -> bool {
+        self.compile_on_render_thread
+    }
+}
+
+impl MaterialPipelineCache {
     /// Creates an empty cache for `device` with the device's effective [`crate::gpu::GpuLimits`].
     ///
     /// `compile_on_render_thread` is set for headless and software adapters. Real GPUs pass false.
