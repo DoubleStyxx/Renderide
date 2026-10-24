@@ -52,6 +52,9 @@ pub struct RenderBackendAttachDesc {
     pub suppress_renderer_config_disk_writes: bool,
     /// `true` when the renderer is attached to an offscreen headless target.
     pub headless: bool,
+    /// Headless and software adapters compile material pipelines on the render thread.
+    /// Real GPUs leave this false and use the background pool.
+    pub compile_pipelines_on_render_thread: bool,
 }
 
 impl RenderBackend {
@@ -82,6 +85,7 @@ impl RenderBackend {
             config_save_path,
             suppress_renderer_config_disk_writes,
             headless,
+            compile_pipelines_on_render_thread,
         } = desc;
         self.renderer_settings = Some(renderer_settings.clone());
         self.surface_format = Some(surface_format);
@@ -114,8 +118,12 @@ impl RenderBackend {
                 suppress_renderer_config_disk_writes,
             );
         }
-        self.materials
-            .try_attach_gpu(device.clone(), &queue, Arc::clone(&gpu_limits))?;
+        self.materials.try_attach_gpu(
+            device.clone(),
+            &queue,
+            Arc::clone(&gpu_limits),
+            compile_pipelines_on_render_thread,
+        )?;
         self.reflection_probes
             .pre_warm_sh2_projection_pipelines(&device);
         asset_uploads::attach_flush_pending_asset_uploads(

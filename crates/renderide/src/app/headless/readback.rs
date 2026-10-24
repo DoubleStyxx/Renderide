@@ -15,6 +15,12 @@ static ATLAS_SIDECAR_STAMP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(()
 
 use crate::gpu::GpuContext;
 
+/// PNG `tEXt` keyword storing the pending-pipeline draw count for this frame.
+///
+/// The harness in `renderide-test` reads the same keyword. The count lives in the
+/// PNG so it cannot be paired with a different frame's sidecar.
+pub(crate) const PIPELINE_PENDING_TEXT_KEYWORD: &str = "renderide_pipeline_pending";
+
 /// Copies the headless primary color texture to CPU memory and writes a PNG atomically.
 pub(super) fn readback_and_write_png_atomically(
     gpu: &GpuContext,
@@ -215,18 +221,13 @@ fn write_png_atomically(
     {
         std::fs::create_dir_all(parent).map_err(HeadlessReadbackError::Io)?;
     }
-    let buffer = image::RgbaImage::from_raw(width, height, rgba_bytes.to_vec())
-        .ok_or(HeadlessReadbackError::EncodeBufferSize)?;
     let tmp_path = output_path.with_extension("png.tmp");
-    buffer
-        .save_with_format(&tmp_path, image::ImageFormat::Png)
-        .map_err(|e| HeadlessReadbackError::Encode(format!("{e:?}")))?;
+    encode_png_with_pending_count(&tmp_path, rgba_bytes, width, height, pending_pipeline_draws)?;
     if let Some(passes) = shadow_atlas_passes {
         // Publish the pass count before the PNG rename so a stable PNG has its stat.
         publish_atlas_pass_record(output_path, passes)?;
     }
-    // Publish before the rename so a stable PNG always has its pipeline count.
-    publish_pipeline_pending_record(output_path, pending_pipeline_draws)?;
+    // The pending count is inside the PNG bytes, so this rename publishes both together.
     std::fs::rename(&tmp_path, output_path).map_err(HeadlessReadbackError::Io)?;
     if shadow_atlas_passes.is_some() {
         // `rename` keeps the temp PNG's mtime, which is earlier than the sidecar write.
@@ -258,20 +259,44 @@ fn align_atlas_pass_sidecar_mtime(output_path: &Path) -> Result<(), HeadlessRead
         .map_err(HeadlessReadbackError::Io)
 }
 
-/// Writes the pending-pipeline draw count beside the PNG.
+/// Writes one RGBA PNG whose `tEXt` chunk carries `pending_pipeline_draws`.
 ///
 /// `0` means every requested material pipeline used by that frame was ready.
 /// A positive count means at least one draw observed a pipeline that was still compiling,
 /// including draws that fell back to Null while the requested program was pending.
-fn publish_pipeline_pending_record(
-    output_path: &Path,
+fn encode_png_with_pending_count(
+    tmp_path: &Path,
+    rgba_bytes: &[u8],
+    width: u32,
+    height: u32,
     pending_pipeline_draws: u64,
 ) -> Result<(), HeadlessReadbackError> {
-    let sidecar = output_path.with_extension("pipeline-pending");
-    let tmp = sidecar.with_extension("pipeline-pending.tmp");
-    std::fs::write(&tmp, format!("{pending_pipeline_draws}\n"))
-        .map_err(HeadlessReadbackError::Io)?;
-    std::fs::rename(&tmp, &sidecar).map_err(HeadlessReadbackError::Io)
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or(HeadlessReadbackError::EncodeBufferSize)?;
+    if rgba_bytes.len() != expected {
+        return Err(HeadlessReadbackError::EncodeBufferSize);
+    }
+    let file = std::fs::File::create(tmp_path).map_err(HeadlessReadbackError::Io)?;
+    let mut encoder = png::Encoder::new(file, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .add_text_chunk(
+            PIPELINE_PENDING_TEXT_KEYWORD.to_string(),
+            pending_pipeline_draws.to_string(),
+        )
+        .map_err(|err| HeadlessReadbackError::Encode(err.to_string()))?;
+    let mut writer = encoder
+        .write_header()
+        .map_err(|err| HeadlessReadbackError::Encode(err.to_string()))?;
+    writer
+        .write_image_data(rgba_bytes)
+        .map_err(|err| HeadlessReadbackError::Encode(err.to_string()))?;
+    writer
+        .finish()
+        .map_err(|err| HeadlessReadbackError::Encode(err.to_string()))
 }
 
 /// Writes `this_frame total` beside the PNG and appends the same line to the pass log.
@@ -452,10 +477,8 @@ mod tests {
         assert!(png.is_file());
         assert!(!png.with_extension("atlas-passes").exists());
         assert!(!png.with_extension("atlas-pass-log").exists());
-        assert_eq!(
-            std::fs::read_to_string(png.with_extension("pipeline-pending")).expect("ready sidecar"),
-            "0\n"
-        );
+        assert!(!png.with_extension("pipeline-pending").exists());
+        assert_eq!(pending_text(&png), Some("0".to_string()));
 
         super::write_png_atomically(&pixels, 1, 1, &png, Some((1, 4)), 3).expect("with count");
         assert_eq!(
@@ -466,11 +489,8 @@ mod tests {
             std::fs::read_to_string(png.with_extension("atlas-pass-log")).expect("log"),
             "1 4\n"
         );
-        assert_eq!(
-            std::fs::read_to_string(png.with_extension("pipeline-pending"))
-                .expect("pending sidecar"),
-            "3\n"
-        );
+        assert!(!png.with_extension("pipeline-pending").exists());
+        assert_eq!(pending_text(&png), Some("3".to_string()));
     }
 
     #[test]
@@ -487,6 +507,18 @@ mod tests {
             std::fs::read_to_string(png.with_extension("atlas-passes")).expect("sidecar"),
             "0 2\n"
         );
+    }
+
+    fn pending_text(path: &std::path::Path) -> Option<String> {
+        let file = std::fs::File::open(path).expect("png");
+        let decoder = png::Decoder::new(std::io::BufReader::new(file));
+        let reader = decoder.read_info().expect("png info");
+        reader
+            .info()
+            .uncompressed_latin1_text
+            .iter()
+            .find(|chunk| chunk.keyword == super::PIPELINE_PENDING_TEXT_KEYWORD)
+            .map(|chunk| chunk.text.clone())
     }
 
     struct FailStampGuard;

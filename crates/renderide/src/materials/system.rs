@@ -143,6 +143,7 @@ impl MaterialSystem {
         device: Arc<wgpu::Device>,
         queue: &Arc<wgpu::Queue>,
         limits: Arc<crate::gpu::GpuLimits>,
+        compile_on_render_thread: bool,
     ) -> Result<(), EmbeddedMaterialBindError> {
         let embedded = EmbeddedMaterialBindResources::new(
             device.clone(),
@@ -150,7 +151,9 @@ impl MaterialSystem {
             limits.clone(),
         )?;
         self.material_registry = Some(crate::materials::MaterialRegistry::with_default_families(
-            device, limits,
+            device,
+            limits,
+            compile_on_render_thread,
         ));
         if let Some(reg) = self.material_registry.as_mut() {
             for (asset_id, (pipeline, shader_asset_name, shader_variant_bits)) in

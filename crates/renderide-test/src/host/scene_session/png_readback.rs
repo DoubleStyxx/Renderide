@@ -147,16 +147,28 @@ impl PngStabilityState {
     }
 }
 
-/// Whether the frame's pipeline sidecar says every requested material pipeline was ready.
+/// Keyword of the PNG `tEXt` chunk written by the headless PNG encoder.
+const PIPELINE_PENDING_TEXT_KEYWORD: &str = "renderide_pipeline_pending";
+
+/// Whether this PNG's own `tEXt` chunk says every requested material pipeline was ready.
 ///
-/// Missing, empty, or non-zero sidecars are not ready. A Null fallback drawn while the
-/// requested shader is still compiling is a positive count, so a colored partial frame
-/// is rejected the same way a clear frame is.
+/// The count is inside the PNG, so a later frame cannot publish `0` next to an older image.
+/// A missing chunk, a non-numeric chunk, or a non-zero count is not ready. A Null fallback
+/// drawn while the requested shader is still compiling is a positive count.
 fn pipeline_frame_is_ready(path: &Path) -> bool {
-    let Ok(text) = std::fs::read_to_string(path.with_extension("pipeline-pending")) else {
-        return false;
-    };
-    text.trim() == "0"
+    pipeline_pending_text(path).is_some_and(|text| text.trim() == "0")
+}
+
+fn pipeline_pending_text(path: &Path) -> Option<String> {
+    let file = std::fs::File::open(path).ok()?;
+    let decoder = png::Decoder::new(std::io::BufReader::new(file));
+    let reader = decoder.read_info().ok()?;
+    reader
+        .info()
+        .uncompressed_latin1_text
+        .iter()
+        .find(|chunk| chunk.keyword == PIPELINE_PENDING_TEXT_KEYWORD)
+        .map(|chunk| chunk.text.clone())
 }
 
 /// Whether the PNG at `path` decodes to a flat single-color image.
@@ -473,16 +485,35 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_sidecar_zero_is_ready_and_anything_else_waits() {
+    fn pipeline_text_chunk_zero_is_ready_and_anything_else_waits() {
         let dir = tempfile::tempdir().expect("tempdir");
         let png = dir.path().join("actual.png");
         assert!(!super::pipeline_frame_is_ready(&png));
-        let sidecar = png.with_extension("pipeline-pending");
-        std::fs::write(&sidecar, "2\n").expect("write pending");
+        write_pending_png(&png, "2");
         assert!(!super::pipeline_frame_is_ready(&png));
-        std::fs::write(&sidecar, "0\n").expect("write ready");
+        write_pending_png(&png, "0");
         assert!(super::pipeline_frame_is_ready(&png));
-        std::fs::write(&sidecar, "nope\n").expect("write garbage");
+        // A sidecar must not override the count stored in the PNG.
+        std::fs::write(png.with_extension("pipeline-pending"), "0\n").expect("sidecar");
+        write_pending_png(&png, "4");
         assert!(!super::pipeline_frame_is_ready(&png));
+        write_pending_png(&png, "nope");
+        assert!(!super::pipeline_frame_is_ready(&png));
+    }
+
+    fn write_pending_png(path: &std::path::Path, pending: &str) {
+        let file = std::fs::File::create(path).expect("create png");
+        let mut encoder = png::Encoder::new(file, 1, 1);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .add_text_chunk(
+                super::PIPELINE_PENDING_TEXT_KEYWORD.to_string(),
+                pending.to_string(),
+            )
+            .expect("text chunk");
+        let mut writer = encoder.write_header().expect("header");
+        writer.write_image_data(&[0, 0, 0, 255]).expect("pixels");
+        writer.finish().expect("finish");
     }
 }
