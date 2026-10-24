@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::scene::gltf_fixture::default_fixture_path;
 use crate::scene::perlin::PerlinTextureSpec;
 
-use super::tolerance::{pbs_lit_region_floors, Combine, Tolerance};
+use super::tolerance::{Combine, Tolerance, pbs_lit_region_floors};
 
 /// A single named integration test case.
 #[derive(Clone, Debug, Serialize, Deserialize)]
