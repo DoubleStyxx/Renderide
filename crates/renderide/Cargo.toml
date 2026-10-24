@@ -34,9 +34,9 @@ path = "src/bin/roundtrip.rs"
 ## Usage: `cargo build --profile dev-fast --features tracy`
 ## For realistic numbers: `cargo build --release --features tracy`
 ##
-## Requires no runtime configuration; connect the Tracy GUI on port 8086 before or after launching.
-## Uses Tracy's `ondemand` mode, and the GPU bridge is rebuilt at clean frame boundaries so late
-## attach starts with fresh GPU query ids instead of replaying disconnected GPU events.
+## Requires no runtime configuration; connect the Tracy 0.14.1 GUI on port 8086 before or after
+## launching. Uses Tracy's `ondemand` mode, and the GPU bridge is rebuilt at clean frame boundaries
+## so late attach starts with fresh GPU query ids instead of replaying disconnected GPU events.
 tracy = [
   "dep:wgpu-profiler",
   "dep:tracy-client",
@@ -121,12 +121,17 @@ bevy_mikktspace = "1.0"
 ## GPU timestamp query scopes; bridges per-phase GPU timing to Tracy when the `tracy` feature is on.
 ## Only compiled when the `tracy` workspace feature is enabled.
 wgpu-profiler = { version = "0.28", optional = true }
-## Tracy client. `enable` activates the native client library; `ondemand` keeps runtime cost
-## near-zero by only streaming data while a profiler GUI is attached. Only compiled when the
-## `tracy` feature is enabled.
-tracy-client = { version = "0.18", optional = true, default-features = false, features = [
+## Tracy client 0.19.0 (`tracy-client-sys` 0.30.1, Tracy protocol 0.14.1). Only compiled when
+## the `tracy` feature is enabled. `enable` links the client. `ondemand` streams only while a
+## GUI is attached. `wait-stacks` keeps context-switch call stacks: Tracy 0.14.0 captured them
+## on every context switch, and 0.14.1 exposes that capture as this flag (also a new 0.19
+## default). `profiling` and `wgpu-profiler` are patched onto this same 0.19 client and still
+## enable its default flags. Upstream removed `delayed-init` in 0.19; this crate left that flag
+## off. Connect the Tracy 0.14.1 GUI.
+tracy-client = { version = "0.19", optional = true, default-features = false, features = [
   "enable",
   "ondemand",
+  "wait-stacks",
 ] }
 ## Optional: enabled by the `video-textures` feature. Provides the GStreamer pipeline that
 ## decodes video texture sources into wgpu textures. Without this feature, video texture
