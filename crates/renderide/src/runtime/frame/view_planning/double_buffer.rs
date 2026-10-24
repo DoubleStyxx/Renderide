@@ -73,26 +73,25 @@ fn note_double_buffer_flag(flagged: &mut Vec<i32>, state: CameraState) {
 /// Swaps a ready double-buffered render texture once per planning pass.
 ///
 /// Call only after the camera has a resident target, a resolved viewport, scratch for a partial
-/// viewport, and a world matrix. Returns `true` when this camera claimed the swap. Which writer
+/// viewport, and a world matrix. The claim list records whether this camera swapped. Which writer
 /// seeds history is decided later, in execution order.
 pub(super) fn swap_double_buffer(
     backend: &mut RenderBackend,
     device: &wgpu::Device,
     state: CameraState,
     claimed: &mut Vec<i32>,
-) -> bool {
+) {
     let rt_id = state.render_texture_asset_id;
     if !camera_state_double_buffered(state.flags) {
-        return false;
+        return;
     }
     if !secondary_render_texture_ready(backend.render_texture_pool(), rt_id, state.viewport) {
-        return false;
+        return;
     }
     if !claim_double_buffer_swap(claimed, rt_id) {
-        return false;
+        return;
     }
     let _allocated = backend.begin_double_buffered_render_texture(device, rt_id);
-    true
 }
 
 /// Replaces the snapshotted color handles with the image published after the swap.
