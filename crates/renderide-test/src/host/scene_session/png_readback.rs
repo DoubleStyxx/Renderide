@@ -26,6 +26,12 @@ pub struct PngStabilityWaitTiming {
     pub overall_timeout: Duration,
     /// Renderer's configured PNG write interval.
     pub interval: Duration,
+    /// How many non-flat stable PNGs to ignore before accepting one.
+    ///
+    /// Async pipeline compiles can present one shader while the next is still building.
+    /// A clear frame is already rejected. This count rejects that many later colored
+    /// frames so the capture waits for the following write.
+    pub non_flat_skips: u32,
 }
 
 /// Filesystem snapshot of the renderer's PNG output, supplied to [`PngStabilityState::observe`].
@@ -178,6 +184,7 @@ pub(super) fn run_lockstep_until_png_stable(
     let deadline = Instant::now() + wait_timing.overall_timeout.max(deadline_floor);
     let mut last_log_at = Instant::now();
     let mut flat_candidate_seen = false;
+    let mut non_flat_skips = wait_timing.non_flat_skips;
 
     while Instant::now() < deadline {
         let _ = lockstep.tick(queues);
@@ -208,6 +215,15 @@ pub(super) fn run_lockstep_until_png_stable(
                     );
                 }
                 flat_candidate_seen = true;
+                state.reject_candidate();
+                std::thread::sleep(timing::POLL_INTERVAL);
+                continue;
+            }
+            if non_flat_skips > 0 {
+                non_flat_skips -= 1;
+                logger::info!(
+                    "Session: stable PNG is only a partial compile; waiting for a newer frame"
+                );
                 state.reject_candidate();
                 std::thread::sleep(timing::POLL_INTERVAL);
                 continue;
@@ -266,6 +282,7 @@ mod tests {
             scene_submit_instant,
             overall_timeout: Duration::from_secs(10),
             interval: Duration::from_secs(1),
+            non_flat_skips: 0,
         }
     }
 

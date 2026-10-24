@@ -11,6 +11,7 @@ members = [
   "crates/interprocess",
   "crates/bootstrapper",
   "crates/logger",
+  "crates/renderide-wayland-tablet",
 ]
 
 # `cc` stays at 1.2.63 in Cargo.lock. cc 1.9.0 applies `RUSTC_WRAPPER` to the
