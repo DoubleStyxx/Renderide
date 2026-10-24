@@ -1,7 +1,14 @@
 # Manual lavapipe frame benchmark. Does not run on push or pull_request.
 # The job builds master and the selected head on one runner and gates only on
-# relative regression of cpu_frame_ms.p95 (default: fail when delta > 10%).
-# Absolute milliseconds are not a gate.
+# relative regression of cpu_frame_ms.p95. Absolute milliseconds are not a gate.
+#
+# Gate (scripts/ci/frame_bench_gate.py, taken from the ref that dispatched this workflow):
+# a scenario regresses when its p95 delta is > `threshold` percent AND larger than the base's
+# own run-to-run p95 spread ((max - min) / median of base per-run p95). A first-pass regression
+# is only a suspect: base and head are re-measured `confirm_rounds` times, interleaved, for the
+# suspect scenarios only, and the job fails only if the pooled re-run also regresses.
+# Scenarios missing on base are `base N/A`; scenarios missing on head are `head N/A, skipped`.
+# The job fails when no requested scenario exists on head.
 name: Frame bench
 
 "on":
@@ -23,7 +30,7 @@ name: Frame bench
         required: false
         type: string
       threshold:
-        description: Fail when gated relative delta is strictly greater than this percent.
+        description: Percent. A scenario regresses when its cpu p95 delta is strictly greater than this AND greater than the base run-to-run p95 spread.
         default: "10"
         required: false
         type: string
@@ -43,8 +50,13 @@ name: Frame bench
         required: false
         type: string
       scenarios:
-        description: Comma-separated framebench scenario names ([a-z0-9_]). Empty uses the built-in defaults. Each tree runs with its own framebench binary; scenarios missing on base run on head only (base N/A).
+        description: Comma-separated framebench scenario names ([a-z0-9_]). Empty uses the built-in defaults. Each tree runs with its own framebench binary; scenarios missing on base run on head only (base N/A); scenarios missing on head are skipped (head N/A). Fails only when no requested scenario exists on head.
         default: ""
+        required: false
+        type: string
+      confirm_rounds:
+        description: When the first pass flags a scenario, re-measure base and head this many interleaved rounds (base/head, then head/base, ...) for the flagged scenarios only, each round with `runs` runs. Fail only if the pooled re-run also regresses. 0 fails on the first pass.
+        default: "3"
         required: false
         type: string
       threads:
@@ -71,6 +83,16 @@ jobs:
         with:
           ref: ${{ inputs.head_ref != '' && inputs.head_ref || github.ref }}
           path: head
+
+      - name: Checkout gate script (dispatching ref)
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: tools
+          sparse-checkout: scripts/ci
+
+      - name: Self-test gate script
+        run: python3 -m unittest discover -s tools/scripts/ci -p 'test_frame_bench_gate.py' -v
 
       - name: Checkout baseline
         uses: actions/checkout@v7
@@ -117,6 +139,7 @@ jobs:
           # Passed through the environment (never interpolated into the script text) and
           # validated below.
           INPUT_SCENARIOS: ${{ inputs.scenarios }}
+          BASE_REF: ${{ inputs.base_ref }}
         run: |
           set -euo pipefail
           threads="${{ inputs.threads }}"
@@ -125,6 +148,8 @@ jobs:
           warmup="${{ inputs.warmup }}"
           frames="${{ inputs.frames }}"
           resolution="${{ inputs.resolution }}"
+          confirm_rounds="${{ inputs.confirm_rounds }}"
+          gate_py="$GITHUB_WORKSPACE/tools/scripts/ci/frame_bench_gate.py"
           scenarios="${INPUT_SCENARIOS// /}"
           scenario_list=()
           if [[ -n "$scenarios" ]]; then
@@ -138,6 +163,14 @@ jobs:
             echo "threads must be a positive integer" >&2
             exit 1
           fi
+          if ! [[ "$confirm_rounds" =~ ^[0-9]+$ ]]; then
+            echo "confirm_rounds must be a non-negative integer" >&2
+            exit 1
+          fi
+          if ! [[ "$threshold" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+            echo "threshold must be a non-negative number" >&2
+            exit 1
+          fi
           last=$((threads - 1))
           if [[ "$threads" -eq 1 ]]; then
             cpuset="0"
@@ -145,8 +178,14 @@ jobs:
             cpuset="0-${last}"
           fi
 
-          mkdir -p "$RUNNER_TEMP/framebench"
-          summary="$RUNNER_TEMP/framebench/compare.md"
+          out="$RUNNER_TEMP/framebench"
+          mkdir -p "$out"
+          summary="$out/summary.md"
+
+          finish() {
+            cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+            exit "$1"
+          }
 
           build_tree() {
             local tree="$1"
@@ -160,11 +199,11 @@ jobs:
           }
 
           # Each tree is measured with ITS OWN renderide-framebench binary. Reports from different
-          # trees are only ever compared through the JSON schema (checked by `compare`).
+          # trees are only ever compared through the schema-1 JSON.
           # usage: run_tree <target dir> <out json> [scenario ...]
           run_tree() {
             local target="$1"
-            local out="$2"
+            local report="$2"
             shift 2
             local args=()
             local scenario
@@ -180,7 +219,7 @@ jobs:
               --frames "$frames" \
               --runs "$runs" \
               --timeout-seconds 600 \
-              --output "$out"
+              --output "$report"
           }
 
           # A scenario exists in a tree when its framebench scenario table defines it.
@@ -188,11 +227,37 @@ jobs:
             grep -Eq "^[[:space:]]*name: \"$2\"," "$1/crates/renderide-framebench/src/scenario.rs" 2>/dev/null
           }
 
+          {
+            echo "# frame-bench-lavapipe"
+            echo
+          } > "$summary"
+
           if ! build_tree "head" "$RUNNER_TEMP/target-head"; then
             echo "candidate tree failed to build" >&2
             exit 1
           fi
-          run_tree "$RUNNER_TEMP/target-head" "$RUNNER_TEMP/framebench/head.json" "${scenario_list[@]}"
+
+          # Requested scenarios the head tree does not define are skipped (head N/A). Fail only
+          # when none of the requested scenarios exist on head.
+          head_scenarios=()
+          head_missing_args=()
+          for scenario in "${scenario_list[@]}"; do
+            if tree_has_scenario "head" "$scenario"; then
+              head_scenarios+=("$scenario")
+            else
+              echo "head has no scenario \`$scenario\`: head N/A, skipped" >&2
+              head_missing_args+=(--head-missing "$scenario")
+            fi
+          done
+          if [[ "${#scenario_list[@]}" -gt 0 && "${#head_scenarios[@]}" -eq 0 ]]; then
+            {
+              echo "None of the requested scenarios (\`$scenarios\`) exist on head."
+              echo
+              echo "result: fail"
+            } | tee -a "$summary"
+            finish 1
+          fi
+          run_tree "$RUNNER_TEMP/target-head" "$out/head.json" "${head_scenarios[@]}"
 
           set +e
           build_tree "base" "$RUNNER_TEMP/target-base"
@@ -200,15 +265,12 @@ jobs:
           set -e
           if [[ "$base_status" -eq 2 ]]; then
             {
-              echo "# frame-bench-lavapipe"
-              echo
-              echo "Base ref \`${{ inputs.base_ref }}\` has no \`crates/renderide-framebench\` crate."
+              echo "Base ref \`$BASE_REF\` has no \`crates/renderide-framebench\` crate."
               echo "Relative gate skipped. Absolute milliseconds are not a gate."
               echo
               echo "result: pass"
-            } | tee "$summary"
-            cat "$summary" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
+            } | tee -a "$summary"
+            finish 0
           fi
           if [[ "$base_status" -ne 0 ]]; then
             echo "baseline tree failed to build" >&2
@@ -216,45 +278,94 @@ jobs:
           fi
 
           # Base runs on base's own binary. Scenarios the base tree does not define are measured
-          # on head only and show as `missing` (N/A) in the comparison, which never fails.
+          # on head only and show as `base N/A`, which never fails.
           base_scenarios=()
-          for scenario in "${scenario_list[@]}"; do
+          for scenario in "${head_scenarios[@]}"; do
             if tree_has_scenario "base" "$scenario"; then
               base_scenarios+=("$scenario")
             else
               echo "base has no scenario \`$scenario\`: head only, base N/A" >&2
             fi
           done
-          if [[ "${#scenario_list[@]}" -gt 0 && "${#base_scenarios[@]}" -eq 0 ]]; then
+          if [[ "${#head_scenarios[@]}" -gt 0 && "${#base_scenarios[@]}" -eq 0 ]]; then
             {
-              echo "# frame-bench-lavapipe"
-              echo
-              echo "None of the requested scenarios exist on base ref \`${{ inputs.base_ref }}\`."
+              echo "None of the requested scenarios exist on base ref \`$BASE_REF\`."
               echo "Head was measured; relative gate skipped (base N/A)."
               echo
-              echo "result: pass"
-            } | tee "$summary"
-            cat "$summary" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
+              python3 "$gate_py" --head "$out/head.json" "${head_missing_args[@]}" \
+                --threshold "$threshold" --title "First pass (head only)" || true
+            } | tee -a "$summary"
+            finish 0
           fi
-          run_tree "$RUNNER_TEMP/target-base" "$RUNNER_TEMP/framebench/base.json" "${base_scenarios[@]}"
+          run_tree "$RUNNER_TEMP/target-base" "$out/base.json" "${base_scenarios[@]}"
 
-          set +e
-          taskset -c "$cpuset" \
-            "$RUNNER_TEMP/target-head/release/renderide-framebench" compare \
-            --baseline "$RUNNER_TEMP/framebench/base.json" \
-            --candidate "$RUNNER_TEMP/framebench/head.json" \
-            --threshold "$threshold" \
-            | tee "$summary"
-          compare_status=${PIPESTATUS[0]}
-          set -e
           {
-            echo "# frame-bench-lavapipe"
-            echo
             echo "lavapipe via VK_ICD_FILENAMES=$VK_ICD_FILENAMES"
-            echo "resolution=$resolution threads=$threads runs=$runs (median of per-run percentiles)"
+            echo "resolution=$resolution threads=$threads runs=$runs threshold=$threshold% confirm_rounds=$confirm_rounds"
             echo "GPU timestamps are optional under lavapipe; null pass times are accepted."
             echo
-            cat "$summary"
-          } >> "$GITHUB_STEP_SUMMARY"
-          exit "$compare_status"
+          } >> "$summary"
+
+          set +e
+          python3 "$gate_py" --base "$out/base.json" --head "$out/head.json" \
+            "${head_missing_args[@]}" --threshold "$threshold" \
+            --title "First pass" --suspects-out "$out/suspects.txt" | tee "$out/first.md"
+          first_status=${PIPESTATUS[0]}
+          set -e
+          cat "$out/first.md" >> "$summary"
+          if [[ "$first_status" -ge 2 ]]; then
+            echo "gate script error" >&2
+            finish 1
+          fi
+
+          gate_status="$first_status"
+          if [[ "$first_status" -eq 1 && "$confirm_rounds" -gt 0 ]]; then
+            mapfile -t suspects < "$out/suspects.txt"
+            echo "first pass flagged: ${suspects[*]}; confirming with $confirm_rounds interleaved rounds" >&2
+            confirm_args=()
+            for ((round = 1; round <= confirm_rounds; round++)); do
+              # Alternate the order (base/head, head/base, ...) so slow drift on the runner
+              # does not always land on the same side.
+              if ((round % 2 == 1)); then
+                run_tree "$RUNNER_TEMP/target-base" "$out/confirm-base-$round.json" "${suspects[@]}"
+                run_tree "$RUNNER_TEMP/target-head" "$out/confirm-head-$round.json" "${suspects[@]}"
+              else
+                run_tree "$RUNNER_TEMP/target-head" "$out/confirm-head-$round.json" "${suspects[@]}"
+                run_tree "$RUNNER_TEMP/target-base" "$out/confirm-base-$round.json" "${suspects[@]}"
+              fi
+              confirm_args+=(--base "$out/confirm-base-$round.json" --head "$out/confirm-head-$round.json")
+            done
+            set +e
+            python3 "$gate_py" "${confirm_args[@]}" --threshold "$threshold" \
+              --title "Confirm re-run ($confirm_rounds interleaved rounds x $runs runs, flagged scenarios only)" \
+              | tee "$out/confirm.md"
+            gate_status=${PIPESTATUS[0]}
+            set -e
+            cat "$out/confirm.md" >> "$summary"
+            if [[ "$gate_status" -ge 2 ]]; then
+              echo "gate script error" >&2
+              finish 1
+            fi
+          fi
+
+          # Per-metric detail from head's own `renderide-framebench compare` (first pass, raw
+          # threshold, no spread check). Informational: its exit status is not the gate.
+          {
+            echo
+            echo "<details><summary>Raw per-metric compare (first pass; informational, not the gate)</summary>"
+            echo
+            taskset -c "$cpuset" \
+              "$RUNNER_TEMP/target-head/release/renderide-framebench" compare \
+              --baseline "$out/base.json" \
+              --candidate "$out/head.json" \
+              --threshold "$threshold" || true
+            echo
+            echo "</details>"
+            echo
+            if [[ "$gate_status" -eq 0 ]]; then
+              echo "gate: pass"
+            else
+              echo "gate: fail"
+            fi
+          } >> "$summary"
+          finish "$gate_status"

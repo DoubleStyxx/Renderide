@@ -227,7 +227,7 @@ cargo run --release -p renderide-framebench -- compare \
   --threshold 10
 ```
 
-`.github/workflows/frame-bench.yml` is `workflow_dispatch` only. The job `frame-bench-lavapipe` installs `mesa-vulkan-drivers`, forces lavapipe with `VK_ICD_FILENAMES` and `VK_DRIVER_FILES` pointed at the `lvp_icd` JSON, and measures the baseline ref and the candidate ref on the same runner. Resolution, thread count, and run count are fixed for that job. GPU timestamp queries are optional; null pass times are accepted.
+`.github/workflows/frame-bench.yml` is `workflow_dispatch` only. The job `frame-bench-lavapipe` installs `mesa-vulkan-drivers`, forces lavapipe with `VK_ICD_FILENAMES` and `VK_DRIVER_FILES` pointed at the `lvp_icd` JSON, and measures the baseline ref and the candidate ref on the same runner. Resolution, thread count, and run count are fixed for that job. GPU timestamp queries are optional; null pass times are accepted. The gate is `scripts/ci/frame_bench_gate.py`: a scenario fails only when its `cpu_frame_ms.p95` delta is above the `threshold` input and above the base's run-to-run spread, and again after `confirm_rounds` interleaved re-runs of the flagged scenarios. Requested scenarios missing on base show as `base N/A`; missing on head, as `head N/A, skipped`.
 
 Each scenario records a script of `camera.set_pose`, `frames.wait`, and `stats.query`. Those names match a dev-only localhost TCP JSON-RPC control API. This crate does not open that socket. The runner applies the pose and the frame counts in process, and `stats.query` is the report file.
 
