@@ -18,13 +18,25 @@ pub(super) fn install_candidate(
     metadata: &ReleaseBuildMetadata,
     candidate: &UpdateCandidate,
 ) -> Result<(), UpdateError> {
-    let install_dir = current_install_dir()?;
-    let stage_dir = unique_update_subdir(&install_dir, DOWNLOADS_DIR, &candidate.tag)?;
+    install_candidate_in(&current_install_dir()?, metadata, candidate)
+}
+
+/// Installs `candidate` into `install_dir`.
+///
+/// The running executable is still replaced with `self_replace::self_replace`, which always
+/// targets the current process image. Callers that are not that image must not reach a successful
+/// install.
+pub(super) fn install_candidate_in(
+    install_dir: &Path,
+    metadata: &ReleaseBuildMetadata,
+    candidate: &UpdateCandidate,
+) -> Result<(), UpdateError> {
+    let stage_dir = unique_update_subdir(install_dir, DOWNLOADS_DIR, &candidate.tag)?;
     let archive_path = download_asset(&candidate.asset, &stage_dir)?;
     bundle::validate_zip_paths(&archive_path)?;
-    let bundle_root = extract_asset(&archive_path, &stage_dir, &candidate.asset.name)?;
+    let bundle_root = extract_asset(&archive_path, &stage_dir, candidate.asset.name())?;
     bundle::validate_bundle_root(&bundle_root, metadata, candidate)?;
-    install_extracted_bundle(&install_dir, &bundle_root, metadata)
+    install_extracted_bundle(install_dir, &bundle_root, metadata)
 }
 
 /// Resolves the directory containing the currently running launcher.
@@ -44,18 +56,20 @@ fn download_asset(asset: &ReleaseAsset, stage_dir: &Path) -> Result<PathBuf, Upd
         context: format!("create update staging directory {}", stage_dir.display()),
         source,
     })?;
-    let archive_path = stage_dir.join(&asset.name);
+    let archive_path = stage_dir.join(asset.name());
     let mut archive = fs::File::create(&archive_path).map_err(|source| UpdateError::Io {
         context: format!("create update archive {}", archive_path.display()),
         source,
     })?;
-    let mut download = self_update::Download::from_url(&asset.download_url);
+    // 0.44's downloader sent this User-Agent when the caller did not set one.
+    // 1.x defaults to `self-update/<crate version>` instead, so set the old
+    // value explicitly. The Accept value is what makes GitHub's asset `url`
+    // (not `browser_download_url`) return the zip bytes.
+    let mut download = self_update::Download::from_url(asset.download_url());
     download
-        .set_header(
-            http::header::ACCEPT,
-            http::HeaderValue::from_static("application/octet-stream"),
-        )
-        .show_progress(false)
+        .request_header(http::header::ACCEPT, "application/octet-stream")
+        .request_header(http::header::USER_AGENT, "rust-reqwest/self-update")
+        .show_download_progress(false)
         .download_to(&mut archive)
         .map_err(to_self_update_error)?;
     Ok(archive_path)
@@ -180,7 +194,7 @@ fn install_extracted_bundle(
         .find(|entry| entry.launcher)
         .ok_or_else(|| UpdateError::InvalidBundle("launcher entry missing".to_owned()))?;
     let new_launcher = bundle_root.join(launcher.relative);
-    if let Err(e) = self_update::self_replace::self_replace(&new_launcher) {
+    if let Err(e) = self_replace::self_replace(&new_launcher) {
         let _ = restore_non_launcher_entries(install_dir, &backup_dir, &entries);
         return Err(to_self_update_error(e));
     }
@@ -381,7 +395,7 @@ pub(super) fn restore_latest_backup() -> Result<(), UpdateError> {
     let temp_launcher =
         unique_update_subdir(&install_dir, DOWNLOADS_DIR, "rollback")?.join(launcher.relative);
     copy_path(&backup_launcher, &temp_launcher)?;
-    self_update::self_replace::self_replace(&temp_launcher).map_err(to_self_update_error)
+    self_replace::self_replace(&temp_launcher).map_err(to_self_update_error)
 }
 
 /// Returns the most recently modified rollback backup directory.
@@ -534,10 +548,7 @@ mod tests {
             tag: UPDATE_TAG.to_owned(),
             commit: UPDATE_COMMIT.to_owned(),
             changelog: String::new(),
-            asset: ReleaseAsset {
-                name: asset_name,
-                download_url: String::new(),
-            },
+            asset: ReleaseAsset::new(asset_name, String::new()),
         }
     }
 

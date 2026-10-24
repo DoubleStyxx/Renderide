@@ -5,8 +5,13 @@
 //! never contact GitHub or show update UI.
 
 mod bundle;
+#[cfg(test)]
+mod flow_test;
 mod github;
+mod github_api;
 mod install;
+#[cfg(test)]
+mod mock_release;
 mod release_metadata;
 mod startup;
 mod state;
