@@ -8,32 +8,43 @@ Gate metric: `cpu_frame_ms.p95`. For each side, every report contributes its
 `per_run_cpu_frame_ms_p95` list (one value per measured run). The side's value is the median
 of those per-run p95s, and `delta = (head - base) / base * 100`.
 
+Two thresholds, both percent, `--flag-threshold <= --fail-threshold`:
+
+- `--flag-threshold` (workflow default 6): only decides which scenarios get re-measured.
+- `--fail-threshold` (workflow default 10): the policy bar. Nothing fails at or below it.
+  `--threshold` is a deprecated alias of `--fail-threshold`.
+
 Decision rule:
 
-1. First pass (`--mode first`, the default): a scenario is flagged when `delta` is strictly
-   greater than `--threshold`. No other condition. In particular the base's run-to-run spread
-   is not a threshold: a spread of 15-30% (normal on lavapipe, see docs/perf-parity-plan.md
-   section 5.1) would otherwise hide real regressions of the same size.
+1. First pass (`--mode first`, the default): a scenario is flagged (`FLAG`) when `delta` is
+   strictly greater than `--flag-threshold`. No other condition; in particular the base's
+   run-to-run spread is not a threshold (a spread of 15-30% is normal on lavapipe, see
+   docs/perf-parity-plan.md section 5.1, and one slow base run would hide a real regression).
+   Exit 1 when anything is flagged; `--suspects-out` lists the flagged scenarios.
 2. Confirm (`--mode confirm`): the workflow re-measures the flagged scenarios for
-   `confirm_rounds` interleaved rounds and passes ALL runs, first pass plus confirm, for each
-   side. A scenario fails only when both hold on that pooled data:
-   a. the pooled `delta` is strictly greater than `--threshold` (the same test as the first
-      pass, on more runs, so pooling never widens the threshold), and
-   b. a one-sided Mann-Whitney U test says head runs are slower than base runs,
-      `p < --alpha` (default 0.05).
-   There is no spread term anywhere: a slow base run can widen nothing. (a) is the first-pass
-   test itself on a superset of the runs, so the confirm threshold is never looser than the
-   first pass. (b) can only clear a flag whose pooled runs overlap so much that "head slower"
-   is not distinguishable from noise; with 4x the runs it has far more power than any 5-run
-   comparison. `confirm_rounds=0` skips the confirm: every first-pass flag fails.
-   Known limit (tested, see test_frame_bench_gate.py): if the confirm rounds add no new
-   information (they repeat the first-pass runs exactly), slow base runs sit at or above the
-   head median and the two sides overlap heavily, (b) can stay above alpha and clear the flag
-   (1.3% of seeded noise-model flags with a true regression >= 15%). Real confirm rounds are
-   fresh runs, where the same outliers do not repeat.
-   Independence caveat: Mann-Whitney assumes independent runs; lavapipe adds a per-invocation
-   shift (section 5.1: round medians move 5-10%). Interleaving base/head rounds spreads that
-   shift over both sides; the seeded simulation in the tests includes it.
+   `confirm_rounds` interleaved rounds. `--base`/`--head` are the first-pass reports,
+   `--confirm-base`/`--confirm-head` the confirm rounds. A scenario FAILS when EITHER holds:
+   a. pooled: on all runs (first pass + confirm), `delta > --fail-threshold` AND a one-sided
+      Mann-Whitney U test says head is slower, `p < --alpha` (default 0.05);
+   b. confirm-only: on the confirm rounds alone, `delta > --fail-threshold` AND the same
+      one-sided Mann-Whitney U test, `p < --alpha`.
+   Path (b) keeps the confirm strict: confirm rounds that on their own reproduce a regression
+   above the bar fail even if odd first-pass runs dilute the pooled data. There is no spread
+   term anywhere.
+3. No confirm (`confirm_rounds=0`): the workflow runs the first pass with
+   `--flag-threshold` set to the fail threshold, so a scenario fails only when its first-pass
+   `delta > fail_threshold`. A delta between the two thresholds PASSES: it is below the
+   policy bar, and the flag threshold only exists to choose what to re-measure. `decide()`
+   implements the same rule.
+
+Known limit (tested, see test_frame_bench_gate.py): if confirm rounds add no new information
+(they repeat the first-pass runs exactly), slow base runs at or above the head median plus heavy
+overlap can keep both Mann-Whitney tests above alpha and clear a first-pass delta above the bar
+(seeded noise model, true +15-30%: 6 of 3605 such cases at runs=9; 47 of 3511 at runs=5).
+Real confirm rounds are fresh runs, where the same outliers do not repeat.
+Independence caveat: Mann-Whitney assumes independent runs; lavapipe adds a per-invocation
+shift (section 5.1: 5-run medians move 5-10% between invocations). Interleaving base/head
+rounds spreads that shift over both sides; the seeded simulation in the tests includes it.
 
 Mann-Whitney U is implemented here (no SciPy): U counts head > base pairs, ties count 1/2.
 When `C(n_base + n_head, n_head) <= EXACT_MAX_COMBINATIONS` the p-value is exact, by
@@ -44,12 +55,13 @@ deterministic; the gate uses no randomness.
 Rows:
 
 - `ok`: no regression.
-- `FAIL`: in `first` mode, a suspect to confirm (see `--suspects-out`); in `confirm` mode, a
-  confirmed regression.
+- `FLAG` (first mode): delta above the flag threshold; re-measure it.
+- `FAIL (pooled)`, `FAIL (confirm-only)`, `FAIL (pooled, confirm-only)` (confirm mode): a
+  confirmed regression and the path(s) that failed it.
 - `base N/A`: scenario measured on head, not defined on base. Never fails.
 - `head N/A, skipped`: scenario requested but not defined on head (`--head-missing`). Never fails.
 
-Exit status: 0 pass, 1 regression, 2 usage or input error.
+Exit status: 0 pass, 1 flagged (first) or regression (confirm), 2 usage or input error.
 """
 
 from __future__ import annotations
@@ -79,6 +91,11 @@ class Row:
     n_base: int
     n_head: int
     status: str
+    # Confirm mode only: the confirm rounds on their own (path b).
+    confirm_delta: float | None = None
+    confirm_p: float | None = None
+    confirm_n_base: int = 0
+    confirm_n_head: int = 0
 
 
 def load(paths: list[Path]) -> dict[str, list[float]]:
@@ -147,46 +164,102 @@ def mann_whitney_greater(base: list[float], head: list[float]) -> float:
     return 0.5 * math.erfc(z / math.sqrt(2.0))
 
 
-def evaluate(
-    base: dict[str, list[float]],
-    head: dict[str, list[float]],
-    threshold: float,
-    head_missing: list[str],
-    mode: str = "first",
-    alpha: float = DEFAULT_ALPHA,
-) -> list[Row]:
-    """Rows for every scenario. `mode` is `first` (delta only) or `confirm` (delta and U test)."""
-    if mode not in ("first", "confirm"):
-        raise ValueError(f"unknown mode {mode!r}")
+def _missing_rows(
+    base: dict[str, list[float]], head: dict[str, list[float]], head_missing: list[str]
+) -> tuple[list[str], list[Row]]:
+    """Names that have data on both sides, and the N/A rows for the rest."""
+    both: list[str] = []
     rows: list[Row] = []
     for name in sorted(set(base) | set(head)):
         head_samples = head.get(name) or []
         base_samples = base.get(name) or []
         if not head_samples:
-            # Only reachable when the base report has a scenario the head report lacks.
             rows.append(
                 Row(name, statistics.median(base_samples), None, None, None, len(base_samples), 0, "head N/A, skipped")
             )
-            continue
-        head_value = statistics.median(head_samples)
-        if not base_samples:
-            rows.append(Row(name, None, head_value, None, None, 0, len(head_samples), "base N/A"))
-            continue
-        base_value = statistics.median(base_samples)
-        delta = delta_percent(base_samples, head_samples)
-        if delta is None:
-            rows.append(Row(name, base_value, head_value, None, None, len(base_samples), len(head_samples), "n/a"))
-            continue
-        p_value = mann_whitney_greater(base_samples, head_samples) if mode == "confirm" else None
-        regressed = delta > threshold
-        if mode == "confirm":
-            regressed = regressed and p_value is not None and p_value < alpha
-        status = "FAIL" if regressed else "ok"
-        rows.append(Row(name, base_value, head_value, delta, p_value, len(base_samples), len(head_samples), status))
-    known = {row.scenario for row in rows}
+        elif not base_samples:
+            rows.append(Row(name, None, statistics.median(head_samples), None, None, 0, len(head_samples), "base N/A"))
+        else:
+            both.append(name)
+    known = set(base) | set(head)
     for name in sorted(set(head_missing) - known):
         rows.append(Row(name, None, None, None, None, 0, 0, "head N/A, skipped"))
-    return rows
+    return both, rows
+
+
+def _order(rows: list[Row]) -> list[Row]:
+    na_head = [r for r in rows if r.status == "head N/A, skipped" and r.base is None and r.n_base == 0]
+    rest = sorted((r for r in rows if r not in na_head), key=lambda r: r.scenario)
+    return rest + sorted(na_head, key=lambda r: r.scenario)
+
+
+def evaluate_first(
+    base: dict[str, list[float]],
+    head: dict[str, list[float]],
+    flag_threshold: float,
+    head_missing: list[str],
+) -> list[Row]:
+    """First pass: `FLAG` when delta > flag_threshold."""
+    both, rows = _missing_rows(base, head, head_missing)
+    for name in both:
+        b, h = base[name], head[name]
+        delta = delta_percent(b, h)
+        if delta is None:
+            status = "n/a"
+        else:
+            status = "FLAG" if delta > flag_threshold else "ok"
+        rows.append(Row(name, statistics.median(b), statistics.median(h), delta, None, len(b), len(h), status))
+    return _order(rows)
+
+
+def _significant_regression(base: list[float], head: list[float], fail_threshold: float, alpha: float):
+    """(delta, p, regressed) for one data set: delta > fail_threshold AND Mann-Whitney p < alpha."""
+    if not base or not head:
+        return None, None, False
+    delta = delta_percent(base, head)
+    p_value = mann_whitney_greater(base, head)
+    regressed = delta is not None and delta > fail_threshold and p_value < alpha
+    return delta, p_value, regressed
+
+
+def evaluate_confirm(
+    first_base: dict[str, list[float]],
+    first_head: dict[str, list[float]],
+    confirm_base: dict[str, list[float]],
+    confirm_head: dict[str, list[float]],
+    fail_threshold: float,
+    head_missing: list[str],
+    alpha: float = DEFAULT_ALPHA,
+) -> list[Row]:
+    """Confirm: FAIL when (a) pooled or (b) confirm-only data shows delta > fail AND MW p < alpha."""
+    pooled_base = {k: list(v) for k, v in first_base.items()}
+    pooled_head = {k: list(v) for k, v in first_head.items()}
+    for k, v in confirm_base.items():
+        pooled_base.setdefault(k, []).extend(v)
+    for k, v in confirm_head.items():
+        pooled_head.setdefault(k, []).extend(v)
+    both, rows = _missing_rows(pooled_base, pooled_head, head_missing)
+    for name in both:
+        b, h = pooled_base[name], pooled_head[name]
+        delta, p_value, pooled_fail = _significant_regression(b, h, fail_threshold, alpha)
+        cb, ch = confirm_base.get(name) or [], confirm_head.get(name) or []
+        c_delta, c_p, confirm_fail = _significant_regression(cb, ch, fail_threshold, alpha)
+        paths = [label for label, hit in (("pooled", pooled_fail), ("confirm-only", confirm_fail)) if hit]
+        if delta is None:
+            status = "n/a"
+        elif paths:
+            status = f"FAIL ({', '.join(paths)})"
+        else:
+            status = "ok"
+        rows.append(
+            Row(name, statistics.median(b), statistics.median(h), delta, p_value, len(b), len(h), status,
+                c_delta, c_p, len(cb), len(ch))
+        )
+    return _order(rows)
+
+
+def is_failure(status: str) -> bool:
+    return status.startswith("FAIL") or status == "FLAG"
 
 
 def decide(
@@ -194,23 +267,27 @@ def decide(
     first_head: list[float],
     confirm_base: list[list[float]],
     confirm_head: list[list[float]],
-    threshold: float,
+    flag_threshold: float,
+    fail_threshold: float,
     alpha: float = DEFAULT_ALPHA,
 ) -> str:
     """Whole-gate decision for one scenario, as the workflow runs it: `pass` or `fail`.
 
-    `confirm_base` / `confirm_head` are the confirm rounds (may be empty: `confirm_rounds=0`
-    fails on the first pass).
+    `confirm_base` / `confirm_head` are the confirm rounds. Empty means `confirm_rounds=0`:
+    then the first pass runs at the fail threshold (a delta between the two thresholds passes).
     """
-    first = evaluate({"s": first_base}, {"s": first_head}, threshold, [])[0]
-    if first.status != "FAIL":
-        return "pass"
     if not confirm_base and not confirm_head:
-        return "fail"
-    pooled_base = list(first_base) + [v for run in confirm_base for v in run]
-    pooled_head = list(first_head) + [v for run in confirm_head for v in run]
-    row = evaluate({"s": pooled_base}, {"s": pooled_head}, threshold, [], mode="confirm", alpha=alpha)[0]
-    return "fail" if row.status == "FAIL" else "pass"
+        first = evaluate_first({"s": first_base}, {"s": first_head}, fail_threshold, [])[0]
+        return "fail" if first.status == "FLAG" else "pass"
+    first = evaluate_first({"s": first_base}, {"s": first_head}, flag_threshold, [])[0]
+    if first.status != "FLAG":
+        return "pass"
+    row = evaluate_confirm(
+        {"s": first_base}, {"s": first_head},
+        {"s": [v for run in confirm_base for v in run]}, {"s": [v for run in confirm_head for v in run]},
+        fail_threshold, [], alpha,
+    )[0]
+    return "fail" if row.status.startswith("FAIL") else "pass"
 
 
 def fmt_ms(value: float | None) -> str:
@@ -225,61 +302,97 @@ def fmt_p(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.4f}"
 
 
-def render(rows: list[Row], title: str, threshold: float, mode: str = "first", alpha: float = DEFAULT_ALPHA) -> str:
+def render(
+    rows: list[Row],
+    title: str,
+    flag_threshold: float,
+    fail_threshold: float,
+    mode: str = "first",
+    alpha: float = DEFAULT_ALPHA,
+) -> str:
+    lines = [f"### {title}", ""]
     if mode == "confirm":
-        rule = (
-            f"Confirm (all runs pooled, first pass + confirm rounds): FAIL needs pooled delta > {threshold:g}% "
-            f"AND one-sided Mann-Whitney U p < {alpha:g} (head slower than base)."
-        )
+        lines += [
+            "Gate: cpu_frame_ms.p95 (median of per-run p95). Confirm: FAIL when EITHER "
+            f"(a) pooled (first pass + confirm) delta > {fail_threshold:g}% AND one-sided Mann-Whitney U p < {alpha:g}, "
+            f"OR (b) confirm-rounds-only delta > {fail_threshold:g}% AND Mann-Whitney p < {alpha:g} (head slower).",
+            "",
+            "| scenario | base p95 ms | head p95 ms | pooled delta | pooled runs base/head | pooled MW p "
+            "| confirm-only delta | confirm runs base/head | confirm-only MW p | status |",
+            "|---|---|---|---|---|---|---|---|---|---|",
+        ]
+        for r in rows:
+            lines.append(
+                f"| {r.scenario} | {fmt_ms(r.base)} | {fmt_ms(r.head)} | {fmt_pct(r.delta)} | {r.n_base}/{r.n_head} "
+                f"| {fmt_p(r.p_value)} | {fmt_pct(r.confirm_delta)} | {r.confirm_n_base}/{r.confirm_n_head} "
+                f"| {fmt_p(r.confirm_p)} | {r.status} |"
+            )
     else:
-        rule = f"First pass: flag when delta > {threshold:g}% (no spread condition). Flags are confirmed before failing."
-    lines = [
-        f"### {title}",
-        "",
-        f"Gate: cpu_frame_ms.p95 (median of per-run p95). {rule}",
-        "",
-        "| scenario | base p95 ms | head p95 ms | delta | runs base/head | Mann-Whitney p | status |",
-        "|---|---|---|---|---|---|---|",
-    ]
-    for row in rows:
-        lines.append(
-            f"| {row.scenario} | {fmt_ms(row.base)} | {fmt_ms(row.head)} | {fmt_pct(row.delta)} "
-            f"| {row.n_base}/{row.n_head} | {fmt_p(row.p_value)} | {row.status} |"
-        )
+        lines += [
+            f"Gate: cpu_frame_ms.p95 (median of per-run p95). First pass: FLAG when delta > {flag_threshold:g}% "
+            f"(no spread condition); flags are re-measured and fail only above {fail_threshold:g}%.",
+            "",
+            "| scenario | base p95 ms | head p95 ms | delta | runs base/head | status |",
+            "|---|---|---|---|---|---|",
+        ]
+        for r in rows:
+            lines.append(
+                f"| {r.scenario} | {fmt_ms(r.base)} | {fmt_ms(r.head)} | {fmt_pct(r.delta)} "
+                f"| {r.n_base}/{r.n_head} | {r.status} |"
+            )
     lines.append("")
     return "\n".join(lines)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--base", type=Path, action="append", default=[], help="base report; repeatable (pooled)")
-    parser.add_argument("--head", type=Path, action="append", default=[], help="head report; repeatable (pooled)")
-    parser.add_argument("--threshold", type=float, default=10.0, help="percent; flag only when strictly greater")
-    parser.add_argument("--mode", choices=("first", "confirm"), default="first", help="first pass or pooled confirm")
+    parser.add_argument("--base", type=Path, action="append", default=[], help="first-pass base report; repeatable")
+    parser.add_argument("--head", type=Path, action="append", default=[], help="first-pass head report; repeatable")
+    parser.add_argument("--confirm-base", type=Path, action="append", default=[], help="confirm-round base report")
+    parser.add_argument("--confirm-head", type=Path, action="append", default=[], help="confirm-round head report")
+    parser.add_argument("--flag-threshold", type=float, default=6.0, help="percent; first pass flags when delta > this")
+    parser.add_argument("--fail-threshold", type=float, default=10.0, help="percent; the policy bar")
+    parser.add_argument("--threshold", type=float, dest="legacy_threshold", help="deprecated alias of --fail-threshold")
+    parser.add_argument("--mode", choices=("first", "confirm"), default="first", help="first pass or confirm")
     parser.add_argument("--alpha", type=float, default=DEFAULT_ALPHA, help="confirm: Mann-Whitney one-sided level")
     parser.add_argument("--head-missing", action="append", default=[], help="requested scenario head does not define")
     parser.add_argument("--title", default="Frame bench gate")
-    parser.add_argument("--suspects-out", type=Path, help="write failing scenario names, one per line")
+    parser.add_argument("--suspects-out", type=Path, help="first mode: write flagged scenario names, one per line")
     args = parser.parse_args(argv)
+    if args.legacy_threshold is not None:
+        print("frame_bench_gate: --threshold is deprecated; using it as --fail-threshold", file=sys.stderr)
+        args.fail_threshold = args.legacy_threshold
     if not args.head:
         print("frame_bench_gate: at least one --head report is required", file=sys.stderr)
         return 2
     if not 0.0 < args.alpha < 1.0:
         print("frame_bench_gate: --alpha must be in (0, 1)", file=sys.stderr)
         return 2
+    if not 0.0 <= args.flag_threshold <= args.fail_threshold:
+        print("frame_bench_gate: need 0 <= --flag-threshold <= --fail-threshold", file=sys.stderr)
+        return 2
+    if args.mode == "first" and (args.confirm_base or args.confirm_head):
+        print("frame_bench_gate: --confirm-base/--confirm-head need --mode confirm", file=sys.stderr)
+        return 2
     try:
         base = load(args.base)
         head = load(args.head)
+        confirm_base = load(args.confirm_base)
+        confirm_head = load(args.confirm_head)
     except (OSError, ValueError, KeyError, TypeError) as err:
         print(f"frame_bench_gate: {err}", file=sys.stderr)
         return 2
-    rows = evaluate(base, head, args.threshold, args.head_missing, mode=args.mode, alpha=args.alpha)
-    sys.stdout.write(render(rows, args.title, args.threshold, mode=args.mode, alpha=args.alpha))
-    failed = [row.scenario for row in rows if row.status == "FAIL"]
+    if args.mode == "confirm":
+        rows = evaluate_confirm(base, head, confirm_base, confirm_head, args.fail_threshold, args.head_missing, args.alpha)
+    else:
+        rows = evaluate_first(base, head, args.flag_threshold, args.head_missing)
+    sys.stdout.write(render(rows, args.title, args.flag_threshold, args.fail_threshold, args.mode, args.alpha))
+    hit = [row.scenario for row in rows if is_failure(row.status)]
     if args.suspects_out is not None:
-        args.suspects_out.write_text("".join(f"{name}\n" for name in failed), encoding="utf-8")
-    print(f"result: {'fail' if failed else 'pass'}" + (f" ({', '.join(failed)})" if failed else ""))
-    return 1 if failed else 0
+        args.suspects_out.write_text("".join(f"{name}\n" for name in hit), encoding="utf-8")
+    word = "fail" if args.mode == "confirm" else "flagged"
+    print(f"result: {word if hit else 'pass'}" + (f" ({', '.join(hit)})" if hit else ""))
+    return 1 if hit else 0
 
 
 if __name__ == "__main__":

@@ -5,12 +5,18 @@
 # Gate (scripts/ci/frame_bench_gate.py, taken from the ref that dispatched this workflow;
 # its docstring is the full rule). delta = (median head per-run p95 - median base per-run p95)
 # / median base per-run p95, in percent.
-# 1. First pass: a scenario is flagged when delta > `threshold`. Nothing else: the base's
+# Two thresholds (percent): `flag_threshold` (default 6) picks what to re-measure,
+# `fail_threshold` (default 10) is the policy bar.
+# 1. First pass: a scenario is flagged when delta > `flag_threshold`. Nothing else: the base's
 #    run-to-run spread (15-30% per run on lavapipe) is not a threshold.
-# 2. Confirm: flagged scenarios are re-measured for `confirm_rounds` interleaved rounds. ALL runs
-#    (first pass + confirm) are pooled per side, and the scenario fails only if the pooled delta
-#    is still > `threshold` AND a one-sided Mann-Whitney U test gives p < 0.05 (head slower).
-#    `confirm_rounds` = 0 fails on the first pass.
+# 2. Confirm: flagged scenarios are re-measured for `confirm_rounds` interleaved rounds. A
+#    scenario fails when EITHER (a) on all runs pooled (first pass + confirm), delta >
+#    `fail_threshold` AND a one-sided Mann-Whitney U test gives p < 0.05 (head slower), OR
+#    (b) on the confirm rounds alone, delta > `fail_threshold` AND Mann-Whitney p < 0.05.
+# 3. `confirm_rounds` = 0: the first pass flags at `fail_threshold` and every flag fails; a
+#    delta between the two thresholds passes (it is under the policy bar).
+# `threshold` is a deprecated alias of `fail_threshold` (it wins when set, and lowers
+# `flag_threshold` to it if needed).
 # Scenarios missing on base are `base N/A`; scenarios missing on head are `head N/A, skipped`.
 # The job fails when no requested scenario exists on head.
 name: Frame bench
@@ -29,13 +35,23 @@ name: Frame bench
         required: false
         type: string
       runs:
-        description: Measured runs per scenario. The gate uses the median of each run's percentile.
-        default: "5"
+        description: Measured runs per scenario, per pass and per confirm round. The gate uses the median of each run's percentile.
+        default: "9"
+        required: false
+        type: string
+      flag_threshold:
+        description: Percent. The first pass flags a scenario for re-measurement when its cpu p95 delta (median of per-run p95s) is strictly greater than this; no spread condition. A flag alone never fails. Must be <= fail_threshold.
+        default: "6"
+        required: false
+        type: string
+      fail_threshold:
+        description: Percent, the policy bar. A flagged scenario fails when, after the confirm, either all pooled runs or the confirm rounds alone show a delta strictly greater than this AND one-sided Mann-Whitney p < 0.05 (head slower).
+        default: "10"
         required: false
         type: string
       threshold:
-        description: Percent. First pass flags a scenario when its cpu p95 delta (median of per-run p95s) is strictly greater than this; no spread condition. The confirm fails it only if the pooled delta is still above this AND a one-sided Mann-Whitney U test on all pooled runs gives p < 0.05.
-        default: "10"
+        description: Deprecated alias of fail_threshold. Empty (default) means unused. When set it overrides fail_threshold and lowers flag_threshold to it if flag_threshold is larger.
+        default: ""
         required: false
         type: string
       warmup:
@@ -59,7 +75,7 @@ name: Frame bench
         required: false
         type: string
       confirm_rounds:
-        description: When the first pass flags a scenario, re-measure base and head this many interleaved rounds (base/head, then head/base, ...) for the flagged scenarios only, each round with `runs` runs. All runs (first pass + confirm) are pooled; fail only if the pooled delta is > threshold AND one-sided Mann-Whitney p < 0.05. 0 fails on the first pass.
+        description: When the first pass flags a scenario, re-measure base and head this many interleaved rounds (base/head, then head/base, ...) for the flagged scenarios only, each round with `runs` runs. Fail if (a) all runs pooled, or (b) the confirm rounds alone, show delta > fail_threshold AND one-sided Mann-Whitney p < 0.05. 0 skips the confirm and fails only first-pass deltas > fail_threshold.
         default: "3"
         required: false
         type: string
@@ -155,6 +171,8 @@ jobs:
           INPUT_SCENARIOS: ${{ inputs.scenarios }}
           INPUT_THREADS: ${{ inputs.threads }}
           INPUT_RUNS: ${{ inputs.runs }}
+          INPUT_FLAG_THRESHOLD: ${{ inputs.flag_threshold }}
+          INPUT_FAIL_THRESHOLD: ${{ inputs.fail_threshold }}
           INPUT_THRESHOLD: ${{ inputs.threshold }}
           INPUT_WARMUP: ${{ inputs.warmup }}
           INPUT_FRAMES: ${{ inputs.frames }}
@@ -165,7 +183,9 @@ jobs:
           set -euo pipefail
           threads="$INPUT_THREADS"
           runs="$INPUT_RUNS"
-          threshold="$INPUT_THRESHOLD"
+          flag_threshold="$INPUT_FLAG_THRESHOLD"
+          fail_threshold="$INPUT_FAIL_THRESHOLD"
+          legacy_threshold="$INPUT_THRESHOLD"
           warmup="$INPUT_WARMUP"
           frames="$INPUT_FRAMES"
           resolution="$INPUT_RESOLUTION"
@@ -204,10 +224,36 @@ jobs:
             echo "confirm_rounds must be a non-negative integer" >&2
             exit 1
           fi
-          if ! [[ "$threshold" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-            echo "threshold must be a non-negative number" >&2
+          number_re='^[0-9]+([.][0-9]+)?$'
+          for pair in "flag_threshold=$flag_threshold" "fail_threshold=$fail_threshold"; do
+            if ! [[ "${pair#*=}" =~ $number_re ]]; then
+              echo "${pair%%=*} must be a non-negative number" >&2
+              exit 1
+            fi
+          done
+          if [[ -n "$legacy_threshold" ]]; then
+            if ! [[ "$legacy_threshold" =~ $number_re ]]; then
+              echo "threshold must be a non-negative number" >&2
+              exit 1
+            fi
+            echo "::warning::input 'threshold' is deprecated; using it as fail_threshold=$legacy_threshold"
+            fail_threshold="$legacy_threshold"
+            if awk -v a="$flag_threshold" -v b="$fail_threshold" 'BEGIN { exit !(a > b) }'; then
+              echo "::warning::flag_threshold $flag_threshold > fail_threshold $fail_threshold; lowering flag_threshold"
+              flag_threshold="$fail_threshold"
+            fi
+          fi
+          if awk -v a="$flag_threshold" -v b="$fail_threshold" 'BEGIN { exit !(a > b) }'; then
+            echo "flag_threshold ($flag_threshold) must be <= fail_threshold ($fail_threshold)" >&2
             exit 1
           fi
+          # confirm_rounds=0: no re-measurement, so the first pass flags at the fail bar and every
+          # flag fails. A delta between the two thresholds passes.
+          first_flag="$flag_threshold"
+          if [[ "$confirm_rounds" -eq 0 ]]; then
+            first_flag="$fail_threshold"
+          fi
+          thresholds=(--flag-threshold "$first_flag" --fail-threshold "$fail_threshold")
           last=$((threads - 1))
           if [[ "$threads" -eq 1 ]]; then
             cpuset="0"
@@ -352,7 +398,7 @@ jobs:
               echo "Head was measured; relative gate skipped (base N/A)."
               echo
               python3 "$gate_py" --head "$out/head.json" "${head_missing_args[@]}" \
-                --threshold "$threshold" --title "First pass (head only)" || true
+                "${thresholds[@]}" --title "First pass (head only)" || true
             } | tee -a "$summary"
             finish 0
           fi
@@ -360,15 +406,20 @@ jobs:
 
           {
             echo "lavapipe via VK_ICD_FILENAMES=$VK_ICD_FILENAMES"
-            echo "resolution=$resolution threads=$threads runs=$runs threshold=$threshold% confirm_rounds=$confirm_rounds"
+            echo "resolution=$resolution threads=$threads runs=$runs flag_threshold=$flag_threshold% fail_threshold=$fail_threshold% confirm_rounds=$confirm_rounds"
             echo "GPU timestamps are optional under lavapipe; null pass times are accepted."
             echo
           } >> "$summary"
 
+          if [[ "$confirm_rounds" -eq 0 ]]; then
+            first_title="First pass (confirm_rounds=0: flags at fail_threshold $fail_threshold% and fails)"
+          else
+            first_title="First pass"
+          fi
           set +e
           python3 "$gate_py" --base "$out/base.json" --head "$out/head.json" \
-            "${head_missing_args[@]}" --threshold "$threshold" \
-            --title "First pass" --suspects-out "$out/suspects.txt" | tee "$out/first.md"
+            "${head_missing_args[@]}" "${thresholds[@]}" \
+            --title "$first_title" --suspects-out "$out/suspects.txt" | tee "$out/first.md"
           first_status=${PIPESTATUS[0]}
           set -e
           cat "$out/first.md" >> "$summary"
@@ -381,7 +432,8 @@ jobs:
           if [[ "$first_status" -eq 1 && "$confirm_rounds" -gt 0 ]]; then
             mapfile -t suspects < "$out/suspects.txt"
             echo "first pass flagged: ${suspects[*]}; confirming with $confirm_rounds interleaved rounds" >&2
-            # Pool every run: first-pass reports plus each confirm round.
+            # First-pass reports plus each confirm round: the gate pools them for path (a) and uses
+            # the confirm rounds alone for path (b).
             confirm_args=(--base "$out/base.json" --head "$out/head.json")
             for ((round = 1; round <= confirm_rounds; round++)); do
               # Alternate the order (base/head, head/base, ...) so slow drift on the runner
@@ -393,12 +445,12 @@ jobs:
                 run_tree "$RUNNER_TEMP/target-head" "$out/confirm-head-$round.json" "${suspects[@]}"
                 run_tree "$RUNNER_TEMP/target-base" "$out/confirm-base-$round.json" "${suspects[@]}"
               fi
-              confirm_args+=(--base "$out/confirm-base-$round.json" --head "$out/confirm-head-$round.json")
+              confirm_args+=(--confirm-base "$out/confirm-base-$round.json" --confirm-head "$out/confirm-head-$round.json")
             done
             set +e
             python3 "$gate_py" --mode confirm "${confirm_args[@]}" "${head_missing_args[@]}" \
-              --threshold "$threshold" \
-              --title "Confirm (first pass + $confirm_rounds interleaved rounds x $runs runs, pooled; only flagged scenarios were re-run)" \
+              "${thresholds[@]}" \
+              --title "Confirm ($confirm_rounds interleaved rounds x $runs runs; only flagged scenarios were re-run)" \
               | tee "$out/confirm.md"
             gate_status=${PIPESTATUS[0]}
             set -e
@@ -410,7 +462,7 @@ jobs:
           fi
 
           # Per-metric detail from head's own `renderide-framebench compare` (first pass, raw
-          # threshold, no spread check). Informational: its exit status is not the gate.
+          # fail_threshold, no spread check). Informational: its exit status is not the gate.
           {
             echo
             echo "<details><summary>Raw per-metric compare (first pass; informational, not the gate)</summary>"
@@ -419,7 +471,7 @@ jobs:
               "$RUNNER_TEMP/target-head/release/renderide-framebench" compare \
               --baseline "$out/base.json" \
               --candidate "$out/head.json" \
-              --threshold "$threshold" || true
+              --threshold "$fail_threshold" || true
             echo
             echo "</details>"
             echo
