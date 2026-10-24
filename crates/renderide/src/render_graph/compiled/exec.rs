@@ -238,7 +238,7 @@ impl CompiledRenderGraph {
                 retained_resources: per_view_retained_resources,
                 ..
             },
-        ) = self.record_graph_commands(
+        ) = match self.record_graph_commands(
             mv_ctx,
             GraphCommandRecordingInputs {
                 views,
@@ -249,7 +249,16 @@ impl CompiledRenderGraph {
                 plan: recording_plan,
                 command_diagnostics,
             },
-        )?;
+        ) {
+            Ok(recorded) => recorded,
+            Err(err) => {
+                mv_ctx
+                    .backend
+                    .frame_resources()
+                    .finish_shadow_map_submit(false);
+                return Err(err);
+            }
+        };
 
         let submit_stats = {
             profiling::scope!("graph::submit_frame_batch");

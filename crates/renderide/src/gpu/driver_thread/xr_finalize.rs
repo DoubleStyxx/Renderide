@@ -1,13 +1,18 @@
 //! OpenXR frame-finalize work piggybacked onto the driver thread.
 //!
-//! The main thread cannot release the OpenXR swapchain image and call `xrEndFrame` until
-//! the previous `wgpu::Queue::submit` for the swapchain-touching work has hit the queue.
-//! Doing the wait synchronously on the main thread defeats the driver-thread pipelining.
-//! Instead the main thread packages everything `xrReleaseSwapchainImage` and
-//! `xrEndFrame` need into [`XrFinalizeWork`] and attaches it to the trailing
-//! [`super::SubmitBatch`] of the VR tick. The driver runs the finalize on its own
-//! thread, then signals back via [`XrFinalizeSignal`] so the next tick's `wait_frame`
-//! can synchronise with `xrBeginFrame` ordering.
+//! The main thread packages `xrReleaseSwapchainImage` and `xrEndFrame` into
+//! [`XrFinalizeWork`] and attaches it to the trailing [`super::SubmitBatch`] of the VR
+//! tick. Same-queue barriers and signals already cover earlier submissions, and the
+//! specs do not require a CPU wait. When this session enabled the WiVRn/Monado on RADV
+//! workaround, the driver waits for work already submitted on that queue before
+//! release. See [`super::swapchain_handoff`]. `never` releases without the wait.
+//!
+//! The driver then releases and ends the frame, and signals back via
+//! [`XrFinalizeSignal`] so the next tick's `wait_frame` can synchronise with `xrBeginFrame`.
+//! With the wait enabled, that signal does not arrive until the eye copy is GPU-visible,
+//! so the next `xrBeginFrame` waits out the copy. That is the overlap the workaround
+//! gives up. With the wait disabled, the signal follows submit and the old pipelining
+//! stays.
 //!
 //! Errors observed on the driver thread are stored in a shared slot and surfaced to the
 //! main thread on the next finalize wait so existing recovery paths react one tick later.
@@ -27,6 +32,7 @@ use crate::crash_context;
 use crate::gpu::GpuQueueAccessGate;
 use crate::gpu::driver_thread::BlockingCallWatchdog;
 use crate::gpu::flight_recorder::{GpuFlightCallResult, GpuFlightOpenXrCall, GpuFlightRecorder};
+use crate::gpu::sync::device_health::GpuDeviceHealth;
 
 /// Deadline for a single deferred `xrEndFrame` call before the watchdog logs a stall.
 ///
@@ -144,10 +150,9 @@ pub struct XrProjectionFinalize {
     pub swapchain: Arc<Mutex<xr::Swapchain<xr::Vulkan>>>,
     /// Per-frame wgpu wrapper for the acquired OpenXR image.
     ///
-    /// Kept in the driver batch until after `Queue::submit` returns so command buffers that
-    /// referenced the imported image cannot outlive the wrapper. The driver drops it before
-    /// `xrReleaseSwapchainImage` so wgpu does not retain tracking state while the compositor owns
-    /// the image.
+    /// Dropped after the GPU-wait decision and before `xrReleaseSwapchainImage`, so wgpu
+    /// does not retain tracking state while the compositor owns the image. When the
+    /// session wait is enabled, that decision is GPU visibility.
     pub imported_color_texture: Option<wgpu::Texture>,
     /// Swapchain image index acquired for this frame.
     pub image_index: u32,
@@ -169,6 +174,11 @@ pub struct XrProjectionFinalize {
     pub frame_open: Arc<AtomicBool>,
     /// Shared shutdown flag used to lower expected compositor-stall log severity.
     pub shutdown_requested: Arc<AtomicBool>,
+    /// Session-start resolution of `[rendering] vr_swapchain_gpu_wait`.
+    ///
+    /// `true` polls the eye-copy submission before release. `false` is the old pipelined
+    /// release (`never`, or `auto` when the runtime and adapter did not match).
+    pub wait_for_gpu_writes: bool,
 }
 
 /// Per-frame depth payload attached to a stereo projection layer when supported by OpenXR.
@@ -222,16 +232,25 @@ pub fn wait_for_finalize(rx: XrFinalizeReceiver) -> Result<(), RecvTimeoutError>
 /// Runs deferred OpenXR finalize work on the driver thread after the trailing batch's
 /// `Queue::submit` returns.
 ///
-/// For [`XrFinalizeKind::Projection`]: drops the per-frame wgpu image wrapper, takes the queue
-/// access gate, releases the swapchain image, drops the gate, takes the gate again, calls
-/// `xrEndFrame` with a stereo projection layer, drops the gate, clears the `frame_open` flag, and
-/// signals. For [`XrFinalizeKind::Empty`]: takes the gate, calls `xrEndFrame` with no layers,
-/// drops the gate, clears the flag, and signals.
+/// For [`XrFinalizeKind::Projection`]: when the session wait is enabled and the batch
+/// contained command buffers, waits until work submitted before the wait is GPU-visible.
+/// Then drops the per-frame wgpu image wrapper, takes the queue access gate, releases
+/// the swapchain image, drops the gate, takes the gate again, calls `xrEndFrame` with a
+/// stereo projection layer, drops the gate, clears the `frame_open` flag, and signals.
+/// That release is the driver-thread success path. Import and `xrWaitSwapchainImage`
+/// failures release the image directly from `xr/app_integration/submit.rs` and never
+/// enter this function.
+/// For [`XrFinalizeKind::Empty`]: takes the gate, calls `xrEndFrame` with no layers, drops the
+/// gate, clears the flag, and signals. Empty frames did not write a swapchain image, so they
+/// do not wait.
 ///
 /// Errors are logged with [`logger::warn!`] and recorded in
 /// [`XrFinalizeWork::error_slot`] for the next `wait_frame` to surface.
 pub(super) fn run_xr_finalize(
     gate: &GpuQueueAccessGate,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    device_health: &GpuDeviceHealth,
     work: XrFinalizeWork,
     flight_recorder: Arc<GpuFlightRecorder>,
 ) -> Result<(), xr::sys::Result> {
@@ -244,9 +263,15 @@ pub(super) fn run_xr_finalize(
     } = work;
 
     let result = match kind {
-        XrFinalizeKind::Projection(payload) => {
-            run_projection_finalize(gate, payload, submit_context, &flight_recorder)
-        }
+        XrFinalizeKind::Projection(payload) => run_projection_finalize(
+            gate,
+            device,
+            queue,
+            device_health,
+            payload,
+            submit_context,
+            &flight_recorder,
+        ),
         XrFinalizeKind::Empty {
             frame_stream,
             env_blend_mode,
@@ -283,22 +308,57 @@ pub(super) fn run_xr_finalize(
 /// Runs stereo projection finalize work.
 fn run_projection_finalize(
     gate: &GpuQueueAccessGate,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    device_health: &GpuDeviceHealth,
     mut payload: Box<XrProjectionFinalize>,
     submit_context: XrFinalizeSubmitContext,
     flight_recorder: &Arc<GpuFlightRecorder>,
 ) -> Result<(), xr::sys::Result> {
+    use super::swapchain_handoff::{
+        ProjectionGpuWaitRequest, note_empty_projection_finalize, wait_for_projection_writes,
+    };
+
     set_projection_crash_context(&payload, submit_context);
+    note_empty_projection_finalize(
+        submit_context.command_buffers,
+        submit_context.frame_seq,
+        payload.image_index,
+        payload.wait_for_gpu_writes,
+    );
+    // The queue gate stays released across this wait. The wait does not submit.
+    // `Queue::write_texture` takes the gate on the main thread; `Queue::write_buffer`
+    // does not. Holding the gate here would stall texture uploads and the OpenXR queue
+    // calls for the whole wait. Each non-blocking poll holds wgpu-core's snatch and
+    // fence read locks only for that maintain. See `wait_for_projection_writes`.
+    let release_permit = wait_for_projection_writes(&ProjectionGpuWaitRequest {
+        device,
+        queue,
+        device_health,
+        command_buffers: submit_context.command_buffers,
+        frame_seq: submit_context.frame_seq,
+        image_index: payload.image_index,
+        wait_enabled: payload.wait_for_gpu_writes,
+        flight_recorder,
+    });
     drop(payload.imported_color_texture.take());
     if let Some(depth) = payload.depth.as_mut() {
         drop(depth.imported_depth_texture.take());
     }
     record_release_image_started(&payload, flight_recorder);
-    let release_res = release_image_with_watchdog(gate, &payload, submit_context, flight_recorder);
+    let release_res = release_image_with_watchdog(
+        &release_permit,
+        gate,
+        &payload,
+        submit_context,
+        flight_recorder,
+    );
     record_release_image_result(&payload, flight_recorder, release_res);
     release_res?;
     if let Some(depth) = payload.depth.as_ref() {
         record_release_depth_image_started(&payload, depth, flight_recorder);
         let release_depth_res = release_depth_image_with_watchdog(
+            &release_permit,
             gate,
             &payload,
             depth,
@@ -367,12 +427,18 @@ fn record_release_image_started(
 }
 
 /// Releases a projection swapchain image with a timeout hook.
+///
+/// `release_permit` is the GPU-wait decision for this driver-thread success path.
+/// This helper cannot run without it. Acquire, import, and `xrWaitSwapchainImage`
+/// failures in `xr/app_integration/submit.rs` release the image directly.
 fn release_image_with_watchdog(
+    release_permit: &super::swapchain_handoff::SwapchainReleasePermit,
     gate: &GpuQueueAccessGate,
     payload: &XrProjectionFinalize,
     submit_context: XrFinalizeSubmitContext,
     flight_recorder: &Arc<GpuFlightRecorder>,
 ) -> Result<(), xr::sys::Result> {
+    let _visibility = release_permit.outcome();
     let release_timeout_context = XrFinalizeTimeoutContext::projection(payload, submit_context);
     let release_timeout_recorder = Arc::clone(flight_recorder);
     let release_watchdog = BlockingCallWatchdog::arm_shutdown_aware_with_timeout_hook(
@@ -407,13 +473,18 @@ fn record_release_depth_image_started(
 }
 
 /// Releases a projection depth swapchain image with a timeout hook.
+///
+/// Same permit rule as [`release_image_with_watchdog`]: this success-path helper
+/// borrows the wait permit. The direct failure-path releases do not.
 fn release_depth_image_with_watchdog(
+    release_permit: &super::swapchain_handoff::SwapchainReleasePermit,
     gate: &GpuQueueAccessGate,
     payload: &XrProjectionFinalize,
     depth: &XrProjectionDepthFinalize,
     submit_context: XrFinalizeSubmitContext,
     flight_recorder: &Arc<GpuFlightRecorder>,
 ) -> Result<(), xr::sys::Result> {
+    let _visibility = release_permit.outcome();
     let release_timeout_context =
         XrFinalizeTimeoutContext::projection_depth(payload, depth, submit_context);
     let release_timeout_recorder = Arc::clone(flight_recorder);

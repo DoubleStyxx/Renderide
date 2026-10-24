@@ -344,6 +344,7 @@ fn prepare_lights_for_camera_views_follows_render_space_visibility_policy() {
                 head_output_transform: Mat4::IDENTITY,
                 render_shadows: true,
                 has_selective_roots: false,
+                transform_filter_space: None,
                 cull: None,
             },
             FrameLightViewDesc {
@@ -354,6 +355,7 @@ fn prepare_lights_for_camera_views_follows_render_space_visibility_policy() {
                 head_output_transform: Mat4::IDENTITY,
                 render_shadows: true,
                 has_selective_roots: false,
+                transform_filter_space: None,
                 cull: None,
             },
         ],
@@ -420,6 +422,7 @@ fn prepare_lights_for_views_culls_light_volumes_before_packing() {
         render_space_scope: ViewRenderSpaceScope::single(space),
         layer_policy: ViewLayerPolicy::MainView,
         has_selective_roots: false,
+        transform_filter_space: None,
         head_output_transform: Mat4::IDENTITY,
         render_shadows: true,
         cull: Some(identity_light_cull_desc()),
@@ -497,6 +500,7 @@ fn prepare_lights_for_views_keeps_secondary_light_positions_view_local() {
                 head_output_transform: Mat4::from_translation(Vec3::new(10.0, 0.0, 0.0)),
                 render_shadows: true,
                 has_selective_roots: false,
+                transform_filter_space: None,
                 cull: None,
             },
             FrameLightViewDesc {
@@ -507,6 +511,7 @@ fn prepare_lights_for_views_keeps_secondary_light_positions_view_local() {
                 head_output_transform: Mat4::from_translation(Vec3::new(30.0, 0.0, 0.0)),
                 render_shadows: true,
                 has_selective_roots: false,
+                transform_filter_space: None,
                 cull: None,
             },
         ],
@@ -552,6 +557,7 @@ fn prepare_lights_for_views_can_disable_shadow_metadata_per_view() {
                 head_output_transform: Mat4::IDENTITY,
                 render_shadows: true,
                 has_selective_roots: false,
+                transform_filter_space: None,
                 cull: None,
             },
             FrameLightViewDesc {
@@ -562,6 +568,7 @@ fn prepare_lights_for_views_can_disable_shadow_metadata_per_view() {
                 head_output_transform: Mat4::IDENTITY,
                 render_shadows: false,
                 has_selective_roots: false,
+                transform_filter_space: None,
                 cull: None,
             },
         ],
@@ -581,4 +588,55 @@ fn prepare_lights_for_views_can_disable_shadow_metadata_per_view() {
     assert_eq!(off[0].shadow_near_plane, 0.0);
     assert_eq!(off[0].shadow_bias, 0.0);
     assert_eq!(off[0].shadow_normal_bias, 0.0);
+}
+
+/// Builds an all-active camera light view for private-UI policy tests.
+fn camera_light_view(
+    view_id: ViewId,
+    render_private_ui: bool,
+    has_selective_roots: bool,
+    transform_filter_space: Option<RenderSpaceId>,
+) -> FrameLightViewDesc {
+    FrameLightViewDesc {
+        view_id,
+        render_context: RenderingContext::Camera,
+        render_space_scope: ViewRenderSpaceScope::AllActive,
+        layer_policy: ViewLayerPolicy::camera(render_private_ui),
+        has_selective_roots,
+        transform_filter_space,
+        head_output_transform: Mat4::IDENTITY,
+        render_shadows: true,
+        cull: None,
+    }
+}
+
+#[test]
+fn selective_light_roots_reveal_private_space_only_when_the_filter_applies() {
+    let mut scene = SceneCoordinator::new();
+    let public_space = RenderSpaceId(9);
+    let private_space = RenderSpaceId(10);
+    seed_space_with_light(&mut scene, public_space, 100, 1.0);
+    seed_space_with_light(&mut scene, private_space, 200, 0.5);
+    scene.test_set_space_private(private_space, true);
+
+    let world_filter = ViewId::secondary_camera(public_space, 0);
+    let userspace_filter = ViewId::secondary_camera(private_space, 0);
+    let global_selective = ViewId::secondary_camera(public_space, 1);
+    let mut mgr = FrameResourceManager::new();
+    mgr.prepare_lights_for_views(
+        &scene,
+        [
+            camera_light_view(world_filter, false, true, Some(public_space)),
+            camera_light_view(userspace_filter, false, true, Some(private_space)),
+            camera_light_view(global_selective, false, true, None),
+        ],
+        None,
+    );
+
+    let world_lights = mgr.frame_lights_for_view(world_filter);
+    assert_eq!(world_lights.len(), 1);
+    assert!((world_lights[0].color[0] - 1.0).abs() < 1e-5);
+
+    assert_eq!(mgr.frame_lights_for_view(userspace_filter).len(), 2);
+    assert_eq!(mgr.frame_lights_for_view(global_selective).len(), 2);
 }

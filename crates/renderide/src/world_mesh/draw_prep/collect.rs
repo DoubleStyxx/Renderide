@@ -156,7 +156,8 @@ pub struct DrawCollectionViewInputs<'a> {
     pub head_output_transform: Mat4,
     /// Camera world position for back-to-front distance sorting of transparent draws.
     ///
-    /// Populate from `HostCameraFrame::view_origin_world()`.
+    /// Populate from `HostCameraFrame::view_origin_world()`. Canvas plane distance uses this
+    /// origin and the draw matrix. It does not use a camera forward.
     pub view_origin_world: Vec3,
     /// Optional CPU frustum + Hi-Z cull inputs.
     pub culling: Option<&'a WorldMeshCullInput<'a>>,
@@ -309,6 +310,15 @@ fn transform_filter_has_selective_roots(ctx: &DrawCollectionInputs<'_>) -> bool 
         .is_some_and(CameraTransformDrawFilter::has_selective_roots)
 }
 
+/// Returns whether this view's selective transform list applies inside `space_id`.
+///
+/// A dashboard camera's selective roots reveal private UI only in the space that filter names.
+/// Using the view-global flag would show every in-scope private space.
+fn selective_roots_apply_to_space(ctx: &DrawCollectionInputs<'_>, space_id: RenderSpaceId) -> bool {
+    transform_filter_for_space(ctx, space_id)
+        .is_some_and(CameraTransformDrawFilter::has_selective_roots)
+}
+
 /// Returns the transform filter for `space_id` if the view-local filter applies to that render space.
 pub(super) fn transform_filter_for_space<'a>(
     ctx: &'a DrawCollectionInputs<'_>,
@@ -355,7 +365,7 @@ fn render_space_visible_in_view(ctx: &DrawCollectionInputs<'_>, space_id: Render
         || ctx
             .view
             .layer_policy
-            .shows_private_render_space(transform_filter_has_selective_roots(ctx))
+            .shows_private_render_space(selective_roots_apply_to_space(ctx, space_id))
 }
 
 /// Returns whether a renderer with `special_layer` is visible under this view's layer policy.
@@ -409,10 +419,11 @@ impl QueuedWorldMeshDraws {
 
     /// Sorts and arranges queued draws, reusing a retained command-list cache when provided.
     pub(crate) fn sort_and_arrange_with_cache(
-        self,
+        mut self,
         parallelism: WorldMeshDrawArrangeParallelism,
         command_cache: Option<&WorldMeshCommandCache>,
     ) -> WorldMeshDrawCollection {
+        super::canvas_depth::snap_canvas_sibling_plane_depths(&mut self.chunks);
         let allow_parallel_sort = parallelism == WorldMeshDrawArrangeParallelism::Full;
         let (items, arrangement) = {
             profiling::scope!("mesh::arrange");

@@ -22,6 +22,37 @@ fn parse_host_args_tokens_empty_slice() {
     assert!(level.is_none());
 }
 
+/// Unknown Resonite arguments, including values with spaces, are forwarded intact.
+#[test]
+fn parse_bootstrap_args_tokens_forwards_unknown_resonite_args() {
+    let args = vec![
+        "--log-level".into(),
+        "warn".into(),
+        "-Screen".into(),
+        "-LoadAssembly".into(),
+        "Libraries/My Mod.dll".into(),
+        "-CustomFlag".into(),
+        "still here".into(),
+        "-Renderer".into(),
+        r"C:\Program Files\AltRenderer.exe".into(),
+    ];
+    let parsed = bootstrapper::cli::parse_bootstrap_args_tokens(&args);
+    assert_eq!(parsed.log_level, Some(LogLevel::Warn));
+    assert!(!parsed.rollback_update);
+    assert_eq!(
+        parsed.host_args,
+        vec![
+            "-Screen".to_string(),
+            "-LoadAssembly".to_string(),
+            "Libraries/My Mod.dll".to_string(),
+            "-CustomFlag".to_string(),
+            "still here".to_string(),
+            "-Renderer".to_string(),
+            r"C:\Program Files\AltRenderer.exe".to_string(),
+        ]
+    );
+}
+
 /// Update rollback is a launcher-only flag and must not leak to Host argv.
 #[test]
 fn parse_bootstrap_args_tokens_consumes_rollback_update() {

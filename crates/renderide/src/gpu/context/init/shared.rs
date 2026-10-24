@@ -50,6 +50,7 @@ impl GpuRuntimeHandles {
     ) -> Result<Self, GpuError> {
         let gpu_queue_access_gate = super::super::super::GpuQueueAccessGate::new();
         let driver_thread = super::super::super::driver_thread::DriverThread::new(
+            Arc::clone(&device),
             Arc::clone(&queue),
             gpu_queue_access_gate.clone(),
             device_health,

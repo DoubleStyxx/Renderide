@@ -66,6 +66,16 @@ pub enum CaseTemplate {
     CustomShaderPropertyUpdate,
     /// Poincare-disk tiling and a raymarched gyroid, each with `_Speed` 0.
     ExoticShaderPair,
+    /// Coplanar UI quads: a small earlier quad must not paint over the later larger quad.
+    CoplanarCanvasUiQuads,
+    /// Tilted parent/child UI canvases at two camera-relative yaws.
+    TiltedCanvasUiQuads,
+    /// UI quad that stays behind an opaque quad unless the reverse-Z NDC bias is applied.
+    CanvasOffsetBiasQuad,
+    /// Tilted canvas siblings at 18 m. The later child wins by the sibling-step bias.
+    TiltedCanvasDistanceBias,
+    /// Hard-shadowed cube on a PBS floor, static then moved.
+    ShadowedCasterMove,
 }
 
 /// Default golden directory, relative to the workspace root: `crates/renderide-test/goldens/`.
@@ -185,6 +195,25 @@ pub fn custom_shader_property_update() -> IntegrationCase {
     }
 }
 
+/// Hard spot shadow on a PBS cube and floor.
+///
+/// The companion golden is the static frame. The compared golden is the same scene after the
+/// cube moves. The session rejects a static recapture unless it is a lit pixel match with zero
+/// atlas passes. Windows CI uses DX12 WARP, which does not render this scene, so the case is
+/// not in the default suite there.
+pub fn shadowed_caster_move() -> IntegrationCase {
+    IntegrationCase {
+        name: "shadowed_caster_move".to_string(),
+        description:
+            "PBS floor and cube under a hard spot shadow on lavapipe. plain.png is the static frame. The harness requires the next static frame to match it exactly and to record zero shadow-atlas passes, then actual.png is the frame after the cube moves and the pass log must show one atlas submit."
+                .to_string(),
+        golden_path: default_goldens_dir().join("shadowed_caster_move.png"),
+        resolution: (256, 256),
+        tolerance: visual_tolerance(0.78, 56, 0.22, 18, 24, 0.06),
+        template: CaseTemplate::ShadowedCasterMove,
+    }
+}
+
 /// Poincare disk on the left and a gyroid SDF on the right. Both materials keep `_Speed` at 0.
 pub fn exotic_shader_pair() -> IntegrationCase {
     IntegrationCase {
@@ -204,6 +233,88 @@ pub fn exotic_shader_pair() -> IntegrationCase {
             combine: Combine::Or,
         },
         template: CaseTemplate::ExoticShaderPair,
+    }
+}
+
+/// Coplanar `UI/Unlit` quads that share a center and sorting order.
+///
+/// The smaller red quad is submitted first. Canvas order plus a reverse-Z depth step must draw
+/// the larger blue quad on top. The red quad sits entirely inside the blue one, so a correct
+/// capture is background plus one blue color.
+pub fn coplanar_canvas_ui_quads() -> IntegrationCase {
+    IntegrationCase {
+        name: "coplanar_canvas_ui_quads".to_string(),
+        description:
+            "Two coplanar UI/Unlit quads. The later larger quad covers the earlier smaller one."
+                .to_string(),
+        golden_path: default_goldens_dir().join("coplanar_canvas_ui_quads.png"),
+        resolution: (256, 256),
+        tolerance: visual_tolerance(0.9, 24, 0.08, 16, 2, 0.04),
+        template: CaseTemplate::CoplanarCanvasUiQuads,
+    }
+}
+
+/// Tilted parent and child `UI/Unlit` quads at +35° and −40° yaw.
+///
+/// The child is offset inside the parent's plane so its AABB center is farther along camera +Z.
+/// A camera-forward center key draws the child first and the parent covers it. The plane-distance
+/// key keeps collect order, so each child stays blue on its red parent. The face-on coplanar
+/// golden still passes with no bias; this one is the tilted ordering probe.
+pub fn tilted_canvas_ui_quads() -> IntegrationCase {
+    IntegrationCase {
+        name: "tilted_canvas_ui_quads".to_string(),
+        description: "Tilted parent/child UI quads at two yaws. Each later child stays visible."
+            .to_string(),
+        golden_path: default_goldens_dir().join("tilted_canvas_ui_quads.png"),
+        resolution: (256, 256),
+        // `And` so a covered child fails even when SSIM stays high. The center-depth head
+        // (`74bd3657`) scores about 0.94 SSIM and a 0.056 failing fraction on this image.
+        tolerance: Tolerance {
+            ssim_min: Some(0.98),
+            max_abs_diff: Some(24),
+            max_failing_pixel_fraction: Some(0.02),
+            min_luma_range: Some(16),
+            min_unique_colors: Some(3),
+            min_non_background_pixel_fraction: Some(0.04),
+            combine: Combine::And,
+        },
+        template: CaseTemplate::TiltedCanvasUiQuads,
+    }
+}
+
+/// Opaque red quad with a smaller UI quad 0.6 mm farther and `_OffsetUnits = -64`.
+///
+/// Four D24 quanta times 64 units pull the UI about 1.37 mm closer at the harness camera
+/// (3 m, near 0.1, far 100), so the center is blue. Hardware bias alone does not clear 0.6 mm,
+/// so the same scene stays red without the NDC term. The coplanar golden is not this probe:
+/// it passes on `LEqual` with no bias.
+pub fn canvas_offset_bias_quad() -> IntegrationCase {
+    IntegrationCase {
+        name: "canvas_offset_bias_quad".to_string(),
+        description: "A UI quad 0.6 mm behind an opaque quad. Offset units must pull it in front."
+            .to_string(),
+        golden_path: default_goldens_dir().join("canvas_offset_bias_quad.png"),
+        resolution: (256, 256),
+        tolerance: visual_tolerance(0.9, 24, 0.08, 16, 3, 0.04),
+        template: CaseTemplate::CanvasOffsetBiasQuad,
+    }
+}
+
+/// Tilted parent and child `UI/Unlit` quads at 18 m, yawed 60°.
+///
+/// The child is 0.15 mm farther along the plane normal, still inside one 0.5 mm quantum, so it
+/// takes sibling step 1. That step is about 0.77 mm toward the camera at 18 m (near 0.1, far 100)
+/// and clears the 0.30 mm view-ray gap. One D24 ulp does not. `_OffsetUnits` stays 0, so the
+/// pixel is the sibling step and not the authored offset. Both quads set `_ZWrite` to 1.
+pub fn tilted_canvas_distance_bias() -> IntegrationCase {
+    IntegrationCase {
+        name: "tilted_canvas_distance_bias".to_string(),
+        description: "Tilted UI siblings at 18 m. The later child's depth step must cover it."
+            .to_string(),
+        golden_path: default_goldens_dir().join("tilted_canvas_distance_bias.png"),
+        resolution: (256, 256),
+        tolerance: visual_tolerance(0.9, 24, 0.08, 16, 3, 0.04),
+        template: CaseTemplate::TiltedCanvasDistanceBias,
     }
 }
 
@@ -231,7 +342,18 @@ pub fn registry() -> Vec<IntegrationCase> {
         alpha_cutout_masked_quads(),
         custom_shader_property_update(),
         exotic_shader_pair(),
+        coplanar_canvas_ui_quads(),
+        tilted_canvas_ui_quads(),
+        canvas_offset_bias_quad(),
+        tilted_canvas_distance_bias(),
     ];
+    // WARP limitation, not a shadow-cache diff. Windows CI is DX12 Microsoft Basic Render Driver
+    // (Vulkan reports ERROR_INCOMPATIBLE_DRIVER). On that adapter the static frame was a 48-color
+    // gray slab and the post-move frame stayed clear-black for the case timeout, while unshadowed
+    // PBS goldens passed. The case does not exist on master, so there is no master WARP image.
+    // Lavapipe still runs it on Linux and macOS.
+    #[cfg(not(windows))]
+    cases.push(shadowed_caster_move());
     let gltf_fixture = default_fixture_path();
     if gltf_fixture.is_file() {
         cases.push(gltf_textured_static_mesh(gltf_fixture));
@@ -248,7 +370,9 @@ impl IntegrationCase {
     /// Golden for the pre-update capture, when this case records two frames.
     pub fn plain_capture_golden(&self) -> Option<PathBuf> {
         match self.template {
-            CaseTemplate::CustomShaderPropertyUpdate => Some(plain_png_path(&self.golden_path)),
+            CaseTemplate::CustomShaderPropertyUpdate | CaseTemplate::ShadowedCasterMove => {
+                Some(plain_png_path(&self.golden_path))
+            }
             _ => None,
         }
     }
@@ -298,6 +422,15 @@ mod tests {
         assert!(lookup("multi_primitive_unlit_grid").is_some());
         assert!(lookup("pbs_lit_material_matrix").is_some());
         assert!(lookup("alpha_cutout_masked_quads").is_some());
+    }
+
+    #[test]
+    fn shadowed_caster_move_stays_out_of_the_windows_suite() {
+        let present = lookup("shadowed_caster_move").is_some();
+        #[cfg(windows)]
+        assert!(!present);
+        #[cfg(not(windows))]
+        assert!(present);
     }
 
     #[test]

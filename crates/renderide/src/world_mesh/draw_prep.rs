@@ -16,6 +16,7 @@
 
 mod arrange;
 mod bitset;
+mod canvas_depth;
 mod collect;
 mod command_cache;
 mod filter;
@@ -24,6 +25,14 @@ mod prepared_renderables;
 mod render_world;
 mod sort;
 
+#[cfg(feature = "bench-api")]
+pub(crate) use canvas_depth::snap_canvas_sibling_plane_depths;
+#[cfg(any(test, feature = "bench-api"))]
+pub(crate) use canvas_depth::sync_transparent_depth_key;
+pub(crate) use canvas_depth::{
+    apply_reverse_z_ndc_bias, assign_canvas_depth_steps, canvas_bias_projection, canvas_ndc_z_bias,
+    canvas_plane_distance_meters, transparent_depth_key_from_parts,
+};
 pub(crate) use collect::queue_prepared_draws_for_views_with_parallelism;
 pub use collect::{
     DrawCollectionFrameCaches, DrawCollectionInputs, DrawCollectionMaterialInputs,
@@ -40,10 +49,15 @@ pub use item::{
 };
 pub use prepared_renderables::FramePreparedRenderables;
 pub use render_world::{RenderWorld, RenderWorldMaintenanceStats};
-#[cfg(test)]
+#[cfg(any(test, feature = "bench-api"))]
 pub use sort::pack_sort_prefix;
 #[cfg(test)]
 pub(crate) use sort::sort_draws;
+#[cfg(feature = "bench-api")]
+pub(crate) use sort::{
+    sort_order_sensitive_draws_master, sort_order_sensitive_draws_precomputed,
+    sort_order_sensitive_draws_recomputing_depth,
+};
 
 #[cfg(test)]
 mod tests;

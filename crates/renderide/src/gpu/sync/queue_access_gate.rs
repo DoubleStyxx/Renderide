@@ -29,9 +29,19 @@
 //!
 //! The gate is held around `Queue::write_texture` call sites in the asset texture upload
 //! path, decoded video texture callbacks, the driver thread's `Queue::submit`,
-//! `SurfaceTexture::present`, and the narrow OpenXR calls listed above. Long waits such as `xrWaitFrame`,
-//! `xrWaitSwapchainImage`, view location, and input sync stay outside the gate so
-//! compositor stalls do not block unrelated GPU submissions.
+//! `SurfaceTexture::present`, and the narrow OpenXR calls listed above. `Queue::write_buffer`
+//! is not gated. Long waits such as `xrWaitFrame`, `xrWaitSwapchainImage`, view location,
+//! and input sync stay outside the gate so compositor stalls do not block unrelated GPU
+//! submissions.
+//!
+//! The VR swapchain GPU wait also stays outside this gate. It drives
+//! `Queue::on_submitted_work_done` with non-blocking `Device::poll(Poll)` calls.
+//! Each poll holds wgpu-core's snatch and fence read locks only for that maintain,
+//! then drops them before the completion callback and before `poll` returns.
+//! `destroy()` can stall on the snatch write lock for that brief section, not for
+//! the 500 ms wait budget. The residual device-lost path is a `get_fence_value`
+//! per ~50 us slice for up to the 500 ms budget. `upload_arena` and occlusion
+//! already call `device.poll(PollType::Poll)` with the same exposure.
 
 use std::sync::Arc;
 

@@ -74,7 +74,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             mesa-vulkan-drivers vulkan-tools \
-            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-bad
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -129,6 +130,12 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace --locked
+
+      # The default test command does not enable `video-textures`. This run covers the
+      # appsrc -> tsdemux continuity probe, which needs the GStreamer plugins above.
+      - name: Test MPEG-TS continuity repair
+        if: runner.os == 'Linux'
+        run: cargo test --locked -p renderide --features video-textures --lib assets::video::mpegts
 
       - name: Run headless renderer suite
         shell: bash

@@ -37,12 +37,13 @@ mod tests {
         let cmd = parse_host_command("-QueueName q -QueueCapacity 4096");
         assert!(matches!(
             cmd,
-            HostCommand::StartRenderer(ref args)
-                if args
-                    == &vec!["-QueueName", "q", "-QueueCapacity", "4096"]
-                        .into_iter()
-                        .map(String::from)
-                        .collect::<Vec<_>>()
+            HostCommand::StartRenderer(ref launch)
+                if launch.executable.is_none()
+                    && launch.args
+                        == vec!["-QueueName", "q", "-QueueCapacity", "4096"]
+                            .into_iter()
+                            .map(String::from)
+                            .collect::<Vec<_>>()
         ));
     }
 
@@ -50,8 +51,36 @@ mod tests {
     fn parse_host_command_empty_message_is_start_renderer_empty() {
         assert!(matches!(
             parse_host_command(""),
-            HostCommand::StartRenderer(ref args) if args.is_empty()
+            HostCommand::StartRenderer(ref launch)
+                if launch.executable.is_none() && launch.args.is_empty()
         ));
+    }
+
+    #[test]
+    fn parse_host_command_unwraps_quoted_start_renderer_wrapper() {
+        let cmd = parse_host_command(
+            r#"STARTRENDERER "C:\Program Files\renderide.exe" ARGS=-QueueName q -QueueCapacity 4096 -Extra "a b""#,
+        );
+        match cmd {
+            HostCommand::StartRenderer(launch) => {
+                assert_eq!(
+                    launch.executable.as_deref(),
+                    Some(r"C:\Program Files\renderide.exe")
+                );
+                assert_eq!(
+                    launch.args,
+                    vec![
+                        "-QueueName".to_string(),
+                        "q".to_string(),
+                        "-QueueCapacity".to_string(),
+                        "4096".to_string(),
+                        "-Extra".to_string(),
+                        "a b".to_string(),
+                    ]
+                );
+            }
+            other => panic!("expected renderer launch, got {other:?}"),
+        }
     }
 
     #[test]
@@ -75,7 +104,8 @@ mod tests {
     fn parse_host_command_whitespace_only_yields_empty_start_renderer() {
         assert!(matches!(
             parse_host_command("   \t  "),
-            HostCommand::StartRenderer(ref args) if args.is_empty()
+            HostCommand::StartRenderer(ref launch)
+                if launch.executable.is_none() && launch.args.is_empty()
         ));
     }
 
@@ -84,8 +114,10 @@ mod tests {
         let cmd = parse_host_command("CUSTOM opaque tail");
         assert!(matches!(
             cmd,
-            HostCommand::StartRenderer(ref args)
-                if args == &vec!["CUSTOM".to_string(), "opaque".to_string(), "tail".to_string()]
+            HostCommand::StartRenderer(ref launch)
+                if launch.executable.is_none()
+                    && launch.args
+                        == vec!["CUSTOM".to_string(), "opaque".to_string(), "tail".to_string()]
         ));
     }
 

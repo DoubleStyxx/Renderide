@@ -219,6 +219,21 @@ fn prepare_template(
         CaseTemplate::ExoticShaderPair => Ok(PreparedTemplate {
             session_template: SessionTemplate::ExoticShaderPair,
         }),
+        CaseTemplate::CoplanarCanvasUiQuads => Ok(PreparedTemplate {
+            session_template: SessionTemplate::CoplanarCanvasUiQuads,
+        }),
+        CaseTemplate::TiltedCanvasUiQuads => Ok(PreparedTemplate {
+            session_template: SessionTemplate::TiltedCanvasUiQuads,
+        }),
+        CaseTemplate::CanvasOffsetBiasQuad => Ok(PreparedTemplate {
+            session_template: SessionTemplate::CanvasOffsetBiasQuad,
+        }),
+        CaseTemplate::TiltedCanvasDistanceBias => Ok(PreparedTemplate {
+            session_template: SessionTemplate::TiltedCanvasDistanceBias,
+        }),
+        CaseTemplate::ShadowedCasterMove => Ok(PreparedTemplate {
+            session_template: SessionTemplate::ShadowedCasterMove,
+        }),
         CaseTemplate::GltfTexturedStaticMesh { path } => {
             let imported = load_static_textured_mesh(path)?;
             let texture_size = imported.texture_size;

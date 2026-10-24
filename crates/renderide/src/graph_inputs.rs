@@ -191,10 +191,13 @@ pub trait GraphPerDrawSlabResources {
     ) -> Option<wgpu::Buffer>;
 
     /// Gives callers mutable access to the per-view CPU slab-packing scratch.
+    ///
+    /// The second buffer is the retained canvas depth-step list. Callers clear and refill it
+    /// instead of allocating a new `Vec` for every view every frame.
     fn with_per_view_per_draw_scratch(
         &self,
         view_id: ViewId,
-        f: &mut dyn FnMut(&mut Vec<PaddedPerDrawUniforms>),
+        f: &mut dyn FnMut(&mut Vec<PaddedPerDrawUniforms>, &mut Vec<u32>),
     ) -> bool;
 
     /// Gives callers mutable access to the per-view material-batch boundary scratch so it can be
@@ -338,6 +341,21 @@ pub trait GraphFrameGlobalResources {
     ) -> bool {
         false
     }
+
+    /// Arms a shadow-atlas note for the submit that follows a complete encode.
+    fn arm_shadow_maps_for_submit(&self) {}
+
+    /// Records that one shadow split chunk wrote a layer. Not a submit.
+    fn mark_shadow_split_chunk_recorded(&self) {}
+
+    /// Arms the submit note after every shadow split chunk has been recorded.
+    fn arm_shadow_maps_if_split_recorded(&self) {}
+
+    /// Drops split-chunk progress when the parallel join fails.
+    fn abandon_shadow_split_recording(&self) {}
+
+    /// Notes the atlas after a successful submit, or clears it when submit fails.
+    fn finish_shadow_map_submit(&self, _submitted: bool) {}
 }
 
 /// Graph-facing access to resident asset/resource pools.
