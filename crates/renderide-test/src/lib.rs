@@ -18,11 +18,3 @@ pub mod scene_dsl;
 mod image_io;
 
 pub use error::HarnessError;
-
-#[cfg(test)]
-mod ci_canary {
-    #[test]
-    fn canary_unit_fails() {
-        assert_eq!(1, 2, "ci canary unit test");
-    }
-}
