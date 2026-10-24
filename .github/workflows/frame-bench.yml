@@ -113,6 +113,16 @@ jobs:
       - name: Self-test gate script
         run: python3 -m unittest discover -s tools/scripts/ci -p 'test_frame_bench_gate.py' -v
 
+      # Same pinned lavapipe as ci.yml's goldens (snapshot 20261003T000000Z,
+      # mesa 25.2.8, libllvm20, sha256-checked), taken from the dispatching ref
+      # like the gate script. Sets VK_ICD_FILENAMES, VK_DRIVER_FILES and
+      # WGPU_BACKEND, and prints `vulkaninfo --summary`. Runs before the
+      # base/head trees are checked out, so no untrusted checkout precedes a
+      # local action (CodeQL actions/cache-poisoning/poisonable-step).
+      - name: Install pinned lavapipe
+        timeout-minutes: 10
+        uses: ./tools/.github/actions/lavapipe
+
       - name: Checkout candidate
         uses: actions/checkout@v7
         with:
@@ -126,14 +136,6 @@ jobs:
           ref: ${{ inputs.base_ref }}
           path: base
           persist-credentials: false
-
-      # Same pinned lavapipe as ci.yml's goldens (snapshot 20261003T000000Z,
-      # mesa 25.2.8, libllvm20, sha256-checked), taken from the dispatching ref
-      # like the gate script. Sets VK_ICD_FILENAMES, VK_DRIVER_FILES and
-      # WGPU_BACKEND, and prints `vulkaninfo --summary`.
-      - name: Install pinned lavapipe
-        timeout-minutes: 10
-        uses: ./tools/.github/actions/lavapipe
 
       - uses: dtolnay/rust-toolchain@stable
 
