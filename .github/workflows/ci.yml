@@ -73,12 +73,13 @@ jobs:
       # GStreamer dev packages are required only when the `video-textures` feature is enabled
       # (Linux clippy does this via `--all-features`); pkg-config resolves the headers/libs at build time.
       #
-      # `--no-install-recommends` is load-bearing. `gstreamer1.0-plugins-bad` recommends
-      # plugins-good, a soundfont, flite, and VA-API drivers. On master 0104fee that set
-      # was 96.2 MB and the Azure mirror delivered it at 78 kB/s (20 min 31 s), which is
-      # what stretched the Rust ubuntu job to ~32 minutes. The MPEG-TS probe needs tsdemux
-      # from the bad plugins package itself, not those recommends. pkg-config is listed
-      # explicitly so the -dev packages still find their headers.
+      # On master 0104fee7 the install fetched 96.2 MB in 20 min 31 s (78.1 kB/s) and
+      # the Rust ubuntu job ran ~32 minutes. The suite step itself was ~19 seconds.
+      # plugins-good, flite, and the soundfont are Depends of gstreamer1.0-plugins-bad,
+      # not recommends. The MPEG-TS test only loads the tsdemux element, whose .so needs
+      # libgstreamer-plugins-bad1.0-0 plus the base plugins. Install that library and
+      # copy the one plugin instead of the plugins-bad package. `--no-install-recommends`
+      # still skips VA-API drivers. pkg-config is named so the -dev packages resolve.
       - name: Install Linux system dependencies (Vulkan + GStreamer)
         if: runner.os == 'Linux'
         run: |
@@ -86,7 +87,13 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             mesa-vulkan-drivers vulkan-tools pkg-config \
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-            gstreamer1.0-plugins-base gstreamer1.0-plugins-bad
+            gstreamer1.0-plugins-base libgstreamer-plugins-bad1.0-0
+          plugindir="$(pkg-config --variable=pluginsdir gstreamer-1.0)"
+          tmp="$(mktemp -d)"
+          ( cd "$tmp" && apt-get download gstreamer1.0-plugins-bad )
+          dpkg-deb -x "$tmp"/gstreamer1.0-plugins-bad_*.deb "$tmp/root"
+          sudo cp "$tmp"/root/usr/lib/*/gstreamer-1.0/libgstmpegtsdemux.so "$plugindir/"
+          rm -rf "$tmp"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
