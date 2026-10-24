@@ -78,6 +78,7 @@ pub(super) fn scene_setup() -> SceneSetup {
                     rgba_bytes: checker.into_raw(),
                     size: texture_size,
                     color_profile: ColorProfile::SRGB,
+                    packed_handle: None,
                 }],
                 floats: vec![
                     FloatBinding {
@@ -106,6 +107,7 @@ pub(super) fn scene_setup() -> SceneSetup {
                 shadow_cast_mode: ShadowCastMode::Off,
             }],
             lights: Vec::new(),
+            cameras: Vec::new(),
         },
     }
 }

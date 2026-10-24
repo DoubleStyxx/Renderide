@@ -124,6 +124,7 @@ pub(super) fn scene_setup() -> SceneSetup {
                 },
             ],
             lights: Vec::new(),
+            cameras: Vec::new(),
         },
     }
 }
@@ -155,6 +156,7 @@ fn custom_quad_material(spec: CustomQuadMaterial) -> MaterialAsset {
                 rgba_bytes: spec.texture,
                 size: spec.texture_size,
                 color_profile: ColorProfile::SRGB,
+                packed_handle: None,
             }],
             floats: spec.floats,
             float4s: spec.float4s,

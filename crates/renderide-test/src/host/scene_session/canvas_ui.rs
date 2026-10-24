@@ -42,6 +42,7 @@ pub(super) fn coplanar_canvas_ui_quads_setup() -> SceneSetup {
             camera_world_pose: default_camera_world_pose(),
             renderables,
             lights: Vec::new(),
+            cameras: Vec::new(),
         },
     }
 }
@@ -75,6 +76,7 @@ pub(super) fn tilted_canvas_ui_quads_setup() -> SceneSetup {
             camera_world_pose: default_camera_world_pose(),
             renderables,
             lights: Vec::new(),
+            cameras: Vec::new(),
         },
     }
 }
@@ -147,6 +149,7 @@ pub(super) fn canvas_offset_bias_quad_setup() -> SceneSetup {
             camera_world_pose: default_camera_world_pose(),
             renderables,
             lights: Vec::new(),
+            cameras: Vec::new(),
         },
     }
 }
@@ -194,6 +197,7 @@ pub(super) fn tilted_canvas_distance_bias_setup() -> SceneSetup {
             camera_world_pose: default_camera_world_pose(),
             renderables,
             lights: Vec::new(),
+            cameras: Vec::new(),
         },
     }
 }

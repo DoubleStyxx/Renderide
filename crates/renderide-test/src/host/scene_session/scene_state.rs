@@ -9,9 +9,10 @@ use renderide_shared::ipc::HostDualQueueIpc;
 use renderide_shared::packing::memory_packable::MemoryPackable;
 use renderide_shared::packing::memory_packer::MemoryPacker;
 use renderide_shared::shared::{
-    LIGHT_STATE_HOST_ROW_BYTES, LightRenderablesUpdate, LightState, LightType,
-    MeshRenderablesUpdate, MeshRendererState, MotionVectorMode, RenderSH2, RenderSpaceUpdate,
-    RenderTransform, ShadowCastMode, ShadowType, TransformsUpdate,
+    CAMERA_STATE_HOST_ROW_BYTES, CameraRenderablesUpdate, CameraState, LIGHT_STATE_HOST_ROW_BYTES,
+    LightRenderablesUpdate, LightState, LightType, MeshRenderablesUpdate, MeshRendererState,
+    MotionVectorMode, RenderSH2, RenderSpaceUpdate, RenderTransform, ShadowCastMode, ShadowType,
+    TransformsUpdate,
 };
 use renderide_shared::wire_writer::mesh_renderers::{
     encode_additions, encode_mesh_states, encode_packed_material_ids,
@@ -52,6 +53,22 @@ pub(super) struct SceneLight {
     pub state: LightState,
 }
 
+/// One host camera submitted by a test scene.
+///
+/// `state.renderable_index`, `selective_render_count`, and `exclude_render_count` are rewritten
+/// from [`Self::selective_transform_ids`] when the shared-memory rows are packed.
+#[derive(Clone, Debug)]
+pub(super) struct SceneCamera {
+    /// Dense transform index this camera attaches to.
+    pub transform_id: i32,
+    /// Local transform pose for the camera.
+    pub pose: RenderTransform,
+    /// Camera state before renderable-index and selective-count rewrite.
+    pub state: CameraState,
+    /// Transform indices the camera is allowed to draw. Empty means every transform.
+    pub selective_transform_ids: Vec<i32>,
+}
+
 /// Full scene payload written into one render-space update.
 #[derive(Clone, Debug)]
 pub(super) struct SceneSubmission {
@@ -61,6 +78,8 @@ pub(super) struct SceneSubmission {
     pub renderables: Vec<SceneRenderable>,
     /// Regular lights to add and update.
     pub lights: Vec<SceneLight>,
+    /// Host cameras that render into render textures. Empty keeps `cameras_update` unset.
+    pub cameras: Vec<SceneCamera>,
 }
 
 impl SceneSubmission {
@@ -77,6 +96,7 @@ impl SceneSubmission {
                 shadow_cast_mode: ShadowCastMode::Off,
             }],
             lights: Vec::new(),
+            cameras: Vec::new(),
         }
     }
 }
@@ -101,6 +121,9 @@ struct SceneSharedMemoryRegions {
     packed_material_ids_bytes: Vec<u8>,
     light_additions_bytes: Vec<u8>,
     light_states_bytes: Vec<u8>,
+    camera_additions_bytes: Vec<u8>,
+    camera_states_bytes: Vec<u8>,
+    camera_transform_ids_bytes: Vec<u8>,
 }
 
 impl SceneSharedMemoryRegions {
@@ -129,6 +152,22 @@ impl SceneSharedMemoryRegions {
                 .collect::<Vec<_>>(),
         );
         let light_states_bytes = encode_light_states(&light_state_rows(scene));
+        let (camera_additions_bytes, camera_states_bytes, camera_transform_ids_bytes) =
+            if scene.cameras.is_empty() {
+                (Vec::new(), Vec::new(), Vec::new())
+            } else {
+                (
+                    encode_additions(
+                        &scene
+                            .cameras
+                            .iter()
+                            .map(|camera| camera.transform_id)
+                            .collect::<Vec<_>>(),
+                    ),
+                    encode_camera_states(&camera_state_rows(scene)),
+                    encode_i32s(&camera_transform_id_rows(scene)),
+                )
+            };
         Self {
             pose_updates_bytes,
             mesh_additions_bytes,
@@ -136,6 +175,9 @@ impl SceneSharedMemoryRegions {
             packed_material_ids_bytes,
             light_additions_bytes,
             light_states_bytes,
+            camera_additions_bytes,
+            camera_states_bytes,
+            camera_transform_ids_bytes,
         }
     }
 
@@ -146,6 +188,9 @@ impl SceneSharedMemoryRegions {
             + self.packed_material_ids_bytes.len()
             + self.light_additions_bytes.len()
             + self.light_states_bytes.len()
+            + self.camera_additions_bytes.len()
+            + self.camera_states_bytes.len()
+            + self.camera_transform_ids_bytes.len()
     }
 }
 
@@ -157,6 +202,9 @@ struct SceneSharedMemoryLayout {
     packed_material_ids: SharedMemoryBufferDescriptor,
     light_additions: SharedMemoryBufferDescriptor,
     light_states: SharedMemoryBufferDescriptor,
+    camera_additions: SharedMemoryBufferDescriptor,
+    camera_states: SharedMemoryBufferDescriptor,
+    camera_transform_ids: SharedMemoryBufferDescriptor,
 }
 
 impl SceneSharedMemoryLayout {
@@ -199,6 +247,24 @@ impl SceneSharedMemoryLayout {
             &mut offset,
             regions.light_states_bytes.len(),
         );
+        let camera_additions = descriptor_for_region(
+            buffer_id,
+            capacity,
+            &mut offset,
+            regions.camera_additions_bytes.len(),
+        );
+        let camera_states = descriptor_for_region(
+            buffer_id,
+            capacity,
+            &mut offset,
+            regions.camera_states_bytes.len(),
+        );
+        let camera_transform_ids = descriptor_for_region(
+            buffer_id,
+            capacity,
+            &mut offset,
+            regions.camera_transform_ids_bytes.len(),
+        );
         Self {
             pose_updates,
             mesh_additions,
@@ -206,6 +272,9 @@ impl SceneSharedMemoryLayout {
             packed_material_ids,
             light_additions,
             light_states,
+            camera_additions,
+            camera_states,
+            camera_transform_ids,
         }
     }
 }
@@ -394,6 +463,10 @@ fn pose_rows(scene: &SceneSubmission) -> Vec<TransformPoseRow> {
             transform_id: light.transform_id,
             pose: light.pose,
         }))
+        .chain(scene.cameras.iter().map(|camera| TransformPoseRow {
+            transform_id: camera.transform_id,
+            pose: camera.pose,
+        }))
         .collect()
 }
 
@@ -483,7 +556,28 @@ fn write_scene_regions(
         layout.light_states,
         &regions.light_states_bytes,
         "light_states",
-    )
+    )?;
+    if !regions.camera_states_bytes.is_empty() {
+        write_region(
+            writer,
+            layout.camera_additions,
+            &regions.camera_additions_bytes,
+            "camera additions",
+        )?;
+        write_region(
+            writer,
+            layout.camera_states,
+            &regions.camera_states_bytes,
+            "camera_states",
+        )?;
+        write_region(
+            writer,
+            layout.camera_transform_ids,
+            &regions.camera_transform_ids_bytes,
+            "camera transform_ids",
+        )?;
+    }
+    Ok(())
 }
 
 fn write_region(
@@ -540,7 +634,12 @@ fn build_render_space_update(
             removals: SharedMemoryBufferDescriptor::default(),
             additions: layout.light_additions,
         }),
-        cameras_update: None,
+        cameras_update: (!scene.cameras.is_empty()).then_some(CameraRenderablesUpdate {
+            transform_ids: layout.camera_transform_ids,
+            states: layout.camera_states,
+            removals: SharedMemoryBufferDescriptor::default(),
+            additions: layout.camera_additions,
+        }),
         camera_portals_update: None,
         reflection_probes_update: None,
         reflection_probe_sh2_taks: None,
@@ -586,6 +685,56 @@ fn pack_light_state_row(dest: &mut [u8], mut row: LightState) {
     row.pack(&mut packer);
 }
 
+fn camera_state_rows(scene: &SceneSubmission) -> Vec<CameraState> {
+    scene
+        .cameras
+        .iter()
+        .enumerate()
+        .map(|(index, camera)| CameraState {
+            renderable_index: index as i32,
+            selective_render_count: camera.selective_transform_ids.len() as i32,
+            exclude_render_count: 0,
+            ..camera.state
+        })
+        .collect()
+}
+
+fn camera_transform_id_rows(scene: &SceneSubmission) -> Vec<i32> {
+    scene
+        .cameras
+        .iter()
+        .flat_map(|camera| camera.selective_transform_ids.iter().copied())
+        .collect()
+}
+
+fn encode_camera_states(rows: &[CameraState]) -> Vec<u8> {
+    let row_size = CAMERA_STATE_HOST_ROW_BYTES;
+    let mut out = vec![0u8; (rows.len() + 1) * row_size];
+    for (index, row) in rows.iter().enumerate() {
+        pack_camera_state_row(&mut out[index * row_size..(index + 1) * row_size], *row);
+    }
+    let sentinel = CameraState {
+        renderable_index: -1,
+        ..CameraState::default()
+    };
+    let start = rows.len() * row_size;
+    pack_camera_state_row(&mut out[start..start + row_size], sentinel);
+    out
+}
+
+fn pack_camera_state_row(dest: &mut [u8], mut row: CameraState) {
+    let mut packer = MemoryPacker::new(dest);
+    row.pack(&mut packer);
+}
+
+fn encode_i32s(values: &[i32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(values.len() * 4);
+    for value in values {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -625,6 +774,7 @@ mod tests {
                 },
             ],
             lights: Vec::new(),
+            cameras: Vec::new(),
         };
         let regions = SceneSharedMemoryRegions::build(&scene);
         assert_eq!(regions.mesh_additions_bytes.len(), 12);
@@ -650,6 +800,7 @@ mod tests {
                     state: directional_light([0.5, 0.5, 1.0], 1.0),
                 },
             ],
+            cameras: Vec::new(),
         };
         let bytes = encode_light_states(&light_state_rows(&scene));
         assert_eq!(bytes.len(), 3 * LIGHT_STATE_HOST_ROW_BYTES);
@@ -670,5 +821,84 @@ mod tests {
             ),
             -1
         );
+    }
+
+    #[test]
+    fn camera_rows_are_indexed_and_selective_ids_follow_state_order() {
+        let scene = SceneSubmission {
+            camera_world_pose: default_camera_world_pose(),
+            renderables: Vec::new(),
+            lights: Vec::new(),
+            cameras: vec![
+                SceneCamera {
+                    transform_id: 2,
+                    pose: default_camera_world_pose(),
+                    state: CameraState {
+                        flags: 1,
+                        depth: 0.0,
+                        ..CameraState::default()
+                    },
+                    selective_transform_ids: vec![0],
+                },
+                SceneCamera {
+                    transform_id: 2,
+                    pose: default_camera_world_pose(),
+                    state: CameraState {
+                        flags: 1 | (1 << 2),
+                        depth: 1.0,
+                        ..CameraState::default()
+                    },
+                    selective_transform_ids: vec![0],
+                },
+            ],
+        };
+        let regions = SceneSharedMemoryRegions::build(&scene);
+        assert_eq!(
+            regions.camera_states_bytes.len(),
+            3 * CAMERA_STATE_HOST_ROW_BYTES
+        );
+        assert_eq!(
+            i32::from_le_bytes(regions.camera_states_bytes[0..4].try_into().unwrap()),
+            0
+        );
+        assert_eq!(
+            i32::from_le_bytes(
+                regions.camera_states_bytes
+                    [CAMERA_STATE_HOST_ROW_BYTES..CAMERA_STATE_HOST_ROW_BYTES + 4]
+                    .try_into()
+                    .unwrap()
+            ),
+            1
+        );
+        assert_eq!(
+            i32::from_le_bytes(
+                regions.camera_states_bytes
+                    [2 * CAMERA_STATE_HOST_ROW_BYTES..2 * CAMERA_STATE_HOST_ROW_BYTES + 4]
+                    .try_into()
+                    .unwrap()
+            ),
+            -1
+        );
+        assert_eq!(
+            regions.camera_transform_ids_bytes,
+            0i32.to_le_bytes().repeat(2)
+        );
+        assert_eq!(target_transform_count(&scene), 3);
+    }
+
+    #[test]
+    fn stacked_scene_camera_pose_is_in_the_pose_region() {
+        let scene = super::super::double_buffer_stack::scene_setup().scene;
+        let regions = SceneSharedMemoryRegions::build(&scene);
+        let row = 44;
+        assert_eq!(regions.pose_updates_bytes.len(), row * 4);
+        let camera = &regions.pose_updates_bytes[row * 2..row * 3];
+        let id = i32::from_le_bytes(camera[0..4].try_into().unwrap());
+        let z = f32::from_le_bytes(camera[12..16].try_into().unwrap());
+        assert_eq!(id, 2);
+        assert!((z + 3.0).abs() < 1e-4, "camera z {z}");
+        let state = &regions.camera_states_bytes[..CAMERA_STATE_HOST_ROW_BYTES];
+        let fov = f32::from_le_bytes(state[4..8].try_into().unwrap());
+        assert!((fov - 60.0).abs() < 1e-4, "fov {fov}");
     }
 }
