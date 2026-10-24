@@ -71,12 +71,12 @@ pub const DOUBLE_BUFFER_CAMERAS: usize = 32;
 
 /// Static many-light shadow planning workload.
 pub use crate::backend::{SHADOW_CHURN_CASTERS, SHADOW_CHURN_LIGHTS, ShadowChurnWorkload};
-/// Custom-shader keyword variant cache workload.
-pub use crate::materials::KeywordVariantCacheWorkload;
 /// Custom-material uniform packing and bind-group cache workloads.
 pub use crate::materials::{
     BIND_GROUP_BATCH, BindGroupChurnWorkload, MATERIAL_UNIFORM_BATCH, MaterialUniformUpdateWorkload,
 };
+/// Custom-shader keyword variant cache and per-frame stem lookup workloads.
+pub use crate::materials::{CustomStemLookupWorkload, KeywordVariantCacheWorkload};
 /// Cameras folded by one [`camera_clear_load_op_checksum`] sample.
 pub const CAMERA_CLEAR_LOAD_OP_CAMERAS: usize = crate::passes::CAMERA_CLEAR_LOAD_OP_CAMERAS;
 
