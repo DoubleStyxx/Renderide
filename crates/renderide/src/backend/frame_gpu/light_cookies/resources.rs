@@ -427,7 +427,7 @@ impl LightCookieAtlasResources {
                     return None;
                 }
                 Some(LightCookieSource {
-                    view: texture.color_view.as_ref(),
+                    view: texture.color_view_for_early_sampling(),
                     channel: LightCookieSourceChannel::Alpha,
                     sampling: self.source_sampling(texture.wgpu_color_format)?,
                 })

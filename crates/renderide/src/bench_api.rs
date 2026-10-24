@@ -12,6 +12,7 @@ use hashbrown::{HashMap, HashSet};
 use rayon::prelude::*;
 
 use crate::camera::reverse_z_perspective;
+use crate::gpu_pools::pools::render_texture::{claim_double_buffer_swap, swap_ping_pong};
 use crate::hi_z_cpu::project_world_aabb_uv;
 use crate::occlusion::hysteresis::{
     CasterKey, CasterRecord, CasterRef, DepthClip, HistoryAction, HistoryInputs, MovedCaster,
@@ -64,6 +65,9 @@ pub const WORLD_MATRIX_NODES: usize = 4_096;
 
 /// Distinct buffer keys reused by one [`BufferPoolWorkload::reuse_cycle`] sample.
 pub const BUFFER_POOL_SLOTS: usize = 1_024;
+
+/// Double-buffered cameras swapped by one [`DoubleBufferWorkload::steady_frame`] sample.
+pub const DOUBLE_BUFFER_CAMERAS: usize = 32;
 
 /// Static many-light shadow planning workload.
 pub use crate::backend::{SHADOW_CHURN_CASTERS, SHADOW_CHURN_LIGHTS, ShadowChurnWorkload};
@@ -623,6 +627,93 @@ fn history_view_projections(moving: bool) -> (Mat4, Mat4) {
         previous
     };
     (projection * previous, projection * current)
+}
+
+/// Per-frame double-buffer bookkeeping for cameras that already own a second color image.
+///
+/// The measured path is the same claim-once scan and three-slot swap the renderer runs after the
+/// history image exists. It does not create wgpu textures; that allocation happens once, outside
+/// the steady frame.
+pub struct DoubleBufferWorkload {
+    scratch: Vec<i32>,
+    published_texture: Vec<u64>,
+    previous_texture: Vec<u64>,
+    published_view: Vec<u64>,
+    previous_view: Vec<u64>,
+    published_generation: Vec<u64>,
+    previous_generation: Vec<u64>,
+}
+
+impl DoubleBufferWorkload {
+    /// Builds `DOUBLE_BUFFER_CAMERAS` already-allocated ping-pong slots and reserves the scratch.
+    #[must_use]
+    pub fn standard() -> Self {
+        let cameras = DOUBLE_BUFFER_CAMERAS;
+        let mut scratch = Vec::with_capacity(cameras);
+        let mut published_texture = Vec::with_capacity(cameras);
+        let mut previous_texture = Vec::with_capacity(cameras);
+        let mut published_view = Vec::with_capacity(cameras);
+        let mut previous_view = Vec::with_capacity(cameras);
+        let mut published_generation = Vec::with_capacity(cameras);
+        let mut previous_generation = Vec::with_capacity(cameras);
+        for index in 0..cameras {
+            let id = u64::try_from(index).unwrap_or(0);
+            published_texture.push(id);
+            previous_texture.push(id.wrapping_add(1_000));
+            published_view.push(id.wrapping_add(2_000));
+            previous_view.push(id.wrapping_add(3_000));
+            published_generation.push(id.wrapping_add(4_000));
+            previous_generation.push(id.wrapping_add(5_000));
+        }
+        // Pay the scratch growth before the measured loop.
+        for index in 0..cameras {
+            let asset_id = i32::try_from(index).unwrap_or(0);
+            let _ = claim_double_buffer_swap(&mut scratch, asset_id);
+        }
+        scratch.clear();
+        Self {
+            scratch,
+            published_texture,
+            previous_texture,
+            published_view,
+            previous_view,
+            published_generation,
+            previous_generation,
+        }
+    }
+
+    /// Claims each camera once and swaps its three slots. Returns the published generation sum.
+    #[must_use]
+    pub fn steady_frame(&mut self) -> u64 {
+        self.scratch.clear();
+        let mut checksum = 0_u64;
+        for index in 0..self.published_generation.len() {
+            let asset_id = i32::try_from(index).unwrap_or(0);
+            if !claim_double_buffer_swap(&mut self.scratch, asset_id) {
+                continue;
+            }
+            swap_ping_pong(
+                &mut self.published_texture[index],
+                &mut self.previous_texture[index],
+            );
+            swap_ping_pong(
+                &mut self.published_view[index],
+                &mut self.previous_view[index],
+            );
+            swap_ping_pong(
+                &mut self.published_generation[index],
+                &mut self.previous_generation[index],
+            );
+            checksum = checksum.wrapping_add(self.published_generation[index]);
+        }
+        checksum
+    }
+
+    /// Capacity of the reused id scratch after [`Self::standard`].
+    #[must_use]
+    pub fn scratch_capacity(&self) -> usize {
+        self.scratch.capacity()
+    }
 }
 
 /// Mixed transparent draws sorted by one [`TransparentSortWorkload`] sample at about a thousand rows.

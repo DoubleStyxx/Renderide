@@ -217,6 +217,25 @@ impl AssetTransferQueue {
         &mut self.integrator
     }
 
+    /// Retires double-buffer history images that have been idle with the flag off.
+    ///
+    /// The scratch vec is taken, drained into the delayed-removal queue, and restored so a pass
+    /// that releases nothing does not allocate.
+    pub(crate) fn retire_idle_double_buffer_histories(&mut self, flagged: &[i32]) {
+        let mut retired = self
+            .pools
+            .render_texture_pool
+            .begin_history_retirement(flagged);
+        while let Some(history) = retired.pop() {
+            self.integrator.enqueue_delayed_removal(
+                integrator::RetiredAssetResource::RenderTextureHistory(history),
+            );
+        }
+        self.pools
+            .render_texture_pool
+            .finish_history_retirement(retired);
+    }
+
     /// Retires a resident mesh through the delayed GPU-resource removal path.
     pub(crate) fn retire_mesh_asset(&mut self, asset_id: i32) -> bool {
         let Some(mesh) = self.pools.mesh_pool.take(asset_id) else {
@@ -706,6 +725,12 @@ impl AssetTransferQueue {
     #[inline]
     pub(crate) fn render_texture_pool(&self) -> &RenderTexturePool {
         &self.pools.render_texture_pool
+    }
+
+    /// Mutable resident render-texture pool.
+    #[inline]
+    pub(crate) fn render_texture_pool_mut(&mut self) -> &mut RenderTexturePool {
+        &mut self.pools.render_texture_pool
     }
 
     /// Resident video-texture pool.

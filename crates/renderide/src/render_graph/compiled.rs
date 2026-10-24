@@ -153,6 +153,11 @@ pub(super) struct ResolvedView<'a> {
     pub(super) post_processing: ViewPostProcessing,
     /// Full-target offscreen color, when this view can seed HDR scene color from it.
     pub(super) color_texture: Option<&'a wgpu::Texture>,
+    /// History image when this view is the first writer of a swapped texture.
+    /// Nothing and Depth copy this instead of [`Self::color_texture`].
+    pub(super) history_color_texture: Option<&'a wgpu::Texture>,
+    /// `true` when this view writes a swapped texture after another view already did this frame.
+    pub(super) seed_published_color: bool,
     /// `true` when `depth_texture` is the persistent camera depth target.
     pub(super) persistent_depth_target: bool,
     // MSAA views are now in the per-view blackboard (MsaaViewsSlot), resolved from graph

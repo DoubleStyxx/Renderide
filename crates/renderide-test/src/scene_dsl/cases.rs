@@ -76,6 +76,8 @@ pub enum CaseTemplate {
     TiltedCanvasDistanceBias,
     /// Hard-shadowed cube on a PBS floor, static then moved.
     ShadowedCasterMove,
+    /// Double-buffered Nothing camera stacked above a normal Skybox camera on one texture.
+    DoubleBufferNothingOnSkybox,
 }
 
 /// Default golden directory, relative to the workspace root: `crates/renderide-test/goldens/`.
@@ -318,6 +320,24 @@ pub fn tilted_canvas_distance_bias() -> IntegrationCase {
     }
 }
 
+/// Normal Skybox camera at depth 0 and a double-buffered Nothing camera at depth 1.
+///
+/// Both write one render texture. The captured main view is a quad sampling that texture, with a
+/// red sphere left visible against the sky clear. The Nothing camera must keep this frame's sky
+/// instead of copying history over it.
+pub fn double_buffer_nothing_on_skybox() -> IntegrationCase {
+    IntegrationCase {
+        name: "double_buffer_nothing_on_skybox".to_string(),
+        description:
+            "Double-buffered Nothing camera stacked above a normal Skybox camera on one render texture. The main view samples that texture. The sky clear must survive the later Nothing camera."
+                .to_string(),
+        golden_path: default_goldens_dir().join("double_buffer_nothing_on_skybox.png"),
+        resolution: (256, 256),
+        tolerance: visual_tolerance(0.9, 24, 0.08, 16, 2, 0.03),
+        template: CaseTemplate::DoubleBufferNothingOnSkybox,
+    }
+}
+
 /// Optional GLB fixture case. The registry includes it only when the fixture file is present,
 /// so the suite remains useful before a commit-safe model has been added.
 pub fn gltf_textured_static_mesh(path: PathBuf) -> IntegrationCase {
@@ -346,6 +366,7 @@ pub fn registry() -> Vec<IntegrationCase> {
         tilted_canvas_ui_quads(),
         canvas_offset_bias_quad(),
         tilted_canvas_distance_bias(),
+        double_buffer_nothing_on_skybox(),
     ];
     // WARP limitation, not a shadow-cache diff. Windows CI is DX12 Microsoft Basic Render Driver
     // (Vulkan reports ERROR_INCOMPATIBLE_DRIVER). On that adapter the static frame was a 48-color
@@ -422,6 +443,16 @@ mod tests {
         assert!(lookup("multi_primitive_unlit_grid").is_some());
         assert!(lookup("pbs_lit_material_matrix").is_some());
         assert!(lookup("alpha_cutout_masked_quads").is_some());
+    }
+
+    #[test]
+    fn double_buffer_nothing_on_skybox_is_registered() {
+        let case = lookup("double_buffer_nothing_on_skybox").expect("registered");
+        assert!(matches!(
+            case.template,
+            CaseTemplate::DoubleBufferNothingOnSkybox
+        ));
+        assert_eq!(case.resolution, (256, 256));
     }
 
     #[test]

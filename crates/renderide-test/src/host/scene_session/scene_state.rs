@@ -29,7 +29,7 @@ use super::consts::{asset_ids, timing};
 mod camera;
 
 pub(super) use camera::SceneCamera;
-use camera::{encode_camera_additions, encode_camera_states};
+use camera::{encode_camera_additions, encode_camera_states, encode_camera_transform_ids};
 
 /// One mesh renderer submitted by a test scene.
 #[derive(Clone, Debug)]
@@ -90,6 +90,10 @@ pub(super) struct SceneSubmission {
     pub lights: Vec<SceneLight>,
     /// One-bone skinned renderers to add and update.
     pub skinned: Vec<SceneSkinned>,
+    /// Host cameras rendered into render textures. Empty leaves `cameras_update` unset when
+    /// [`build_scene_state`] is used. Frame-bench passes its cameras to
+    /// [`build_scene_state_with_cameras`] instead.
+    pub cameras: Vec<SceneCamera>,
 }
 
 impl SceneSubmission {
@@ -107,6 +111,7 @@ impl SceneSubmission {
             }],
             lights: Vec::new(),
             skinned: Vec::new(),
+            cameras: Vec::new(),
         }
     }
 }
@@ -141,12 +146,13 @@ struct SceneSharedMemoryRegions {
     skinned_bounds_bytes: Vec<u8>,
     camera_additions_bytes: Vec<u8>,
     camera_states_bytes: Vec<u8>,
+    camera_transform_ids_bytes: Vec<u8>,
 }
 
 impl SceneSharedMemoryRegions {
     #[cfg(test)]
     fn build(scene: &SceneSubmission) -> Self {
-        Self::build_with_cameras(scene, &[])
+        Self::build_with_cameras(scene, &scene.cameras)
     }
 
     fn build_with_cameras(scene: &SceneSubmission, cameras: &[SceneCamera]) -> Self {
@@ -190,6 +196,7 @@ impl SceneSharedMemoryRegions {
             skinned_bounds_bytes: skinned.bounds,
             camera_additions_bytes: encode_camera_additions(cameras),
             camera_states_bytes: encode_camera_states(cameras),
+            camera_transform_ids_bytes: encode_camera_transform_ids(cameras),
         }
     }
 
@@ -208,6 +215,7 @@ impl SceneSharedMemoryRegions {
             + self.skinned_bounds_bytes.len()
             + self.camera_additions_bytes.len()
             + self.camera_states_bytes.len()
+            + self.camera_transform_ids_bytes.len()
     }
 }
 
@@ -227,6 +235,7 @@ struct SceneSharedMemoryLayout {
     skinned_bounds: SharedMemoryBufferDescriptor,
     camera_additions: SharedMemoryBufferDescriptor,
     camera_states: SharedMemoryBufferDescriptor,
+    camera_transform_ids: SharedMemoryBufferDescriptor,
 }
 
 impl SceneSharedMemoryLayout {
@@ -278,6 +287,7 @@ impl SceneSharedMemoryLayout {
         let skinned_bounds = region(regions.skinned_bounds_bytes.len());
         let camera_additions = region(regions.camera_additions_bytes.len());
         let camera_states = region(regions.camera_states_bytes.len());
+        let camera_transform_ids = region(regions.camera_transform_ids_bytes.len());
         Self {
             pose_updates,
             mesh_additions,
@@ -293,6 +303,7 @@ impl SceneSharedMemoryLayout {
             skinned_bounds,
             camera_additions,
             camera_states,
+            camera_transform_ids,
         }
     }
 }
@@ -304,7 +315,7 @@ pub(super) fn build_scene_state(
     scene: &SceneSubmission,
     lockstep: &mut LockstepDriver,
 ) -> Result<SceneState, HarnessError> {
-    build_scene_state_with_cameras(prefix, backing_dir, scene, &[], lockstep)
+    build_scene_state_with_cameras(prefix, backing_dir, scene, &scene.cameras, lockstep)
 }
 
 /// [`build_scene_state`] plus secondary cameras sent in the same `RenderSpaceUpdate`.
@@ -738,6 +749,12 @@ fn write_scene_regions(
         &regions.camera_states_bytes,
         "camera states",
     )?;
+    write_region(
+        writer,
+        layout.camera_transform_ids,
+        &regions.camera_transform_ids_bytes,
+        "camera transform ids",
+    )?;
     Ok(())
 }
 
@@ -810,7 +827,7 @@ fn build_render_space_update(
             additions: layout.light_additions,
         }),
         cameras_update: (!cameras.is_empty()).then_some(CameraRenderablesUpdate {
-            transform_ids: SharedMemoryBufferDescriptor::default(),
+            transform_ids: layout.camera_transform_ids,
             states: layout.camera_states,
             removals: SharedMemoryBufferDescriptor::default(),
             additions: layout.camera_additions,
@@ -866,119 +883,4 @@ fn pack_light_state_row(dest: &mut [u8], mut row: LightState) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn scene_submission_single_mesh_matches_historical_region_sizes() {
-        let scene = SceneSubmission::single_mesh(2, 4);
-        let regions = SceneSharedMemoryRegions::build(&scene);
-        assert_eq!(regions.pose_updates_bytes.len(), 44);
-        assert_eq!(regions.mesh_additions_bytes.len(), 8);
-        assert_eq!(regions.mesh_states_bytes.len(), 48);
-        assert_eq!(regions.packed_material_ids_bytes.len(), 4);
-        assert_eq!(regions.light_additions_bytes.len(), 4);
-        assert_eq!(regions.light_states_bytes.len(), LIGHT_STATE_HOST_ROW_BYTES);
-    }
-
-    #[test]
-    fn multi_renderable_scene_uses_transform_ids_and_material_order() {
-        let scene = SceneSubmission {
-            camera_world_pose: default_camera_world_pose(),
-            renderables: vec![
-                SceneRenderable {
-                    transform_id: 2,
-                    pose: identity_transform(),
-                    mesh_asset_id: 10,
-                    material_asset_id: 20,
-                    sorting_order: 0,
-                    shadow_cast_mode: ShadowCastMode::Off,
-                },
-                SceneRenderable {
-                    transform_id: 4,
-                    pose: identity_transform(),
-                    mesh_asset_id: 11,
-                    material_asset_id: 21,
-                    sorting_order: 3,
-                    shadow_cast_mode: ShadowCastMode::Off,
-                },
-            ],
-            lights: Vec::new(),
-            skinned: Vec::new(),
-        };
-        let regions = SceneSharedMemoryRegions::build(&scene);
-        assert_eq!(regions.mesh_additions_bytes.len(), 12);
-        assert_eq!(regions.mesh_states_bytes.len(), 72);
-        assert_eq!(regions.packed_material_ids_bytes.len(), 8);
-        assert_eq!(target_transform_count(&scene, &[]), 5);
-    }
-
-    #[test]
-    fn skinned_regions_are_sized_and_terminated() {
-        let avatar = |transform_id| SceneSkinned {
-            transform_id,
-            pose: identity_transform(),
-            mesh_asset_id: 3,
-            material_asset_id: 4,
-            shadow_cast_mode: ShadowCastMode::On,
-            posed_bounds: RenderBoundingBox::default(),
-        };
-        let scene = SceneSubmission {
-            camera_world_pose: default_camera_world_pose(),
-            renderables: Vec::new(),
-            lights: Vec::new(),
-            skinned: vec![avatar(7), avatar(9)],
-        };
-        let regions = SceneSharedMemoryRegions::build(&scene);
-        assert_eq!(regions.skinned_additions_bytes.len(), 12);
-        assert_eq!(regions.skinned_states_bytes.len(), 72);
-        assert_eq!(regions.skinned_material_ids_bytes.len(), 8);
-        assert_eq!(regions.bone_assignments_bytes.len(), 24);
-        assert_eq!(regions.bone_indexes_bytes.len(), 8);
-        assert_eq!(
-            regions.skinned_bounds_bytes.len(),
-            3 * SKINNED_MESH_BOUNDS_UPDATE_HOST_ROW_BYTES
-        );
-        assert_eq!(target_transform_count(&scene, &[]), 10);
-    }
-
-    #[test]
-    fn light_state_rows_are_indexed_and_terminated() {
-        let scene = SceneSubmission {
-            camera_world_pose: default_camera_world_pose(),
-            renderables: Vec::new(),
-            lights: vec![
-                SceneLight {
-                    transform_id: 0,
-                    pose: identity_transform(),
-                    state: point_light([1.0, 0.5, 0.25], 2.0, 3.0),
-                },
-                SceneLight {
-                    transform_id: 1,
-                    pose: identity_transform(),
-                    state: directional_light([0.5, 0.5, 1.0], 1.0),
-                },
-            ],
-            skinned: Vec::new(),
-        };
-        let bytes = encode_light_states(&light_state_rows(&scene));
-        assert_eq!(bytes.len(), 3 * LIGHT_STATE_HOST_ROW_BYTES);
-        assert_eq!(i32::from_le_bytes(bytes[0..4].try_into().unwrap()), 0);
-        assert_eq!(
-            i32::from_le_bytes(
-                bytes[LIGHT_STATE_HOST_ROW_BYTES..LIGHT_STATE_HOST_ROW_BYTES + 4]
-                    .try_into()
-                    .unwrap()
-            ),
-            1
-        );
-        assert_eq!(
-            i32::from_le_bytes(
-                bytes[2 * LIGHT_STATE_HOST_ROW_BYTES..2 * LIGHT_STATE_HOST_ROW_BYTES + 4]
-                    .try_into()
-                    .unwrap()
-            ),
-            -1
-        );
-    }
-}
+mod tests;
