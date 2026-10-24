@@ -169,7 +169,7 @@ impl RendererRuntime {
         });
         schedule.run_phase(CpuRenderPhase::AssetPrepare, || {
             self.setup_msaa_for_request(gpu, &request);
-            prepare_assets_for_schedule(&mut self.backend, gpu);
+            prepare_assets_for_schedule(&mut self.backend);
         });
         let prepared_views = schedule.run_phase(CpuRenderPhase::ViewPlanning, || {
             self.prepare_frame_views(gpu, request)

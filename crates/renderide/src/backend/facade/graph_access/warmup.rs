@@ -390,9 +390,9 @@ impl<'a> BackendGraphAccess<'a> {
     ///
     /// Depth and normal prepasses are warmed from the draw list just above. Shadow
     /// keys are collected and compiled there only when this same flag is set, so a
-    /// desktop or VR GPU does not hash shadow draws for this warmup. Real GPUs
-    /// return on the flag. A material lookup during the frame stays pending and
-    /// compiles on the next frame-start drain.
+    /// windowed frame or a frame-bench frame does not hash shadow draws for this
+    /// warmup. Those frames return on the flag. A material lookup during a capture
+    /// frame stays pending and compiles on the next frame-start drain.
     pub(crate) fn precompile_pass_owned_pipelines(
         &self,
         device: &wgpu::Device,

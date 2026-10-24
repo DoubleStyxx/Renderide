@@ -170,34 +170,31 @@ impl RendererRuntime {
         self.backend.set_skin_weight_mode(self.skin_weight_mode());
         self.backend.set_shadow_quality(self.shadow_quality());
         let (shm, ipc) = self.frontend.transport_pair_mut();
-        if let Err(e) = self.backend.attach(
-            crate::backend::RenderBackendAttachDesc {
-                device,
-                queue,
-                driver_submitter,
-                gpu_queue_access_gate,
-                gpu_limits: Arc::clone(gpu.limits()),
-                mapped_buffer_health: gpu.mapped_buffer_health(),
-                surface_format: gpu.config_format(),
-                renderer_settings,
-                config_save_path,
-                suppress_renderer_config_disk_writes,
-                headless: gpu.is_headless(),
-                compile_pipelines_on_render_thread: crate::materials::compile_on_render_thread(
-                    gpu.is_headless(),
-                    gpu.adapter_info().device_type,
-                    &gpu.adapter_info().name,
-                ),
-                render_thread_compiles_per_frame:
-                    crate::materials::render_thread_compiles_per_frame(
-                        gpu.is_headless(),
-                        gpu.adapter_info().device_type,
-                        &gpu.adapter_info().name,
-                    ),
-            },
-            shm,
-            ipc,
-        ) {
+        let headless = gpu.is_headless();
+        let frame_bench = crate::app::frame_bench::active();
+        if let Err(e) =
+            self.backend.attach(
+                crate::backend::RenderBackendAttachDesc {
+                    device,
+                    queue,
+                    driver_submitter,
+                    gpu_queue_access_gate,
+                    gpu_limits: Arc::clone(gpu.limits()),
+                    mapped_buffer_health: gpu.mapped_buffer_health(),
+                    surface_format: gpu.config_format(),
+                    renderer_settings,
+                    config_save_path,
+                    suppress_renderer_config_disk_writes,
+                    headless,
+                    compile_pipelines_on_render_thread:
+                        crate::materials::material_compile_blocks_frame(headless, frame_bench),
+                    render_thread_compiles_per_frame:
+                        crate::materials::render_thread_compiles_per_frame(headless, frame_bench),
+                },
+                shm,
+                ipc,
+            )
+        {
             logger::error!("GPU attach failed: {e}; CPU work continues, GPU draws disabled");
         }
     }

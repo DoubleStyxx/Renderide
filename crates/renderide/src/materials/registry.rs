@@ -74,10 +74,11 @@ impl MaterialRegistry {
             source.generation,
             source.source_override,
         );
-        // `note` counts only Pending. A failed lookup that still draws through a ready
-        // Null pipeline stays at zero so the harness compares that frame. Returning no
-        // pipeline at all is counted once below, and only when nothing was pending.
-        self.pending_draws.note(&lookup);
+        // `note` counts only Pending, and only on a capture readback. A failed lookup
+        // that still draws through a ready Null pipeline stays at zero so the harness
+        // compares that frame. Returning no pipeline at all is counted once below, and
+        // only when nothing was pending. Windowed frames do not increment the counter.
+        self.note_lookup(&lookup);
         let requested_pending = matches!(lookup, MaterialPipelineLookup::Pending);
         let (resolution, fallback_pending) = match lookup {
             MaterialPipelineLookup::Ready(p) => (
@@ -141,7 +142,7 @@ impl MaterialRegistry {
             source.generation,
             source.source_override,
         );
-        self.pending_draws.note(&lookup);
+        self.note_lookup(&lookup);
         let saw_pending = matches!(lookup, MaterialPipelineLookup::Pending);
         let resolution = match lookup {
             MaterialPipelineLookup::Ready(p) => Some(MaterialPipelineResolution::new(fallback, p)),
@@ -157,8 +158,23 @@ impl MaterialRegistry {
     /// Counts a skipped draw once when no pending lookup was already recorded for it.
     fn note_abandoned_draw(&self, dropped: bool, already_pending: bool) {
         if dropped && !already_pending {
-            self.pending_draws.note_dropped();
+            self.note_dropped_draw();
         }
+    }
+
+    /// Capture readback stamps this counter into the PNG. Windowed frames leave it at zero.
+    fn counts_pending_pipeline_draws(&self) -> bool {
+        self.cache.compiles_on_render_thread()
+    }
+
+    fn note_lookup(&self, lookup: &MaterialPipelineLookup) {
+        self.pending_draws
+            .note_readback(self.counts_pending_pipeline_draws(), lookup);
+    }
+
+    fn note_dropped_draw(&self) {
+        self.pending_draws
+            .note_dropped_readback(self.counts_pending_pipeline_draws());
     }
 
     /// Resolves the Null fallback pipeline for a caller that must abandon a routed embedded draw.
@@ -177,7 +193,7 @@ impl MaterialRegistry {
     /// The registry lookup itself did not return [`None`], so it did not count the skip.
     /// Call this only for that empty-set path. A [`None`] lookup is already counted.
     pub(crate) fn note_skipped_pipeline_draw(&self) {
-        self.pending_draws.note_dropped();
+        self.note_dropped_draw();
     }
 
     /// Builds a registry whose router falls back to [`RasterPipelineKind::Null`] for unknown shader assets.
@@ -295,14 +311,9 @@ impl MaterialRegistry {
             .variant_bits_for_shader_asset(shader_asset_id)
     }
 
-    /// Attach-time flag. Real GPUs are false.
+    /// Attach-time flag. True only for a capture readback.
     pub(crate) fn compiles_on_render_thread(&self) -> bool {
         self.cache.compiles_on_render_thread()
-    }
-
-    /// Headless captures compile every queued material pipeline in one drain.
-    pub(crate) fn compiles_full_render_thread_queue(&self) -> bool {
-        self.cache.compiles_full_render_thread_queue()
     }
 
     /// Takes this registry's pending-draw count and resets it.
@@ -314,16 +325,11 @@ impl MaterialRegistry {
     ///
     /// Invoked once per frame from the renderer's tick before per-view recording so worker
     /// threads never touch the completion channel or the pending/failed mutexes during draw.
-    /// Headless compiles every pipeline already queued for this thread and does not wait
-    /// for an idle device. A windowed software adapter compiles at most one; its caller
-    /// waits on a short idle budget before this drain.
+    /// A capture readback compiles every pipeline already queued for this thread and
+    /// does not wait for an idle device. Every other frame only installs builds the
+    /// background pool has already finished.
     pub fn drain_pipeline_build_completions(&self) {
         self.cache.drain_pipeline_build_completions();
-    }
-
-    /// Drains builds that already finished, without starting a render-thread compile.
-    pub fn drain_finished_pipeline_builds(&self) {
-        self.cache.drain_finished_pipeline_builds();
     }
 
     /// Enables or disables development WGSL hot reload polling.
@@ -376,5 +382,18 @@ mod tests {
         draws.note_dropped();
         assert_eq!(draws.take(), 1);
         assert_eq!(other.take(), 0);
+    }
+
+    #[test]
+    fn windowed_frames_do_not_increment_the_pending_counter() {
+        let draws = PendingPipelineDraws::new();
+
+        draws.note_readback(false, &MaterialPipelineLookup::Pending);
+        draws.note_dropped_readback(false);
+        assert_eq!(draws.take(), 0);
+
+        draws.note_readback(true, &MaterialPipelineLookup::Pending);
+        draws.note_dropped_readback(true);
+        assert_eq!(draws.take(), 2);
     }
 }

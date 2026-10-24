@@ -1,16 +1,16 @@
 //! Where a material pipeline build runs.
 //!
-//! Real GPUs keep the background pool. Headless captures and software adapters
-//! (WARP, lavapipe, llvmpipe) compile on the render thread instead: a background
-//! `create_render_pipeline` deadlocks DX12 WARP while the render thread is inside
-//! a frame. Headless compiles the whole queued set at the start of the frame.
-//! It does not flush or poll the device first, and it does not compile during a
-//! draw lookup. A lookup in that frame stays pending until the next drain.
+//! A frame blocks on queued compiles only when its image will be read back:
+//! a headless golden or capture, including a control-api capture on that same
+//! headless frame. The drain compiles the whole render-thread queue at frame
+//! start. It does not flush or poll the device first, and it does not compile
+//! during a draw lookup. A lookup in that frame stays pending until the next drain.
 //!
-//! A windowed software adapter compiles at most
-//! [`RENDER_THREAD_PIPELINE_COMPILES_PER_FRAME`] pipelines per drain so one frame
-//! cannot absorb a whole scene, and its idle wait is one short budget. Queued
-//! builds that do not fit in this drain stay pending.
+//! Every other frame uses the background pool, the same as before this gate.
+//! Windowed frames never block, including windowed software adapters. Headless
+//! frames that are not read back (frame bench included) do not block either, on
+//! a real GPU or on lavapipe or WARP. Those frames return with the pipeline
+//! still pending.
 
 use std::sync::{Arc, OnceLock};
 
@@ -22,14 +22,6 @@ use super::cache::{
 };
 use super::pipeline_kind::RasterPipelineKind;
 use super::raster_pipeline::MaterialPipelineDesc;
-
-/// Pipelines compiled on the render thread during one
-/// [`MaterialPipelineCache::drain_pipeline_build_completions`] call on a
-/// windowed software adapter.
-///
-/// Headless captures ignore this cap and compile every pipeline already queued
-/// for the render thread. Real GPUs do not use this path.
-pub(in crate::materials) const RENDER_THREAD_PIPELINE_COMPILES_PER_FRAME: usize = 1;
 
 /// Maximum number of background workers dedicated to material pipeline compilation.
 const MATERIAL_PIPELINE_MAX_WORKERS: usize = 4;
@@ -57,42 +49,34 @@ pub(in crate::materials) struct PipelineBuildOutcome {
     pub(in crate::materials) result: Result<MaterialPipelineSet, String>,
 }
 
-/// Headless and software adapters compile on the render thread. A real GPU does not.
-pub(crate) fn compile_on_render_thread(
-    headless: bool,
-    device_type: wgpu::DeviceType,
-    adapter_name: &str,
-) -> bool {
-    headless || device_type == wgpu::DeviceType::Cpu || adapter_name_is_software(adapter_name)
+/// `true` when this frame's image is read back, so queued compiles must finish first.
+///
+/// Headless golden and capture frames block. A headless control-api capture is
+/// one of those frames: the headless driver read back every presented frame
+/// except while the frame bench is running. Windowed frames never block.
+/// Frame-bench frames do not block on a real GPU or a software adapter.
+pub(crate) fn material_compile_blocks_frame(headless: bool, frame_bench: bool) -> bool {
+    headless && !frame_bench
 }
 
 /// How many render-thread pipeline compiles one drain may run.
 ///
-/// `0` keeps the background pool. Headless returns [`usize::MAX`] so the capture
-/// compiles every pipeline queued for this thread before the frame submits. A
-/// windowed software adapter returns [`RENDER_THREAD_PIPELINE_COMPILES_PER_FRAME`].
-/// Real GPUs are unchanged: cold-load cost stays on the background pool.
-pub(crate) fn render_thread_compiles_per_frame(
-    headless: bool,
-    device_type: wgpu::DeviceType,
-    adapter_name: &str,
-) -> usize {
-    if !compile_on_render_thread(headless, device_type, adapter_name) {
-        return 0;
-    }
-    if headless {
+/// `0` keeps the background pool and leaves the pipeline pending. A capture
+/// readback returns [`usize::MAX`] so the frame compiles every pipeline already
+/// queued for this thread before it submits. Windowed frames return `0`.
+pub(crate) fn render_thread_compiles_per_frame(headless: bool, frame_bench: bool) -> usize {
+    if material_compile_blocks_frame(headless, frame_bench) {
         usize::MAX
     } else {
-        RENDER_THREAD_PIPELINE_COMPILES_PER_FRAME
+        0
     }
 }
 
-fn adapter_name_is_software(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    name.contains("llvmpipe")
-        || name.contains("lavapipe")
-        || name.contains("swiftshader")
-        || name.contains("microsoft basic render")
+/// How many queued render-thread builds a drain with `budget` actually compiles.
+///
+/// A non-capture budget of zero compiles nothing, so the pipeline stays pending.
+pub(crate) fn render_thread_compile_take(queued: usize, budget: usize) -> usize {
+    budget.min(queued)
 }
 
 pub(in crate::materials) fn spawn_pipeline_build(
@@ -112,7 +96,7 @@ pub(in crate::materials) fn spawn_pipeline_build(
 pub(in crate::materials) fn drain_render_thread_pipeline_builds(max_compiles: usize) {
     let requests = {
         let mut queue = render_thread_pipeline_build_queue().lock();
-        let count = max_compiles.min(queue.len());
+        let count = render_thread_compile_take(queue.len(), max_compiles);
         queue.drain(..count).collect::<Vec<_>>()
     };
     let mut deferred = Vec::new();
@@ -162,11 +146,6 @@ fn render_thread_pipeline_build_queue() -> &'static Mutex<Vec<PipelineBuildReque
     &QUEUE
 }
 
-/// True when a render-thread compile is waiting for the next drain.
-pub(crate) fn render_thread_builds_queued() -> bool {
-    !render_thread_pipeline_build_queue().lock().is_empty()
-}
-
 fn material_pipeline_compile_worker_count() -> usize {
     std::thread::available_parallelism().map_or(1, |threads| {
         (threads.get() / 2).clamp(1, MATERIAL_PIPELINE_MAX_WORKERS)
@@ -189,8 +168,8 @@ fn material_pipeline_compile_pool() -> Result<&'static rayon::ThreadPool, String
 #[cfg(test)]
 mod tests {
     use super::{
-        MATERIAL_PIPELINE_MAX_WORKERS, RENDER_THREAD_PIPELINE_COMPILES_PER_FRAME,
-        compile_on_render_thread, material_pipeline_compile_worker_count,
+        MATERIAL_PIPELINE_MAX_WORKERS, material_compile_blocks_frame,
+        material_pipeline_compile_worker_count, render_thread_compile_take,
         render_thread_compiles_per_frame,
     };
 
@@ -203,56 +182,35 @@ mod tests {
     }
 
     #[test]
-    fn render_thread_compile_is_headless_or_software_only() {
-        let discrete = wgpu::DeviceType::DiscreteGpu;
-        let cpu = wgpu::DeviceType::Cpu;
-
-        assert!(compile_on_render_thread(
-            true,
-            discrete,
-            "NVIDIA GeForce RTX 4090"
-        ));
-        assert!(!compile_on_render_thread(
-            false,
-            discrete,
-            "NVIDIA GeForce RTX 4090"
-        ));
-        assert!(compile_on_render_thread(
-            false,
-            discrete,
-            "llvmpipe (LLVM 20.1.2, 256 bits)"
-        ));
-        assert!(compile_on_render_thread(false, discrete, "lavapipe"));
-        assert!(compile_on_render_thread(
-            false,
-            discrete,
-            "Microsoft Basic Render Driver"
-        ));
-        assert!(compile_on_render_thread(false, cpu, "Unknown Adapter"));
-        assert!(!compile_on_render_thread(
-            false,
-            wgpu::DeviceType::IntegratedGpu,
-            "Intel(R) UHD Graphics"
-        ));
+    fn windowed_frames_never_block_on_a_queued_compile() {
+        assert!(!material_compile_blocks_frame(false, false));
+        assert!(!material_compile_blocks_frame(false, true));
+        assert_eq!(render_thread_compiles_per_frame(false, false), 0);
+        assert_eq!(render_thread_compiles_per_frame(false, true), 0);
     }
 
     #[test]
-    fn headless_compiles_the_queued_set_and_windowed_software_compiles_one() {
-        let discrete = wgpu::DeviceType::DiscreteGpu;
-        let cpu = wgpu::DeviceType::Cpu;
+    fn non_capture_frame_leaves_the_pipeline_pending() {
+        let frame_bench = true;
+        let headless = true;
+        let budget = render_thread_compiles_per_frame(headless, frame_bench);
 
-        assert_eq!(
-            render_thread_compiles_per_frame(true, discrete, "NVIDIA GeForce RTX 4090"),
-            usize::MAX
-        );
-        assert_eq!(
-            render_thread_compiles_per_frame(false, cpu, "Microsoft Basic Render Driver"),
-            RENDER_THREAD_PIPELINE_COMPILES_PER_FRAME
-        );
-        assert_eq!(
-            render_thread_compiles_per_frame(false, discrete, "NVIDIA GeForce RTX 4090"),
-            0
-        );
-        assert_eq!(RENDER_THREAD_PIPELINE_COMPILES_PER_FRAME, 1);
+        assert!(!material_compile_blocks_frame(headless, frame_bench));
+        assert_eq!(budget, 0);
+        assert_eq!(render_thread_compile_take(4, budget), 0);
+
+        let windowed_budget = render_thread_compiles_per_frame(false, false);
+        assert_eq!(render_thread_compile_take(4, windowed_budget), 0);
+    }
+
+    #[test]
+    fn capture_frame_compiles_the_queued_set_on_every_gpu() {
+        let frame_bench = false;
+        let headless = true;
+
+        assert!(material_compile_blocks_frame(headless, frame_bench));
+        let budget = render_thread_compiles_per_frame(headless, frame_bench);
+        assert_eq!(budget, usize::MAX);
+        assert_eq!(render_thread_compile_take(4, budget), 4);
     }
 }

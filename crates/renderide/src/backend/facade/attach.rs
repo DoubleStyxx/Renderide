@@ -52,12 +52,11 @@ pub struct RenderBackendAttachDesc {
     pub suppress_renderer_config_disk_writes: bool,
     /// `true` when the renderer is attached to an offscreen headless target.
     pub headless: bool,
-    /// Headless and software adapters compile material pipelines on the render thread.
-    /// Real GPUs leave this false and use the background pool.
+    /// Capture readback compiles material pipelines on the render thread.
+    /// Windowed frames and frame-bench frames leave this false and use the background pool.
     pub compile_pipelines_on_render_thread: bool,
-    /// Render-thread compiles allowed in one drain. Headless is [`usize::MAX`].
-    /// A windowed software adapter is one. Ignored when
-    /// `compile_pipelines_on_render_thread` is false.
+    /// Render-thread compiles allowed in one drain. A capture readback is [`usize::MAX`].
+    /// Every other frame is zero. Ignored when `compile_pipelines_on_render_thread` is false.
     pub render_thread_compiles_per_frame: usize,
 }
 
@@ -133,10 +132,10 @@ impl RenderBackend {
             compile_pipelines_on_render_thread,
             render_thread_compiles_per_frame,
         )?;
-        // The device has not submitted yet. Headless and software adapters build the
-        // pass-owned pipelines now so the first frame does not call
-        // create_render_pipeline after Queue::submit. Real GPUs skip on the flag
-        // and keep the lazy path.
+        // The device has not submitted yet. A capture readback builds the
+        // pass-owned pipelines now so the first captured frame does not call
+        // create_render_pipeline after Queue::submit. Windowed and frame-bench
+        // frames skip on the flag and keep the lazy path.
         if compile_pipelines_on_render_thread {
             crate::passes::precompile_clustered_light_pipeline(device.as_ref());
             crate::passes::precompile_scene_color_compose_pipeline(
