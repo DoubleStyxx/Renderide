@@ -272,7 +272,13 @@ fn seeded_build_frame_matches_the_slow_path() {
     let casters = collect(&prepared);
     let scope = ViewRenderSpaceScope::single(RenderSpaceId(1));
     let camera = camera_in_front_of_the_grid();
+    let mut fast_publishes = 0usize;
+    let mut dedicated_fast = 0usize;
+    let mut dedicated_frames = 0usize;
     for seed in 0..16u64 {
+        // Even seeds stay on the single-space unskinned grid and mostly draw every caster, so
+        // `build_frame` publishes on the fast path. Odd seeds keep the noisy call pattern.
+        let uniform = seed % 2 == 0;
         let mut rng = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
         let mut next = || {
             rng ^= rng << 13;
@@ -283,21 +289,14 @@ fn seeded_build_frame_matches_the_slow_path() {
         let mut fast_lane = Lane::new(history_of(&casters));
         let mut slow_lane = Lane::new(history_of(&casters));
         for _ in 0..12 {
-            let mut calls = Vec::new();
-            for index in 0..casters.len() {
-                if next() % 8 == 0 {
-                    continue;
-                }
-                let occluded = next() % 7 == 0;
-                calls.push((
-                    index,
-                    OcclusionFacts {
-                        occluded,
-                        other_occluder: occluded,
-                        rects: [None, None],
-                    },
-                ));
-            }
+            let steady = uniform && next() % 5 < 3;
+            let calls = if steady {
+                (0..casters.len())
+                    .map(|index| (index, OcclusionFacts::keep()))
+                    .collect()
+            } else {
+                noisy_calls(&casters, &mut next)
+            };
             let step = Step {
                 scene: &scene,
                 prepared: &prepared,
@@ -309,8 +308,43 @@ fn seeded_build_frame_matches_the_slow_path() {
             let (fast, next_fast) = publish(&step, fast_lane, true);
             let (slow, next_slow) = publish(&step, slow_lane, false);
             assert_published(&fast, &slow);
+            if fast.armed {
+                fast_publishes += 1;
+            }
+            if uniform {
+                dedicated_frames += 1;
+                if fast.armed {
+                    dedicated_fast += 1;
+                }
+            }
             fast_lane = next_fast;
             slow_lane = next_slow;
         }
     }
+    assert!(
+        dedicated_fast * 4 >= dedicated_frames,
+        "fast publishes {fast_publishes} of 192 frames; single-space {dedicated_fast} of {dedicated_frames}"
+    );
+}
+
+fn noisy_calls(
+    casters: &[PreparedCasterBounds],
+    next: &mut impl FnMut() -> u64,
+) -> Vec<(usize, OcclusionFacts)> {
+    let mut calls = Vec::new();
+    for index in 0..casters.len() {
+        if next().is_multiple_of(8) {
+            continue;
+        }
+        let occluded = next().is_multiple_of(7);
+        calls.push((
+            index,
+            OcclusionFacts {
+                occluded,
+                other_occluder: occluded,
+                rects: [None, None],
+            },
+        ));
+    }
+    calls
 }

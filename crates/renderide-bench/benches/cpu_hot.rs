@@ -60,12 +60,12 @@ fn hysteresis_classification(c: &mut Criterion) {
             let mut workload = HysteresisHistoryWorkload::new(count, moving);
             let _ = workload.step();
             // Camera motion fails open, so the warm-up step leaves every caster visible and the
-            // measured loop takes the fast path. The unmoving set keeps its occluded quarter and
-            // stays on the full update. The budget-sized names say which of those is measured.
+            // measured loop takes the fast path (`8192_after_motion_all_visible`). The unmoving
+            // set keeps its occluded quarter and stays on the full update (`8192_quarter_occluded`).
             let at_budget = count == HYSTERESIS_HISTORY_COUNTS[0];
             let label = match (at_budget, moving) {
-                (true, true) => "moving_then_all_visible_fast_path",
-                (true, false) => "partly_occluded_full_update",
+                (true, true) => "after_motion_all_visible",
+                (true, false) => "quarter_occluded",
                 (false, true) => "moving",
                 (false, false) => "stable",
             };

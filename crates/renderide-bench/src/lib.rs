@@ -143,8 +143,12 @@ mod tests {
         let mut moving = HysteresisHistoryWorkload::new(count, true);
         let moving_kept = moving.step();
         assert_eq!(moving_kept, u32::try_from(count).unwrap_or(0));
+        // `8192_quarter_occluded` is this unmoving set at the budget.
         assert!(!stable.fast_path_engaged());
         assert!(!moving.fast_path_engaged());
+        // `8192_after_motion_all_visible` measures the step after this warm-up.
+        assert_eq!(moving.step(), u32::try_from(count).unwrap_or(0));
+        assert!(moving.fast_path_engaged());
         let mut visible = HysteresisHistoryWorkload::all_visible(count);
         assert_eq!(visible.step(), u32::try_from(count).unwrap_or(0));
         assert!(visible.fast_path_engaged());

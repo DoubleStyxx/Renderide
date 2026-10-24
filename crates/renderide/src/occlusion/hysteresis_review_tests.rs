@@ -246,59 +246,90 @@ fn fast_table_storage_survives_a_full_update() {
     assert_eq!(reused_capacity, capacity);
 }
 
+const SEEDED_FRAMES: usize = 20;
+
 #[test]
 fn seeded_fast_path_matches_the_full_update() {
     const SEEDS: u64 = 64;
-    const FRAMES: usize = 20;
+    let mut fast_publishes = 0usize;
+    let mut dedicated_fast = 0usize;
+    let mut dedicated_frames = 0usize;
     for seed in 0..SEEDS {
-        let mut rng = Rng::new(seed);
-        let mut world = (0..rng.below(24).max(1))
-            .map(|index| Body::at(index, &mut rng))
-            .collect::<Vec<_>>();
-        let mut fast_history = VisibilityHistory::default();
-        let mut slow_history = VisibilityHistory::default();
-        let mut fast_spare = HashMap::new();
-        let mut slow_spare = HashMap::new();
-        let mut fast_buffers = VisibilityCullBuffers::default();
-        let mut slow_buffers = VisibilityCullBuffers::default();
-        for _frame in 0..FRAMES {
-            if rng.chance(2, 5) {
-                for body in &mut world {
-                    body.mutate(&mut rng);
-                }
-            }
-            let (present, calls) = frame_of(&world, &mut rng);
-            let frame = Frame {
-                present,
-                calls,
-                parallel: false,
-            };
-            let (fast_snap, next_fast, next_fast_spare, next_fast_buffers) = apply(
-                std::mem::take(&mut fast_history),
-                std::mem::take(&mut fast_spare),
-                std::mem::take(&mut fast_buffers),
-                &frame,
-                true,
-            );
-            let (slow_snap, next_slow, next_slow_spare, next_slow_buffers) = apply(
-                std::mem::take(&mut slow_history),
-                std::mem::take(&mut slow_spare),
-                std::mem::take(&mut slow_buffers),
-                &frame,
-                false,
-            );
-            assert_same(
-                std::slice::from_ref(&fast_snap),
-                std::slice::from_ref(&slow_snap),
-            );
-            fast_history = next_fast;
-            slow_history = next_slow;
-            fast_spare = next_fast_spare;
-            slow_spare = next_slow_spare;
-            fast_buffers = next_fast_buffers;
-            slow_buffers = next_slow_buffers;
+        let uniform = seed % 2 == 0;
+        let published = run_seeded_world(seed, uniform);
+        fast_publishes += published;
+        if uniform {
+            dedicated_fast += published;
+            dedicated_frames += SEEDED_FRAMES;
         }
     }
+    assert!(
+        dedicated_fast * 4 >= dedicated_frames,
+        "fast publishes {fast_publishes} of {} frames; single-space unskinned {dedicated_fast} of {dedicated_frames}",
+        SEEDS as usize * SEEDED_FRAMES
+    );
+}
+
+fn run_seeded_world(seed: u64, uniform: bool) -> usize {
+    let mut rng = Rng::new(seed);
+    let mut world = (0..rng.below(24).max(1))
+        .map(|index| Body::at(index, &mut rng, uniform))
+        .collect::<Vec<_>>();
+    let mut fast_history = VisibilityHistory::default();
+    let mut slow_history = VisibilityHistory::default();
+    let mut fast_spare = HashMap::new();
+    let mut slow_spare = HashMap::new();
+    let mut fast_buffers = VisibilityCullBuffers::default();
+    let mut slow_buffers = VisibilityCullBuffers::default();
+    let mut published = 0usize;
+    for _frame in 0..SEEDED_FRAMES {
+        // Uniform seeds stay in one space and unskinned. Most of their frames are steady so the
+        // fast path actually publishes; the other frames keep the noisy coverage.
+        let steady = uniform && rng.chance(3, 5);
+        if !steady && rng.chance(2, 5) {
+            for body in &mut world {
+                body.mutate(&mut rng, uniform);
+            }
+        }
+        let (present, calls) = if steady {
+            steady_frame(&world)
+        } else {
+            frame_of(&world, &mut rng)
+        };
+        let frame = Frame {
+            present,
+            calls,
+            parallel: false,
+        };
+        let (fast_snap, next_fast, next_fast_spare, next_fast_buffers) = apply(
+            std::mem::take(&mut fast_history),
+            std::mem::take(&mut fast_spare),
+            std::mem::take(&mut fast_buffers),
+            &frame,
+            true,
+        );
+        let (slow_snap, next_slow, next_slow_spare, next_slow_buffers) = apply(
+            std::mem::take(&mut slow_history),
+            std::mem::take(&mut slow_spare),
+            std::mem::take(&mut slow_buffers),
+            &frame,
+            false,
+        );
+        assert_same(
+            std::slice::from_ref(&fast_snap),
+            std::slice::from_ref(&slow_snap),
+        );
+        if fast_snap.published_fast {
+            published += 1;
+        }
+        fast_history = next_fast;
+        slow_history = next_slow;
+        fast_spare = next_fast_spare;
+        slow_spare = next_slow_spare;
+        fast_buffers = next_fast_buffers;
+        slow_buffers = next_slow_buffers;
+    }
+    published
 }
 
 struct Rng(u64);
@@ -338,13 +369,15 @@ struct Body {
 }
 
 impl Body {
-    fn at(index: u32, rng: &mut Rng) -> Self {
+    fn at(index: u32, rng: &mut Rng, uniform: bool) -> Self {
         let index = u64::from(index);
         let (min, max) = bounds(index);
+        let space = if rng.chance(1, 4) { 2 } else { 1 };
+        let skinned = rng.chance(1, 10);
         Self {
             index,
-            space: if rng.chance(1, 4) { 2 } else { 1 },
-            skinned: rng.chance(1, 10),
+            space: if uniform { 1 } else { space },
+            skinned: if uniform { false } else { skinned },
             instance: index,
             node: i32::try_from(index).unwrap_or(i32::MAX),
             mesh: 1,
@@ -353,7 +386,7 @@ impl Body {
         }
     }
 
-    fn mutate(&mut self, rng: &mut Rng) {
+    fn mutate(&mut self, rng: &mut Rng, uniform: bool) {
         let roll = rng.below(100);
         if roll < 3 {
             self.min += Vec3::splat(0.25);
@@ -365,7 +398,7 @@ impl Body {
             self.mesh = self.mesh.saturating_add(1);
         } else if roll < 7 {
             self.instance = self.instance.saturating_add(1_000);
-        } else if roll < 8 {
+        } else if roll < 8 && !uniform {
             self.space = 3 - self.space;
         }
     }
@@ -379,6 +412,30 @@ impl Body {
             self.skinned,
         )
     }
+}
+
+fn steady_frame(world: &[Body]) -> (Vec<PresentCaster>, Vec<DrawCall>) {
+    let mut present = Vec::new();
+    let mut calls = Vec::new();
+    for body in world {
+        present.push(PresentCaster {
+            key: body.key(),
+            mesh_asset_id: body.mesh,
+            aabb_min: body.min,
+            aabb_max: body.max,
+            space_id: RenderSpaceId(body.space),
+        });
+        calls.push(DrawCall {
+            caster: Some(CasterRef {
+                key: body.key(),
+                mesh_asset_id: body.mesh,
+            }),
+            aabb_min: body.min,
+            aabb_max: body.max,
+            facts: keep(),
+        });
+    }
+    (present, calls)
 }
 
 fn frame_of(world: &[Body], rng: &mut Rng) -> (Vec<PresentCaster>, Vec<DrawCall>) {
