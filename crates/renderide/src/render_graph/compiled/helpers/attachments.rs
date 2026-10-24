@@ -125,16 +125,37 @@ impl<'a> ResolvedColorAttachments<'a> {
     }
 }
 
+/// Stack cap for per-view color load overrides. Forward passes use one color attachment.
+const COLOR_LOAD_OVERRIDE_CAP: usize = 8;
+
+/// Collects runtime color load overrides without allocating.
+pub(in crate::render_graph::compiled) fn color_load_overrides(
+    pass: &PassNode,
+    template: &RenderPassTemplate,
+    ctx: &RasterPassCtx<'_, '_>,
+) -> [Option<wgpu::LoadOp<wgpu::Color>>; COLOR_LOAD_OVERRIDE_CAP] {
+    let mut loads = [None; COLOR_LOAD_OVERRIDE_CAP];
+    let count = template
+        .color_attachments
+        .len()
+        .min(COLOR_LOAD_OVERRIDE_CAP);
+    for (index, slot) in loads.iter_mut().enumerate().take(count) {
+        *slot = pass.color_load_op_override(ctx, index);
+    }
+    loads
+}
+
 /// Resolves the raster pass template's color attachments to live `wgpu::TextureView`s.
 pub(in crate::render_graph::compiled) fn resolve_color_attachments<'a>(
     pass_name: &str,
     template: &RenderPassTemplate,
     graph_resources: &'a GraphResolvedResources,
     sample_count: u32,
+    color_loads: &[Option<wgpu::LoadOp<wgpu::Color>>],
 ) -> Result<ResolvedColorAttachments<'a>, GraphExecuteError> {
     profiling::scope!("graph::raster::resolve_color_attachments");
     let mut color_attachments = ResolvedColorAttachments::new();
-    for color in &template.color_attachments {
+    for (index, color) in template.color_attachments.iter().enumerate() {
         let target = resolve_attachment_target(color.target, sample_count);
         let view = graph_resources.texture_view(target).ok_or_else(|| {
             GraphExecuteError::MissingGraphAttachment {
@@ -158,7 +179,11 @@ pub(in crate::render_graph::compiled) fn resolve_color_attachments<'a>(
             view,
             resolve_target,
             ops: wgpu::Operations {
-                load: color.load,
+                load: color_loads
+                    .get(index)
+                    .copied()
+                    .flatten()
+                    .unwrap_or(color.load),
                 store: color.store.resolve(sample_count),
             },
             depth_slice: None,
@@ -174,6 +199,7 @@ pub(in crate::render_graph::compiled) fn resolve_depth_attachment_with_stencil<'
     graph_resources: &'a GraphResolvedResources,
     sample_count: u32,
     stencil_ops: Option<wgpu::Operations<u32>>,
+    depth_load: Option<wgpu::LoadOp<f32>>,
 ) -> Result<Option<wgpu::RenderPassDepthStencilAttachment<'a>>, GraphExecuteError> {
     profiling::scope!("graph::raster::resolve_depth_attachment");
     let Some(depth) = &template.depth_stencil_attachment else {
@@ -186,9 +212,13 @@ pub(in crate::render_graph::compiled) fn resolve_depth_attachment_with_stencil<'
             resource: format!("{target:?}"),
         }
     })?;
+    let mut depth_ops = depth.depth.resolve(sample_count);
+    if let Some(load) = depth_load {
+        depth_ops.load = load;
+    }
     Ok(Some(wgpu::RenderPassDepthStencilAttachment {
         view,
-        depth_ops: Some(depth.depth.resolve(sample_count)),
+        depth_ops: Some(depth_ops),
         stencil_ops,
     }))
 }
@@ -205,12 +235,17 @@ fn resolve_depth_attachment<'a>(
         .depth_stencil_attachment
         .as_ref()
         .and_then(|depth| pass.stencil_ops_override(ctx, depth));
+    let depth_load = template
+        .depth_stencil_attachment
+        .as_ref()
+        .and_then(|_| pass.depth_load_op_override(ctx));
     resolve_depth_attachment_with_stencil(
         pass.name(),
         template,
         graph_resources,
         sample_count,
         stencil_ops,
+        depth_load,
     )
 }
 
@@ -318,8 +353,14 @@ pub(in crate::render_graph::compiled) fn execute_graph_raster_pass_node(
     }
 
     let sample_count = frame_sample_count_from_raster_ctx(ctx);
-    let color_attachments =
-        resolve_color_attachments(pass.name(), template, graph_resources, sample_count)?;
+    let color_loads = color_load_overrides(pass, template, ctx);
+    let color_attachments = resolve_color_attachments(
+        pass.name(),
+        template,
+        graph_resources,
+        sample_count,
+        &color_loads,
+    )?;
     let depth_stencil_attachment =
         resolve_depth_attachment(pass, template, graph_resources, sample_count, ctx)?;
     let multiview_mask = pass.multiview_mask_override(ctx, template);

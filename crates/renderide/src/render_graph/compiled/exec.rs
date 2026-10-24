@@ -419,3 +419,8 @@ fn usize_to_u64(value: usize) -> u64 {
 mod pre_warm;
 mod recording;
 mod resolve;
+
+#[cfg(test)]
+pub(crate) use resolve::{
+    ClearLoadDecisionInputs, ClearLoadViewSource, clear_load_inputs_from_view,
+};
