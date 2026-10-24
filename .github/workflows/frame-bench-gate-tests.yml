@@ -1,0 +1,46 @@
+# Unit tests for the frame-bench gate script (scripts/ci/frame_bench_gate.py).
+# frame-bench.yml is workflow_dispatch only and ci.yml's path filters skip scripts/**, so
+# without this workflow a gate change is only tested when someone dispatches a frame bench.
+# Standard library only: no pip install.
+name: Frame bench gate tests
+
+"on":
+  push:
+    branches: [master]
+    paths:
+      - ".github/workflows/frame-bench-gate-tests.yml"
+      - ".github/workflows/frame-bench.yml"
+      - "scripts/ci/**"
+  pull_request:
+    paths:
+      - ".github/workflows/frame-bench-gate-tests.yml"
+      - ".github/workflows/frame-bench.yml"
+      - "scripts/ci/**"
+  workflow_dispatch:
+
+concurrency:
+  group: frame-bench-gate-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gate-tests:
+    name: frame-bench gate tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12.15"
+
+      # Same invocation as the self-test step in frame-bench.yml.
+      - name: Run gate unit tests
+        run: python -m unittest discover -s scripts/ci -p 'test_frame_bench_gate.py' -v
