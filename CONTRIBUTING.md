@@ -248,6 +248,12 @@ Use `update-suite` only when the visual change is intentional. The flat-image ga
 
 If the renderer binary is not already present next to the harness, build it first with `cargo build -p renderide` or pass an explicit binary with `--renderer`.
 
+#### Rendering and parity changes need a test render
+
+A pull request that changes how a scene is drawn, shaded, lit, culled, skinned, or matched to Resonite must add or update a headless case under `crates/renderide-test`. Register it in `src/scene_dsl/cases.rs`, keep the scene deterministic, and commit the golden under `goldens/`. The capture must fail on the parent commit and pass with the change. A CPU unit test does not replace that image when the bug is visible in pixels.
+
+Do not widen SSIM, per-pixel, or coverage tolerances to hide a mismatch. Linux CI runs the suite on lavapipe (Mesa's software Vulkan rasterizer). Windows CI uses DX12 WARP, and macOS CI uses Metal. Those are different adapters, so a Linux mismatch is the behavior gate. The pull request template has the same checklist.
+
 ### 2.6 Lints and formatting
 
 The workspace puts a heavy lint configuration at the workspace level so every crate inherits it. The intent is that code which lands in this repo holds itself to a consistent standard regardless of which crate it lives in.
@@ -703,6 +709,8 @@ If OpenXR initialization or a per-frame acquire fails, the renderer should degra
 - `logging` for the harness's own log routing.
 
 The harness is what stands between "the renderer compiles" and "the renderer behaves." It exercises the same queues, the same shared-memory protocol, and the same renderer entry points a real launch would, then captures the rendered frames for comparison against golden references under `crates/renderide-test/goldens/`. The default renderer binary is resolved next to the harness binary; `--release` selects `target/release/renderide-renderer`, and `--renderer` can override the path entirely. New end-to-end integration tests for the renderer as a whole belong in this harness, not in `crates/renderide/tests/`.
+
+A rendering or parity change adds or updates one of those captures so the suite fails without the change. See [Rendering and parity changes need a test render](#rendering-and-parity-changes-need-a-test-render).
 
 ---
 
