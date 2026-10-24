@@ -180,6 +180,7 @@ fn draw_plan(items: Vec<WorldMeshDrawItem>) -> WorldMeshDrawPlan {
             draws_hi_z_culled: 0,
             visibility: Default::default(),
             arrangement: Default::default(),
+            has_rigid_object_motion: false,
         },
         None,
     )))

@@ -146,6 +146,7 @@ mod tests {
                 render_space_scope: crate::world_mesh::ViewRenderSpaceScope::AllActive,
                 layer_policy: crate::world_mesh::ViewLayerPolicy::MainView,
                 reflection_probes: None,
+                consumes_motion_vectors: false,
             },
             caches: DrawCollectionFrameCaches {
                 material_cache: None,

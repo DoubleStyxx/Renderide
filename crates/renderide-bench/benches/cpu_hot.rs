@@ -54,6 +54,25 @@ fn world_matrices(c: &mut Criterion) {
     group.bench_function("reverse_chain_recompute", |b| {
         b.iter(|| black_box(reverse.recompute()));
     });
+    let mut history = WorldMatrixWorkload::standard();
+    let _ = history.recompute();
+    let dense_4096: Vec<usize> = (0..WORLD_MATRIX_NODES).collect();
+    let sparse: Vec<usize> = (0..64).collect();
+    let _ = history.publish_motion_history(&dense_4096);
+    group.bench_function("motion_history_publish", |b| {
+        b.iter(|| black_box(history.publish_motion_history(&dense_4096)));
+    });
+    let mut wide = WorldMatrixWorkload::forest(100_000);
+    let _ = wide.recompute();
+    let dense_100k: Vec<usize> = (0..100_000).collect();
+    let _ = wide.publish_motion_history(&sparse);
+    group.bench_function("motion_history_publish_100k_sparse", |b| {
+        b.iter(|| black_box(wide.publish_motion_history(&sparse)));
+    });
+    let _ = wide.publish_motion_history(&dense_100k);
+    group.bench_function("motion_history_publish_100k_dense", |b| {
+        b.iter(|| black_box(wide.publish_motion_history(&dense_100k)));
+    });
     group.finish();
 }
 

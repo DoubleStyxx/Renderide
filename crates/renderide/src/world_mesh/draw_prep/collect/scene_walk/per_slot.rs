@@ -126,6 +126,7 @@ pub(super) fn push_one_slot_draw(
         rigid_world_matrix,
         alpha_distance_sq,
     ) {
+        *acc.has_rigid_object_motion |= item.previous_rigid_world_matrix.is_some();
         acc.out.push(item);
     }
 }
