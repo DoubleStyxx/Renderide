@@ -120,6 +120,10 @@ pub struct WorldTransformCache {
     /// Apply marks `computed` false for dirty nodes without clearing `world_matrices`, so this bit
     /// is what lets the next publish treat that stored matrix as "previous".
     pub(in crate::scene) motion_history_ready: Vec<bool>,
+    /// `motion_history_ready[0..prefix]` is all true. A dense publish of that prefix is one copy.
+    ///
+    /// Reset when a structural edit clears or reorders ready flags. Seal only raises it.
+    pub(in crate::scene) motion_history_ready_prefix: usize,
 }
 
 /// Reused hierarchy traversal state for one [`WorldTransformCache`].
@@ -186,6 +190,7 @@ impl Default for WorldTransformCache {
             previous_world_matrices: Vec::new(),
             previous_valid: Vec::new(),
             motion_history_ready: Vec::new(),
+            motion_history_ready_prefix: 0,
         }
     }
 }
@@ -196,11 +201,18 @@ impl WorldTransformCache {
     /// Call this before the current flush overwrites `world_matrices`. Only the listed nodes are
     /// written. Those nodes are the rigid `MotionVectorMode::Object` transforms, which includes
     /// both dirty and clean ones so a stopped object’s previous matrix catches up to current.
-    /// Dirty nodes with no object-mode renderer are left alone. The copy stays inside the existing
-    /// allocation when the node count is unchanged.
+    /// Dirty nodes with no object-mode renderer are left alone. A contiguous run covering at least
+    /// half the nodes is copied with `copy_from_slice`. Smaller or gapped lists stay indexed. The
+    /// copy stays inside the existing allocation when the node count is unchanged.
     pub(crate) fn publish_previous_world_matrices(&mut self, nodes: &[usize]) {
         let count = self.world_matrices.len();
         self.ensure_motion_history_len(count);
+        if motion_history::covers_at_least_half(nodes, count)
+            && let Some(range) = motion_history::dense_motion_range(nodes, count)
+        {
+            motion_history::publish_dense(self, range);
+            return;
+        }
         for &index in nodes {
             if index >= count {
                 continue;
@@ -217,10 +229,17 @@ impl WorldTransformCache {
     /// Marks listed nodes whose current world matrix came from a completed solve.
     ///
     /// Dirty nodes keep a previous `true` until the next successful solve replaces it. That is
-    /// what makes the following publish see the pre-solve matrix.
+    /// what makes the following publish see the pre-solve matrix. A contiguous run covering at
+    /// least half the nodes is sealed in place. Smaller or gapped lists stay indexed.
     pub(crate) fn seal_motion_history(&mut self, nodes: &[usize]) {
         let count = self.world_matrices.len();
         self.ensure_motion_history_len(count);
+        if motion_history::covers_at_least_half(nodes, count)
+            && let Some(range) = motion_history::dense_motion_range(nodes, count)
+        {
+            motion_history::seal_dense(self, range);
+            return;
+        }
         for &index in nodes {
             if index < count && self.computed[index] {
                 self.motion_history_ready[index] = true;
@@ -237,6 +256,7 @@ impl WorldTransformCache {
         }
         if self.motion_history_ready.len() != count {
             self.motion_history_ready.resize(count, false);
+            self.motion_history_ready_prefix = self.motion_history_ready_prefix.min(count);
         }
     }
 
@@ -879,6 +899,7 @@ pub(super) fn ensure_cache_shapes(
         cache.computed.fill(false);
         cache.previous_valid.fill(false);
         cache.motion_history_ready.fill(false);
+        cache.motion_history_ready_prefix = 0;
     } else if force_invalidate {
         cache.computed.fill(false);
     }
@@ -928,6 +949,8 @@ pub fn compute_world_matrices_for_space(
 
     cache.compute_world_matrices_incremental(scene_id, nodes, node_parents)
 }
+
+mod motion_history;
 
 #[cfg(test)]
 mod tests;

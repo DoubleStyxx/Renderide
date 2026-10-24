@@ -185,6 +185,7 @@ fn ensure_world_cache_matches_node_count(
         .resize(space.nodes.len(), glam::Mat4::IDENTITY);
     cache.previous_valid.resize(space.nodes.len(), false);
     cache.motion_history_ready.resize(space.nodes.len(), false);
+    cache.motion_history_ready_prefix = cache.motion_history_ready_prefix.min(space.nodes.len());
     *invalidate_world = true;
 }
 

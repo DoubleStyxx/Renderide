@@ -503,3 +503,50 @@ fn motion_history_publish_copies_only_listed_nodes() {
     cache.publish_previous_world_matrices(&[1]);
     assert_eq!(cache.previous_world_matrix_capacity(), capacity);
 }
+
+#[test]
+fn motion_history_publish_bulk_copies_a_full_list_and_skips_a_hole() {
+    let mut cache = WorldTransformCache::default();
+    let nodes = vec![
+        translation_xform(0.0, 0.0, 0.0),
+        translation_xform(1.0, 0.0, 0.0),
+        translation_xform(2.0, 0.0, 0.0),
+        translation_xform(3.0, 0.0, 0.0),
+    ];
+    let parents = vec![-1, 0, 0, 0];
+    compute_world_matrices_for_space(0, &nodes, &parents, &mut cache).expect("solve");
+    let full = [0usize, 1, 2, 3];
+    cache.seal_motion_history(&full);
+    cache.publish_previous_world_matrices(&full);
+    for index in 0..4 {
+        assert_eq!(
+            cache.previous_world_matrix(index),
+            Some(cache.world_matrices[index])
+        );
+    }
+    let capacity = cache.previous_world_matrix_capacity();
+
+    let mut holed = WorldTransformCache::default();
+    compute_world_matrices_for_space(0, &nodes, &parents, &mut holed).expect("solve hole");
+    holed.seal_motion_history(&[0, 1, 3]);
+    holed.publish_previous_world_matrices(&[0, 1, 3]);
+    assert!(holed.previous_world_matrix(2).is_none());
+    assert_eq!(
+        holed.previous_world_matrix(3),
+        Some(holed.world_matrices[3])
+    );
+    assert_eq!(cache.previous_world_matrix_capacity(), capacity);
+
+    // Span matches `[0, 2]` but index 1 is not listed. Debug builds reject that and stay indexed.
+    #[cfg(debug_assertions)]
+    {
+        let mut duplicated = WorldTransformCache::default();
+        compute_world_matrices_for_space(0, &nodes[..3], &parents[..3], &mut duplicated)
+            .expect("solve duplicate");
+        duplicated.seal_motion_history(&[0, 0, 2]);
+        duplicated.publish_previous_world_matrices(&[0, 0, 2]);
+        assert!(duplicated.previous_world_matrix(1).is_none());
+        assert!(duplicated.previous_world_matrix(0).is_some());
+        assert!(duplicated.previous_world_matrix(2).is_some());
+    }
+}

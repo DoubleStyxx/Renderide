@@ -68,6 +68,7 @@ pub fn apply_transform_removals_ordered(
             }
             if idx < cache.motion_history_ready.len() {
                 cache.motion_history_ready.swap_remove(idx);
+                cache.motion_history_ready_prefix = 0;
             }
         }
         out.push(TransformRemovalEvent {
