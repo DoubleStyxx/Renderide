@@ -9,8 +9,10 @@
 
 use std::hash::{Hash, Hasher};
 use std::num::{NonZeroU32, NonZeroUsize};
+use std::sync::Arc;
+#[cfg(not(windows))]
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
 
 use ahash::{AHasher, RandomState};
 use hashbrown::{HashMap, HashSet};
@@ -795,7 +797,7 @@ fn spawn_pipeline_build(request: PipelineBuildRequest) -> Result<(), String> {
     #[cfg(windows)]
     {
         windows_pipeline_build_queue().lock().push(request);
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(windows))]
     {
@@ -848,9 +850,11 @@ fn drain_windows_pipeline_builds() {
 }
 
 /// Maximum number of background workers dedicated to material pipeline compilation.
+#[cfg(not(windows))]
 const MATERIAL_PIPELINE_MAX_WORKERS: usize = 4;
 
 /// Returns the bounded material-pipeline worker count for this process.
+#[cfg(not(windows))]
 fn material_pipeline_compile_worker_count() -> usize {
     std::thread::available_parallelism().map_or(1, |threads| {
         (threads.get() / 2).clamp(1, MATERIAL_PIPELINE_MAX_WORKERS)
@@ -875,10 +879,11 @@ fn material_pipeline_compile_pool() -> Result<&'static rayon::ThreadPool, String
 mod tests {
     use std::sync::Arc;
 
+    #[cfg(not(windows))]
+    use super::material_pipeline_compile_worker_count;
     use super::{
         MaterialPipelineCache, MaterialPipelineVariantSpec, PipelineCacheShard,
-        ShaderModuleCacheKey, WarmupDedupeOutcome, claim_warmup_key,
-        material_pipeline_compile_worker_count, per_shard_cap,
+        ShaderModuleCacheKey, WarmupDedupeOutcome, claim_warmup_key, per_shard_cap,
     };
     use crate::materials::{
         MaterialBlendMode, MaterialPassRouting, MaterialPipelineDesc, MaterialRenderState,
@@ -984,6 +989,7 @@ mod tests {
         assert!(shard.pending.is_empty());
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn material_pipeline_worker_count_is_bounded() {
         let workers = material_pipeline_compile_worker_count();
