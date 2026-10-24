@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::cases::IntegrationCase;
+use super::host_info;
 use super::tolerance::ToleranceEvaluation;
 
 /// Default name for the per-suite output directory beneath `target/`.
@@ -100,10 +101,22 @@ pub struct CaseReport {
     /// Optional error message when `passed = false` and `evaluation = None` (e.g. capture
     /// failure, harness error).
     pub error: Option<String>,
+    /// Runner CPU model. Empty only for reports written before this field existed.
+    #[serde(default)]
+    pub cpu_model: String,
+    /// Headless wgpu adapter line (name, device type, backend). `unavailable` when the
+    /// renderer log has no matching capture.
+    #[serde(default)]
+    pub adapter: String,
 }
 
 /// Writes a `report.json` describing the comparison outcome.
-pub fn write_report(layout: &CaseOutputLayout, report: &CaseReport) -> io::Result<()> {
+///
+/// Stamps the runner CPU and the adapter line for this case's PNG before serializing.
+pub fn write_report(layout: &CaseOutputLayout, report: &mut CaseReport) -> io::Result<()> {
+    let host = host_info::capture(&layout.actual_png);
+    report.cpu_model = host.cpu_model;
+    report.adapter = host.adapter;
     let json = serde_json::to_string_pretty(report)
         .map_err(|e| io::Error::other(format!("serialize report: {e}")))?;
     std::fs::write(&layout.report_json, json)
@@ -118,6 +131,8 @@ pub fn report_from_evaluation(case: &IntegrationCase, eval: ToleranceEvaluation)
         passed: eval.passed,
         evaluation: Some(eval),
         error: None,
+        cpu_model: String::new(),
+        adapter: String::new(),
     }
 }
 
@@ -131,6 +146,8 @@ pub fn report_from_error(case: &IntegrationCase, message: impl Into<String>) -> 
         passed: false,
         evaluation: None,
         error: Some(message.into()),
+        cpu_model: String::new(),
+        adapter: String::new(),
     }
 }
 
@@ -174,15 +191,17 @@ mod tests {
     #[test]
     fn report_serializes_to_json() {
         let case = crate::scene_dsl::cases::unlit_sphere();
-        let report = report_from_error(&case, "boom");
+        let mut report = report_from_error(&case, "boom");
         let layout =
             CaseOutputLayout::for_case(tempfile::tempdir().expect("tempdir").path(), &case.name);
         layout.prepare().expect("prepare");
-        write_report(&layout, &report).expect("write report");
+        write_report(&layout, &mut report).expect("write report");
         let bytes = std::fs::read(&layout.report_json).expect("read report");
         let json: serde_json::Value = serde_json::from_slice(&bytes).expect("parse json");
         assert_eq!(json["name"], "unlit_sphere");
         assert_eq!(json["passed"], false);
         assert_eq!(json["error"], "boom");
+        assert!(!json["cpu_model"].as_str().unwrap_or("").is_empty());
+        assert!(json["adapter"].is_string());
     }
 }

@@ -13,6 +13,7 @@ use crate::HarnessError;
 use crate::image_io::load_rgba;
 
 use super::cases::{IntegrationCase, lookup, registry};
+use super::host_info;
 use super::output::{CaseOutputLayout, report_from_evaluation, write_report};
 use super::runner::{CaseRunOutcome, RunnerConfig, run_integration_case};
 
@@ -137,6 +138,7 @@ fn run_suite_with(
     config: SuiteConfig,
     run_case: fn(&IntegrationCase, &RunnerConfig) -> SuiteCaseReport,
 ) -> Result<SuiteRunOutcome, HarnessError> {
+    host_info::log_suite_host();
     std::fs::create_dir_all(&config.runner.output_root)?;
     let jobs = config.jobs.max(1).min(config.cases.len().max(1));
     let pool = rayon::ThreadPoolBuilder::new()
@@ -222,8 +224,8 @@ fn promote_case_golden(
         .evaluate(&actual, &actual)
         .map_err(|msg| HarnessError::ImageCompare(format!("post-update self-compare: {msg}")))?;
     if !eval.passed {
-        let report = report_from_evaluation(case, eval);
-        write_report(&outcome.layout, &report)
+        let mut report = report_from_evaluation(case, eval);
+        write_report(&outcome.layout, &mut report)
             .map_err(|e| HarnessError::QueueOptions(format!("write update report: {e}")))?;
         return Err(HarnessError::ImageCompare(
             "post-update self-compare failed coverage gates".to_string(),
@@ -248,8 +250,8 @@ fn promote_case_golden(
         logger::warn!("suite update: failed to refresh artifact golden copy: {e}");
     }
 
-    let report = report_from_evaluation(case, eval);
-    write_report(&outcome.layout, &report)
+    let mut report = report_from_evaluation(case, eval);
+    write_report(&outcome.layout, &mut report)
         .map_err(|e| HarnessError::QueueOptions(format!("write update report: {e}")))?;
     Ok(SuiteCaseReport {
         name: report.name,
