@@ -1,0 +1,10 @@
+{
+  "extreme_pose_stays_visible": true,
+  "rest_pose_would_be_frustum_rejected": true,
+  "posed_offscreen_while_rest_onscreen_is_frustum_rejected": true,
+  "accepted_rigid_world_matrix_is_null": true,
+  "material_slots_sharing_one_cull": 2,
+  "hiz_uses_posed_aabb": true,
+  "hiz_rejected_slots": 2,
+  "shadow_without_culling_is_not_rejected": true
+}
