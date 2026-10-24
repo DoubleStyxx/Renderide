@@ -120,15 +120,22 @@ fn run_suite_command(opts: &SuiteOpts) -> Result<(), HarnessError> {
 
     let outcome = run_suite(config)?;
     let log_dir = logger::log_dir_for(logger::LogComponent::Renderer);
-    let ruling = crate::warp_pbs::ruling(
-        crate::warp_pbs::directory_is_warp(&log_dir),
-        &outcome
-            .report
-            .cases
-            .iter()
-            .map(|case| (case.name.as_str(), case.passed))
-            .collect::<Vec<_>>(),
-    );
+    let snapshots = outcome
+        .report
+        .cases
+        .iter()
+        .map(|case| crate::warp_pbs::CaseSnapshot {
+            name: case.name.as_str(),
+            passed: case.passed,
+            fault: crate::warp_pbs::fault_from_failure(
+                case.error.as_deref(),
+                case.color_or_band_failed,
+            ),
+            pending: case.pipeline_pending,
+            dropped_draws: case.dropped_draws,
+        })
+        .collect::<Vec<_>>();
+    let ruling = crate::warp_pbs::ruling(crate::warp_pbs::directory_is_warp(&log_dir), &snapshots);
     let expected = matches!(ruling, crate::warp_pbs::Ruling::ExpectedFailure);
     print_suite_outcome(&outcome, "PASS", "passed", expected);
     match ruling {
@@ -207,7 +214,7 @@ fn print_suite_outcome(
     for case in &outcome.report.cases {
         if warp_pbs_expected && case.name == crate::warp_pbs::PBS_LIT && !case.passed {
             println!(
-                "EXPECTED FAIL {} ({}) WARP pbs_lit is the known mismatch (https://github.com/DoubleStyxx/Renderide/issues/212)",
+                "EXPECTED FAIL {} ({}) WARP pbs_lit failed the color or band check on a finished frame (pending=0, dropped draws=0; https://github.com/DoubleStyxx/Renderide/issues/212)",
                 case.name,
                 case.artifacts_dir.display()
             );
