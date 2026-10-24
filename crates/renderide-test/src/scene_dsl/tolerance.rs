@@ -40,8 +40,72 @@ pub struct Tolerance {
     /// Minimum fraction of pixels that must differ from the dominant RGB color in the actual
     /// image. This catches mostly-clear captures with a small amount of noise.
     pub min_non_background_pixel_fraction: Option<f64>,
+    /// Per-rectangle floors on pixels that are not the actual image's dominant color.
+    ///
+    /// These are required gates, like coverage. They are not combined with [`Self::combine`].
+    #[serde(default)]
+    pub region_floors: Vec<RegionFloor>,
     /// Operator combining the specified image-comparison criteria.
     pub combine: Combine,
+}
+
+/// Fraction of the golden band that the actual band must still contain.
+///
+/// The `pbs_lit` golden has about 4200 non-dominant pixels in each sphere band, so
+/// this floor is about 3150. A gray checker band is about 2400 and a clipped WARP
+/// band is about 1600, so both miss it. A fixed 1500 does not.
+pub const PBS_BAND_FLOOR_FRACTION: f64 = 0.75;
+
+/// One rectangle whose non-dominant pixel count is compared with the golden's.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct RegionFloor {
+    /// Left edge, in pixels.
+    pub x: u32,
+    /// Top edge, in pixels.
+    pub y: u32,
+    /// Width, in pixels.
+    pub width: u32,
+    /// Height, in pixels.
+    pub height: u32,
+    /// Actual count must be at least this fraction of the golden's count in the same rectangle.
+    pub min_fraction_of_golden: f64,
+}
+
+/// Sphere bands for `pbs_lit_material_matrix` on its 320×320 capture.
+///
+/// `y` ends are exclusive: 77..150 and 162..234. Each floor is
+/// [`PBS_BAND_FLOOR_FRACTION`] of that band in the golden.
+pub fn pbs_lit_region_floors() -> Vec<RegionFloor> {
+    vec![
+        RegionFloor {
+            x: 0,
+            y: 77,
+            width: 160,
+            height: 73,
+            min_fraction_of_golden: PBS_BAND_FLOOR_FRACTION,
+        },
+        RegionFloor {
+            x: 160,
+            y: 77,
+            width: 160,
+            height: 73,
+            min_fraction_of_golden: PBS_BAND_FLOOR_FRACTION,
+        },
+        RegionFloor {
+            x: 0,
+            y: 162,
+            width: 160,
+            height: 72,
+            min_fraction_of_golden: PBS_BAND_FLOOR_FRACTION,
+        },
+        RegionFloor {
+            x: 160,
+            y: 162,
+            width: 160,
+            height: 72,
+            min_fraction_of_golden: PBS_BAND_FLOOR_FRACTION,
+        },
+    ]
 }
 
 impl Tolerance {
@@ -98,37 +162,13 @@ impl Tolerance {
             None
         };
 
-        let (max_abs, failing_fraction) = match (self.max_abs_diff, self.max_failing_pixel_fraction)
-        {
-            (Some(threshold), fraction_opt) => {
-                let stats = compute_pixel_diff_stats(actual, golden, threshold);
-                let criterion = if let Some(fraction) = fraction_opt {
-                    CriterionResult::PixelDiff {
-                        max_abs_diff: threshold,
-                        failing_fraction: stats.failing_fraction,
-                        max_failing_fraction: fraction,
-                        passed: stats.failing_fraction <= fraction,
-                    }
-                } else {
-                    CriterionResult::PixelDiff {
-                        max_abs_diff: threshold,
-                        failing_fraction: stats.failing_fraction,
-                        max_failing_fraction: 0.0,
-                        passed: stats.failing_fraction == 0.0,
-                    }
-                };
-                comparison_criteria.push(criterion.clone());
-                criteria.push(criterion);
-                (Some(stats.max_abs_diff), Some(stats.failing_fraction))
-            }
-            (None, Some(_)) => {
-                return Err(
-                    "tolerance configured max_failing_pixel_fraction without max_abs_diff"
-                        .to_string(),
-                );
-            }
-            _ => (None, None),
-        };
+        let (max_abs, failing_fraction) = pixel_diff_criterion(
+            self,
+            actual,
+            golden,
+            &mut criteria,
+            &mut comparison_criteria,
+        )?;
 
         let actual_coverage = compute_image_coverage_stats(actual);
         let golden_coverage = compute_image_coverage_stats(golden);
@@ -153,11 +193,21 @@ impl Tolerance {
             criteria.push(criterion);
         }
 
-        let coverage_passed = coverage_criteria.iter().all(CriterionResult::passed);
-        let passed = if comparison_criteria.is_empty() {
-            !coverage_criteria.is_empty() && coverage_passed
+        let region_criteria = if self.region_floors.is_empty() {
+            Vec::new()
         } else {
-            aggregate(&comparison_criteria, self.combine) && coverage_passed
+            region_floor_criteria(actual, golden, &self.region_floors)?
+        };
+        criteria.extend(region_criteria.iter().cloned());
+
+        let coverage_passed = coverage_criteria.iter().all(CriterionResult::passed);
+        let regions_passed = region_criteria.iter().all(CriterionResult::passed);
+        let gates_passed = coverage_passed && regions_passed;
+        let gates_present = !coverage_criteria.is_empty() || !region_criteria.is_empty();
+        let passed = if comparison_criteria.is_empty() {
+            gates_present && gates_passed
+        } else {
+            aggregate(&comparison_criteria, self.combine) && gates_passed
         };
 
         Ok(ToleranceEvaluation {
@@ -171,6 +221,82 @@ impl Tolerance {
             combine: self.combine,
         })
     }
+}
+
+fn pixel_diff_criterion(
+    tolerance: &Tolerance,
+    actual: &RgbaImage,
+    golden: &RgbaImage,
+    criteria: &mut Vec<CriterionResult>,
+    comparison_criteria: &mut Vec<CriterionResult>,
+) -> Result<(Option<u8>, Option<f64>), String> {
+    match (tolerance.max_abs_diff, tolerance.max_failing_pixel_fraction) {
+        (Some(threshold), fraction_opt) => {
+            let stats = compute_pixel_diff_stats(actual, golden, threshold);
+            let max_failing_fraction = fraction_opt.unwrap_or(0.0);
+            let passed = match fraction_opt {
+                Some(fraction) => stats.failing_fraction <= fraction,
+                None => stats.failing_fraction == 0.0,
+            };
+            let criterion = CriterionResult::PixelDiff {
+                max_abs_diff: threshold,
+                failing_fraction: stats.failing_fraction,
+                max_failing_fraction,
+                passed,
+            };
+            comparison_criteria.push(criterion.clone());
+            criteria.push(criterion);
+            Ok((Some(stats.max_abs_diff), Some(stats.failing_fraction)))
+        }
+        (None, Some(_)) => {
+            Err("tolerance configured max_failing_pixel_fraction without max_abs_diff".to_string())
+        }
+        _ => Ok((None, None)),
+    }
+}
+
+/// Required per-rectangle floors. Each result is also recorded on the evaluation.
+///
+/// The dominant color is read only when `regions` is non-empty. The caller skips
+/// this function otherwise.
+fn region_floor_criteria(
+    actual: &RgbaImage,
+    golden: &RgbaImage,
+    regions: &[RegionFloor],
+) -> Result<Vec<CriterionResult>, String> {
+    let actual_dominant = super::band_count::dominant_rgb_key(actual);
+    let golden_dominant = super::band_count::dominant_rgb_key(golden);
+    let mut criteria = Vec::with_capacity(regions.len());
+    for region in regions {
+        let count = super::band_count::count_non_dominant(
+            actual,
+            actual_dominant,
+            region.x,
+            region.y,
+            region.width,
+            region.height,
+        )?;
+        let golden_count = super::band_count::count_non_dominant(
+            golden,
+            golden_dominant,
+            region.x,
+            region.y,
+            region.width,
+            region.height,
+        )?;
+        let min_count =
+            super::band_count::fraction_floor(golden_count, region.min_fraction_of_golden);
+        criteria.push(CriterionResult::RegionNonDominant {
+            x: region.x,
+            y: region.y,
+            width: region.width,
+            height: region.height,
+            count,
+            min_count,
+            passed: count >= min_count,
+        });
+    }
+    Ok(criteria)
 }
 
 /// Per-criterion result returned by [`Tolerance::evaluate`].
@@ -214,6 +340,23 @@ pub enum CriterionResult {
         /// Whether the criterion passed.
         passed: bool,
     },
+    /// Pixels in one rectangle that are not the actual image's dominant color.
+    RegionNonDominant {
+        /// Left edge, in pixels.
+        x: u32,
+        /// Top edge, in pixels.
+        y: u32,
+        /// Width, in pixels.
+        width: u32,
+        /// Height, in pixels.
+        height: u32,
+        /// Observed count of pixels whose RGB is not the dominant color.
+        count: usize,
+        /// Required minimum count.
+        min_count: usize,
+        /// Whether the criterion passed.
+        passed: bool,
+    },
 }
 
 impl CriterionResult {
@@ -222,7 +365,8 @@ impl CriterionResult {
         match self {
             CriterionResult::Ssim { passed, .. }
             | CriterionResult::PixelDiff { passed, .. }
-            | CriterionResult::ImageCoverage { passed, .. } => *passed,
+            | CriterionResult::ImageCoverage { passed, .. }
+            | CriterionResult::RegionNonDominant { passed, .. } => *passed,
         }
     }
 }
@@ -336,7 +480,7 @@ fn compute_image_coverage_stats(image: &RgbaImage) -> ImageCoverageStats {
         let luma = luma_u8(pixel[0], pixel[1], pixel[2]);
         luma_min = luma_min.min(luma);
         luma_max = luma_max.max(luma);
-        colors.push(rgb_key(pixel[0], pixel[1], pixel[2]));
+        colors.push(super::band_count::rgb_key(pixel[0], pixel[1], pixel[2]));
         if pixel[3] == 0 {
             transparent += 1;
         }
@@ -375,10 +519,6 @@ fn compute_image_coverage_stats(image: &RgbaImage) -> ImageCoverageStats {
 
 fn luma_u8(r: u8, g: u8, b: u8) -> u8 {
     (((r as u16 * 77) + (g as u16 * 150) + (b as u16 * 29)) >> 8) as u8
-}
-
-fn rgb_key(r: u8, g: u8, b: u8) -> u32 {
-    ((r as u32) << 16) | ((g as u32) << 8) | b as u32
 }
 
 fn coverage_requested(tolerance: &Tolerance) -> bool {
@@ -482,6 +622,154 @@ mod tests {
         let b = solid(8, 8, [0, 0, 0, 255]);
         let err = Tolerance::ssim_at_least(0.5).evaluate(&a, &b).unwrap_err();
         assert!(err.contains("dimensions differ"));
+    }
+
+    fn paint_rect_prefix(img: &mut RgbaImage, region: RegionFloor, n: usize, color: [u8; 4]) {
+        let mut left = n;
+        let y1 = region.y + region.height;
+        let x1 = region.x + region.width;
+        for y in region.y..y1 {
+            for x in region.x..x1 {
+                if left == 0 {
+                    return;
+                }
+                img.put_pixel(x, y, Rgba(color));
+                left -= 1;
+            }
+        }
+        assert_eq!(left, 0, "region is smaller than the requested paint count");
+    }
+
+    fn or_with_coverage_and_floors(floors: Vec<RegionFloor>) -> Tolerance {
+        Tolerance {
+            ssim_min: Some(0.78),
+            max_abs_diff: Some(56),
+            max_failing_pixel_fraction: Some(0.22),
+            min_non_background_pixel_fraction: Some(0.06),
+            region_floors: floors,
+            combine: Combine::Or,
+            ..Tolerance::default()
+        }
+    }
+
+    fn region_floor_result(eval: &ToleranceEvaluation, x: u32, y: u32) -> (usize, usize, bool) {
+        eval.criteria
+            .iter()
+            .find_map(|criterion| match criterion {
+                CriterionResult::RegionNonDominant {
+                    x: cx,
+                    y: cy,
+                    count,
+                    min_count,
+                    passed,
+                    ..
+                } if *cx == x && *cy == y => Some((*count, *min_count, *passed)),
+                _ => None,
+            })
+            .expect("region criterion")
+    }
+
+    fn bands(counts: [usize; 4]) -> RgbaImage {
+        let mut img = solid(320, 320, [0, 0, 0, 255]);
+        let floors = pbs_lit_region_floors();
+        let gray = [63, 63, 63, 255];
+        for (floor, count) in floors.iter().zip(counts) {
+            paint_rect_prefix(&mut img, *floor, count, gray);
+        }
+        img
+    }
+
+    fn assert_short_band_fails(actual_counts: [usize; 4], x: u32, y: u32, expected_count: usize) {
+        let golden = bands([4_200, 4_200, 4_200, 4_200]);
+        let actual = bands(actual_counts);
+        let eval = or_with_coverage_and_floors(pbs_lit_region_floors())
+            .evaluate(&actual, &golden)
+            .expect("evaluate");
+        let (count, min_count, passed) = region_floor_result(&eval, x, y);
+        assert_eq!(count, expected_count);
+        assert_eq!(min_count, 3_150);
+        assert!(!passed);
+        assert!(!eval.passed);
+        assert!(eval.actual_coverage.non_background_pixel_fraction >= 0.06);
+    }
+
+    #[test]
+    fn region_floor_rejects_empty_quadrant_when_or_and_coverage_pass() {
+        let golden = bands([4_200, 4_200, 4_200, 4_200]);
+        let actual = bands([4_200, 0, 4_200, 4_200]);
+        let eval = or_with_coverage_and_floors(pbs_lit_region_floors())
+            .evaluate(&actual, &golden)
+            .expect("evaluate");
+        assert!(eval.ssim.unwrap() >= 0.78);
+        assert!(eval.failing_pixel_fraction.unwrap() <= 0.22);
+        assert!(eval.actual_coverage.non_background_pixel_fraction >= 0.06);
+        let (count, min_count, passed) = region_floor_result(&eval, 160, 77);
+        assert_eq!((count, min_count, passed), (0, 3_150, false));
+        assert!(!eval.passed);
+    }
+
+    #[test]
+    fn region_floor_rejects_609_pixel_quadrant_when_coverage_passes() {
+        assert_short_band_fails([4_200, 4_200, 4_200, 609], 160, 162, 609);
+    }
+
+    #[test]
+    fn region_floor_rejects_gray_sized_bands() {
+        assert_short_band_fails([2_360, 2_360, 2_360, 2_360], 0, 77, 2_360);
+        assert_short_band_fails([2_418, 2_376, 2_400, 2_390], 160, 77, 2_376);
+    }
+
+    #[test]
+    fn region_floor_rejects_clipped_warp_bands() {
+        assert_short_band_fails([4_200, 1_601, 4_200, 1_595], 160, 77, 1_601);
+        assert_short_band_fails([4_200, 1_601, 4_200, 1_595], 160, 162, 1_595);
+    }
+
+    #[test]
+    fn region_floor_passes_when_actual_matches_golden_bands() {
+        let img = bands([4_200, 4_200, 4_200, 4_200]);
+        let eval = or_with_coverage_and_floors(pbs_lit_region_floors())
+            .evaluate(&img, &img)
+            .expect("evaluate");
+        assert!(eval.passed);
+        for (x, y) in [(0, 77), (160, 77), (0, 162), (160, 162)] {
+            assert_eq!(region_floor_result(&eval, x, y), (4_200, 3_150, true));
+        }
+    }
+
+    #[test]
+    fn region_floor_on_the_pbs_golden_is_about_three_quarters_of_each_band() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("goldens/pbs_lit_material_matrix.png");
+        let golden = crate::image_io::load_rgba(&path).expect("pbs golden");
+        let dominant = super::super::band_count::dominant_rgb_key(&golden);
+        for floor in pbs_lit_region_floors() {
+            let count = super::super::band_count::count_non_dominant(
+                &golden,
+                dominant,
+                floor.x,
+                floor.y,
+                floor.width,
+                floor.height,
+            )
+            .expect("band");
+            let min_count =
+                super::super::band_count::fraction_floor(count, floor.min_fraction_of_golden);
+            assert!(
+                count >= 4_000,
+                "golden band {},{} has {count} non-dominant pixels",
+                floor.x,
+                floor.y
+            );
+            assert!(
+                min_count > 2_418,
+                "floor {min_count} from golden count {count} must sit above a gray band of 2418 and a clipped band of 1601"
+            );
+        }
+        let eval = or_with_coverage_and_floors(pbs_lit_region_floors())
+            .evaluate(&golden, &golden)
+            .expect("evaluate golden");
+        assert!(eval.passed);
     }
 
     #[test]

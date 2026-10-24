@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::scene::gltf_fixture::default_fixture_path;
 use crate::scene::perlin::PerlinTextureSpec;
 
-use super::tolerance::{Combine, Tolerance};
+use super::tolerance::{Combine, Tolerance, pbs_lit_region_floors};
 
 /// A single named integration test case.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -154,7 +154,11 @@ pub fn pbs_lit_material_matrix() -> IntegrationCase {
                 .to_string(),
         golden_path: default_goldens_dir().join("pbs_lit_material_matrix.png"),
         resolution: (320, 320),
-        tolerance: visual_tolerance(0.78, 56, 0.22, 18, 24, 0.06),
+        tolerance: {
+            let mut tolerance = visual_tolerance(0.78, 56, 0.22, 18, 24, 0.06);
+            tolerance.region_floors = pbs_lit_region_floors();
+            tolerance
+        },
         template: CaseTemplate::PbsLitMaterialMatrix,
     }
 }
@@ -191,6 +195,7 @@ pub fn custom_shader_property_update() -> IntegrationCase {
             min_luma_range: Some(20),
             min_unique_colors: Some(8),
             min_non_background_pixel_fraction: Some(0.12),
+            region_floors: Vec::new(),
             combine: Combine::And,
         },
         template: CaseTemplate::CustomShaderPropertyUpdate,
@@ -232,6 +237,7 @@ pub fn exotic_shader_pair() -> IntegrationCase {
             min_luma_range: Some(24),
             min_unique_colors: Some(16),
             min_non_background_pixel_fraction: Some(0.15),
+            region_floors: Vec::new(),
             combine: Combine::Or,
         },
         template: CaseTemplate::ExoticShaderPair,
@@ -278,6 +284,7 @@ pub fn tilted_canvas_ui_quads() -> IntegrationCase {
             min_luma_range: Some(16),
             min_unique_colors: Some(3),
             min_non_background_pixel_fraction: Some(0.04),
+            region_floors: Vec::new(),
             combine: Combine::And,
         },
         template: CaseTemplate::TiltedCanvasUiQuads,
@@ -420,6 +427,7 @@ fn visual_tolerance(
         min_luma_range: Some(min_luma_range),
         min_unique_colors: Some(min_unique_colors),
         min_non_background_pixel_fraction: Some(min_non_background_pixel_fraction),
+        region_floors: Vec::new(),
         combine: Combine::Or,
     }
 }
@@ -509,6 +517,31 @@ mod tests {
                     plain.display()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn pbs_lit_band_floor_is_three_quarters_of_the_golden() {
+        let case = lookup("pbs_lit_material_matrix").expect("registered");
+        let expected = [
+            (0, 77, 160, 73),
+            (160, 77, 160, 73),
+            (0, 162, 160, 72),
+            (160, 162, 160, 72),
+        ];
+        assert_eq!(case.tolerance.region_floors.len(), expected.len());
+        for (floor, (x, y, width, height)) in case.tolerance.region_floors.iter().zip(expected) {
+            assert_eq!(
+                (floor.x, floor.y, floor.width, floor.height),
+                (x, y, width, height)
+            );
+            assert_eq!(
+                super::super::band_count::fraction_floor(1_000, floor.min_fraction_of_golden),
+                super::super::band_count::fraction_floor(
+                    1_000,
+                    super::super::tolerance::PBS_BAND_FLOOR_FRACTION
+                )
+            );
         }
     }
 
