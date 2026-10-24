@@ -40,8 +40,66 @@ pub struct Tolerance {
     /// Minimum fraction of pixels that must differ from the dominant RGB color in the actual
     /// image. This catches mostly-clear captures with a small amount of noise.
     pub min_non_background_pixel_fraction: Option<f64>,
+    /// Per-rectangle floors on pixels that are not the actual image's dominant color.
+    ///
+    /// These are required gates, like coverage. They are not combined with [`Self::combine`].
+    #[serde(default)]
+    pub region_floors: Vec<RegionFloor>,
     /// Operator combining the specified image-comparison criteria.
     pub combine: Combine,
+}
+
+/// One rectangle that must contain enough pixels of a color other than the image's dominant color.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct RegionFloor {
+    /// Left edge, in pixels.
+    pub x: u32,
+    /// Top edge, in pixels.
+    pub y: u32,
+    /// Width, in pixels.
+    pub width: u32,
+    /// Height, in pixels.
+    pub height: u32,
+    /// Minimum pixels in this rectangle whose RGB is not the image's dominant color.
+    pub min_non_dominant: usize,
+}
+
+/// Sphere bands for `pbs_lit_material_matrix` on its 320×320 capture.
+///
+/// `y` ends are exclusive: 77..150 and 162..234. Each band's floor is 1500. Master frames
+/// have about 2360 non-dominant pixels in a band; a missing sphere has 0.
+pub fn pbs_lit_region_floors() -> Vec<RegionFloor> {
+    const MIN: usize = 1_500;
+    vec![
+        RegionFloor {
+            x: 0,
+            y: 77,
+            width: 160,
+            height: 73,
+            min_non_dominant: MIN,
+        },
+        RegionFloor {
+            x: 160,
+            y: 77,
+            width: 160,
+            height: 73,
+            min_non_dominant: MIN,
+        },
+        RegionFloor {
+            x: 0,
+            y: 162,
+            width: 160,
+            height: 72,
+            min_non_dominant: MIN,
+        },
+        RegionFloor {
+            x: 160,
+            y: 162,
+            width: 160,
+            height: 72,
+            min_non_dominant: MIN,
+        },
+    ]
 }
 
 impl Tolerance {
@@ -153,11 +211,32 @@ impl Tolerance {
             criteria.push(criterion);
         }
 
+        let dominant = dominant_rgb_key(actual);
+        let mut region_criteria: Vec<CriterionResult> =
+            Vec::with_capacity(self.region_floors.len());
+        for region in &self.region_floors {
+            let count = count_non_dominant(actual, dominant, *region)?;
+            let criterion = CriterionResult::RegionNonDominant {
+                x: region.x,
+                y: region.y,
+                width: region.width,
+                height: region.height,
+                count,
+                min_count: region.min_non_dominant,
+                passed: count >= region.min_non_dominant,
+            };
+            region_criteria.push(criterion.clone());
+            criteria.push(criterion);
+        }
+
         let coverage_passed = coverage_criteria.iter().all(CriterionResult::passed);
+        let regions_passed = region_criteria.iter().all(CriterionResult::passed);
+        let gates_passed = coverage_passed && regions_passed;
+        let gates_present = !coverage_criteria.is_empty() || !region_criteria.is_empty();
         let passed = if comparison_criteria.is_empty() {
-            !coverage_criteria.is_empty() && coverage_passed
+            gates_present && gates_passed
         } else {
-            aggregate(&comparison_criteria, self.combine) && coverage_passed
+            aggregate(&comparison_criteria, self.combine) && gates_passed
         };
 
         Ok(ToleranceEvaluation {
@@ -214,6 +293,23 @@ pub enum CriterionResult {
         /// Whether the criterion passed.
         passed: bool,
     },
+    /// Pixels in one rectangle that are not the actual image's dominant color.
+    RegionNonDominant {
+        /// Left edge, in pixels.
+        x: u32,
+        /// Top edge, in pixels.
+        y: u32,
+        /// Width, in pixels.
+        width: u32,
+        /// Height, in pixels.
+        height: u32,
+        /// Observed count of pixels whose RGB is not the dominant color.
+        count: usize,
+        /// Required minimum count.
+        min_count: usize,
+        /// Whether the criterion passed.
+        passed: bool,
+    },
 }
 
 impl CriterionResult {
@@ -222,7 +318,8 @@ impl CriterionResult {
         match self {
             CriterionResult::Ssim { passed, .. }
             | CriterionResult::PixelDiff { passed, .. }
-            | CriterionResult::ImageCoverage { passed, .. } => *passed,
+            | CriterionResult::ImageCoverage { passed, .. }
+            | CriterionResult::RegionNonDominant { passed, .. } => *passed,
         }
     }
 }
@@ -381,6 +478,66 @@ fn rgb_key(r: u8, g: u8, b: u8) -> u32 {
     ((r as u32) << 16) | ((g as u32) << 8) | b as u32
 }
 
+fn dominant_rgb_key(image: &RgbaImage) -> u32 {
+    let mut colors = Vec::with_capacity(image.width() as usize * image.height() as usize);
+    for pixel in image.as_raw().as_chunks::<4>().0 {
+        colors.push(rgb_key(pixel[0], pixel[1], pixel[2]));
+    }
+    colors.sort_unstable();
+    let mut dominant_key = 0u32;
+    let mut dominant = 0usize;
+    let mut run = 0usize;
+    let mut previous = None;
+    for color in colors {
+        if Some(color) == previous {
+            run += 1;
+        } else {
+            if run > dominant {
+                dominant = run;
+                dominant_key = previous.unwrap_or(color);
+            }
+            previous = Some(color);
+            run = 1;
+        }
+    }
+    if run > dominant {
+        dominant_key = previous.unwrap_or(0);
+    }
+    dominant_key
+}
+
+fn count_non_dominant(
+    image: &RgbaImage,
+    dominant: u32,
+    region: RegionFloor,
+) -> Result<usize, String> {
+    let (width, height) = image.dimensions();
+    let x1 = region
+        .x
+        .checked_add(region.width)
+        .ok_or_else(|| format!("region x {} + width {} overflows", region.x, region.width))?;
+    let y1 = region
+        .y
+        .checked_add(region.height)
+        .ok_or_else(|| format!("region y {} + height {} overflows", region.y, region.height))?;
+    if x1 > width || y1 > height {
+        return Err(format!(
+            "region {},{} {}x{} is outside {}x{}",
+            region.x, region.y, region.width, region.height, width, height
+        ));
+    }
+    let mut count = 0usize;
+    for y in region.y..y1 {
+        for x in region.x..x1 {
+            let pixel = image.get_pixel(x, y);
+            if rgb_key(pixel[0], pixel[1], pixel[2]) != dominant {
+                count += 1;
+            }
+        }
+    }
+    Ok(count)
+}
+
 fn coverage_requested(tolerance: &Tolerance) -> bool {
     tolerance.min_luma_range.is_some()
         || tolerance.min_unique_colors.is_some()
@@ -482,6 +639,102 @@ mod tests {
         let b = solid(8, 8, [0, 0, 0, 255]);
         let err = Tolerance::ssim_at_least(0.5).evaluate(&a, &b).unwrap_err();
         assert!(err.contains("dimensions differ"));
+    }
+
+    fn paint_rect_prefix(img: &mut RgbaImage, region: RegionFloor, n: usize, color: [u8; 4]) {
+        let mut left = n;
+        let y1 = region.y + region.height;
+        let x1 = region.x + region.width;
+        for y in region.y..y1 {
+            for x in region.x..x1 {
+                if left == 0 {
+                    return;
+                }
+                img.put_pixel(x, y, Rgba(color));
+                left -= 1;
+            }
+        }
+        assert_eq!(left, 0, "region is smaller than the requested paint count");
+    }
+
+    fn or_with_coverage_and_floors(floors: Vec<RegionFloor>) -> Tolerance {
+        Tolerance {
+            ssim_min: Some(0.78),
+            max_abs_diff: Some(56),
+            max_failing_pixel_fraction: Some(0.22),
+            min_non_background_pixel_fraction: Some(0.06),
+            region_floors: floors,
+            combine: Combine::Or,
+            ..Tolerance::default()
+        }
+    }
+
+    fn region_count(eval: &ToleranceEvaluation, x: u32, y: u32) -> usize {
+        eval.criteria
+            .iter()
+            .find_map(|criterion| match criterion {
+                CriterionResult::RegionNonDominant {
+                    x: cx,
+                    y: cy,
+                    count,
+                    ..
+                } if *cx == x && *cy == y => Some(*count),
+                _ => None,
+            })
+            .expect("region criterion")
+    }
+
+    #[test]
+    fn region_floor_rejects_empty_quadrant_when_or_and_coverage_pass() {
+        let mut img = solid(320, 320, [0, 0, 0, 255]);
+        let floors = pbs_lit_region_floors();
+        let gray = [63, 63, 63, 255];
+        paint_rect_prefix(&mut img, floors[0], 4_000, gray);
+        paint_rect_prefix(&mut img, floors[2], 4_000, gray);
+        paint_rect_prefix(&mut img, floors[3], 4_000, gray);
+        let eval = or_with_coverage_and_floors(floors)
+            .evaluate(&img, &img)
+            .expect("evaluate");
+        assert!(eval.ssim.unwrap() >= 0.78);
+        assert!(eval.failing_pixel_fraction.unwrap() <= 0.22);
+        assert!(eval.actual_coverage.non_background_pixel_fraction >= 0.06);
+        assert!(!eval.passed);
+        assert_eq!(region_count(&eval, 160, 77), 0);
+    }
+
+    #[test]
+    fn region_floor_rejects_609_pixel_quadrant_when_coverage_passes() {
+        let mut img = solid(320, 320, [0, 0, 0, 255]);
+        let floors = pbs_lit_region_floors();
+        let gray = [63, 63, 63, 255];
+        paint_rect_prefix(&mut img, floors[0], 4_000, gray);
+        paint_rect_prefix(&mut img, floors[1], 4_000, gray);
+        paint_rect_prefix(&mut img, floors[2], 4_000, gray);
+        paint_rect_prefix(&mut img, floors[3], 609, gray);
+        let eval = or_with_coverage_and_floors(floors)
+            .evaluate(&img, &img)
+            .expect("evaluate");
+        assert!(eval.actual_coverage.non_background_pixel_fraction >= 0.06);
+        assert!(!eval.passed);
+        assert_eq!(region_count(&eval, 160, 162), 609);
+    }
+
+    #[test]
+    fn region_floor_passes_master_style_bands() {
+        let mut img = solid(320, 320, [0, 0, 0, 255]);
+        let floors = pbs_lit_region_floors();
+        let gray = [63, 63, 63, 255];
+        for floor in &floors {
+            paint_rect_prefix(&mut img, *floor, 2_360, gray);
+        }
+        let eval = or_with_coverage_and_floors(floors)
+            .evaluate(&img, &img)
+            .expect("evaluate");
+        assert!(eval.passed);
+        assert_eq!(region_count(&eval, 0, 77), 2_360);
+        assert_eq!(region_count(&eval, 160, 77), 2_360);
+        assert_eq!(region_count(&eval, 0, 162), 2_360);
+        assert_eq!(region_count(&eval, 160, 162), 2_360);
     }
 
     #[test]
