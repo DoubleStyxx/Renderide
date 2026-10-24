@@ -181,39 +181,13 @@ fn view_from_plan<'a>(plan: &'a FrameViewPlan<'_>) -> GraphPassFrameView<'a> {
         color_texture: Some(&handles.color_texture),
         history_color_texture: handles.history_color_texture.as_ref(),
         seed_published_color: handles.seed_published_color,
-        persistent_depth_target: true,
-        clear_load_inputs: full_offscreen_clear_load_inputs(
+        clear_load_inputs: crate::render_graph::compiled::full_offscreen_clear_load_inputs(
             plan.viewport_px,
             handles.color_format,
             handles.write_target,
         ),
         post_processing: ViewPostProcessing::disabled(),
     }
-}
-
-/// Full-target offscreen inputs for a test view that always attaches color and depth.
-fn full_offscreen_clear_load_inputs(
-    viewport_px: (u32, u32),
-    surface_format: wgpu::TextureFormat,
-    write_target: crate::frame_contract::OffscreenWriteTarget,
-) -> crate::render_graph::compiled::ClearLoadDecisionInputs {
-    use crate::camera::CameraRenderRect;
-    use crate::render_graph::compiled::{
-        ClearLoadViewSource, FrameViewTargetKind, clear_load_inputs_from_view,
-    };
-    clear_load_inputs_from_view(ClearLoadViewSource {
-        kind: FrameViewTargetKind::OffscreenRt,
-        viewport: CameraRenderRect {
-            origin_px: (0, 0),
-            extent_px: viewport_px,
-        },
-        target_extent_px: viewport_px,
-        copies_partial_color: false,
-        sample_count: 1,
-        surface_format,
-        scene_color_format: surface_format,
-        write_target,
-    })
 }
 
 fn clear_color(

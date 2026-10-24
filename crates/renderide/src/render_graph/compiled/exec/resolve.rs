@@ -4,7 +4,7 @@
 use hashbrown::HashMap;
 
 use crate::camera::{CameraRenderRect, ViewId};
-pub(crate) use crate::frame_contract::ClearLoadDecisionInputs;
+use crate::frame_contract::ClearLoadDecisionInputs;
 use crate::frame_contract::{OffscreenWriteTarget, ViewWinding};
 use crate::gpu::GpuContext;
 use crate::gpu_resource::TextureViewDescriptorKey;
@@ -570,7 +570,6 @@ fn resolved_swapchain_view<'a>(
         color_texture: None,
         history_color_texture: None,
         seed_published_color: false,
-        persistent_depth_target: clear_load_inputs.persistent_depth_target,
         clear_load_inputs,
     }
 }
@@ -602,7 +601,6 @@ fn resolved_multiview_view<'a>(
         color_texture: None,
         history_color_texture: None,
         seed_published_color: false,
-        persistent_depth_target: clear_load_inputs.persistent_depth_target,
         clear_load_inputs,
     }
 }
@@ -616,7 +614,7 @@ fn resolved_offscreen_view<'a>(
 ) -> ResolvedView<'a> {
     let clear_load_inputs = clear_load_inputs_from_offscreen(
         ext.extent_px,
-        ext.copy_to_color,
+        ext.copy_to_color.map(offscreen_copy_rect),
         layout.sample_count,
         layout.surface_format,
         scene_color_format,
@@ -639,7 +637,6 @@ fn resolved_offscreen_view<'a>(
             .then_some(ext.color_texture),
         history_color_texture: ext.history_color_texture,
         seed_published_color: ext.seed_published_color,
-        persistent_depth_target: clear_load_inputs.persistent_depth_target,
         clear_load_inputs,
     }
 }
@@ -672,7 +669,6 @@ fn owned_swapchain_view(
         color_texture: None,
         history_color_texture: None,
         seed_published_color: false,
-        persistent_depth_target: clear_load_inputs.persistent_depth_target,
         clear_load_inputs,
         offscreen_color_copy: None,
     }
@@ -705,7 +701,6 @@ fn owned_multiview_view(
         color_texture: None,
         history_color_texture: None,
         seed_published_color: false,
-        persistent_depth_target: clear_load_inputs.persistent_depth_target,
         clear_load_inputs,
         offscreen_color_copy: None,
     }
@@ -720,7 +715,7 @@ fn owned_offscreen_view(
 ) -> OwnedResolvedView {
     let clear_load_inputs = clear_load_inputs_from_offscreen(
         ext.extent_px,
-        ext.copy_to_color,
+        ext.copy_to_color.map(offscreen_copy_rect),
         layout.sample_count,
         layout.surface_format,
         scene_color_format,
@@ -743,7 +738,6 @@ fn owned_offscreen_view(
             .then(|| (*ext.color_texture).clone()),
         history_color_texture: ext.history_color_texture.map(|texture| (*texture).clone()),
         seed_published_color: ext.seed_published_color,
-        persistent_depth_target: clear_load_inputs.persistent_depth_target,
         clear_load_inputs,
         offscreen_color_copy: ext.copy_to_color.map(|copy| ResolvedOffscreenColorCopy {
             source_texture: (*ext.color_texture).clone(),
@@ -776,15 +770,29 @@ fn clear_load_inputs_for_non_offscreen(
     inputs
 }
 
-fn clear_load_inputs_from_offscreen(
+/// Pixel rect of a scratch color copy. The destination texture stays on the copy target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct OffscreenCopyRect {
+    destination_origin_px: (u32, u32),
     extent_px: (u32, u32),
-    copy_to_color: Option<super::super::OffscreenColorCopyTarget<'_>>,
-    sample_count: u32,
-    surface_format: wgpu::TextureFormat,
-    scene_color_format: wgpu::TextureFormat,
-    write_target: OffscreenWriteTarget,
-) -> ClearLoadDecisionInputs {
-    let (viewport, copies_partial_color) = match copy_to_color {
+}
+
+fn offscreen_copy_rect(copy: super::super::OffscreenColorCopyTarget<'_>) -> OffscreenCopyRect {
+    OffscreenCopyRect {
+        destination_origin_px: copy.destination_origin_px,
+        extent_px: copy.extent_px,
+    }
+}
+
+/// Viewport and partial-copy flag for an offscreen color target.
+///
+/// `None` writes the full target. `Some` copies onto that rect and stays partial even when the
+/// rect covers the destination.
+fn offscreen_copy_viewport(
+    extent_px: (u32, u32),
+    copy: Option<OffscreenCopyRect>,
+) -> (CameraRenderRect, bool) {
+    match copy {
         None => (
             CameraRenderRect {
                 origin_px: (0, 0),
@@ -799,7 +807,18 @@ fn clear_load_inputs_from_offscreen(
             },
             true,
         ),
-    };
+    }
+}
+
+fn clear_load_inputs_from_offscreen(
+    extent_px: (u32, u32),
+    copy: Option<OffscreenCopyRect>,
+    sample_count: u32,
+    surface_format: wgpu::TextureFormat,
+    scene_color_format: wgpu::TextureFormat,
+    write_target: OffscreenWriteTarget,
+) -> ClearLoadDecisionInputs {
+    let (viewport, copies_partial_color) = offscreen_copy_viewport(extent_px, copy);
     clear_load_inputs_from_view(ClearLoadViewSource {
         kind: FrameViewTargetKind::OffscreenRt,
         viewport,
@@ -808,6 +827,29 @@ fn clear_load_inputs_from_offscreen(
         sample_count,
         surface_format,
         scene_color_format,
+        write_target,
+    })
+}
+
+/// Full-target offscreen inputs for a test view that always attaches color and depth.
+#[cfg(test)]
+#[must_use]
+pub(crate) fn full_offscreen_clear_load_inputs(
+    viewport_px: (u32, u32),
+    surface_format: wgpu::TextureFormat,
+    write_target: OffscreenWriteTarget,
+) -> ClearLoadDecisionInputs {
+    clear_load_inputs_from_view(ClearLoadViewSource {
+        kind: FrameViewTargetKind::OffscreenRt,
+        viewport: CameraRenderRect {
+            origin_px: (0, 0),
+            extent_px: viewport_px,
+        },
+        target_extent_px: viewport_px,
+        copies_partial_color: false,
+        sample_count: 1,
+        surface_format,
+        scene_color_format: surface_format,
         write_target,
     })
 }

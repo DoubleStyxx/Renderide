@@ -287,7 +287,6 @@ fn desktop_overlay_graph_frame<'a>(frame: &GraphPassFrame<'a>) -> GraphPassFrame
             color_texture: frame.view.color_texture,
             history_color_texture: frame.view.history_color_texture,
             seed_published_color: frame.view.seed_published_color,
-            persistent_depth_target: frame.view.persistent_depth_target,
             clear_load_inputs: ClearLoadDecisionInputs {
                 sample_count: 1,
                 scene_color_format: frame.view.surface_format,

@@ -185,8 +185,8 @@ impl CompiledRenderGraph {
         transient_by_key: &mut HashMap<GraphResolveKey, GraphResolvedResources>,
     ) -> Result<(), GraphExecuteError> {
         profiling::scope!("render::pre_resolve_transients");
+        let scene_color_format = mv_ctx.backend.scene_color_format_wgpu();
         for view in views {
-            let scene_color_format = mv_ctx.backend.scene_color_format_wgpu();
             let resolved = Self::resolve_owned_view_metadata_from_target(
                 ViewTargetResolveInputs {
                     view_id: view.view_id(),
@@ -212,7 +212,6 @@ impl CompiledRenderGraph {
                     resolved.viewport_px,
                     mv_ctx.gpu_limits.max_texture_dimension_2d(),
                 );
-                let scene_color_format = mv_ctx.backend.scene_color_format_wgpu();
                 self.resolve_transient_textures(
                     mv_ctx.device,
                     mv_ctx.gpu_limits,

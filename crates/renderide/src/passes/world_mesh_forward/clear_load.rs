@@ -11,9 +11,8 @@
 
 #[cfg(any(test, feature = "bench-api"))]
 use crate::frame_contract::FrameViewClear;
-use crate::frame_contract::RenderTextureSelfSampling;
+use crate::frame_contract::{ClearLoadDecisionInputs, RenderTextureSelfSampling};
 use crate::graph_inputs::GraphPassFrameView;
-use crate::render_graph::compiled::ClearLoadDecisionInputs;
 use crate::shared::CameraClearMode;
 
 /// Cameras folded by one [`camera_clear_load_op_checksum`] sample.
@@ -210,6 +209,20 @@ fn scene_preserve_query_from_inputs(
 #[inline]
 #[must_use]
 fn scene_preserve_query(view: &GraphPassFrameView<'_>) -> ScenePreserveQuery {
+    debug_assert_eq!(view.clear_load_inputs.sample_count, view.sample_count);
+    debug_assert_eq!(view.clear_load_inputs.surface_format, view.surface_format);
+    debug_assert_eq!(
+        view.clear_load_inputs.scene_color_format,
+        view.scene_color_format
+    );
+    debug_assert_eq!(
+        view.clear_load_inputs.has_color_texture,
+        view.color_texture.is_some()
+    );
+    debug_assert_eq!(
+        view.clear_load_inputs.self_sampling,
+        view.offscreen_write_target.render_texture_self_sampling()
+    );
     scene_preserve_query_from_inputs(
         view.clear_load_inputs,
         ClearLoadSeedBits {
@@ -378,7 +391,9 @@ mod tests {
         preserves_scene_depth,
     };
     use crate::camera::CameraRenderRect;
-    use crate::frame_contract::{FrameViewClear, OffscreenWriteTarget, RenderTextureSelfSampling};
+    use crate::frame_contract::{
+        ClearLoadDecisionInputs, FrameViewClear, OffscreenWriteTarget, RenderTextureSelfSampling,
+    };
     use crate::render_graph::compiled::{
         ClearLoadViewSource, FrameViewTargetKind, clear_load_inputs_from_view,
     };
@@ -597,14 +612,12 @@ mod tests {
         assert_unseeded_pair("partial viewport", preserve_query(partial_inputs));
     }
 
-    fn preserve_query(
-        inputs: crate::render_graph::compiled::ClearLoadDecisionInputs,
-    ) -> ScenePreserveQuery {
+    fn preserve_query(inputs: ClearLoadDecisionInputs) -> ScenePreserveQuery {
         mapped_query(inputs, no_seed())
     }
 
     fn mapped_query(
-        inputs: crate::render_graph::compiled::ClearLoadDecisionInputs,
+        inputs: ClearLoadDecisionInputs,
         seed: super::ClearLoadSeedBits,
     ) -> ScenePreserveQuery {
         super::scene_preserve_query_from_inputs(inputs, seed)

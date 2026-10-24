@@ -267,7 +267,8 @@ impl Default for ViewPostProcessing {
 ///
 /// Resolve builds one value per view through the view-target mapping and stores it on the frame
 /// view. The forward pass reads that stored value. Attachment selection reads
-/// [`Self::has_color_texture`] and [`Self::persistent_depth_target`].
+/// [`Self::has_color_texture`] when it chooses the offscreen color image. Depth persistence is
+/// only this stored [`Self::persistent_depth_target`], which the pass reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ClearLoadDecisionInputs {
     /// Raster sample count, copied from the view.

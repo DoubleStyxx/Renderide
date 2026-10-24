@@ -178,6 +178,7 @@ impl CompiledRenderGraph {
     ) -> Result<Vec<PerViewWorkItem>, GraphExecuteError> {
         profiling::scope!("graph::prepare_per_view_work_items");
         let mut work_items = Vec::with_capacity(views.len());
+        let scene_color_format = mv_ctx.backend.scene_color_format_wgpu();
         for (view_idx, view) in views.iter_mut().enumerate() {
             let view_id = view.view_id();
             let host_camera = view.host_camera;
@@ -185,7 +186,6 @@ impl CompiledRenderGraph {
             let frame_time_seconds = view.frame_time_seconds;
             let post_processing = view.post_processing();
             let target_is_swapchain = matches!(view.target, FrameViewTarget::Swapchain);
-            let scene_color_format = mv_ctx.backend.scene_color_format_wgpu();
             let resolved = Self::resolve_owned_view_metadata_from_target(
                 ViewTargetResolveInputs {
                     view_id,

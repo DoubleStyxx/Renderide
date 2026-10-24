@@ -10,7 +10,7 @@ use super::resources::{
 use super::schedule::{FrameSchedule, ScheduleHudSnapshot};
 use super::validation::GraphValidationReport;
 use crate::camera::ViewId;
-use crate::frame_contract::{OffscreenWriteTarget, ViewWinding};
+use crate::frame_contract::{ClearLoadDecisionInputs, OffscreenWriteTarget, ViewWinding};
 use crate::graph_inputs::GraphSceneView;
 use crate::render_graph::RenderGraphValidationMode;
 
@@ -28,10 +28,11 @@ pub(super) use merge_cache::{
 #[cfg(test)]
 mod dot;
 
-pub(crate) use exec::ClearLoadDecisionInputs;
 pub(crate) use exec::CommandEncodingHudSnapshot;
 #[cfg(test)]
-pub(crate) use exec::{ClearLoadViewSource, clear_load_inputs_from_view};
+pub(crate) use exec::{
+    ClearLoadViewSource, clear_load_inputs_from_view, full_offscreen_clear_load_inputs,
+};
 pub(crate) use frame_view::{
     ExternalFrameTargets, ExternalOffscreenTargets, FrameGlobalView, FrameView, FrameViewLayout,
     FrameViewResourceHints, FrameViewTarget, OffscreenColorCopyTarget, RenderPathProfile,
@@ -159,8 +160,6 @@ pub(super) struct ResolvedView<'a> {
     pub(super) history_color_texture: Option<&'a wgpu::Texture>,
     /// `true` when this view writes a swapped texture after another view already did this frame.
     pub(super) seed_published_color: bool,
-    /// `true` when `depth_texture` is the persistent camera depth target.
-    pub(super) persistent_depth_target: bool,
     /// Camera-clear inputs built by the view-target mapping for this target.
     pub(super) clear_load_inputs: ClearLoadDecisionInputs,
     // MSAA views are now in the per-view blackboard (MsaaViewsSlot), resolved from graph
