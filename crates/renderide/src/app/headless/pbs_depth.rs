@@ -6,8 +6,8 @@
 use std::path::Path;
 use std::time::Duration;
 
-use crate::diagnostics::pbs_capture;
 use crate::gpu::GpuContext;
+use crate::pbs_diag as pbs_capture;
 
 /// Copies the headless depth attachment when the canary is armed.
 ///

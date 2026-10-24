@@ -46,6 +46,7 @@ const ROOT_MODULES: &[&str] = &[
     "mesh_deform",
     "occlusion",
     "particles",
+    "pbs_diag",
     "passes",
     "process_io",
     "profiling",

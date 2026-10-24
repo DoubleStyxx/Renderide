@@ -496,7 +496,7 @@ impl MaterialPipelineCache {
             if let Some(hit) = shard.pipelines.get(&key).cloned() {
                 drop(shard);
                 self.stats.note_hit();
-                crate::diagnostics::pbs_capture::note_lookup(
+                crate::pbs_diag::note_lookup(
                     kind,
                     desc.depth_stencil_format,
                     desc.sample_count,
@@ -506,7 +506,7 @@ impl MaterialPipelineCache {
             }
             if let Some(err) = shard.failed.get(&key).cloned() {
                 drop(shard);
-                crate::diagnostics::pbs_capture::note_lookup(
+                crate::pbs_diag::note_lookup(
                     kind,
                     desc.depth_stencil_format,
                     desc.sample_count,
@@ -515,7 +515,7 @@ impl MaterialPipelineCache {
                 return MaterialPipelineLookup::Failed(err);
             }
             if !shard.pending.insert(key.clone()) {
-                crate::diagnostics::pbs_capture::note_lookup(
+                crate::pbs_diag::note_lookup(
                     kind,
                     desc.depth_stencil_format,
                     desc.sample_count,
@@ -526,7 +526,7 @@ impl MaterialPipelineCache {
         }
 
         self.queue_pipeline_build(key, kind.clone(), *desc, variant, wgsl_override);
-        crate::diagnostics::pbs_capture::note_lookup(
+        crate::pbs_diag::note_lookup(
             kind,
             desc.depth_stencil_format,
             desc.sample_count,
@@ -734,7 +734,7 @@ impl MaterialPipelineCache {
         set: MaterialPipelineSet,
     ) {
         self.stats.note_insertion();
-        crate::diagnostics::pbs_capture::note_created(
+        crate::pbs_diag::note_created(
             &key.kind,
             key.depth_stencil_format,
             key.sample_count,

@@ -1,5 +1,8 @@
 //! Throwaway per-frame log for the Windows `pbs_lit` canaries.
 //!
+//! This is its own root module. `diagnostics` already imports materials, passes,
+//! and world mesh, so those modules cannot import `diagnostics` back.
+//!
 //! Armed only when the headless output path contains `pbs_lit`. Every other
 //! capture, and every real-GPU frame, returns before formatting a line.
 

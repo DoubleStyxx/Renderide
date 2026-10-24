@@ -41,6 +41,7 @@ mod hi_z_cpu;
 mod hi_z_temporal;
 mod history_texture;
 mod hud_contract;
+mod pbs_diag;
 
 pub(crate) use gpu::present;
 

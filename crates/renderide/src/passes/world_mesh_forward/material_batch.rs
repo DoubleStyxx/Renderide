@@ -408,7 +408,7 @@ impl<'a> MaterialDrawResolver<'a> {
                     pipeline_kind,
                     resolution.kind
                 );
-                crate::diagnostics::pbs_capture::note_resolve(
+                crate::pbs_diag::note_resolve(
                     &pipeline_key.shader_asset_id,
                     pipeline_kind,
                     "empty",
@@ -421,11 +421,7 @@ impl<'a> MaterialDrawResolver<'a> {
                     pipeline_key.shader_asset_id,
                     pipeline_kind
                 );
-                crate::diagnostics::pbs_capture::note_resolve(
-                    &pipeline_key.shader_asset_id,
-                    pipeline_kind,
-                    "none",
-                );
+                crate::pbs_diag::note_resolve(&pipeline_key.shader_asset_id, pipeline_kind, "none");
                 None
             }
         }
@@ -447,7 +443,7 @@ impl<'a> MaterialDrawResolver<'a> {
                     "WorldMeshForward: empty Null fallback pipeline for shader {:?}, skipping batch",
                     pipeline_key.shader_asset_id
                 );
-                crate::diagnostics::pbs_capture::note_resolve(
+                crate::pbs_diag::note_resolve(
                     &pipeline_key.shader_asset_id,
                     &RasterPipelineKind::Null,
                     "empty",
@@ -459,7 +455,7 @@ impl<'a> MaterialDrawResolver<'a> {
                     "WorldMeshForward: Null fallback pipeline unavailable for shader {:?}, skipping batch",
                     pipeline_key.shader_asset_id
                 );
-                crate::diagnostics::pbs_capture::note_resolve(
+                crate::pbs_diag::note_resolve(
                     &pipeline_key.shader_asset_id,
                     &RasterPipelineKind::Null,
                     "none",
