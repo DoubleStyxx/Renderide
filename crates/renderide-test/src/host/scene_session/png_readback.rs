@@ -136,11 +136,14 @@ impl PngStabilityState {
         PngStabilityVerdict::Pending
     }
 
-    /// Rejects the current stable candidate so only a strictly newer PNG write can become
-    /// `Stable`. Used when the candidate is a flat clear-only frame rendered before async
-    /// material pipelines finished compiling.
+    /// Drops the current stability window so the same PNG can be judged again.
+    ///
+    /// Clearing only `stable_since` left `last_seen_mtime` set, and the next observation of
+    /// that same mtime never reopened the window. A frame that became ready without a newer
+    /// write, or a write whose mtime did not change, then waited out the whole capture.
     pub fn reject_candidate(&mut self) {
         self.stable_since = None;
+        self.last_seen_mtime = None;
     }
 }
 
@@ -418,6 +421,41 @@ mod tests {
                     mtime: mtime2,
                     size: 1024,
                 }
+            ),
+            PngStabilityVerdict::Stable
+        );
+    }
+
+    #[test]
+    fn reject_candidate_reopens_the_window_for_the_same_mtime() {
+        let (mut s, i0, t0) = fresh_state();
+        let mtime = t0 + Duration::from_millis(2200);
+        assert_eq!(
+            s.observe(
+                i0 + Duration::from_millis(2300),
+                PngObservation::Present { mtime, size: 1024 }
+            ),
+            PngStabilityVerdict::Pending
+        );
+        assert_eq!(
+            s.observe(
+                i0 + Duration::from_millis(2600),
+                PngObservation::Present { mtime, size: 1024 }
+            ),
+            PngStabilityVerdict::Stable
+        );
+        s.reject_candidate();
+        assert_eq!(
+            s.observe(
+                i0 + Duration::from_millis(2610),
+                PngObservation::Present { mtime, size: 1024 }
+            ),
+            PngStabilityVerdict::Pending
+        );
+        assert_eq!(
+            s.observe(
+                i0 + Duration::from_millis(2900),
+                PngObservation::Present { mtime, size: 1024 }
             ),
             PngStabilityVerdict::Stable
         );

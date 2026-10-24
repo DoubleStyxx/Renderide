@@ -593,6 +593,10 @@ impl MaterialPipelineCache {
     /// every cache probe.
     pub(super) fn drain_pipeline_build_completions(&self) {
         profiling::scope!("materials::drain_pipeline_build_completions");
+        // Windows builds were queued on the render thread. Finish them before draining
+        // the completion channel so this frame can record the pipelines they produce.
+        #[cfg(windows)]
+        drain_windows_pipeline_builds();
         self.drain_completed_pipeline_builds();
     }
 
@@ -784,31 +788,63 @@ fn validate_embedded_required_features(
 }
 
 fn spawn_pipeline_build(request: PipelineBuildRequest) -> Result<(), String> {
-    let pool = material_pipeline_compile_pool()?;
-    pool.spawn(move || {
-        profiling::scope!("materials::async_pipeline_compile");
-        let PipelineBuildRequest {
-            key,
-            kind,
-            desc,
-            variant,
-            wgsl_override,
-            resources,
-            tx,
-        } = request;
-        let shader_source_generation = key.shader_source_generation;
-        let result = MaterialPipelineCache::build_pipeline_set_for(
-            resources,
-            &kind,
-            &desc,
-            variant,
-            shader_source_generation,
-            wgsl_override,
-        )
-        .map_err(|e| e.to_string());
-        let _ = tx.send(PipelineBuildOutcome { key, kind, result });
-    });
-    Ok(())
+    // DX12 (Windows CI is the WARP adapter) deadlocks when a background thread calls
+    // `create_render_pipeline` while the render thread is inside a frame. Queue the build
+    // and run it on the render thread at the next pre-pass drain instead. Other platforms
+    // keep the async pool; the golden harness waits until that pool reports ready.
+    #[cfg(windows)]
+    {
+        windows_pipeline_build_queue().lock().push(request);
+        return Ok(());
+    }
+    #[cfg(not(windows))]
+    {
+        let pool = material_pipeline_compile_pool()?;
+        pool.spawn(move || finish_pipeline_build(request));
+        Ok(())
+    }
+}
+
+fn finish_pipeline_build(request: PipelineBuildRequest) {
+    profiling::scope!("materials::async_pipeline_compile");
+    let PipelineBuildRequest {
+        key,
+        kind,
+        desc,
+        variant,
+        wgsl_override,
+        resources,
+        tx,
+    } = request;
+    let shader_source_generation = key.shader_source_generation;
+    let result = MaterialPipelineCache::build_pipeline_set_for(
+        resources,
+        &kind,
+        &desc,
+        variant,
+        shader_source_generation,
+        wgsl_override,
+    )
+    .map_err(|e| e.to_string());
+    let _ = tx.send(PipelineBuildOutcome { key, kind, result });
+}
+
+/// Builds queued on Windows until [`drain_windows_pipeline_builds`] runs on the render thread.
+#[cfg(windows)]
+fn windows_pipeline_build_queue() -> &'static Mutex<Vec<PipelineBuildRequest>> {
+    static QUEUE: Mutex<Vec<PipelineBuildRequest>> = Mutex::new(Vec::new());
+    &QUEUE
+}
+
+#[cfg(windows)]
+fn drain_windows_pipeline_builds() {
+    let requests = {
+        let mut queue = windows_pipeline_build_queue().lock();
+        std::mem::take(&mut *queue)
+    };
+    for request in requests {
+        finish_pipeline_build(request);
+    }
 }
 
 /// Maximum number of background workers dedicated to material pipeline compilation.
@@ -821,6 +857,7 @@ fn material_pipeline_compile_worker_count() -> usize {
     })
 }
 
+#[cfg(not(windows))]
 fn material_pipeline_compile_pool() -> Result<&'static rayon::ThreadPool, String> {
     static POOL: OnceLock<Result<rayon::ThreadPool, String>> = OnceLock::new();
     POOL.get_or_init(|| {
