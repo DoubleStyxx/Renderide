@@ -7,8 +7,8 @@
 //! On Windows, the named mapping backend does not read `.qu` paths from disk; [`QueueOptions::path`]
 //! is still set to the same default for consistency with [`interprocess`].
 //!
-//! Production code in this module is safe. Tests opt into `unsafe` only to mutate
-//! the process environment under `lock_interprocess_env`.
+//! Production code in this module is safe. Tests that change the process
+//! environment take [`crate::test_env::lock`].
 
 #![deny(unsafe_code)]
 
@@ -122,11 +122,14 @@ pub(crate) fn open_bootstrap_queues_with_host_endpoints(
 #[cfg(test)]
 #[expect(
     unsafe_code,
-    reason = "edition 2024 env mutation in tests; serialized by lock_interprocess_env"
+    reason = "tests call the unsafe test_env setters while holding EnvLockGuard"
+)]
+#[expect(
+    clippy::significant_drop_tightening,
+    reason = "queue paths read RENDERIDE_INTERPROCESS_DIR, and the snapshot restores it, only while the process env lock is still held"
 )]
 mod tests {
     use super::*;
-    use crate::test_env::lock_interprocess_env;
 
     #[test]
     fn bootstrap_queue_base_names_match_suffixes() {
@@ -137,62 +140,54 @@ mod tests {
 
     #[test]
     fn interprocess_backing_dir_defaults_when_env_unset() {
-        let _g = lock_interprocess_env();
-        // SAFETY: env mutation in test; serialized by the interprocess env test lock.
+        let guard = crate::test_env::lock();
+        let _snap = guard.capture(&[RENDERIDE_INTERPROCESS_DIR_ENV]);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            std::env::remove_var(RENDERIDE_INTERPROCESS_DIR_ENV);
+            guard.remove_var(RENDERIDE_INTERPROCESS_DIR_ENV);
         }
         assert_eq!(interprocess_backing_dir(), default_memory_dir());
     }
 
     #[test]
     fn interprocess_backing_dir_respects_env() {
-        let _g = lock_interprocess_env();
+        let guard = crate::test_env::lock();
+        let _snap = guard.capture(&[RENDERIDE_INTERPROCESS_DIR_ENV]);
         let tmp = std::env::temp_dir().join(format!("bootstrapper_ipc_env_{}", std::process::id()));
-        // SAFETY: env mutation in test; serialized by the interprocess env test lock.
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            std::env::set_var(RENDERIDE_INTERPROCESS_DIR_ENV, &tmp);
+            guard.set_var(RENDERIDE_INTERPROCESS_DIR_ENV, &tmp);
         }
         assert_eq!(interprocess_backing_dir(), PathBuf::from(&tmp));
-        // SAFETY: env mutation in test; serialized by the interprocess env test lock.
-        unsafe {
-            std::env::remove_var(RENDERIDE_INTERPROCESS_DIR_ENV);
-        }
     }
 
     #[test]
     fn interprocess_backing_dir_empty_env_falls_back() {
-        let _g = lock_interprocess_env();
-        // SAFETY: env mutation in test; serialized by the interprocess env test lock.
+        let guard = crate::test_env::lock();
+        let _snap = guard.capture(&[RENDERIDE_INTERPROCESS_DIR_ENV]);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            std::env::set_var(RENDERIDE_INTERPROCESS_DIR_ENV, "");
+            guard.set_var(RENDERIDE_INTERPROCESS_DIR_ENV, "");
         }
         assert_eq!(interprocess_backing_dir(), default_memory_dir());
-        // SAFETY: env mutation in test; serialized by the interprocess env test lock.
-        unsafe {
-            std::env::remove_var(RENDERIDE_INTERPROCESS_DIR_ENV);
-        }
     }
 
     #[test]
     fn bootstrap_queues_open_rejects_prefix_containing_slash() {
-        let _g = lock_interprocess_env();
+        let guard = crate::test_env::lock();
+        let _snap = guard.capture(&[RENDERIDE_INTERPROCESS_DIR_ENV]);
         let tmp =
             std::env::temp_dir().join(format!("bootstrapper_ipc_invalid_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        // SAFETY: env mutation in test; serialized by the interprocess env test lock.
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            std::env::set_var(RENDERIDE_INTERPROCESS_DIR_ENV, &tmp);
+            guard.set_var(RENDERIDE_INTERPROCESS_DIR_ENV, &tmp);
         }
 
         // Slash in the prefix flows through to the composed queue name and must be rejected by
         // QueueOptions validation, surfaced as BootstrapError::QueueOptionsInvalid.
         let result = BootstrapQueues::open("bad/prefix");
-        // SAFETY: env mutation in test; serialized by the interprocess env test lock.
-        unsafe {
-            std::env::remove_var(RENDERIDE_INTERPROCESS_DIR_ENV);
-        }
         let _ = std::fs::remove_dir_all(&tmp);
 
         match result {
@@ -204,23 +199,20 @@ mod tests {
 
     #[test]
     fn bootstrap_queues_open_rejects_prefix_with_nul() {
-        let _g = lock_interprocess_env();
+        let guard = crate::test_env::lock();
+        let _snap = guard.capture(&[RENDERIDE_INTERPROCESS_DIR_ENV]);
         let tmp = std::env::temp_dir().join(format!(
             "bootstrapper_ipc_invalid_nul_{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        // SAFETY: env mutation in test; serialized by the interprocess env test lock.
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            std::env::set_var(RENDERIDE_INTERPROCESS_DIR_ENV, &tmp);
+            guard.set_var(RENDERIDE_INTERPROCESS_DIR_ENV, &tmp);
         }
 
         let result = BootstrapQueues::open("bad\0prefix");
-        // SAFETY: env mutation in test; serialized by the interprocess env test lock.
-        unsafe {
-            std::env::remove_var(RENDERIDE_INTERPROCESS_DIR_ENV);
-        }
         let _ = std::fs::remove_dir_all(&tmp);
 
         match result {
@@ -233,14 +225,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn bootstrap_queues_open_creates_backing_under_custom_dir() {
-        let _g = lock_interprocess_env();
+        let guard = crate::test_env::lock();
+        let _snap = guard.capture(&[RENDERIDE_INTERPROCESS_DIR_ENV]);
         let tmp =
             std::env::temp_dir().join(format!("bootstrapper_ipc_open_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        // SAFETY: env mutation in test; serialized by the interprocess env test lock.
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            std::env::set_var(RENDERIDE_INTERPROCESS_DIR_ENV, &tmp);
+            guard.set_var(RENDERIDE_INTERPROCESS_DIR_ENV, &tmp);
         }
 
         let prefix = format!("t{}", std::process::id());
@@ -257,10 +250,6 @@ mod tests {
         assert!(!tmp.join(format!("{in_name}.qu")).exists());
         assert!(!tmp.join(format!("{out_name}.qu")).exists());
 
-        // SAFETY: env mutation in test; serialized by the interprocess env test lock.
-        unsafe {
-            std::env::remove_var(RENDERIDE_INTERPROCESS_DIR_ENV);
-        }
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

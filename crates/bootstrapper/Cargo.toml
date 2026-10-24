@@ -62,6 +62,9 @@ windows-sys = { version = "0.61", features = [
 embed-manifest = "1.5"
 
 [dev-dependencies]
+# The normal dependency leaves `test-env` off so release builds do not ship the
+# env-lock wrappers. Tests and integration tests enable it here.
+interprocess = { path = "../interprocess", features = ["test-env"] }
 logger = { path = "../logger" }
 tempfile = "3.27"
 
