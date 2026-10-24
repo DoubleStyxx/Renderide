@@ -160,21 +160,23 @@ fn double_buffered_preserve_view<'a>(
     seed_published_color: bool,
     mode: CameraClearMode,
 ) -> GraphPassFrameView<'a> {
+    let surface_format = wgpu::TextureFormat::Rgba8Unorm;
+    let offscreen_write_target = OffscreenWriteTarget::host_render_texture_with_self_sampling(
+        7,
+        crate::frame_contract::RenderTextureSelfSampling::AllowPreviousContents,
+    );
     GraphPassFrameView {
         depth_texture: depth,
         depth_view,
         depth_sample_view: None,
-        surface_format: wgpu::TextureFormat::Rgba8Unorm,
-        scene_color_format: wgpu::TextureFormat::Rgba8Unorm,
+        surface_format,
+        scene_color_format: surface_format,
         viewport_px: (WIDTH, HEIGHT),
         host_camera: HostCameraFrame::default(),
         render_context: RenderingContext::Camera,
         frame_time_seconds: 0.0,
         multiview_stereo: false,
-        offscreen_write_target: OffscreenWriteTarget::host_render_texture_with_self_sampling(
-            7,
-            crate::frame_contract::RenderTextureSelfSampling::AllowPreviousContents,
-        ),
+        offscreen_write_target,
         view_winding: ViewWinding::normal(),
         view_id: ViewId::Main,
         hi_z_slot: Arc::new(Mutex::new(HiZGpuState::default())),
@@ -188,7 +190,11 @@ fn double_buffered_preserve_view<'a>(
         color_texture: Some(write),
         history_color_texture: Some(history),
         seed_published_color,
-        persistent_depth_target: true,
+        clear_load_inputs: crate::render_graph::compiled::full_offscreen_clear_load_inputs(
+            (WIDTH, HEIGHT),
+            surface_format,
+            offscreen_write_target,
+        ),
         post_processing: ViewPostProcessing::disabled(),
     }
 }
