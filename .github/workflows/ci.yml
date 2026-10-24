@@ -46,6 +46,10 @@ jobs:
   rust:
     name: Rust / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # Healthy jobs are about 10 minutes on ubuntu and 21 on windows.
+    # 45 minutes is about twice the slower of those, and still above the
+    # 32 minute master run at 0104fee whose apt download crawled.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -68,12 +72,19 @@ jobs:
       # headless Vulkan adapter. There is no `materials::registry` GPU smoke test.
       # GStreamer dev packages are required only when the `video-textures` feature is enabled
       # (Linux clippy does this via `--all-features`); pkg-config resolves the headers/libs at build time.
+      #
+      # `--no-install-recommends` is load-bearing. `gstreamer1.0-plugins-bad` recommends
+      # plugins-good, a soundfont, flite, and VA-API drivers. On master 0104fee that set
+      # was 96.2 MB and the Azure mirror delivered it at 78 kB/s (20 min 31 s), which is
+      # what stretched the Rust ubuntu job to ~32 minutes. The MPEG-TS probe needs tsdemux
+      # from the bad plugins package itself, not those recommends. pkg-config is listed
+      # explicitly so the -dev packages still find their headers.
       - name: Install Linux system dependencies (Vulkan + GStreamer)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            mesa-vulkan-drivers vulkan-tools \
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            mesa-vulkan-drivers vulkan-tools pkg-config \
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             gstreamer1.0-plugins-base gstreamer1.0-plugins-bad
 
@@ -137,7 +148,14 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo test --locked -p renderide --features video-textures --lib assets::video::mpegts
 
+      # Happy path is about 20 seconds (ubuntu on 0104fee, and on the #142 PR head).
+      # Each scene already fails itself after DEFAULT_CASE_TIMEOUT (180s) in
+      # crates/renderide-test. 20 minutes is about twice a 4-wide wave of those
+      # per-scene caps, so a stuck scene ends the step instead of holding the
+      # default six-hour job. Two times the happy path would be under a minute
+      # and would kill a scene that is still inside its own timeout.
       - name: Run headless renderer suite
+        timeout-minutes: 20
         shell: bash
         run: |
           set -euo pipefail
