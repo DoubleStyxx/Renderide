@@ -566,7 +566,7 @@ impl HysteresisHistoryWorkload {
         let history = std::mem::take(&mut self.history);
         let spare = std::mem::take(&mut self.spare);
         let mut buffers = std::mem::take(&mut self.buffers);
-        let fast_layout = prepare_fast_visible(&history, &self.present, &mut buffers);
+        let fast_layout = prepare_fast_visible(&history, &self.present, &mut self.present_keys);
         self.fast_engaged = fast_layout.is_some();
         let current_vp = self.current_vp;
         let previous_vp = self.previous_vp;

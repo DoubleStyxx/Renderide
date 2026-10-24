@@ -6,8 +6,9 @@
 //! place. The count is prepared casters in the view's render-space scope, not casters that
 //! survive the frustum. After the count crosses the cap, the pass stays off until it falls to
 //! [`crate::occlusion::hysteresis::HISTORY_CASTER_RESUME`]. When the previous frame had no
-//! occluded caster and the prepared set is unchanged, the plan skips the present-key set. The
-//! cull still records a class change when the pyramid occludes a caster.
+//! occluded caster and the prepared set is unchanged, disocclusion rectangles stay empty and
+//! publishing the history skips the retain scan. The cull still records a class change when
+//! the pyramid occludes a caster.
 
 use glam::{Mat4, Vec3};
 
@@ -122,7 +123,11 @@ fn build_frame(
         }
     }
     let fast_layout = if track_presence && history.no_occluded_casters() {
-        prepare_fast_visible(&history, &frame_scratch.present, &mut cull_buffers)
+        prepare_fast_visible(
+            &history,
+            &frame_scratch.present,
+            &mut frame_scratch.present_keys,
+        )
     } else {
         None
     };

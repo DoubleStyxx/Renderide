@@ -20,10 +20,10 @@
 //! longer covers.
 //!
 //! When the previous frame stored no occluded caster and this frame's prepared set is the same
-//! keys, meshes, and bounds, the plan skips the present-key set. A caster the pyramid does not
-//! occlude then skips the history-map probe. A caster the pyramid does occlude, a moved or missing
-//! caster, and any row that is not tested still take the full update, so the published
-//! classification matches that slower path.
+//! keys, meshes, and bounds, disocclusion rectangles are empty and publishing the history skips
+//! the retain scan. A caster the pyramid does not occlude is stamped in its existing row. A
+//! caster the pyramid does occlude, a moved or missing caster, and any row that is not tested
+//! still take the full update, so the published classification matches that slower path.
 //!
 //! The cap counts prepared casters: one renderer run with a world AABB, inside the view's
 //! render-space scope, and not overlay or hidden. It does not count frustum-visible casters,
@@ -361,8 +361,6 @@ pub(crate) struct VisibilityCullBuffers {
     pub stale_rects: Vec<ScreenRect>,
     /// One record buffer per rayon worker, plus one for callers outside the pool.
     pub shards: Vec<Mutex<Vec<(CasterKey, CasterRecord)>>>,
-    /// Dense slot table for the stable-visible fast path. Capacity stays across frames.
-    fast_table: fast::FastTable,
 }
 
 /// History snapshot plus the cleared map the next [`VisibilityHysteresis::finish`] refills.
@@ -488,9 +486,9 @@ pub(crate) struct VisibilityHysteresis {
     spare: HashMap<CasterKey, CasterRecord>,
     /// Epoch stamped onto every caster this frame actually tests.
     epoch: u32,
-    /// Set when [`prepare_fast_visible`] proved the prepared set matches the visible history.
-    fast: Option<fast::FastLayout>,
-    /// Distinct stable-visible accepts. Compared with [`fast::FastLayout`]'s expected count.
+    /// Remembered-caster count when the stable-visible fast path is armed. `0` keeps the full update.
+    fast_expected: u32,
+    /// Distinct stable-visible accepts. Compared with [`Self::fast_expected`].
     fast_visits: AtomicU32,
 }
 
@@ -524,7 +522,6 @@ impl VisibilityHysteresis {
                 motions,
                 stale_rects,
                 shards: Vec::new(),
-                ..VisibilityCullBuffers::default()
             },
         )
     }
@@ -551,14 +548,14 @@ impl VisibilityHysteresis {
             buffers,
             spare,
             epoch,
-            fast: None,
+            fast_expected: 0,
             fast_visits: AtomicU32::new(0),
         }
     }
 
     /// Enables the stable-visible fast path for this frame. `None` keeps the full update.
-    pub(crate) fn install_fast(&mut self, layout: Option<fast::FastLayout>) {
-        self.fast = layout;
+    pub(crate) fn install_fast(&mut self, expected: Option<u32>) {
+        self.fast_expected = expected.unwrap_or(0);
     }
 
     /// Camera pair cached for `space_id` while this view's plan was built.
@@ -644,13 +641,13 @@ impl VisibilityHysteresis {
             buffers,
             spare,
             epoch,
-            fast,
+            fast_expected,
             fast_visits,
         } = self;
         let visits = fast_visits.load(Ordering::Relaxed);
-        let expected = fast.map_or(0, |layout| layout.expected);
         let shards_empty = buffers.shards.iter().all(|shard| shard.lock().is_empty());
-        if shards_empty && expected > 0 && visits == expected {
+        // Each remembered caster was restamped once, and no class change was queued.
+        if shards_empty && fast_expected > 0 && visits == fast_expected {
             let (mut history, spare) = adopt_spare(history, spare);
             history.epoch = epoch;
             return VisibilityRecycle {
@@ -663,16 +660,13 @@ impl VisibilityHysteresis {
         for shard in &buffers.shards {
             let mut records = shard.lock();
             for (key, record) in records.drain(..) {
-                let confirmed = fast::row_confirmed(fast, &buffers.fast_table, &key);
-                merge_record(&mut history.casters, key, record, confirmed);
+                merge_record(&mut history.casters, key, record);
             }
             drop(records);
         }
         let mut visible_count = 0u32;
-        history.casters.retain(|key, record| {
-            let stamped = record.seen_epoch.load(Ordering::Relaxed) == epoch;
-            let confirmed = fast::row_confirmed(fast, &buffers.fast_table, key);
-            if !stamped && !confirmed {
+        history.casters.retain(|_, record| {
+            if record.seen_epoch.load(Ordering::Relaxed) != epoch {
                 return false;
             }
             if record.class == VisibilityClass::Visible {
@@ -893,7 +887,6 @@ fn merge_record(
     map: &mut HashMap<CasterKey, CasterRecord>,
     key: CasterKey,
     incoming: CasterRecord,
-    visible_confirmed: bool,
 ) {
     match map.entry(key) {
         hashbrown::hash_map::Entry::Vacant(slot) => {
@@ -904,9 +897,7 @@ fn merge_record(
             let incoming_epoch = incoming.seen_epoch.load(Ordering::Relaxed);
             // Last frame's row is a different classification. Unioning it with this frame would
             // keep a caster Visible forever and grow a moving caster's bounds every frame.
-            // A stable-visible accept did not rewrite `seen_epoch`, so that bit counts as this
-            // frame's stamp and the union still lets `Visible` win.
-            if existing.seen_epoch.load(Ordering::Relaxed) != incoming_epoch && !visible_confirmed {
+            if existing.seen_epoch.load(Ordering::Relaxed) != incoming_epoch {
                 *existing = incoming;
                 return;
             }

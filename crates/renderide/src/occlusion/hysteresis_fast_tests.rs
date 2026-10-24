@@ -139,14 +139,14 @@ mod fast_path_tests {
         HashMap<CasterKey, CasterRecord>,
         VisibilityCullBuffers,
     ) {
+        let mut present_keys = HashSet::new();
         let layout = if enable_fast {
-            prepare_fast_visible(&history, &frame.present, &mut buffers)
+            prepare_fast_visible(&history, &frame.present, &mut present_keys)
         } else {
             None
         };
         buffers.stale_rects.clear();
         if layout.is_none() {
-            let mut present_keys = HashSet::new();
             let mut movers = Vec::new();
             plan_disocclusion(
                 &history,
@@ -513,7 +513,7 @@ mod fast_path_tests {
     }
 
     #[test]
-    fn fast_table_capacity_survives_the_next_frame() {
+    fn history_map_capacity_survives_a_fast_frame() {
         let entries = [(0, 1), (1, 1), (2, 1)];
         let frame = Frame {
             present: present_of(&entries),
@@ -528,13 +528,24 @@ mod fast_path_tests {
             true,
         );
         assert!(first.armed);
-        let (pointer, capacity) = buffers.fast_table.row_storage();
-        assert!(capacity > 0);
-        let (second, _, _, buffers) = apply(history, spare, buffers, &frame, true);
+        let pointer = history
+            .casters
+            .keys()
+            .next()
+            .map(std::ptr::from_ref)
+            .expect("history row");
+        let capacity = history.casters.capacity();
+        assert!(capacity >= 3);
+        let (second, history, _, _) = apply(history, spare, buffers, &frame, true);
         assert!(second.armed);
-        let (second_pointer, second_capacity) = buffers.fast_table.row_storage();
+        let second_pointer = history
+            .casters
+            .keys()
+            .next()
+            .map(std::ptr::from_ref)
+            .expect("history row");
         assert_eq!(second_pointer, pointer);
-        assert_eq!(second_capacity, capacity);
+        assert_eq!(history.casters.capacity(), capacity);
     }
 
     #[test]
