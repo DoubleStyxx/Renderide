@@ -15,6 +15,7 @@
 //! non-background) where compiling the queue before the submit passed (3780 colors,
 //! 8.8%). Queued builds that do not fit in this drain stay pending.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use parking_lot::Mutex;
@@ -25,6 +26,22 @@ use super::cache::{
 };
 use super::pipeline_kind::RasterPipelineKind;
 use super::raster_pipeline::MaterialPipelineDesc;
+
+/// Set after this frame's idle wait succeeds on a headless capture.
+///
+/// Draw lookup then compiles the pipeline before returning, so the frame is not
+/// counted pending and the build does not move into command recording. Cleared
+/// before a pass is opened and again after the frame submits.
+static RENDER_THREAD_INLINE_COMPILE: AtomicBool = AtomicBool::new(false);
+
+/// Allows headless draw lookup to compile a queued pipeline on this thread.
+pub(crate) fn set_render_thread_inline_compile(enabled: bool) {
+    RENDER_THREAD_INLINE_COMPILE.store(enabled, Ordering::Relaxed);
+}
+
+pub(crate) fn render_thread_inline_compile_enabled() -> bool {
+    RENDER_THREAD_INLINE_COMPILE.load(Ordering::Relaxed)
+}
 
 /// Pipelines compiled on the render thread during one
 /// [`MaterialPipelineCache::drain_pipeline_build_completions`] call.

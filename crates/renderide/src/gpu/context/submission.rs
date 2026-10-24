@@ -9,9 +9,16 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-/// How long a render-thread pipeline compile waits for the previous `Queue::submit`
-/// to leave the driver thread. The readback flush stays on its own shorter timeout.
-const PIPELINE_COMPILE_DRIVER_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long a headless render-thread compile waits for the previous `Queue::submit`
+/// and the device poll together. One budget covers both, so the wait cannot stack
+/// to 240s. The readback flush stays on its own shorter timeout.
+const PIPELINE_COMPILE_HEADLESS_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Worst-case block for one windowed software frame while a compile waits for idle.
+///
+/// Flush and device poll share this budget. A windowed software adapter used to
+/// wait 120s for the driver and another 120s for the device.
+const PIPELINE_COMPILE_WINDOWED_SOFTWARE_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 
 use super::GpuContext;
 use crate::gpu::GpuRetainedResources;
@@ -331,33 +338,49 @@ impl GpuContext {
     }
 
     /// Waits until the driver thread has finished every queued submit and the device
-    /// reports no pending GPU work, or the wait exceeds
-    /// [`PIPELINE_COMPILE_DRIVER_IDLE_TIMEOUT`].
+    /// reports no pending GPU work, or the headless budget runs out.
     ///
     /// Render-thread `create_render_pipeline` calls this first. A timed-out driver
     /// flush or device poll returns false so the caller leaves the compile queued
     /// instead of overlapping `Queue::submit` on DX12 WARP.
     pub fn wait_until_idle_for_pipeline_compile(&self) -> bool {
-        if !self
-            .submission
-            .driver_thread
-            .flush_within(PIPELINE_COMPILE_DRIVER_IDLE_TIMEOUT)
-        {
+        self.wait_until_idle_for_pipeline_compile_within(PIPELINE_COMPILE_HEADLESS_IDLE_TIMEOUT)
+    }
+
+    /// Same idle wait as [`Self::wait_until_idle_for_pipeline_compile`], capped so a
+    /// windowed software frame cannot block for a driver flush plus a second poll.
+    pub fn wait_until_idle_for_windowed_software_pipeline_compile(&self) -> bool {
+        self.wait_until_idle_for_pipeline_compile_within(
+            PIPELINE_COMPILE_WINDOWED_SOFTWARE_IDLE_TIMEOUT,
+        )
+    }
+
+    fn wait_until_idle_for_pipeline_compile_within(&self, budget: Duration) -> bool {
+        let started = Instant::now();
+        if !self.submission.driver_thread.flush_within(budget) {
             logger::warn!(
                 "material pipeline compile deferred: driver thread did not finish Queue::submit within {}s",
-                PIPELINE_COMPILE_DRIVER_IDLE_TIMEOUT.as_secs()
+                budget.as_secs()
+            );
+            return false;
+        }
+        let remaining = budget.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            logger::warn!(
+                "material pipeline compile deferred: idle budget of {}s was spent waiting for Queue::submit",
+                budget.as_secs()
             );
             return false;
         }
         match self.device().poll(wgpu::PollType::Wait {
             submission_index: None,
-            timeout: Some(PIPELINE_COMPILE_DRIVER_IDLE_TIMEOUT),
+            timeout: Some(remaining),
         }) {
             Ok(_) => true,
             Err(wgpu::PollError::Timeout) => {
                 logger::warn!(
-                    "material pipeline compile deferred: device poll timed out after {}s",
-                    PIPELINE_COMPILE_DRIVER_IDLE_TIMEOUT.as_secs()
+                    "material pipeline compile deferred: device poll timed out inside a {}s idle budget",
+                    budget.as_secs()
                 );
                 false
             }
@@ -389,7 +412,19 @@ impl GpuContext {
 
 #[cfg(test)]
 mod tests {
-    use super::FrameSubmitKind;
+    use super::{
+        FrameSubmitKind, PIPELINE_COMPILE_HEADLESS_IDLE_TIMEOUT,
+        PIPELINE_COMPILE_WINDOWED_SOFTWARE_IDLE_TIMEOUT,
+    };
+
+    #[test]
+    fn windowed_software_pipeline_compile_wait_is_a_single_short_budget() {
+        assert!(
+            PIPELINE_COMPILE_WINDOWED_SOFTWARE_IDLE_TIMEOUT <= std::time::Duration::from_secs(2),
+            "windowed software must not stack a 120s flush and a 120s poll"
+        );
+        assert!(PIPELINE_COMPILE_HEADLESS_IDLE_TIMEOUT <= std::time::Duration::from_secs(120));
+    }
 
     #[test]
     fn render_submit_frame_mark_only_tracks_primary_frame_work() {

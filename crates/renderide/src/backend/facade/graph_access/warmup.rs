@@ -15,8 +15,10 @@ use crate::passes::{
     WorldMeshForwardDepthPrepassPipelineKey, WorldMeshForwardNormalPipelineKey,
     WorldMeshForwardPipelineState, depth_prepass_pipeline_key_for_draw,
     normal_pipeline_key_for_draw, pre_warm_depth_prepass_pipeline, pre_warm_normal_pipeline,
+    pre_warm_shadow_pipeline,
 };
 use crate::render_graph::compiled::{FrameView, FrameViewTarget};
+use crate::shared::ShadowCastMode;
 use crate::world_mesh::{WorldMeshDrawItem, WorldMeshPhase};
 
 use super::super::super::{WorldMeshDrawPlanSlot, WorldMeshOverlayDrawPlanSlot};
@@ -300,6 +302,7 @@ struct MaterialPipelineWarmupKey {
 struct WorldMeshPrepassPipelineWarmupKeys {
     depth: HashSet<WorldMeshForwardDepthPrepassPipelineKey>,
     normal: HashSet<WorldMeshForwardNormalPipelineKey>,
+    shadow: HashSet<WorldMeshForwardDepthPrepassPipelineKey>,
 }
 
 impl WorldMeshPrepassPipelineWarmupKeys {
@@ -312,9 +315,15 @@ impl WorldMeshPrepassPipelineWarmupKeys {
         {
             self.normal.insert(key);
         }
+        if item.shadow_cast_mode != ShadowCastMode::Off
+            && let Some(key) =
+                WorldMeshForwardDepthPrepassPipelineKey::for_shadow_draw(item, pipeline)
+        {
+            self.shadow.insert(key);
+        }
     }
 
-    fn warm(self, device: &wgpu::Device) -> (usize, usize) {
+    fn warm(self, device: &wgpu::Device, compile_shadows: bool) -> (usize, usize) {
         let depth_count = self.depth.len();
         let normal_count = self.normal.len();
         for key in self.depth {
@@ -322,6 +331,11 @@ impl WorldMeshPrepassPipelineWarmupKeys {
         }
         for key in self.normal {
             pre_warm_normal_pipeline(device, key);
+        }
+        if compile_shadows {
+            for key in self.shadow {
+                pre_warm_shadow_pipeline(device, key);
+            }
         }
         (depth_count, normal_count)
     }
@@ -507,7 +521,8 @@ impl<'a> BackendGraphAccess<'a> {
                 }
             }
         }
-        let (depth_prepass_requests, normal_prepass_requests) = keys.warm(device);
+        let compile_shadows = self.materials.compiles_pipelines_on_render_thread();
+        let (depth_prepass_requests, normal_prepass_requests) = keys.warm(device, compile_shadows);
         logger::trace!(
             "graph pre-warm world mesh prepass pipelines: depth_requests={} normal_requests={}",
             depth_prepass_requests,

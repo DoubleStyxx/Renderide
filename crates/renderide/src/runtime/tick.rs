@@ -370,6 +370,17 @@ impl RendererRuntime {
                 ..Default::default()
             };
         }
+        // Pass-owned pipelines are not on the material queue. Build the ones that
+        // depend only on the attached target before this tick enters render-views,
+        // and only when the render thread owns compilation. Real GPUs skip this.
+        if self.backend.material_pipelines_compile_on_render_thread()
+            && let Some(format) = self.backend.attached_surface_format()
+        {
+            let device = gpu.device();
+            crate::passes::precompile_clustered_light_pipeline(device);
+            crate::passes::precompile_scene_color_compose_pipeline(device, format, false);
+            crate::occlusion::gpu::precompile_hi_z_pipelines(device);
+        }
         crash_context::set_tick_phase(TickPhase::RenderViews);
         let graph_error = self.render_desktop_frame(gpu).err();
         self.note_frame_render_attempted();

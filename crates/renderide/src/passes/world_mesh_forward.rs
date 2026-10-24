@@ -77,7 +77,7 @@ pub use color_preserve::WorldMeshForwardColorPreservePass;
 pub use depth_prepass::{WorldMeshForwardDepthPrepass, WorldMeshForwardDepthPrepassGraphResources};
 pub(crate) use depth_prepass::{
     WorldMeshForwardDepthPrepassPipelineKey, depth_prepass_pipeline_key_for_draw,
-    pre_warm_depth_prepass_pipeline,
+    pre_warm_depth_prepass_pipeline, pre_warm_shadow_pipeline,
 };
 pub(crate) use encode::{
     ObjectMotionDraw, ShadowDepthDrawBatch, draw_shadow_depth_subset,

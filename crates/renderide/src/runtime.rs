@@ -206,6 +206,11 @@ impl RendererRuntime {
     pub(crate) fn shadow_atlas_pass_counts(&self) -> (u32, u64) {
         self.backend.frame_resources().shadow_atlas_pass_counts()
     }
+
+    /// Pending material draws since the previous headless PNG write.
+    pub(crate) fn take_pending_pipeline_draws(&self) -> u64 {
+        self.backend.take_pending_pipeline_draws()
+    }
 }
 
 #[cfg(test)]

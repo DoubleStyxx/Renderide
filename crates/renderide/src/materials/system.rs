@@ -198,6 +198,21 @@ impl MaterialSystem {
             .is_some_and(|registry| registry.compiles_on_render_thread())
     }
 
+    /// Headless captures compile the whole render-thread queue before submit.
+    pub fn compiles_full_render_thread_queue(&self) -> bool {
+        self.material_registry
+            .as_ref()
+            .is_some_and(|registry| registry.compiles_full_render_thread_queue())
+    }
+
+    /// Takes this material system's pending-draw count. Zero before GPU attach.
+    pub fn take_pending_pipeline_draws(&self) -> u64 {
+        self.material_registry
+            .as_ref()
+            .map(crate::materials::MaterialRegistry::take_pending_pipeline_draws)
+            .unwrap_or(0)
+    }
+
     /// Drains finished background pipeline builds into the cache (no-op before GPU attach).
     ///
     /// Recording threads call into the cache concurrently; pulling completions here keeps the

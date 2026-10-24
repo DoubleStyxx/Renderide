@@ -13,14 +13,18 @@ pub(crate) mod post_processing;
 mod scene_color_compose;
 mod world_mesh_forward;
 
-pub(crate) use clustered_light::{ClusteredLightGraphResources, ClusteredLightPass};
+pub(crate) use clustered_light::{
+    ClusteredLightGraphResources, ClusteredLightPass, precompile_clustered_light_pipeline,
+};
 pub(crate) use hi_z_build::{HiZBuildGraphResources, HiZBuildPass};
 pub(crate) use mesh_deform::MeshDeformPass;
 pub(crate) use post_processing::{
     AcesTonemapEffect, AgxTonemapEffect, AutoExposureEffect, BloomEffect, GtaoEffect,
     GtaoGraphResources, GtaoPassRange, MotionBlurEffect,
 };
-pub(crate) use scene_color_compose::{SceneColorComposeGraphResources, SceneColorComposePass};
+pub(crate) use scene_color_compose::{
+    SceneColorComposeGraphResources, SceneColorComposePass, precompile_scene_color_compose_pipeline,
+};
 #[cfg(feature = "bench-api")]
 pub use world_mesh_forward::CameraClearLoadOpInput;
 pub(crate) use world_mesh_forward::ForwardMsaaResources;
@@ -45,5 +49,6 @@ pub(crate) use world_mesh_forward::{
     WorldMeshForwardTransparentSequencePass, WorldMeshOverlayForwardPlanSlot,
     depth_prepass_pipeline_key_for_draw, draw_shadow_depth_subset, normal_pipeline_key_for_draw,
     object_motion_previous_vp_bind_group, pre_warm_depth_prepass_pipeline,
-    pre_warm_normal_pipeline, prepare_world_mesh_forward_frame, record_object_motion_vectors,
+    pre_warm_normal_pipeline, pre_warm_shadow_pipeline, prepare_world_mesh_forward_frame,
+    record_object_motion_vectors,
 };

@@ -7,6 +7,7 @@ use super::cache::{
     MaterialPipelineCache, MaterialPipelineCacheDiagnosticSnapshot, MaterialPipelineLookup,
     MaterialPipelineSet, MaterialPipelineVariantSpec,
 };
+use super::pipeline_frame_readiness::PendingPipelineDraws;
 use super::pipeline_kind::RasterPipelineKind;
 use super::raster_pipeline::MaterialPipelineDesc;
 use super::router::MaterialRouter;
@@ -48,6 +49,8 @@ pub struct MaterialRegistry {
     /// Shader/material graph state for routes, source generations, and dependency hooks.
     asset_graph: MaterialAssetGraph,
     cache: MaterialPipelineCache,
+    /// Pending-draw count for this registry. Not shared with any other instance.
+    pending_draws: PendingPipelineDraws,
 }
 
 impl MaterialRegistry {
@@ -73,7 +76,7 @@ impl MaterialRegistry {
         );
         // A failed build is not pending. The harness must compare the golden and fail
         // it, rather than wait out the capture timeout.
-        record_pending_lookup(&lookup);
+        self.pending_draws.note(&lookup);
         match lookup {
             MaterialPipelineLookup::Ready(p) => {
                 Some(MaterialPipelineResolution::new(kind.clone(), p))
@@ -130,7 +133,7 @@ impl MaterialRegistry {
             source.generation,
             source.source_override,
         );
-        record_pending_lookup(&lookup);
+        self.pending_draws.note(&lookup);
         match lookup {
             MaterialPipelineLookup::Ready(p) => Some(MaterialPipelineResolution::new(fallback, p)),
             MaterialPipelineLookup::Pending => None,
@@ -172,6 +175,7 @@ impl MaterialRegistry {
                 compile_on_render_thread,
                 render_thread_compiles_per_frame,
             ),
+            pending_draws: PendingPipelineDraws::new(),
         }
     }
 
@@ -269,6 +273,16 @@ impl MaterialRegistry {
         self.cache.compiles_on_render_thread()
     }
 
+    /// Headless captures compile every queued material pipeline in one drain.
+    pub(crate) fn compiles_full_render_thread_queue(&self) -> bool {
+        self.cache.compiles_full_render_thread_queue()
+    }
+
+    /// Takes this registry's pending-draw count and resets it.
+    pub fn take_pending_pipeline_draws(&self) -> u64 {
+        self.pending_draws.take()
+    }
+
     /// Drains finished pipeline builds into the cache.
     ///
     /// Invoked once per frame from the renderer's tick before per-view recording so worker
@@ -306,34 +320,29 @@ impl MaterialRegistry {
     }
 }
 
-/// A pending lookup counts. A failed or ready lookup does not.
-fn record_pending_lookup(lookup: &MaterialPipelineLookup) {
-    if matches!(lookup, MaterialPipelineLookup::Pending) {
-        super::pipeline_frame_readiness::note_pending_pipeline_draw();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::cache::MaterialPipelineLookup;
-    use super::super::pipeline_frame_readiness::take_pending_pipeline_draws;
-    use super::record_pending_lookup;
+    use super::super::pipeline_frame_readiness::PendingPipelineDraws;
 
     #[test]
-    fn pending_lookups_increment_the_frame_count_and_failures_do_not() {
-        let _ = take_pending_pipeline_draws();
+    fn pending_lookups_count_the_requested_shader_and_its_null_fallback() {
+        let draws = PendingPipelineDraws::new();
+        let other = PendingPipelineDraws::new();
 
-        record_pending_lookup(&MaterialPipelineLookup::Pending);
-        assert_eq!(take_pending_pipeline_draws(), 1);
+        draws.note(&MaterialPipelineLookup::Pending);
+        assert_eq!(draws.take(), 1);
+        assert_eq!(other.take(), 0);
 
         // The requested shader is pending, and the Null fallback lookup is pending too.
-        record_pending_lookup(&MaterialPipelineLookup::Pending);
-        record_pending_lookup(&MaterialPipelineLookup::Pending);
-        assert_eq!(take_pending_pipeline_draws(), 2);
+        draws.note(&MaterialPipelineLookup::Pending);
+        draws.note(&MaterialPipelineLookup::Pending);
+        assert_eq!(draws.take(), 2);
 
-        record_pending_lookup(&MaterialPipelineLookup::Failed(
+        draws.note(&MaterialPipelineLookup::Failed(
             "shader compile failed".to_string(),
         ));
-        assert_eq!(take_pending_pipeline_draws(), 0);
+        assert_eq!(draws.take(), 0);
+        assert_eq!(other.take(), 0);
     }
 }

@@ -202,25 +202,39 @@ impl Drop for CpuRenderPhaseScope {
 
 /// Runs global asset/material preparation for a schedule-backed render submission.
 ///
-/// Headless compiles every pipeline queued for this thread. A windowed software adapter
-/// compiles at most one. When that queue is non-empty, the compile waits until the
-/// driver thread has finished `Queue::submit` and the device is idle. On DX12 WARP,
-/// compiling during that submit hangs the render thread and can cache a pipeline that
-/// under-draws. If the driver does not go idle, this frame only collects builds that
-/// already finished and leaves the queue for a later frame. Real GPUs read the
-/// attach-time flag and skip the build-queue lock. An empty headless queue does
-/// not wait, so those frames keep their normal submit overlap.
+/// Headless compiles every pipeline queued for this thread, then allows draw lookup
+/// to compile a newly requested pipeline before the draw is counted pending. A
+/// windowed software adapter compiles at most one and bounds its idle wait to a
+/// single short budget. On DX12 WARP, compiling during `Queue::submit` hangs the
+/// render thread and can cache a pipeline that under-draws. If the driver does not
+/// go idle, this frame only collects builds that already finished and leaves the
+/// queue for a later frame. Real GPUs read the attach-time flag and skip the
+/// build-queue lock.
 pub(in crate::runtime) fn prepare_assets_for_schedule(
     backend: &mut RenderBackend,
     gpu: &GpuContext,
 ) {
     backend.sync_material_shader_hot_reload();
-    if backend.material_pipelines_compile_on_render_thread()
-        && crate::materials::render_thread_builds_queued()
-        && !gpu.wait_until_idle_for_pipeline_compile()
-    {
-        backend.drain_finished_pipeline_builds();
+    if !backend.material_pipelines_compile_on_render_thread() {
+        backend.drain_pipeline_build_completions();
         return;
+    }
+    crate::materials::set_render_thread_inline_compile(false);
+    let full_queue = backend.compiles_full_render_thread_queue();
+    let queued = crate::materials::render_thread_builds_queued();
+    if full_queue || queued {
+        let idle = if full_queue {
+            gpu.wait_until_idle_for_pipeline_compile()
+        } else {
+            gpu.wait_until_idle_for_windowed_software_pipeline_compile()
+        };
+        if !idle {
+            backend.drain_finished_pipeline_builds();
+            return;
+        }
+    }
+    if full_queue {
+        crate::materials::set_render_thread_inline_compile(true);
     }
     backend.drain_pipeline_build_completions();
 }
@@ -315,6 +329,7 @@ fn execute_prepared_views_with_cleanup<'a>(
     let result = schedule.run_phase(CpuRenderPhase::CommandRecord, || {
         submit_frame.execute_after_resource_prepare(gpu, scene, backend)
     });
+    crate::materials::set_render_thread_inline_compile(false);
     schedule.run_phase(CpuRenderPhase::Cleanup, || cleanup(backend));
     result
 }
