@@ -39,6 +39,42 @@ pub struct MeshUpload {
     pub submeshes: Vec<SubmeshBufferDescriptor>,
     /// Conservative axis-aligned bounds.
     pub bounds: RenderBoundingBox,
+    /// Skeleton size (`MeshUploadData.bone_count`); zero for rigid meshes.
+    pub bone_count: i32,
+    /// Bone-weight tuple count (`MeshUploadData.bone_weight_count`); zero for rigid meshes.
+    pub bone_weight_count: i32,
+}
+
+impl MeshUpload {
+    /// Turns a rigid upload into a one-bone skinned mesh: every vertex carries one influence
+    /// `(weight 1.0, bone 0)` and the single bind pose is the identity, so the posed mesh equals
+    /// the rest mesh while the bone transform's world position places it.
+    #[must_use]
+    pub fn with_single_bone_skin(mut self) -> Self {
+        let vertex_count = self.vertex_count.max(0) as usize;
+        let counts_start =
+            self.payload.vertex_stride_bytes * vertex_count + self.payload.index_region_bytes;
+        if let Some(counts) = self
+            .payload
+            .bytes
+            .get_mut(counts_start..counts_start + vertex_count)
+        {
+            counts.fill(1);
+        }
+        for _ in 0..vertex_count {
+            self.payload.bytes.extend_from_slice(&1.0f32.to_le_bytes());
+            self.payload.bytes.extend_from_slice(&0i32.to_le_bytes());
+        }
+        let identity: [f32; 16] = [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ];
+        for value in identity {
+            self.payload.bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        self.bone_count = 1;
+        self.bone_weight_count = self.vertex_count;
+        self
+    }
 }
 
 /// Backwards-compatible alias for the historical name.
@@ -143,6 +179,8 @@ pub fn pack_mesh_upload(
         vertex_attributes,
         submeshes,
         bounds,
+        bone_count: 0,
+        bone_weight_count: 0,
     })
 }
 
@@ -185,8 +223,8 @@ pub fn make_mesh_upload_data(
         high_priority: false,
         buffer: buffer_descriptor,
         vertex_count: upload.vertex_count,
-        bone_weight_count: 0,
-        bone_count: 0,
+        bone_weight_count: upload.bone_weight_count,
+        bone_count: upload.bone_count,
         index_buffer_format: upload.index_buffer_format,
         vertex_attributes: upload.vertex_attributes.clone(),
         submeshes: upload.submeshes.clone(),
