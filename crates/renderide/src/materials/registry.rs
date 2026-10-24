@@ -74,8 +74,16 @@ impl MaterialRegistry {
             MaterialPipelineLookup::Ready(p) => {
                 Some(MaterialPipelineResolution::new(kind.clone(), p))
             }
-            MaterialPipelineLookup::Pending if matches!(kind, RasterPipelineKind::Null) => None,
-            MaterialPipelineLookup::Pending => self.null_pipeline_fallback(desc, variant),
+            MaterialPipelineLookup::Pending if matches!(kind, RasterPipelineKind::Null) => {
+                super::pipeline_frame_readiness::note_pending_pipeline_draw();
+                None
+            }
+            MaterialPipelineLookup::Pending => {
+                // A compiled Null stand-in is still the wrong program. Count the frame
+                // so the harness waits for the requested pipeline.
+                super::pipeline_frame_readiness::note_pending_pipeline_draw();
+                self.null_pipeline_fallback(desc, variant)
+            }
             MaterialPipelineLookup::Failed(err) if matches!(kind, RasterPipelineKind::Null) => {
                 match shader_asset_id {
                     Some(id) => {
@@ -123,7 +131,10 @@ impl MaterialRegistry {
             source.source_override,
         ) {
             MaterialPipelineLookup::Ready(p) => Some(MaterialPipelineResolution::new(fallback, p)),
-            MaterialPipelineLookup::Pending => None,
+            MaterialPipelineLookup::Pending => {
+                super::pipeline_frame_readiness::note_pending_pipeline_draw();
+                None
+            }
             MaterialPipelineLookup::Failed(e) => {
                 logger::error!("fallback Null pipeline build failed: {e}");
                 None

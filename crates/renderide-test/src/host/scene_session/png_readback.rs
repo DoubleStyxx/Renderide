@@ -144,6 +144,18 @@ impl PngStabilityState {
     }
 }
 
+/// Whether the frame's pipeline sidecar says every requested material pipeline was ready.
+///
+/// Missing, empty, or non-zero sidecars are not ready. A Null fallback drawn while the
+/// requested shader is still compiling is a positive count, so a colored partial frame
+/// is rejected the same way a clear frame is.
+fn pipeline_frame_is_ready(path: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(path.with_extension("pipeline-pending")) else {
+        return false;
+    };
+    text.trim() == "0"
+}
+
 /// Whether the PNG at `path` decodes to a flat single-color image.
 fn png_is_flat(path: &Path) -> bool {
     crate::image_io::load_rgba(path).is_ok_and(|img| crate::golden::is_flat_image(&img))
@@ -178,6 +190,7 @@ pub(super) fn run_lockstep_until_png_stable(
     let deadline = Instant::now() + wait_timing.overall_timeout.max(deadline_floor);
     let mut last_log_at = Instant::now();
     let mut flat_candidate_seen = false;
+    let mut pending_pipeline_seen = false;
 
     while Instant::now() < deadline {
         let _ = lockstep.tick(queues);
@@ -208,6 +221,18 @@ pub(super) fn run_lockstep_until_png_stable(
                     );
                 }
                 flat_candidate_seen = true;
+                pending_pipeline_seen |= !pipeline_frame_is_ready(output_path);
+                state.reject_candidate();
+                std::thread::sleep(timing::POLL_INTERVAL);
+                continue;
+            }
+            if !pipeline_frame_is_ready(output_path) {
+                if !pending_pipeline_seen {
+                    logger::info!(
+                        "Session: stable PNG was drawn while a material pipeline was still compiling; waiting for a ready frame"
+                    );
+                }
+                pending_pipeline_seen = true;
                 state.reject_candidate();
                 std::thread::sleep(timing::POLL_INTERVAL);
                 continue;
@@ -235,6 +260,12 @@ pub(super) fn run_lockstep_until_png_stable(
         std::thread::sleep(timing::POLL_INTERVAL);
     }
 
+    if pending_pipeline_seen {
+        return Err(HarnessError::PipelineNotReady {
+            path: PathBuf::from(output_path),
+            wait: wait_timing.overall_timeout,
+        });
+    }
     if flat_candidate_seen {
         // Never rendered anything but a flat frame: hand it to the golden check so the
         // failure is reported as "flat single color" rather than "missing PNG".
@@ -401,5 +432,19 @@ mod tests {
             PngStabilityVerdict::Pending
         );
         assert!(s.last_seen_mtime().is_none());
+    }
+
+    #[test]
+    fn pipeline_sidecar_zero_is_ready_and_anything_else_waits() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let png = dir.path().join("actual.png");
+        assert!(!super::pipeline_frame_is_ready(&png));
+        let sidecar = png.with_extension("pipeline-pending");
+        std::fs::write(&sidecar, "2\n").expect("write pending");
+        assert!(!super::pipeline_frame_is_ready(&png));
+        std::fs::write(&sidecar, "0\n").expect("write ready");
+        assert!(super::pipeline_frame_is_ready(&png));
+        std::fs::write(&sidecar, "nope\n").expect("write garbage");
+        assert!(!super::pipeline_frame_is_ready(&png));
     }
 }

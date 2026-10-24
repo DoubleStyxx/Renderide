@@ -33,6 +33,16 @@ pub enum HarnessError {
         /// Maximum wall-clock wait before giving up.
         wait: Duration,
     },
+    /// A stable PNG arrived, but every candidate frame still had a compiling material pipeline.
+    #[error(
+        "headless PNG at {path} stayed pipeline-pending for {wait:?}; capture refused frames drawn before the requested shaders finished compiling"
+    )]
+    PipelineNotReady {
+        /// Output PNG path the renderer was instructed to write.
+        path: PathBuf,
+        /// Maximum wall-clock wait before giving up.
+        wait: Duration,
+    },
     /// Reading or decoding the PNG output failed.
     #[error("read png {path}: {source}")]
     PngRead {
@@ -155,6 +165,18 @@ mod tests {
         assert!(s.contains("SSIM=0.5000"));
         assert!(s.contains("0.9500"));
         assert!(s.contains("diff.png"));
+    }
+
+    #[test]
+    fn display_pipeline_not_ready_includes_path_and_wait() {
+        let e = HarnessError::PipelineNotReady {
+            path: PathBuf::from("target/headless.png"),
+            wait: Duration::from_secs(9),
+        };
+        let s = e.to_string();
+        assert!(s.contains("headless.png"));
+        assert!(s.contains("pipeline-pending"));
+        assert!(s.contains('9'));
     }
 
     #[test]

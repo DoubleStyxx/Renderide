@@ -20,11 +20,18 @@ pub(super) fn readback_and_write_png_atomically(
     gpu: &GpuContext,
     output_path: &Path,
     shadow_atlas_passes: Option<(u32, u64)>,
+    pending_pipeline_draws: u64,
 ) -> Result<(), HeadlessReadbackError> {
     let color_texture = gpu
         .headless_color_texture()
         .ok_or(HeadlessReadbackError::NoOffscreenTexture)?;
-    readback_color_texture(gpu, color_texture, output_path, shadow_atlas_passes)
+    readback_color_texture(
+        gpu,
+        color_texture,
+        output_path,
+        shadow_atlas_passes,
+        pending_pipeline_draws,
+    )
 }
 
 /// Copies one color texture to CPU memory and writes a PNG atomically.
@@ -33,6 +40,7 @@ fn readback_color_texture(
     color_texture: &wgpu::Texture,
     output_path: &Path,
     shadow_atlas_passes: Option<(u32, u64)>,
+    pending_pipeline_draws: u64,
 ) -> Result<(), HeadlessReadbackError> {
     let layout = compute_readback_layout(color_texture.size(), gpu.limits().max_buffer_size())?;
     let readback = create_readback_buffer(gpu, &layout);
@@ -54,6 +62,7 @@ fn readback_color_texture(
         layout.height,
         output_path,
         shadow_atlas_passes,
+        pending_pipeline_draws,
     )
 }
 
@@ -64,7 +73,7 @@ pub(crate) fn readback_texture_png(
     color_texture: &wgpu::Texture,
     output_path: &Path,
 ) -> Result<(), HeadlessReadbackError> {
-    readback_color_texture(gpu, color_texture, output_path, None)
+    readback_color_texture(gpu, color_texture, output_path, None, 0)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -199,6 +208,7 @@ fn write_png_atomically(
     height: u32,
     output_path: &Path,
     shadow_atlas_passes: Option<(u32, u64)>,
+    pending_pipeline_draws: u64,
 ) -> Result<(), HeadlessReadbackError> {
     if let Some(parent) = output_path.parent()
         && !parent.as_os_str().is_empty()
@@ -215,6 +225,8 @@ fn write_png_atomically(
         // Publish the pass count before the PNG rename so a stable PNG has its stat.
         publish_atlas_pass_record(output_path, passes)?;
     }
+    // Publish before the rename so a stable PNG always has its pipeline count.
+    publish_pipeline_pending_record(output_path, pending_pipeline_draws)?;
     std::fs::rename(&tmp_path, output_path).map_err(HeadlessReadbackError::Io)?;
     if shadow_atlas_passes.is_some() {
         // `rename` keeps the temp PNG's mtime, which is earlier than the sidecar write.
@@ -244,6 +256,22 @@ fn align_atlas_pass_sidecar_mtime(output_path: &Path) -> Result<(), HeadlessRead
         .open(&sidecar)
         .and_then(|file| file.set_modified(png_mtime))
         .map_err(HeadlessReadbackError::Io)
+}
+
+/// Writes the pending-pipeline draw count beside the PNG.
+///
+/// `0` means every requested material pipeline used by that frame was ready.
+/// A positive count means at least one draw observed a pipeline that was still compiling,
+/// including draws that fell back to Null while the requested program was pending.
+fn publish_pipeline_pending_record(
+    output_path: &Path,
+    pending_pipeline_draws: u64,
+) -> Result<(), HeadlessReadbackError> {
+    let sidecar = output_path.with_extension("pipeline-pending");
+    let tmp = sidecar.with_extension("pipeline-pending.tmp");
+    std::fs::write(&tmp, format!("{pending_pipeline_draws}\n"))
+        .map_err(HeadlessReadbackError::Io)?;
+    std::fs::rename(&tmp, &sidecar).map_err(HeadlessReadbackError::Io)
 }
 
 /// Writes `this_frame total` beside the PNG and appends the same line to the pass log.
@@ -420,12 +448,16 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let png = dir.path().join("frame.png");
         let pixels = [9u8, 8, 7, 255];
-        super::write_png_atomically(&pixels, 1, 1, &png, None).expect("png only");
+        super::write_png_atomically(&pixels, 1, 1, &png, None, 0).expect("png only");
         assert!(png.is_file());
         assert!(!png.with_extension("atlas-passes").exists());
         assert!(!png.with_extension("atlas-pass-log").exists());
+        assert_eq!(
+            std::fs::read_to_string(png.with_extension("pipeline-pending")).expect("ready sidecar"),
+            "0\n"
+        );
 
-        super::write_png_atomically(&pixels, 1, 1, &png, Some((1, 4))).expect("with count");
+        super::write_png_atomically(&pixels, 1, 1, &png, Some((1, 4)), 3).expect("with count");
         assert_eq!(
             std::fs::read_to_string(png.with_extension("atlas-passes")).expect("sidecar"),
             "1 4\n"
@@ -433,6 +465,11 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(png.with_extension("atlas-pass-log")).expect("log"),
             "1 4\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(png.with_extension("pipeline-pending"))
+                .expect("pending sidecar"),
+            "3\n"
         );
     }
 
@@ -444,7 +481,7 @@ mod tests {
         let pixels = [1u8, 2, 3, 255];
         let _guard = FailStampGuard;
         super::FAIL_ATLAS_SIDECAR_MTIME_STAMP.store(true, super::Ordering::Relaxed);
-        super::write_png_atomically(&pixels, 1, 1, &png, Some((0, 2))).expect("png published");
+        super::write_png_atomically(&pixels, 1, 1, &png, Some((0, 2)), 0).expect("png published");
         assert!(png.is_file());
         assert_eq!(
             std::fs::read_to_string(png.with_extension("atlas-passes")).expect("sidecar"),
