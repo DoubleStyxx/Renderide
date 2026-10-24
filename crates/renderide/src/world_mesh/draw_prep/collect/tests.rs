@@ -596,6 +596,7 @@ fn collect_admitted_prepared_spaces(
         host_camera: &host_camera,
         hi_z: None,
         hi_z_temporal: None,
+        hysteresis: None,
     };
     let mut ctx = test_draw_context(
         TestDrawContextResources {

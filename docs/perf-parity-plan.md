@@ -44,7 +44,7 @@ Camera, resolution, warmup and frame counts are part of the scene definition: S1
 - `renderide-test check-suite`: golden images (correctness, not perf).
 - Allocation checks (per-frame heap) via the PR's own Criterion or test, as required by the issue templates.
 
-Known limits on lavapipe: absolute ms are not comparable across machines; GPU pass times measure a CPU rasteriser; the shared VM adds roughly 5-10% run-to-run noise on sub-millisecond frames (measured, see the baseline doc `docs/perf-baseline-2026-10-23.md`, which lives on PR #141 / branch `gauge/perf-baseline` (not yet on master) at https://github.com/DoubleStyxx/Renderide/blob/gauge/perf-baseline/docs/perf-baseline-2026-10-23.md, and section 5), so the gate uses repeats and a median.
+Known limits on lavapipe: absolute ms are not comparable across machines; GPU pass times measure a CPU rasteriser; on sub-millisecond frames the shared VM gives single-run p95 spreads of 15-30% inside one 5-run invocation and moves the 5-run median 5-10% between invocations (measured; the data and method are in section 5 and its subsection 5.1), so the gate uses 9-run medians, a separate flag threshold (5%) and fail bar (10%), and a confirm with Mann-Whitney U rank tests (section 9, item 4).
 
 ### Needs a real GPU (and the Unity reference)
 
@@ -89,8 +89,27 @@ cargo bench --locked -p renderide-bench
 ## 5. Noise floor (measured, lavapipe, 8 vCPU shared VM)
 
 - Criterion: the same binary run twice, 9 benches apart, differs by 1-3% on the 50-250 us benches and by up to 7-20% on the 35 ns and 190-220 us (`bind_groups/miss_rebuild`) benches. Use the median of at least 3 interleaved runs and only call a regression above max(5%, observed spread).
-- framebench CI config on the 1-4 draw scenes: ~0.23-0.31 ms, repeat spread of about 5-10% on p50 and p95. The first run after a quiet period is consistently slower; discard run 1 or warm up with a throwaway run.
+- framebench CI config on the 1-4 draw scenes: ~0.23-0.31 ms. Per-run p95 spread inside one 5-run invocation is 15-30% (single runs up to ~1.5x apart); the 5-run median moves about 5-10% between invocations. The `frame-bench.yml` default is therefore `runs=9` per pass and per confirm round. The first run after a quiet period is consistently slower; discard run 1 or warm up with a throwaway run.
 - Therefore the ~2% floor quoted informally applies only to the largest scenes (S1/S2) and to Criterion benches over ~50 us. The gate below uses S1/S2, where frame time is milliseconds and relative noise is smaller.
+
+### 5.1 Evidence for the noise figures
+
+Machine for every number below: shared cloud Linux VM (Debian 13), 8 virtualised Intel Xeon vCPUs, 15 GB RAM, no physical GPU. wgpu 30 / Vulkan on lavapipe (llvmpipe LLVM 19.1.7, Mesa 25.0.7-2+deb13u1, `device_type: Cpu`), rustc 1.99.1, `--locked`, release build. Framebench CI config throughout: 256x256, warmup 10, frames 20, `RAYON_NUM_THREADS=2`, `taskset` to 2 cores (the `frame-bench.yml` defaults), and runs 5 per invocation unless a row says otherwise. The `frame-bench.yml` default is now `runs=9` (section 9, item 4); the 5-run figures below are why. Gate metric `cpu_frame_ms.p95` is the median over runs of each run's p95.
+
+Method: build base and head with the same toolchain, run them back to back (interleaved rounds when confirming) in one session on the same cores, and use the spread between repeats of the *same* binary as the noise floor. Spread is `(max - min) / median`.
+
+| Measurement (all on master or a renderer-neutral change) | Scenario | Result |
+|---|---|---|
+| Master `aafcb720`, two identical CI-config invocations A and B | `unlit_sphere` | p50 0.242 / 0.232 ms, p95 0.275 / 0.273 ms |
+| same | `multi_primitive_unlit` | p50 0.264 / 0.268 ms, p95 0.313 / 0.318 ms (A vs B within 1.7%) |
+| same, single runs inside one invocation | both | per-run p95 up to ~1.5x apart; only medians of 5 runs are usable |
+| `0104fee7` (base) vs `66421146` (head), 5 interleaved rounds x 5 runs | `unlit_sphere` | base per-run p95 0.244-0.297 ms (spread 19.8% around a 0.267 ms median); head median 0.262 ms (-1.7%) |
+| same | `secondary_camera_copy` | base per-run p95 0.638-0.861 ms (spread 29.7%); head median -4.6% |
+| Later fork sessions (#45-#184 gates), base-vs-base rounds | 1-4 draw scenes; `lights_shadows` | 1-4 draw scenes: round medians move about 5-10%, p95 round spread up to ~30%; `lights_shadows` is bimodal (round values 0.58-0.93 ms) |
+| GitHub `Frame bench` run [40050133923](https://github.com/DoubleStyxx/Renderide/actions/runs/40050133923) on #178 head `03255af9` (docs/test-only change, no renderer code) | `unlit_sphere` | p50 +2.94%, p95 **+11.46%** (raw gate FAIL); `multi_primitive_unlit` p95 +1.52% |
+| Re-dispatch [40051478539](https://github.com/DoubleStyxx/Renderide/actions/runs/40051478539), same SHAs, `runs=9` | `unlit_sphere` / `multi_primitive_unlit` | p95 -12.02% / -17.11%, p50 -8.68% / -17.23% (pass) |
+
+Reading: on sub-millisecond scenes, single runs of the gate metric spread 15-30% (one slow run of up to ~1.5x is common) and the 5-run median moves 5-10% between invocations, so one raw p95 delta near 10% is not evidence of a regression. The base's spread must not be the threshold either: a single slow base run (spread 50%) would then hide a real +17% or +40% regression. The `frame-bench.yml` gate therefore flags on the median delta alone, at a flag threshold (5%) below the fail bar (10%) so that the 5-10% invocation shift does not hide a regression at the bar from the first pass. Every flag is settled by confirm rounds and Mann-Whitney U tests against the fail bar (section 9, item 4).
 
 ## 6. How to attach numbers (copy-paste block for PR descriptions)
 
@@ -113,7 +132,7 @@ cargo bench --locked -p renderide-bench
 - Needs real GPU to judge: <yes/no, what>
 ```
 
-CI shortcut: Actions -> "Frame bench" -> Run workflow with `base_ref=master`, `head_ref=<branch>`, `scenarios=many_static_meshes,lights_shadows` (input added on this branch), `runs=5`.
+CI shortcut: Actions -> "Frame bench" -> Run workflow with `base_ref=master`, `head_ref=<branch>`, `scenarios=many_static_meshes,lights_shadows` (input added on this branch), other inputs at their defaults (`runs=9`).
 
 ## 7. Parity table (to be filled; one row per scene and machine)
 
@@ -148,10 +167,29 @@ Thresholds are relative to master measured on the same box in the same session. 
 
 Use the existing manual workflow (`.github/workflows/frame-bench.yml`, `workflow_dispatch` with `base_ref` / `head_ref`); it builds both refs on one runner, pins to 2 CPUs and compares medians of per-run percentiles. Proposed changes (this branch includes the workflow change, which is additive):
 
-1. **`scenarios` input** (done on this branch): comma-separated list of `[a-z0-9_]` names, passed through `env:` (not interpolated into the script) and regex-validated like `threads`, then forwarded as repeated `--scenario`. **Each tree is measured with its own `renderide-framebench` binary** (base on base's, head on head's), as before. A scenario that the base tree does not define (checked against its `scenario.rs`) is run on head only; `compare` then shows it as `missing` (base N/A) and it cannot fail the gate. If none of the requested scenarios exist on base, the relative gate is skipped and the summary says so.
+1. **`scenarios` input** (done on this branch): comma-separated list of `[a-z0-9_]` names, passed through `env:` (not interpolated into the script) and regex-validated like `threads`, then forwarded as repeated `--scenario`. **Each tree is measured with its own `renderide-framebench` binary** (base on base's, head on head's), as before. A scenario that the base tree does not define (checked against its `scenario.rs`) is run on head only and shows as `base N/A`; it cannot fail the gate. If none of the requested scenarios exist on base, the relative gate is skipped and the summary says so. A requested scenario that the head tree does not define is skipped and shows as `head N/A, skipped`; the job fails only when none of the requested scenarios exist on head.
 2. **Default gate set**: `unlit_sphere,multi_primitive_unlit,many_static_meshes,lights_shadows`. The tiny scenes catch gross regressions; S1/S2 (milliseconds) are the ones with a usable signal.
-3. **Thresholds**: `--gate cpu_frame_ms.p50 --gate cpu_frame_ms.p95 --threshold 10` for scenes under 1 ms (noise 5-10%), `--threshold 5` for S1/S2. Also gate on `draw_calls.p50` and `upload_bytes.p50` with threshold 0 (these are deterministic; any change must be explained). **Limitation:** `renderide-framebench compare` takes ONE `--threshold` that applies to every `--gate` metric of that invocation (and to all scenarios in the report); it has no per-metric or per-scenario thresholds. Until per-metric support exists (follow-up: accept `--gate metric=percent` in `compare.rs`), run `compare` more than once with different `--gate`/`--threshold` pairs (timing metrics at 5-10, `draw_calls.p50`/`upload_bytes.p50` at 0) and fail if any invocation fails; the table in section 8 gives the intended threshold per metric, not what a single invocation can express.
-4. **Repeat policy**: `runs=5`; re-dispatch once before treating a failure as real (the first run after idle is slow). Add `workflow_dispatch` input `repeat_on_fail` later if needed.
+3. **Thresholds**: `--gate cpu_frame_ms.p50 --gate cpu_frame_ms.p95 --threshold 10` for scenes under 1 ms (5-run medians move 5-10%; single runs spread 15-30%), `--threshold 5` for S1/S2. Also gate on `draw_calls.p50` and `upload_bytes.p50` with threshold 0 (these are deterministic; any change must be explained). **Limitation:** `renderide-framebench compare` takes ONE `--threshold` that applies to every `--gate` metric of that invocation (and to all scenarios in the report); it has no per-metric or per-scenario thresholds. Until per-metric support exists (follow-up: accept `--gate metric=percent` in `compare.rs`), run `compare` more than once with different `--gate`/`--threshold` pairs (timing metrics at 5-10, `draw_calls.p50`/`upload_bytes.p50` at 0) and fail if any invocation fails; the table in section 8 gives the intended threshold per metric, not what a single invocation can express.
+4. **Repeat policy** (done): `runs=9`, `confirm_rounds=3`, `flag_threshold=5`, `fail_threshold=10`. The gate (`scripts/ci/frame_bench_gate.py`; its docstring is the full rule) works on `delta` = percent change of the median of per-run `cpu_frame_ms.p95`.
+   - **First pass**: a scenario is flagged when `delta > flag_threshold` (5). No spread condition. A flag alone never fails; the flag threshold only picks what to re-measure.
+   - **Confirm**: flagged scenarios are re-measured for `confirm_rounds` rounds (base/head, head/base, ... interleaved, `runs` runs each, flagged scenarios only). A scenario fails when EITHER:
+     - (a) **pooled**: on all runs, first pass plus confirm (36 vs 36 at the defaults), `delta > fail_threshold` (10) **and** a one-sided Mann-Whitney U test (head slower) gives `p < 0.05`; or
+     - (b) **confirm-only**: on the confirm rounds alone (27 vs 27), `delta > fail_threshold` **and** one-sided Mann-Whitney `p < 0.05`.
+     Path (b) keeps the confirm strict: confirm rounds that reproduce a regression above the bar on their own fail even when odd first-pass runs dilute the pooled data. The test is pure Python: exact enumeration up to 20000 rank assignments, else the normal approximation with tie correction and continuity correction; deterministic.
+   - **`confirm_rounds=0`**: the first pass runs at the fail bar, so a scenario fails only when its first-pass `delta > fail_threshold`. A delta between 5 and 10 passes: it is under the policy bar.
+   - **Inputs**: `flag_threshold` and `fail_threshold` replace `threshold`. The old `threshold` input is kept as a deprecated alias of `fail_threshold` (default empty). When set, it overrides `fail_threshold`, lowers `flag_threshold` to it if needed, and logs a warning. The gate CLI mirrors this: `--flag-threshold` (default 5), `--fail-threshold` (default 10), and `--threshold` as a deprecated alias of `--fail-threshold` that also lowers `--flag-threshold` to it, with a warning, when the flag is larger. An explicit `flag_threshold > fail_threshold` is an error. The gate also exits 2 on bad input: a head report with zero scenarios, a NaN or infinite value, or a base median of 0.
+   - Mann-Whitney assumes independent runs; the per-invocation shift above breaks that, which interleaving only partly offsets. A seeded simulation in `scripts/ci/test_frame_bench_gate.py` models it: lognormal per-run noise with sigma 6%, a 10% chance of a 1.15-1.5x slow run, and a per-invocation shift with sigma 3%, which gives a median 5-run spread of about 18%.
+   - **Measured at the defaults** (4000 seeded trials per point):
+
+     | true change | gate result |
+     |---|---|
+     | 0% | passes 99.925% |
+     | +10% | fails 47.65% (10% is the bar itself, so about 50% is expected) |
+     | +12% | fails 69.725% |
+     | +15% | fails 90.0% |
+
+     Flag 5 was chosen: at flag 6 a true +15% failed 87.875%, under the 90% target, with the same 0% pass rate. The earlier single-threshold rule at `runs=5` failed a true +15% only 70% of the time.
+   - The per-metric `renderide-framebench compare` table is still printed at `fail_threshold`, as information.
 5. **Criterion** is a separate, non-gating job: `cargo bench -p renderide-bench` for base and head back to back, base twice, report only (Criterion noise on shared runners is 5-20%). Promote to a gate only for benches with a stable spread below 3%.
 6. **When to run**: manually on PRs labelled `perf` and on every PR touching `crates/renderide/src/{world_mesh,render_graph,passes,gpu,materials,occlusion}`; the repo's `pull_request` trigger stays off until runner noise is characterised (open question for Prism).
 7. **Real-GPU nightly** (future, needs a self-hosted GPU runner): same commands as section 4 with a stored artifact per commit and a trend chart; gate on GPU ms p95 at 10%.

@@ -10,7 +10,8 @@ use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use renderide_bench::{
     BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload,
     CAMERA_CLEAR_LOAD_OP_CAMERAS, CULL_BATCH, CullWorkload, DOUBLE_BUFFER_CAMERAS,
-    DoubleBufferWorkload, KeywordVariantCacheWorkload, MATERIAL_UNIFORM_BATCH,
+    DoubleBufferWorkload, HYSTERESIS_BATCH, HYSTERESIS_HISTORY_COUNTS, HysteresisCullWorkload,
+    HysteresisHistoryWorkload, KeywordVariantCacheWorkload, MATERIAL_UNIFORM_BATCH,
     MaterialUniformUpdateWorkload, SHADOW_CHURN_CASTERS, SHADOW_CHURN_LIGHTS, ShadowChurnWorkload,
     SkinnedGeometryWorkload, TRANSFORM_BATCH, TransformWorkload, WORLD_MATRIX_NODES,
     WorldMatrixWorkload, camera_clear_load_op_checksum, camera_clear_load_op_inputs,
@@ -38,6 +39,34 @@ fn culling(c: &mut Criterion) {
         b.iter(|| black_box(skinned.fold()));
     });
     group.finish();
+}
+
+fn hysteresis_classification(c: &mut Criterion) {
+    let workload = HysteresisCullWorkload::standard();
+    {
+        let mut group = c.benchmark_group("hysteresis_classification");
+        group.throughput(Throughput::Elements(
+            u64::try_from(HYSTERESIS_BATCH).unwrap_or(0),
+        ));
+        group.bench_function("decide_visibility", |b| {
+            b.iter(|| black_box(workload.kept_count()));
+        });
+        group.finish();
+    }
+
+    let mut history = c.benchmark_group("hysteresis_history");
+    for count in HYSTERESIS_HISTORY_COUNTS {
+        for moving in [false, true] {
+            let mut workload = HysteresisHistoryWorkload::new(count, moving);
+            let _ = workload.step();
+            let label = if moving { "moving" } else { "stable" };
+            history.throughput(Throughput::Elements(u64::try_from(count).unwrap_or(0)));
+            history.bench_function(format!("{count}_{label}"), |b| {
+                b.iter(|| black_box(workload.step()));
+            });
+        }
+    }
+    history.finish();
 }
 
 fn world_matrices(c: &mut Criterion) {
@@ -190,6 +219,7 @@ criterion_group!(
     cpu,
     transforms,
     culling,
+    hysteresis_classification,
     world_matrices,
     buffer_pool,
     render_texture_double_buffer,

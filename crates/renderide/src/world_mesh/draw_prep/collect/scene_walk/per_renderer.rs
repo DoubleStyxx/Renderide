@@ -19,9 +19,9 @@ use super::{
 /// `collect_order` is filled with a placeholder; the merge step in
 /// [`super::super::queue_draws_with_parallelism`] assigns the final stable index after
 /// per-chunk results are merged.
-pub(super) fn push_draws_for_renderer(
-    ctx: &DrawCollectionInputs<'_>,
-    acc: &mut DrawCollectionAccumulator<'_>,
+pub(super) fn push_draws_for_renderer<'a>(
+    ctx: &DrawCollectionInputs<'a>,
+    acc: &mut DrawCollectionAccumulator<'_, 'a>,
     draw: StaticMeshDrawSource<'_>,
     cache: &FrameMaterialBatchCache,
 ) {
@@ -78,10 +78,9 @@ pub(super) fn push_draws_for_renderer(
 
     // Cull hoist: when a renderer expands to multiple material slots, every slot's cull would
     // otherwise re-test the same world AABB / Hi-Z. Compute it once and feed every slot the
-    // cached outcome. For single-slot renderers (the common case for static scenery) the hoist
-    // has no work to amortize, so let `push_one_slot_draw` cull inline via its `None` branch.
+    // cached outcome. Single-slot renderers cull inline, through the same chunk cache.
     let cached_cull = if n_slot > 1 {
-        compute_cached_cull(ctx, &draw, is_overlay)
+        compute_cached_cull(ctx, &draw, is_overlay, &mut acc.cull_cache)
     } else {
         None
     };
@@ -120,7 +119,7 @@ pub(super) fn push_draws_for_renderer(
 /// Applies the per-view transform filter and the renderer's transform-scale gate.
 fn renderer_passes_view_filters(
     ctx: &DrawCollectionInputs<'_>,
-    acc: &DrawCollectionAccumulator<'_>,
+    acc: &DrawCollectionAccumulator<'_, '_>,
     draw: &StaticMeshDrawSource<'_>,
 ) -> bool {
     if let Some(f) = ctx.view.transform_filter {

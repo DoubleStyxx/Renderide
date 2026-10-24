@@ -79,6 +79,7 @@ fn offscreen_skinned_slots_drop_and_extreme_pose_stays() {
         host_camera: &host_camera,
         hi_z: None,
         hi_z_temporal: None,
+        hysteresis: None,
     };
 
     let onscreen_min = Vec3::new(-0.25, -0.25, -0.25);
@@ -213,6 +214,7 @@ fn mono_cull(host_camera: &HostCameraFrame) -> WorldMeshCullInput<'_> {
         host_camera,
         hi_z: None,
         hi_z_temporal: None,
+        hysteresis: None,
     }
 }
 

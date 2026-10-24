@@ -8,6 +8,7 @@ use crate::materials::RasterFrontFace;
 use crate::scene::{RenderSpaceId, SkinnedMeshRenderer};
 use crate::shared::LayerType;
 
+use crate::occlusion::hysteresis::CasterRef;
 use crate::world_mesh::culling::{
     CpuCullFailure, MeshCullTarget, SpaceCullCache, mesh_world_geometry_for_cull_with_head,
 };
@@ -160,13 +161,23 @@ fn prepared_run_view_state<'a>(
         deformed_front_face_world_matrix = geom.front_face_world_matrix;
         if let Some(c) = ctx.view.culling {
             cull_stats.0 += run.len();
-            match cull_cache.cull_geometry(
+            match cull_cache.cull_geometry_for_caster(
                 geom,
                 ctx.scene_assets.scene,
                 first.space_id,
                 is_overlay,
                 c,
                 None,
+                Some(CasterRef {
+                    key: crate::occlusion::hysteresis::CasterKey::new(
+                        first.space_id,
+                        first.renderable_index,
+                        first.instance_id.0,
+                        first.node_id,
+                        first.skinned,
+                    ),
+                    mesh_asset_id: first.mesh_asset_id,
+                }),
             ) {
                 Err(CpuCullFailure::Frustum | CpuCullFailure::UiRectMask) => {
                     cull_stats.1 += run.len();

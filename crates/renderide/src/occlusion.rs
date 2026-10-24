@@ -3,6 +3,7 @@
 
 pub mod gpu;
 mod hook;
+pub(crate) mod hysteresis;
 mod system;
 
 pub use hook::OcclusionGraphHook;
