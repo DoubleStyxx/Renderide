@@ -217,7 +217,7 @@ pub(in crate::runtime) fn prepare_assets_for_schedule(
         return;
     }
     if backend.compiles_full_render_thread_queue() {
-        hold_hiz_after_render_thread_compile(backend, backend.drain_pipeline_build_completions());
+        backend.drain_pipeline_build_completions();
         return;
     }
     if crate::materials::render_thread_builds_queued()
@@ -226,18 +226,7 @@ pub(in crate::runtime) fn prepare_assets_for_schedule(
         backend.drain_finished_pipeline_builds();
         return;
     }
-    hold_hiz_after_render_thread_compile(backend, backend.drain_pipeline_build_completions());
-}
-
-/// A render-thread compile just finished, before this frame's cull.
-///
-/// Warmup can queue those builds without counting a pending draw, so the pending
-/// latch alone turns Hi-Z back on for the frame that spent the compile. Keep the
-/// casters for this cull and the next one.
-fn hold_hiz_after_render_thread_compile(backend: &RenderBackend, compiled: usize) {
-    if compiled > 0 {
-        backend.hold_hiz_for_render_thread_compile();
-    }
+    backend.drain_pipeline_build_completions();
 }
 
 /// Executes already prepared views through the draw, resource, command, and cleanup phases.
