@@ -78,12 +78,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
-      - name: Checkout candidate
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.head_ref != '' && inputs.head_ref || github.ref }}
-          path: head
-
       - name: Checkout gate script (dispatching ref)
         uses: actions/checkout@v7
         with:
@@ -91,8 +85,15 @@ jobs:
           path: tools
           sparse-checkout: scripts/ci
 
+      # Runs before any base/head tree is checked out.
       - name: Self-test gate script
         run: python3 -m unittest discover -s tools/scripts/ci -p 'test_frame_bench_gate.py' -v
+
+      - name: Checkout candidate
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.head_ref != '' && inputs.head_ref || github.ref }}
+          path: head
 
       - name: Checkout baseline
         uses: actions/checkout@v7
