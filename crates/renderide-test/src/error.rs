@@ -106,6 +106,11 @@ pub enum HarnessError {
     /// Unknown frame-benchmark scenario name.
     #[error("unknown frame bench scenario `{0}`")]
     UnknownBenchScenario(String),
+    /// `pbs_lit` passed on WARP. The known mismatch is supposed to fail until the frame matches.
+    #[error(
+        "pbs_lit_material_matrix passed on WARP; that case is an expected failure until the frame matches the golden (https://github.com/DoubleStyxx/Renderide/issues/212)"
+    )]
+    WarpPbsUnexpectedPass,
     /// One or more cases in the headless suite failed.
     #[error(
         "headless suite failed: {failed}/{total} cases failed; report written to {report_path}"

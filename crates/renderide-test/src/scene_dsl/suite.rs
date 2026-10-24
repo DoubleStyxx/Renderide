@@ -96,6 +96,15 @@ pub struct SuiteCaseReport {
     pub report_json: PathBuf,
     /// Error summary when the case failed before or during comparison.
     pub error: Option<String>,
+    /// A region color or band-floor criterion failed. False when the case passed or failed another way.
+    #[serde(default)]
+    pub color_or_band_failed: bool,
+    /// Pending-pipeline draws recorded for a compared frame. `None` was not recorded, and is not zero.
+    #[serde(default)]
+    pub pipeline_pending: Option<u64>,
+    /// Draws dropped before a compared frame. `None` was not recorded, and is not zero.
+    #[serde(default)]
+    pub dropped_draws: Option<u64>,
 }
 
 /// Resolves requested case names against the registry.
@@ -181,6 +190,9 @@ fn run_case_for_suite(case: &IntegrationCase, runner: &RunnerConfig) -> SuiteCas
             artifacts_dir: fallback_layout.root,
             report_json: fallback_layout.report_json,
             error: Some(err.to_string()),
+            color_or_band_failed: false,
+            pipeline_pending: None,
+            dropped_draws: None,
         },
     }
 }
@@ -195,6 +207,9 @@ fn run_case_for_update(case: &IntegrationCase, runner: &RunnerConfig) -> SuiteCa
             artifacts_dir: fallback_layout.root,
             report_json: fallback_layout.report_json,
             error: Some(err.to_string()),
+            color_or_band_failed: false,
+            pipeline_pending: None,
+            dropped_draws: None,
         },
     }
 }
@@ -208,6 +223,9 @@ fn report_from_update_outcome(case: &IntegrationCase, outcome: CaseRunOutcome) -
             artifacts_dir: outcome.layout.root,
             report_json: outcome.layout.report_json,
             error: Some(format!("golden update: {err}")),
+            color_or_band_failed: false,
+            pipeline_pending: None,
+            dropped_draws: None,
         },
     }
 }
@@ -257,10 +275,24 @@ fn promote_case_golden(
         artifacts_dir: outcome.layout.root.clone(),
         report_json: outcome.layout.report_json.clone(),
         error: None,
+        color_or_band_failed: false,
+        pipeline_pending: None,
+        dropped_draws: None,
     })
 }
 
 fn report_from_outcome(outcome: CaseRunOutcome) -> SuiteCaseReport {
+    let color_or_band_failed = outcome
+        .report
+        .evaluation
+        .as_ref()
+        .is_some_and(crate::warp_pbs::evaluation_failed_color_or_band);
+    let (pipeline_pending, dropped_draws) = if outcome.report.evaluation.is_some() {
+        let chunk = crate::warp_pbs::read_pipeline_pending_chunk(&outcome.layout.actual_png);
+        crate::warp_pbs::counts_for_compared_frame(chunk.as_deref())
+    } else {
+        (None, None)
+    };
     let error = if outcome.report.passed {
         None
     } else {
@@ -276,6 +308,9 @@ fn report_from_outcome(outcome: CaseRunOutcome) -> SuiteCaseReport {
         artifacts_dir: outcome.layout.root,
         report_json: outcome.layout.report_json,
         error,
+        color_or_band_failed,
+        pipeline_pending,
+        dropped_draws,
     }
 }
 
@@ -300,6 +335,9 @@ mod tests {
                 .join(name)
                 .join("report.json"),
             error: (!passed).then(|| "failed".to_string()),
+            color_or_band_failed: false,
+            pipeline_pending: None,
+            dropped_draws: None,
         }
     }
 

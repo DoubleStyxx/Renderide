@@ -16,5 +16,6 @@ pub mod scene;
 pub mod scene_dsl;
 
 mod image_io;
+mod warp_pbs;
 
 pub use error::HarnessError;
