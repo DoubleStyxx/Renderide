@@ -9,8 +9,8 @@
 
 use std::hash::{Hash, Hasher};
 use std::num::{NonZeroU32, NonZeroUsize};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
 
 use ahash::{AHasher, RandomState};
 use hashbrown::{HashMap, HashSet};
@@ -32,6 +32,10 @@ use crate::materials::{
 };
 
 use super::pipeline_build_error::PipelineBuildError;
+use super::pipeline_compile::{
+    PipelineBuildOutcome, PipelineBuildRequest, PipelineBuildResources,
+    drain_render_thread_pipeline_builds, spawn_pipeline_build,
+};
 use super::raster_pipeline::MaterialPipelineDesc;
 
 /// Maximum raster pipelines retained (LRU eviction).
@@ -119,7 +123,7 @@ pub type MaterialPipelineSet = Arc<[wgpu::RenderPipeline]>;
 pub(super) enum MaterialPipelineLookup {
     /// The requested pipeline set is available for this frame.
     Ready(MaterialPipelineSet),
-    /// A background worker is building the requested pipeline set.
+    /// The requested pipeline set is still compiling.
     Pending,
     /// The requested pipeline failed to build; callers may use a fallback.
     Failed(String),
@@ -205,29 +209,6 @@ impl PipelineWarmupDedupeCounters {
     }
 }
 
-struct PipelineBuildRequest {
-    key: MaterialPipelineCacheKey,
-    kind: RasterPipelineKind,
-    desc: MaterialPipelineDesc,
-    variant: MaterialPipelineVariantSpec,
-    /// Optional WGSL source override loaded by development hot reload.
-    wgsl_override: Option<Arc<str>>,
-    resources: PipelineBuildResources,
-    tx: crossbeam_channel::Sender<PipelineBuildOutcome>,
-}
-
-struct PipelineBuildResources {
-    shader_module_cache: Arc<ShaderModuleCache>,
-    device: Arc<wgpu::Device>,
-    limits: Arc<crate::gpu::GpuLimits>,
-}
-
-struct PipelineBuildOutcome {
-    key: MaterialPipelineCacheKey,
-    kind: RasterPipelineKind,
-    result: Result<MaterialPipelineSet, String>,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 struct ShaderModuleCacheKey {
     source_hash: u64,
@@ -255,7 +236,7 @@ struct ShaderModuleCacheEntry {
     module: Arc<wgpu::ShaderModule>,
 }
 
-struct ShaderModuleCache {
+pub(in crate::materials) struct ShaderModuleCache {
     entries: Mutex<LruCache<ShaderModuleCacheKey, Vec<ShaderModuleCacheEntry>>>,
     builds: KeyedSingleFlight<ShaderModuleCacheKey>,
     stats: AtomicCacheCounters,
@@ -443,11 +424,42 @@ pub struct MaterialPipelineCache {
     stats: AtomicCacheCounters,
     warmup_stats: PipelineWarmupDedupeCounters,
     shader_module_cache: Arc<ShaderModuleCache>,
+    /// Headless and software adapters compile here, on the render thread.
+    /// Real GPUs leave this false and use the background pool.
+    compile_on_render_thread: bool,
+    /// Compiles `drain_pipeline_build_completions` may run on this thread.
+    ///
+    /// Headless is unbounded so the capture builds the whole queue before submit.
+    /// A windowed software adapter is one. Real GPUs store zero and ignore it.
+    render_thread_compiles_per_frame: usize,
+}
+
+impl MaterialPipelineCache {
+    /// Attach-time flag. Real GPUs are false and never take the render-thread build queue lock.
+    pub(super) fn compiles_on_render_thread(&self) -> bool {
+        self.compile_on_render_thread
+    }
+
+    /// Headless compiles the whole queued set at the frame-start drain, not during lookup.
+    pub(super) fn compiles_full_render_thread_queue(&self) -> bool {
+        self.compile_on_render_thread && self.render_thread_compiles_per_frame == usize::MAX
+    }
 }
 
 impl MaterialPipelineCache {
     /// Creates an empty cache for `device` with the device's effective [`crate::gpu::GpuLimits`].
-    pub fn new(device: Arc<wgpu::Device>, limits: Arc<crate::gpu::GpuLimits>) -> Self {
+    ///
+    /// `compile_on_render_thread` is set for headless and software adapters. Real GPUs pass false.
+    ///
+    /// `render_thread_compiles_per_frame` is the drain budget. Headless passes `usize::MAX`.
+    /// A windowed software adapter passes one. The value is ignored when
+    /// `compile_on_render_thread` is false.
+    pub fn new(
+        device: Arc<wgpu::Device>,
+        limits: Arc<crate::gpu::GpuLimits>,
+        compile_on_render_thread: bool,
+        render_thread_compiles_per_frame: usize,
+    ) -> Self {
         let (pipeline_build_tx, pipeline_build_rx) = crossbeam_channel::unbounded();
         let cap = per_shard_cap();
         let shards: Box<[Mutex<PipelineCacheShard>]> = (0..PIPELINE_CACHE_SHARDS)
@@ -463,6 +475,8 @@ impl MaterialPipelineCache {
             stats: AtomicCacheCounters::default(),
             warmup_stats: PipelineWarmupDedupeCounters::default(),
             shader_module_cache: Arc::new(ShaderModuleCache::default()),
+            compile_on_render_thread,
+            render_thread_compiles_per_frame,
         }
     }
 
@@ -577,7 +591,7 @@ impl MaterialPipelineCache {
             },
             tx: self.pipeline_build_tx.clone(),
         };
-        if let Err(e) = spawn_pipeline_build(request) {
+        if let Err(e) = spawn_pipeline_build(request, self.compile_on_render_thread) {
             let mut shard = self.shard_for(&key).lock();
             shard.pending.remove(&key);
             shard.failed.insert(key, e.clone());
@@ -593,6 +607,20 @@ impl MaterialPipelineCache {
     /// every cache probe.
     pub(super) fn drain_pipeline_build_completions(&self) {
         profiling::scope!("materials::drain_pipeline_build_completions");
+        // Software and headless builds were queued for this thread. Headless finishes
+        // the queue; a windowed software adapter finishes at most one. Real GPUs leave
+        // the queue empty and only observe the background pool here.
+        if self.compile_on_render_thread {
+            drain_render_thread_pipeline_builds(self.render_thread_compiles_per_frame);
+        }
+        self.drain_completed_pipeline_builds();
+    }
+
+    /// Applies pipeline builds that already finished, without starting a render-thread compile.
+    ///
+    /// Used when the driver thread is still inside a previous submit. Compiling then would
+    /// overlap `Queue::submit` on DX12 WARP.
+    pub(super) fn drain_finished_pipeline_builds(&self) {
         self.drain_completed_pipeline_builds();
     }
 
@@ -613,7 +641,7 @@ impl MaterialPipelineCache {
         }
     }
 
-    fn build_pipeline_set_for(
+    pub(in crate::materials) fn build_pipeline_set_for(
         resources: PipelineBuildResources,
         kind: &RasterPipelineKind,
         desc: &MaterialPipelineDesc,
@@ -783,65 +811,13 @@ fn validate_embedded_required_features(
     })
 }
 
-fn spawn_pipeline_build(request: PipelineBuildRequest) -> Result<(), String> {
-    let pool = material_pipeline_compile_pool()?;
-    pool.spawn(move || {
-        profiling::scope!("materials::async_pipeline_compile");
-        let PipelineBuildRequest {
-            key,
-            kind,
-            desc,
-            variant,
-            wgsl_override,
-            resources,
-            tx,
-        } = request;
-        let shader_source_generation = key.shader_source_generation;
-        let result = MaterialPipelineCache::build_pipeline_set_for(
-            resources,
-            &kind,
-            &desc,
-            variant,
-            shader_source_generation,
-            wgsl_override,
-        )
-        .map_err(|e| e.to_string());
-        let _ = tx.send(PipelineBuildOutcome { key, kind, result });
-    });
-    Ok(())
-}
-
-/// Maximum number of background workers dedicated to material pipeline compilation.
-const MATERIAL_PIPELINE_MAX_WORKERS: usize = 4;
-
-/// Returns the bounded material-pipeline worker count for this process.
-fn material_pipeline_compile_worker_count() -> usize {
-    std::thread::available_parallelism().map_or(1, |threads| {
-        (threads.get() / 2).clamp(1, MATERIAL_PIPELINE_MAX_WORKERS)
-    })
-}
-
-fn material_pipeline_compile_pool() -> Result<&'static rayon::ThreadPool, String> {
-    static POOL: OnceLock<Result<rayon::ThreadPool, String>> = OnceLock::new();
-    POOL.get_or_init(|| {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(material_pipeline_compile_worker_count())
-            .thread_name(|idx| format!("material-pipeline-worker-{idx}"))
-            .build()
-            .map_err(|e| format!("material pipeline worker pool creation failed: {e}"))
-    })
-    .as_ref()
-    .map_err(Clone::clone)
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
     use super::{
         MaterialPipelineCache, MaterialPipelineVariantSpec, PipelineCacheShard,
-        ShaderModuleCacheKey, WarmupDedupeOutcome, claim_warmup_key,
-        material_pipeline_compile_worker_count, per_shard_cap,
+        ShaderModuleCacheKey, WarmupDedupeOutcome, claim_warmup_key, per_shard_cap,
     };
     use crate::materials::{
         MaterialBlendMode, MaterialPassRouting, MaterialPipelineDesc, MaterialRenderState,
@@ -945,13 +921,5 @@ mod tests {
             WarmupDedupeOutcome::FailedSkip
         );
         assert!(shard.pending.is_empty());
-    }
-
-    #[test]
-    fn material_pipeline_worker_count_is_bounded() {
-        let workers = material_pipeline_compile_worker_count();
-
-        assert!(workers >= 1);
-        assert!(workers <= super::MATERIAL_PIPELINE_MAX_WORKERS);
     }
 }

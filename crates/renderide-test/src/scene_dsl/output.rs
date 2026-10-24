@@ -18,9 +18,17 @@ pub const DEFAULT_OUTPUT_SUBDIR: &str = "renderide-test-out";
 
 /// Filenames written within a per-case output directory.
 const ACTUAL_FILENAME: &str = "actual.png";
+
+/// Path of the captured PNG inside a case artifact directory.
+pub(crate) fn actual_png_in(artifacts_dir: &Path) -> PathBuf {
+    artifacts_dir.join(ACTUAL_FILENAME)
+}
 const GOLDEN_FILENAME: &str = "golden.png";
 const DIFF_FILENAME: &str = "diff.png";
 const REPORT_FILENAME: &str = "report.json";
+
+/// Sidecar written beside `actual.png` with the capture's stall and WARP budget.
+pub(crate) const CAPTURE_STATS_FILENAME: &str = "capture-stats.json";
 
 /// Paths used for one case run. Build with [`Self::for_case`]; do not construct fields by hand.
 #[derive(Clone, Debug)]
@@ -56,6 +64,7 @@ impl CaseOutputLayout {
         std::fs::create_dir_all(&self.root)?;
         let plain_png = self.actual_png.with_file_name("plain.png");
         let plain_diff = self.root.join("plain_diff.png");
+        let capture_stats = self.actual_png.with_file_name(CAPTURE_STATS_FILENAME);
         for stale in [
             &self.actual_png,
             &self.golden_png_copy,
@@ -63,6 +72,7 @@ impl CaseOutputLayout {
             &self.report_json,
             &plain_png,
             &plain_diff,
+            &capture_stats,
         ] {
             if stale.exists() {
                 std::fs::remove_file(stale)?;
@@ -101,6 +111,10 @@ pub struct CaseReport {
     /// Optional error message when `passed = false` and `evaluation = None` (e.g. capture
     /// failure, harness error).
     pub error: Option<String>,
+    /// Set when a failure is an expected WARP mismatch. A pass leaves this empty.
+    /// The text is `expected failure (WARP, #212)` and `passed` stays false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
     /// Runner CPU model. Empty only for reports written before this field existed.
     #[serde(default)]
     pub cpu_model: String,
@@ -108,6 +122,12 @@ pub struct CaseReport {
     /// renderer log has no matching capture.
     #[serde(default)]
     pub adapter: String,
+    /// Longest `on_submitted_work_done` stall observed for this case, in milliseconds.
+    #[serde(default)]
+    pub longest_submission_stall_ms: u64,
+    /// True when this case ran on WARP and the harness applied the WARP readiness budget.
+    #[serde(default)]
+    pub warp_readiness_budget_used: bool,
 }
 
 /// Writes a `report.json` describing the comparison outcome.
@@ -117,6 +137,9 @@ pub fn write_report(layout: &CaseOutputLayout, report: &mut CaseReport) -> io::R
     let host = host_info::capture(&layout.actual_png);
     report.cpu_model = host.cpu_model;
     report.adapter = host.adapter;
+    let (stall_ms, warp_budget_used) = read_capture_stats(&layout.actual_png);
+    report.longest_submission_stall_ms = stall_ms;
+    report.warp_readiness_budget_used = warp_budget_used;
     let json = serde_json::to_string_pretty(report)
         .map_err(|e| io::Error::other(format!("serialize report: {e}")))?;
     std::fs::write(&layout.report_json, json)
@@ -131,8 +154,11 @@ pub fn report_from_evaluation(case: &IntegrationCase, eval: ToleranceEvaluation)
         passed: eval.passed,
         evaluation: Some(eval),
         error: None,
+        result: None,
         cpu_model: String::new(),
         adapter: String::new(),
+        longest_submission_stall_ms: 0,
+        warp_readiness_budget_used: false,
     }
 }
 
@@ -146,9 +172,31 @@ pub fn report_from_error(case: &IntegrationCase, message: impl Into<String>) -> 
         passed: false,
         evaluation: None,
         error: Some(message.into()),
+        result: None,
         cpu_model: String::new(),
         adapter: String::new(),
+        longest_submission_stall_ms: 0,
+        warp_readiness_budget_used: false,
     }
+}
+
+fn read_capture_stats(actual_png: &Path) -> (u64, bool) {
+    let path = actual_png.with_file_name(CAPTURE_STATS_FILENAME);
+    let Ok(bytes) = std::fs::read(path) else {
+        return (0, false);
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return (0, false);
+    };
+    let stall_ms = value
+        .get("longest_submission_stall_ms")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let warp_budget_used = value
+        .get("warp_readiness_budget_used")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    (stall_ms, warp_budget_used)
 }
 
 #[cfg(test)]
@@ -203,5 +251,29 @@ mod tests {
         assert_eq!(json["error"], "boom");
         assert!(!json["cpu_model"].as_str().unwrap_or("").is_empty());
         assert!(json["adapter"].is_string());
+        assert_eq!(json["longest_submission_stall_ms"], 0);
+        assert_eq!(json["warp_readiness_budget_used"], false);
+    }
+
+    #[test]
+    fn report_records_the_longest_submission_stall_and_warp_budget() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let case = crate::scene_dsl::cases::unlit_sphere();
+        let layout = CaseOutputLayout::for_case(dir.path(), &case.name);
+        layout.prepare().expect("prepare");
+        let stats = layout.actual_png.with_file_name(CAPTURE_STATS_FILENAME);
+        std::fs::write(
+            &stats,
+            r#"{"longest_submission_stall_ms":127000,"warp_readiness_budget_used":true}"#,
+        )
+        .expect("sidecar");
+        let mut report = report_from_error(&case, "boom");
+        write_report(&layout, &mut report).expect("write report");
+        let bytes = std::fs::read(&layout.report_json).expect("read report");
+        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("parse json");
+        assert_eq!(json["longest_submission_stall_ms"], 127_000);
+        assert_eq!(json["warp_readiness_budget_used"], true);
+        assert_eq!(report.longest_submission_stall_ms, 127_000);
+        assert!(report.warp_readiness_budget_used);
     }
 }

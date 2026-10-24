@@ -1,7 +1,7 @@
 //! Headless color-target readback and atomic PNG writing.
 
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,16 +15,42 @@ static ATLAS_SIDECAR_STAMP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(()
 
 use crate::gpu::GpuContext;
 
+/// PNG `tEXt` keyword storing the pending-pipeline draw count for this frame.
+///
+/// The harness in `renderide-test` reads the same keyword. The count lives in the
+/// PNG so it cannot be paired with a different frame's sidecar.
+pub(crate) const PIPELINE_PENDING_TEXT_KEYWORD: &str = "renderide_pipeline_pending";
+/// `1` after this frame's queue submission has reached `on_submitted_work_done`.
+pub(crate) const GPU_DONE_TEXT_KEYWORD: &str = "renderide_gpu_done";
+/// Milliseconds this readback waited for that submission.
+pub(crate) const SUBMIT_STALL_TEXT_KEYWORD: &str = "renderide_submit_stall_ms";
+
+/// Upper bound for one headless readback's GPU-done wait.
+///
+/// Matches the harness WARP readiness budget so a ~127s stall can finish and
+/// the PNG can still be published inside that budget (#216). A non-WARP harness
+/// deadline of 180s kills the process before this cap.
+const FRAME_SUBMISSION_WAIT_CAP: Duration = Duration::from_secs(300);
+/// Poll slice while waiting for `on_submitted_work_done`. The callback runs inside `device.poll`.
+const FRAME_SUBMISSION_POLL: Duration = Duration::from_millis(50);
+
 /// Copies the headless primary color texture to CPU memory and writes a PNG atomically.
 pub(super) fn readback_and_write_png_atomically(
     gpu: &GpuContext,
     output_path: &Path,
     shadow_atlas_passes: Option<(u32, u64)>,
+    pending_pipeline_draws: u64,
 ) -> Result<(), HeadlessReadbackError> {
     let color_texture = gpu
         .headless_color_texture()
         .ok_or(HeadlessReadbackError::NoOffscreenTexture)?;
-    readback_color_texture(gpu, color_texture, output_path, shadow_atlas_passes)
+    readback_color_texture(
+        gpu,
+        color_texture,
+        output_path,
+        shadow_atlas_passes,
+        pending_pipeline_draws,
+    )
 }
 
 /// Copies one color texture to CPU memory and writes a PNG atomically.
@@ -33,11 +59,12 @@ fn readback_color_texture(
     color_texture: &wgpu::Texture,
     output_path: &Path,
     shadow_atlas_passes: Option<(u32, u64)>,
+    pending_pipeline_draws: u64,
 ) -> Result<(), HeadlessReadbackError> {
     let layout = compute_readback_layout(color_texture.size(), gpu.limits().max_buffer_size())?;
     let readback = create_readback_buffer(gpu, &layout);
 
-    submit_texture_to_buffer_copy(gpu, color_texture, &layout, &readback);
+    let stall = submit_texture_to_buffer_copy(gpu, color_texture, &layout, &readback)?;
     let slice = readback.slice(..);
     await_buffer_map(slice, gpu.device())?;
     let tight = {
@@ -54,6 +81,11 @@ fn readback_color_texture(
         layout.height,
         output_path,
         shadow_atlas_passes,
+        FramePngStamp {
+            pending_pipeline_draws,
+            gpu_done: true,
+            submit_stall_ms: u64::try_from(stall.as_millis()).unwrap_or(u64::MAX),
+        },
     )
 }
 
@@ -64,7 +96,7 @@ pub(crate) fn readback_texture_png(
     color_texture: &wgpu::Texture,
     output_path: &Path,
 ) -> Result<(), HeadlessReadbackError> {
-    readback_color_texture(gpu, color_texture, output_path, None)
+    readback_color_texture(gpu, color_texture, output_path, None, 0)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -122,8 +154,14 @@ fn submit_texture_to_buffer_copy(
     color_texture: &wgpu::Texture,
     layout: &ReadbackLayout,
     readback: &wgpu::Buffer,
-) {
+) -> Result<Duration, HeadlessReadbackError> {
     gpu.flush_driver();
+    // `flush_driver` means the driver thread returned from `Queue::submit`, not
+    // that the GPU finished the frame. Copying before `on_submitted_work_done`
+    // reads the clear color during a long queue stall (#216). This wait is only
+    // on the headless PNG readback. The windowed frame loop never calls it, so
+    // Gauge's frame-time samples do not include it.
+    let stall = confirm_frame_submission_done(gpu)?;
 
     let mut encoder = gpu
         .device()
@@ -156,6 +194,51 @@ fn submit_texture_to_buffer_copy(
         encoder.finish()
     };
     gpu.queue().submit(std::iter::once(command_buffer));
+    Ok(stall)
+}
+
+/// Waits until work already submitted on this queue has finished on the GPU.
+fn confirm_frame_submission_done(gpu: &GpuContext) -> Result<Duration, HeadlessReadbackError> {
+    let started = Instant::now();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    gpu.queue().on_submitted_work_done(move || {
+        let _ = sender.send(());
+    });
+    loop {
+        if started.elapsed() >= FRAME_SUBMISSION_WAIT_CAP {
+            return Err(HeadlessReadbackError::FrameSubmissionTimeout(
+                FRAME_SUBMISSION_WAIT_CAP,
+            ));
+        }
+        match gpu.device().poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(FRAME_SUBMISSION_POLL),
+        }) {
+            Ok(_) => {}
+            Err(wgpu::PollError::Timeout) => {}
+            Err(err) => return Err(HeadlessReadbackError::DeviceLost(format!("{err:?}"))),
+        }
+        match receiver.try_recv() {
+            Ok(()) => {
+                let stall = started.elapsed();
+                logger::info!(
+                    "Headless readback: frame submission gpu_done stall_ms={}",
+                    stall.as_millis()
+                );
+                return Ok(stall);
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                // `Poll` can return before the callback when the queue looks idle.
+                // A short sleep keeps a stall from spinning the main thread.
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                return Err(HeadlessReadbackError::DeviceLost(
+                    "on_submitted_work_done channel disconnected".to_owned(),
+                ));
+            }
+        }
+    }
 }
 
 fn await_buffer_map(
@@ -193,28 +276,33 @@ fn copy_padded_rows_to_tight(bytes: &[u8], layout: &ReadbackLayout) -> Vec<u8> {
     tight
 }
 
+/// Counts and GPU-completion facts stored in the published PNG.
+struct FramePngStamp {
+    pending_pipeline_draws: u64,
+    gpu_done: bool,
+    submit_stall_ms: u64,
+}
+
 fn write_png_atomically(
     rgba_bytes: &[u8],
     width: u32,
     height: u32,
     output_path: &Path,
     shadow_atlas_passes: Option<(u32, u64)>,
+    stamp: FramePngStamp,
 ) -> Result<(), HeadlessReadbackError> {
     if let Some(parent) = output_path.parent()
         && !parent.as_os_str().is_empty()
     {
         std::fs::create_dir_all(parent).map_err(HeadlessReadbackError::Io)?;
     }
-    let buffer = image::RgbaImage::from_raw(width, height, rgba_bytes.to_vec())
-        .ok_or(HeadlessReadbackError::EncodeBufferSize)?;
     let tmp_path = output_path.with_extension("png.tmp");
-    buffer
-        .save_with_format(&tmp_path, image::ImageFormat::Png)
-        .map_err(|e| HeadlessReadbackError::Encode(format!("{e:?}")))?;
+    encode_png_with_pending_count(&tmp_path, rgba_bytes, width, height, &stamp)?;
     if let Some(passes) = shadow_atlas_passes {
         // Publish the pass count before the PNG rename so a stable PNG has its stat.
         publish_atlas_pass_record(output_path, passes)?;
     }
+    // The pending count is inside the PNG bytes, so this rename publishes both together.
     std::fs::rename(&tmp_path, output_path).map_err(HeadlessReadbackError::Io)?;
     if shadow_atlas_passes.is_some() {
         // `rename` keeps the temp PNG's mtime, which is earlier than the sidecar write.
@@ -244,6 +332,57 @@ fn align_atlas_pass_sidecar_mtime(output_path: &Path) -> Result<(), HeadlessRead
         .open(&sidecar)
         .and_then(|file| file.set_modified(png_mtime))
         .map_err(HeadlessReadbackError::Io)
+}
+
+/// Writes one RGBA PNG whose `tEXt` chunk carries `pending_pipeline_draws`.
+///
+/// `0` means no draw was still compiling and no draw was skipped for lack of a pipeline.
+/// A positive count means a pipeline was still compiling, or a draw was skipped because
+/// no pipeline was available and that skip was not already counted as pending. A failed
+/// lookup that still draws through a ready Null pipeline stays at zero.
+fn encode_png_with_pending_count(
+    tmp_path: &Path,
+    rgba_bytes: &[u8],
+    width: u32,
+    height: u32,
+    stamp: &FramePngStamp,
+) -> Result<(), HeadlessReadbackError> {
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or(HeadlessReadbackError::EncodeBufferSize)?;
+    if rgba_bytes.len() != expected {
+        return Err(HeadlessReadbackError::EncodeBufferSize);
+    }
+    let file = std::fs::File::create(tmp_path).map_err(HeadlessReadbackError::Io)?;
+    let mut encoder = png::Encoder::new(file, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let gpu_done = if stamp.gpu_done { "1" } else { "0" };
+    encoder
+        .add_text_chunk(
+            PIPELINE_PENDING_TEXT_KEYWORD.to_string(),
+            stamp.pending_pipeline_draws.to_string(),
+        )
+        .map_err(|err| HeadlessReadbackError::Encode(err.to_string()))?;
+    encoder
+        .add_text_chunk(GPU_DONE_TEXT_KEYWORD.to_string(), gpu_done.to_string())
+        .map_err(|err| HeadlessReadbackError::Encode(err.to_string()))?;
+    encoder
+        .add_text_chunk(
+            SUBMIT_STALL_TEXT_KEYWORD.to_string(),
+            stamp.submit_stall_ms.to_string(),
+        )
+        .map_err(|err| HeadlessReadbackError::Encode(err.to_string()))?;
+    let mut writer = encoder
+        .write_header()
+        .map_err(|err| HeadlessReadbackError::Encode(err.to_string()))?;
+    writer
+        .write_image_data(rgba_bytes)
+        .map_err(|err| HeadlessReadbackError::Encode(err.to_string()))?;
+    writer
+        .finish()
+        .map_err(|err| HeadlessReadbackError::Encode(err.to_string()))
 }
 
 /// Writes `this_frame total` beside the PNG and appends the same line to the pass log.
@@ -282,6 +421,9 @@ pub(crate) enum HeadlessReadbackError {
     /// `map_async` callback never delivered a result before the timeout.
     #[error("buffer.map_async timed out")]
     ReadbackTimeout,
+    /// The frame submission did not finish inside the headless readback cap.
+    #[error("frame submission was not gpu-done within {0:?}")]
+    FrameSubmissionTimeout(Duration),
     /// `map_async` returned an error.
     #[error("map_async failed: {0}")]
     Map(String),
@@ -321,6 +463,11 @@ mod tests {
         assert_eq!(
             HeadlessReadbackError::ReadbackTimeout.to_string(),
             "buffer.map_async timed out"
+        );
+        assert!(
+            HeadlessReadbackError::FrameSubmissionTimeout(std::time::Duration::from_secs(300))
+                .to_string()
+                .contains("gpu-done")
         );
         assert_eq!(
             HeadlessReadbackError::EncodeBufferSize.to_string(),
@@ -420,12 +567,23 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let png = dir.path().join("frame.png");
         let pixels = [9u8, 8, 7, 255];
-        super::write_png_atomically(&pixels, 1, 1, &png, None).expect("png only");
+        super::write_png_atomically(&pixels, 1, 1, &png, None, stamp(0)).expect("png only");
         assert!(png.is_file());
         assert!(!png.with_extension("atlas-passes").exists());
         assert!(!png.with_extension("atlas-pass-log").exists());
+        assert!(!png.with_extension("pipeline-pending").exists());
+        assert_eq!(pending_text(&png), Some("0".to_string()));
+        assert_eq!(
+            text_chunk(&png, super::GPU_DONE_TEXT_KEYWORD),
+            Some("1".to_string())
+        );
+        assert_eq!(
+            text_chunk(&png, super::SUBMIT_STALL_TEXT_KEYWORD),
+            Some("12".to_string())
+        );
 
-        super::write_png_atomically(&pixels, 1, 1, &png, Some((1, 4))).expect("with count");
+        super::write_png_atomically(&pixels, 1, 1, &png, Some((1, 4)), stamp(3))
+            .expect("with count");
         assert_eq!(
             std::fs::read_to_string(png.with_extension("atlas-passes")).expect("sidecar"),
             "1 4\n"
@@ -434,6 +592,8 @@ mod tests {
             std::fs::read_to_string(png.with_extension("atlas-pass-log")).expect("log"),
             "1 4\n"
         );
+        assert!(!png.with_extension("pipeline-pending").exists());
+        assert_eq!(pending_text(&png), Some("3".to_string()));
     }
 
     #[test]
@@ -444,12 +604,37 @@ mod tests {
         let pixels = [1u8, 2, 3, 255];
         let _guard = FailStampGuard;
         super::FAIL_ATLAS_SIDECAR_MTIME_STAMP.store(true, super::Ordering::Relaxed);
-        super::write_png_atomically(&pixels, 1, 1, &png, Some((0, 2))).expect("png published");
+        super::write_png_atomically(&pixels, 1, 1, &png, Some((0, 2)), stamp(0))
+            .expect("png published");
         assert!(png.is_file());
         assert_eq!(
             std::fs::read_to_string(png.with_extension("atlas-passes")).expect("sidecar"),
             "0 2\n"
         );
+    }
+
+    fn stamp(pending: u64) -> super::FramePngStamp {
+        super::FramePngStamp {
+            pending_pipeline_draws: pending,
+            gpu_done: true,
+            submit_stall_ms: 12,
+        }
+    }
+
+    fn pending_text(path: &std::path::Path) -> Option<String> {
+        text_chunk(path, super::PIPELINE_PENDING_TEXT_KEYWORD)
+    }
+
+    fn text_chunk(path: &std::path::Path, keyword: &str) -> Option<String> {
+        let file = std::fs::File::open(path).expect("png");
+        let decoder = png::Decoder::new(std::io::BufReader::new(file));
+        let reader = decoder.read_info().expect("png info");
+        reader
+            .info()
+            .uncompressed_latin1_text
+            .iter()
+            .find(|chunk| chunk.keyword == keyword)
+            .map(|chunk| chunk.text.clone())
     }
 
     struct FailStampGuard;

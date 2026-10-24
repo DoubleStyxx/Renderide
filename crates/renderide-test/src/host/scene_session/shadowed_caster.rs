@@ -247,7 +247,6 @@ fn wait_for_fresh_png(recapture: &mut ShadowMoveRecapture<'_>) -> Result<(), Har
             scene_submit_instant: Instant::now(),
             overall_timeout: recapture.timeout,
             interval: recapture.interval,
-            non_flat_skips: 0,
         },
         recapture.renderer,
     )?;

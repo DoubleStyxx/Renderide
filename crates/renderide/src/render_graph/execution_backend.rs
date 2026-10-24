@@ -121,6 +121,16 @@ pub trait GraphViewPreparationBackend {
         view_layouts: &[Option<PreRecordViewResourceLayout>],
         resource_layouts: &[PreRecordViewResourceLayout],
     );
+    /// Compiles pass-owned pipelines before command recording.
+    ///
+    /// `compose_targets` is `(surface format, multiview stereo)`. The render graph
+    /// must not import `passes`; the backend owns those pipeline caches. Real GPUs
+    /// return on the software-adapter flag inside the implementation.
+    fn precompile_pass_owned_pipelines_before_submit(
+        &mut self,
+        device: &wgpu::Device,
+        compose_targets: &[(wgpu::TextureFormat, bool)],
+    );
     /// Synchronizes shared frame resources using resident asset state before graph recording.
     fn pre_record_sync_for_views(
         &mut self,

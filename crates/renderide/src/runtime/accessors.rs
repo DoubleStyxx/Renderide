@@ -183,6 +183,17 @@ impl RendererRuntime {
                 config_save_path,
                 suppress_renderer_config_disk_writes,
                 headless: gpu.is_headless(),
+                compile_pipelines_on_render_thread: crate::materials::compile_on_render_thread(
+                    gpu.is_headless(),
+                    gpu.adapter_info().device_type,
+                    &gpu.adapter_info().name,
+                ),
+                render_thread_compiles_per_frame:
+                    crate::materials::render_thread_compiles_per_frame(
+                        gpu.is_headless(),
+                        gpu.adapter_info().device_type,
+                        &gpu.adapter_info().name,
+                    ),
             },
             shm,
             ipc,

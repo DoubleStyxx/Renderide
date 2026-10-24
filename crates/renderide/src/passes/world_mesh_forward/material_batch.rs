@@ -408,6 +408,9 @@ impl<'a> MaterialDrawResolver<'a> {
                     pipeline_kind,
                     resolution.kind
                 );
+                // Ready but empty is not a pending lookup. Count the skip so the
+                // harness does not accept the frame. A `None` lookup already counted.
+                registry.note_skipped_pipeline_draw();
                 None
             }
             None => {
@@ -437,6 +440,7 @@ impl<'a> MaterialDrawResolver<'a> {
                     "WorldMeshForward: empty Null fallback pipeline for shader {:?}, skipping batch",
                     pipeline_key.shader_asset_id
                 );
+                registry.note_skipped_pipeline_draw();
                 None
             }
             None => {

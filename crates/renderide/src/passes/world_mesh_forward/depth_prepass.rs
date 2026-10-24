@@ -404,6 +404,18 @@ pub(crate) fn pre_warm_depth_prepass_pipeline(
     let _ = depth_prepass_pipelines().pipeline(device, key);
 }
 
+/// Pre-warms projected and radial shadow pipelines for `key`.
+///
+/// Headless and software adapters do this before command recording. The shadow
+/// draw otherwise builds the pipeline while its render pass is open.
+pub(crate) fn pre_warm_shadow_pipeline(
+    device: &wgpu::Device,
+    key: WorldMeshForwardDepthPrepassPipelineKey,
+) {
+    let _ = shadow_pipelines().pipeline(device, key);
+    let _ = radial_shadow_pipelines().pipeline(device, key);
+}
+
 fn depth_prepass_cull_mode(
     item: &WorldMeshDrawItem,
     shader_perm: crate::materials::ShaderPermutation,

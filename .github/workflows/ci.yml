@@ -258,6 +258,9 @@ jobs:
       # can still follow a wider pool (https://github.com/DoubleStyxx/Renderide/issues/194).
       # #186's pending-count gate waits until shader pipelines are ready. It does
       # not make draw order independent of that pool.
+      # WARP (adapter vendor 0x1414, device 0x008c) may use a 300s readiness
+      # budget so a ~127s submission stall can finish (#216, #214). Other
+      # adapters stay on the 180s case timeout. This 20 minute cap is unchanged.
       - name: Run headless renderer suite
         timeout-minutes: 20
         shell: bash
@@ -267,6 +270,15 @@ jobs:
           set -euo pipefail
           if [[ "${RUNNER_OS}" == "Windows" ]]; then
             ./target/debug/renderide-test.exe check-suite --jobs 1
+          elif [[ "${RUNNER_OS}" == "Linux" ]]; then
+            # Defer one non-Null material pipeline for 12s without blocking the
+            # render thread. The suite must still match the lit golden, which
+            # requires the pending==0 wait, and that wait must log a rejection
+            # before the ready frame. Release builds ignore the env.
+            RENDERIDE_TEST_PIPELINE_STALL_MS=12000 \
+              ./target/debug/renderide-test check-suite --jobs 1
+            grep -R -q "still has compiling or skipped material draws" logs/renderer-test \
+              || grep -R -q "stable PNG is flat; waiting for a later frame" logs/renderer-test
           else
             ./target/debug/renderide-test check-suite --jobs 1
           fi
