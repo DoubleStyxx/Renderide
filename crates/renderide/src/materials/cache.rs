@@ -605,15 +605,18 @@ impl MaterialPipelineCache {
     /// Must be called once per frame before per-view recording starts. Pulling the channel off
     /// the hot path keeps [`Self::get_or_queue`] from contending the pending/failed sets on
     /// every cache probe.
-    pub(super) fn drain_pipeline_build_completions(&self) {
+    pub(super) fn drain_pipeline_build_completions(&self) -> usize {
         profiling::scope!("materials::drain_pipeline_build_completions");
         // Software and headless builds were queued for this thread. Headless finishes
         // the queue; a windowed software adapter finishes at most one. Real GPUs leave
         // the queue empty and only observe the background pool here.
-        if self.compile_on_render_thread {
-            drain_render_thread_pipeline_builds(self.render_thread_compiles_per_frame);
-        }
+        let compiled = if self.compile_on_render_thread {
+            drain_render_thread_pipeline_builds(self.render_thread_compiles_per_frame)
+        } else {
+            0
+        };
         self.drain_completed_pipeline_builds();
+        compiled
     }
 
     /// Applies pipeline builds that already finished, without starting a render-thread compile.

@@ -461,8 +461,22 @@ impl RenderBackend {
     /// that draw. The depth pyramid from this frame is not evidence the caster is
     /// occluded, so the next cull keeps it. Real GPUs clear the flag. The pending count
     /// stays put for the headless PNG.
+    /// This frame compiled pipelines on the render thread. Skip Hi-Z for its cull and the next.
+    pub fn hold_hiz_for_render_thread_compile(&self) {
+        let was = self.occlusion.suppress_hiz_after_unready_pipelines();
+        self.occlusion.hold_hiz_through_next_frame();
+        if !was {
+            logger::info!(
+                "render-thread pipeline compile; this frame and the next will not Hi-Z reject world meshes"
+            );
+        }
+    }
+
     pub fn publish_unready_pipeline_cull_latch(&self) {
-        let suppress = self.materials.unready_pipelines_block_next_hiz_cull();
+        let compiled_this_frame = self.occlusion.take_hiz_hold();
+        let suppress = self
+            .materials
+            .unready_pipelines_block_next_hiz_cull(compiled_this_frame);
         let was = self.occlusion.suppress_hiz_after_unready_pipelines();
         if suppress != was {
             if suppress {
@@ -481,8 +495,8 @@ impl RenderBackend {
     ///
     /// The renderer's per-tick render entry calls this before per-view recording starts so
     /// worker threads stay off the completion channel and pending/failed mutexes on the hot path.
-    pub fn drain_pipeline_build_completions(&self) {
-        self.materials.drain_pipeline_build_completions();
+    pub fn drain_pipeline_build_completions(&self) -> usize {
+        self.materials.drain_pipeline_build_completions()
     }
 
     /// Drains finished pipeline builds without starting a render-thread compile.

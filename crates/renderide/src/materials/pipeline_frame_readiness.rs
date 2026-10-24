@@ -18,8 +18,9 @@
 //!
 //! On a render-thread compile (headless or a software adapter), a positive count also
 //! means the next frame must not Hi-Z reject world meshes. Those draws were not
-//! rasterized, so the pyramid from this frame is not evidence they are occluded. Real
-//! GPUs leave the flag clear.
+//! rasterized, so the pyramid from this frame is not evidence they are occluded. A
+//! drain that compiled pipelines holds the same way: warmup can queue the build
+//! without counting a draw. Real GPUs leave the flag clear.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -72,11 +73,13 @@ impl PendingPipelineDraws {
 /// Whether the next frame should skip Hi-Z rejection of world meshes.
 ///
 /// Real GPUs pass `compile_on_render_thread = false` and always return false. A
-/// render-thread compile returns true while any draw is still counted, because that
-/// draw was not written into the depth pyramid.
+/// render-thread compile returns true while any draw is still counted, or when this
+/// frame itself compiled pipelines. Warmup can queue those builds without counting a
+/// draw, and the pyramid from the compile frame does not contain the casters yet.
 pub(super) fn suppress_hiz_while_pipelines_unready(
     compile_on_render_thread: bool,
     outstanding: u64,
+    compiled_this_frame: bool,
 ) -> bool {
-    compile_on_render_thread && outstanding > 0
+    compile_on_render_thread && (outstanding > 0 || compiled_this_frame)
 }

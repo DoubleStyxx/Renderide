@@ -109,15 +109,20 @@ pub(in crate::materials) fn spawn_pipeline_build(
 }
 
 /// Compiles up to `max_compiles` builds that were queued for the render thread.
-pub(in crate::materials) fn drain_render_thread_pipeline_builds(max_compiles: usize) {
+///
+/// Returns how many builds ran. Callers use a non-zero count to keep Hi-Z from
+/// rejecting draws in the frame that just compiled them.
+pub(in crate::materials) fn drain_render_thread_pipeline_builds(max_compiles: usize) -> usize {
     let requests = {
         let mut queue = render_thread_pipeline_build_queue().lock();
         let count = max_compiles.min(queue.len());
         queue.drain(..count).collect::<Vec<_>>()
     };
+    let compiled = requests.len();
     for request in requests {
         finish_pipeline_build(request);
     }
+    compiled
 }
 
 fn finish_pipeline_build(request: PipelineBuildRequest) {

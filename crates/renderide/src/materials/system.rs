@@ -215,15 +215,17 @@ impl MaterialSystem {
 
     /// The next frame should not Hi-Z reject world meshes.
     ///
-    /// True only when this attach compiles on the render thread and draws are still
-    /// counted. Real GPUs return false. The count is left in place for the PNG take.
-    pub fn unready_pipelines_block_next_hiz_cull(&self) -> bool {
+    /// True when this attach compiles on the render thread and draws are still counted,
+    /// or when `compiled_this_frame` is set. Real GPUs return false. The count is left
+    /// in place for the PNG take.
+    pub fn unready_pipelines_block_next_hiz_cull(&self, compiled_this_frame: bool) -> bool {
         let Some(registry) = self.material_registry.as_ref() else {
             return false;
         };
         super::pipeline_frame_readiness::suppress_hiz_while_pipelines_unready(
             registry.compiles_on_render_thread(),
             registry.pending_pipeline_draws_outstanding(),
+            compiled_this_frame,
         )
     }
 
@@ -231,10 +233,11 @@ impl MaterialSystem {
     ///
     /// Recording threads call into the cache concurrently; pulling completions here keeps the
     /// per-draw lookup from touching the completion channel or pending/failed mutexes.
-    pub fn drain_pipeline_build_completions(&self) {
-        if let Some(reg) = self.material_registry.as_ref() {
-            reg.drain_pipeline_build_completions();
-        }
+    pub fn drain_pipeline_build_completions(&self) -> usize {
+        self.material_registry
+            .as_ref()
+            .map(crate::materials::MaterialRegistry::drain_pipeline_build_completions)
+            .unwrap_or(0)
     }
 
     /// Drains finished pipeline builds without starting a render-thread compile.

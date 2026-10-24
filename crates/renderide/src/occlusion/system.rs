@@ -50,6 +50,8 @@ pub struct OcclusionSystem {
     /// Those draws were not rasterized, so this frame's Hi-Z pyramid is not evidence they
     /// are occluded. Real GPUs leave this clear.
     suppress_hiz_after_unready_pipelines: AtomicBool,
+    /// This frame compiled pipelines on the render thread. Publish keeps Hi-Z off next frame.
+    hold_hiz_for_next_frame: AtomicBool,
 }
 
 /// Published history, the spare map, and the pooled cull buffers for one view.
@@ -109,7 +111,23 @@ impl OcclusionSystem {
             visibility: Mutex::new(HashMap::new()),
             hysteresis_plans: Mutex::new(Vec::new()),
             suppress_hiz_after_unready_pipelines: AtomicBool::new(false),
+            hold_hiz_for_next_frame: AtomicBool::new(false),
         }
+    }
+
+    /// Keeps world meshes through this frame's cull and the following frame.
+    ///
+    /// The render thread just compiled pipelines. The casters were not in the pyramid
+    /// this frame will test, and the next frame's pyramid is the one this frame writes.
+    pub(crate) fn hold_hiz_through_next_frame(&self) {
+        self.suppress_hiz_after_unready_pipelines
+            .store(true, Ordering::Relaxed);
+        self.hold_hiz_for_next_frame.store(true, Ordering::Relaxed);
+    }
+
+    /// Takes the one-frame hold set by [`Self::hold_hiz_through_next_frame`].
+    pub(crate) fn take_hiz_hold(&self) -> bool {
+        self.hold_hiz_for_next_frame.swap(false, Ordering::Relaxed)
     }
 
     /// The next cull should keep world meshes instead of trusting the Hi-Z pyramid.

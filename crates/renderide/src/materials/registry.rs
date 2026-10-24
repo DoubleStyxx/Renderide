@@ -322,8 +322,8 @@ impl MaterialRegistry {
     /// Headless compiles every pipeline already queued for this thread and does not wait
     /// for an idle device. A windowed software adapter compiles at most one; its caller
     /// waits on a short idle budget before this drain.
-    pub fn drain_pipeline_build_completions(&self) {
-        self.cache.drain_pipeline_build_completions();
+    pub fn drain_pipeline_build_completions(&self) -> usize {
+        self.cache.drain_pipeline_build_completions()
     }
 
     /// Drains builds that already finished, without starting a render-thread compile.
@@ -390,26 +390,35 @@ mod tests {
         let draws = PendingPipelineDraws::new();
         assert!(!suppress_hiz_while_pipelines_unready(
             true,
-            draws.outstanding()
+            draws.outstanding(),
+            false
         ));
-        assert!(!suppress_hiz_while_pipelines_unready(false, 4));
+        assert!(!suppress_hiz_while_pipelines_unready(false, 4, true));
 
         draws.note(&MaterialPipelineLookup::Pending);
         assert!(suppress_hiz_while_pipelines_unready(
             true,
-            draws.outstanding()
+            draws.outstanding(),
+            false
         ));
-        // The PNG take clears the count. The next publish then lets Hi-Z reject again.
+        // The PNG take clears the count. A compile in this frame still holds the latch.
         assert_eq!(draws.take(), 1);
         assert!(!suppress_hiz_while_pipelines_unready(
             true,
-            draws.outstanding()
+            draws.outstanding(),
+            false
+        ));
+        assert!(suppress_hiz_while_pipelines_unready(
+            true,
+            draws.outstanding(),
+            true
         ));
 
         draws.note_dropped();
         assert!(suppress_hiz_while_pipelines_unready(
             true,
-            draws.outstanding()
+            draws.outstanding(),
+            false
         ));
     }
 }
