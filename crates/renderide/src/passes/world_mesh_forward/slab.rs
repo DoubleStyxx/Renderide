@@ -171,7 +171,8 @@ fn pack_per_draw_vp_uniforms(
                 item.reflection_probes.atlas_indices,
                 item.reflection_probes.importance_mask,
             )
-            .with_particle_draw(item.particle_draw);
+            .with_particle_draw(item.particle_draw)
+            .with_previous_model(item.previous_rigid_world_matrix);
     };
     let admission =
         admit_render_command_items(inputs.draws.len(), current_reference_worker_count());

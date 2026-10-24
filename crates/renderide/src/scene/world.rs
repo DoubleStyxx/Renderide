@@ -108,6 +108,22 @@ pub struct WorldTransformCache {
     pub(super) bulk_rebuild: WorldBulkRebuildScratch,
     /// Reused dense transform-update scratch.
     pub(super) transform_apply: TransformApplyScratch,
+    /// Last solved world matrix per node, copied in place when rigid object motion is published.
+    ///
+    /// Empty until the first publish. Steady-state publishes overwrite this storage and do not
+    /// allocate.
+    pub(in crate::scene) previous_world_matrices: Vec<Mat4>,
+    /// `true` when [`Self::previous_world_matrices`] holds a solved pose from the previous publish.
+    pub(in crate::scene) previous_valid: Vec<bool>,
+    /// `true` when `world_matrices[i]` still holds a pose produced by an earlier solve.
+    ///
+    /// Apply marks `computed` false for dirty nodes without clearing `world_matrices`, so this bit
+    /// is what lets the next publish treat that stored matrix as "previous".
+    pub(in crate::scene) motion_history_ready: Vec<bool>,
+    /// `motion_history_ready[0..prefix]` is all true. A dense publish of that prefix is one copy.
+    ///
+    /// Reset when a structural edit clears or reorders ready flags. Seal only raises it.
+    pub(in crate::scene) motion_history_ready_prefix: usize,
 }
 
 /// Reused hierarchy traversal state for one [`WorldTransformCache`].
@@ -171,7 +187,92 @@ impl Default for WorldTransformCache {
             },
             bulk_rebuild: WorldBulkRebuildScratch::default(),
             transform_apply: TransformApplyScratch::default(),
+            previous_world_matrices: Vec::new(),
+            previous_valid: Vec::new(),
+            motion_history_ready: Vec::new(),
+            motion_history_ready_prefix: 0,
         }
+    }
+}
+
+impl WorldTransformCache {
+    /// Copies the last solved world pose for `nodes` into reused previous-matrix storage.
+    ///
+    /// Call this before the current flush overwrites `world_matrices`. Only the listed nodes are
+    /// written. Those nodes are the rigid `MotionVectorMode::Object` transforms, which includes
+    /// both dirty and clean ones so a stopped object’s previous matrix catches up to current.
+    /// Dirty nodes with no object-mode renderer are left alone. A contiguous run covering at least
+    /// half the nodes is copied with `copy_from_slice`. Smaller or gapped lists stay indexed. The
+    /// copy stays inside the existing allocation when the node count is unchanged.
+    pub(crate) fn publish_previous_world_matrices(&mut self, nodes: &[usize]) {
+        let count = self.world_matrices.len();
+        self.ensure_motion_history_len(count);
+        if motion_history::covers_at_least_half(nodes, count)
+            && let Some(range) = motion_history::dense_motion_range(nodes, count)
+        {
+            motion_history::publish_dense(self, range);
+            return;
+        }
+        for &index in nodes {
+            if index >= count {
+                continue;
+            }
+            if self.motion_history_ready[index] {
+                self.previous_world_matrices[index] = self.world_matrices[index];
+                self.previous_valid[index] = true;
+            } else {
+                self.previous_valid[index] = false;
+            }
+        }
+    }
+
+    /// Marks listed nodes whose current world matrix came from a completed solve.
+    ///
+    /// Dirty nodes keep a previous `true` until the next successful solve replaces it. That is
+    /// what makes the following publish see the pre-solve matrix. A contiguous run covering at
+    /// least half the nodes is sealed in place. Smaller or gapped lists stay indexed.
+    pub(crate) fn seal_motion_history(&mut self, nodes: &[usize]) {
+        let count = self.world_matrices.len();
+        self.ensure_motion_history_len(count);
+        if motion_history::covers_at_least_half(nodes, count)
+            && let Some(range) = motion_history::dense_motion_range(nodes, count)
+        {
+            motion_history::seal_dense(self, range);
+            return;
+        }
+        for &index in nodes {
+            if index < count && self.computed[index] {
+                self.motion_history_ready[index] = true;
+            }
+        }
+    }
+
+    fn ensure_motion_history_len(&mut self, count: usize) {
+        if self.previous_world_matrices.len() != count {
+            self.previous_world_matrices.resize(count, Mat4::IDENTITY);
+        }
+        if self.previous_valid.len() != count {
+            self.previous_valid.resize(count, false);
+        }
+        if self.motion_history_ready.len() != count {
+            self.motion_history_ready.resize(count, false);
+            self.motion_history_ready_prefix = self.motion_history_ready_prefix.min(count);
+        }
+    }
+
+    /// Previous solved world matrix for one dense transform, when rigid motion history has one.
+    pub(crate) fn previous_world_matrix(&self, index: usize) -> Option<Mat4> {
+        if self.previous_valid.get(index).copied().unwrap_or(false) {
+            self.previous_world_matrices.get(index).copied()
+        } else {
+            None
+        }
+    }
+
+    /// Capacity of the reused previous-matrix buffer. Steady-state publishes do not grow it.
+    #[cfg(any(test, feature = "bench-api"))]
+    pub(crate) fn previous_world_matrix_capacity(&self) -> usize {
+        self.previous_world_matrices.capacity()
     }
 }
 
@@ -790,7 +891,15 @@ pub(super) fn ensure_cache_shapes(
         cache.degenerate_scales.resize(node_count, false);
         cache.hierarchy.visit_epoch.resize(node_count, 0);
         cache.hierarchy.children_dirty = true;
+        cache
+            .previous_world_matrices
+            .resize(node_count, Mat4::IDENTITY);
+        cache.previous_valid.resize(node_count, false);
+        cache.motion_history_ready.resize(node_count, false);
         cache.computed.fill(false);
+        cache.previous_valid.fill(false);
+        cache.motion_history_ready.fill(false);
+        cache.motion_history_ready_prefix = 0;
     } else if force_invalidate {
         cache.computed.fill(false);
     }
@@ -840,6 +949,8 @@ pub fn compute_world_matrices_for_space(
 
     cache.compute_world_matrices_incremental(scene_id, nodes, node_parents)
 }
+
+mod motion_history;
 
 #[cfg(test)]
 mod tests;

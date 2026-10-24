@@ -5,7 +5,14 @@
 //! resolve. When the velocity pass is skipped for a view, the resolve pass copies input to output
 //! so the post-processing chain remains well-defined.
 
+#[path = "motion_blur/object_velocity.rs"]
+mod object_velocity;
 mod pipeline;
+#[cfg(test)]
+#[path = "motion_blur/velocity.rs"]
+mod velocity;
+
+use object_velocity::ObjectMotionVectorsPass;
 
 use std::num::NonZeroU32;
 use std::sync::{Arc, LazyLock};
@@ -36,8 +43,9 @@ use crate::render_graph::post_process_chain::{
     EffectPasses, PostProcessEffect, PostProcessEffectId,
 };
 use crate::render_graph::resources::{
-    ImportedTextureHandle, TextureAccess, TextureHandle, TransientArrayLayers, TransientExtent,
-    TransientSampleCount, TransientTextureDesc, TransientTextureFormat,
+    ImportedBufferHandle, ImportedTextureHandle, TextureAccess, TextureHandle,
+    TransientArrayLayers, TransientExtent, TransientSampleCount, TransientTextureDesc,
+    TransientTextureFormat,
 };
 
 /// Velocity texture format used by the motion blur pass.
@@ -53,6 +61,8 @@ const MATRIX_INVERSION_EPSILON: f32 = 1.0e-20;
 pub struct MotionBlurEffect {
     /// Imported frame depth target used by the velocity pass.
     depth: ImportedTextureHandle,
+    /// Imported forward per-draw slab sampled by the object-velocity pass.
+    per_draw_slab: ImportedBufferHandle,
     /// Shared per-view camera history and GPU uniform buffers.
     state_cache: Arc<MotionBlurStateCache>,
 }
@@ -61,9 +71,14 @@ impl MotionBlurEffect {
     /// Creates a motion blur effect backed by a shared per-view state cache.
     pub(crate) fn new(
         depth: ImportedTextureHandle,
+        per_draw_slab: ImportedBufferHandle,
         state_cache: Arc<MotionBlurStateCache>,
     ) -> Self {
-        Self { depth, state_cache }
+        Self {
+            depth,
+            per_draw_slab,
+            state_cache,
+        }
     }
 }
 
@@ -103,12 +118,20 @@ impl PostProcessEffect for MotionBlurEffect {
             velocity,
             Arc::clone(&self.state_cache),
         )));
+        let object_vectors = builder.add_raster_pass(Box::new(ObjectMotionVectorsPass::new(
+            self.depth,
+            velocity,
+            self.per_draw_slab,
+            Arc::clone(&self.state_cache),
+        )));
         let blur = builder.add_raster_pass(Box::new(MotionBlurResolvePass::new(
             input,
             velocity,
             output,
             Arc::clone(&self.state_cache),
         )));
+        builder.add_edge(vectors, object_vectors);
+        builder.add_edge(object_vectors, blur);
         builder.add_edge(vectors, blur);
         EffectPasses::registered(vectors, blur)
     }
@@ -337,17 +360,42 @@ pub(crate) struct MotionBlurViewState {
     motion_vector_params_buffer: wgpu::Buffer,
     /// Uniform buffer consumed by the blur resolve pass.
     blur_params_buffer: wgpu::Buffer,
+    /// Reused previous view-projection uniform for the object-velocity pass.
+    previous_vp_buffer: wgpu::Buffer,
+    /// Bind group for [`Self::previous_vp_buffer`]. Created once per view.
+    previous_vp_bind_group: wgpu::BindGroup,
     /// Last rendered camera matrices for this view.
     history: Mutex<Option<MotionBlurCameraHistory>>,
+    /// Previous view-projection captured while camera history advances.
+    ///
+    /// `None` when that history cannot be used. The object-velocity pass reads this after the
+    /// camera pass has already replaced [`Self::history`] with the current frame.
+    object_motion_previous_vp: Mutex<Option<(Mat4, Mat4)>>,
+    /// Host frame index that already emitted object velocity for this view.
+    ///
+    /// A second render in the same submit sees the same index and leaves camera velocity in place.
+    object_velocity_emitted_frame: Mutex<Option<i32>>,
 }
 
 impl MotionBlurViewState {
     /// Allocates per-view motion blur uniform buffers.
     fn new(device: &wgpu::Device, pipelines: &MotionBlurPipelineCache) -> Self {
+        let previous_vp_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("object_motion_previous_vp"),
+            size: 128,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let previous_vp_bind_group =
+            crate::passes::object_motion_previous_vp_bind_group(device, &previous_vp_buffer);
         Self {
             motion_vector_params_buffer: pipelines.create_motion_vector_params_buffer(device),
             blur_params_buffer: pipelines.create_blur_params_buffer(device),
+            previous_vp_buffer,
+            previous_vp_bind_group,
             history: Mutex::new(None),
+            object_motion_previous_vp: Mutex::new(None),
+            object_velocity_emitted_frame: Mutex::new(None),
         }
     }
 }
@@ -383,6 +431,8 @@ impl MotionBlurStateCache {
         let previous = previous.copied().unwrap_or(current);
         *history = Some(current);
         drop(history);
+        *state.object_motion_previous_vp.lock() =
+            valid.then_some((previous.view_proj_left, previous.view_proj_right));
         MotionVectorParamsGpu::from_history(current, previous, valid)
     }
 
@@ -546,7 +596,10 @@ fn current_to_previous_clip_matrix(current: Mat4, previous: Mat4, valid: bool) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render_graph::resources::{ImportSource, ImportedTextureDecl};
+    use crate::render_graph::resources::{
+        BufferAccess, BufferImportSource, ImportSource, ImportedBufferDecl, ImportedTextureDecl,
+        StorageAccess,
+    };
 
     fn hdr_texture_desc(label: &'static str) -> TransientTextureDesc {
         TransientTextureDesc {
@@ -628,7 +681,23 @@ mod tests {
         });
         let input = builder.create_texture(hdr_texture_desc("input"));
         let output = builder.create_texture(hdr_texture_desc("output"));
-        let effect = MotionBlurEffect::new(depth, Arc::new(MotionBlurStateCache::default()));
+        let per_draw_slab = builder.import_buffer(ImportedBufferDecl {
+            label: "per_draw_slab",
+            source: BufferImportSource::External,
+            initial_access: BufferAccess::Storage {
+                stages: wgpu::ShaderStages::VERTEX,
+                access: StorageAccess::ReadOnly,
+            },
+            final_access: BufferAccess::Storage {
+                stages: wgpu::ShaderStages::VERTEX,
+                access: StorageAccess::ReadOnly,
+            },
+        });
+        let effect = MotionBlurEffect::new(
+            depth,
+            per_draw_slab,
+            Arc::new(MotionBlurStateCache::default()),
+        );
         let settings = PostProcessingSettings {
             enabled: true,
             motion_blur: MotionBlurSettings {

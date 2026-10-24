@@ -6,7 +6,10 @@ use std::path::{Path, PathBuf};
 
 /// `#[cfg(test)]` GPU harnesses. They open a private device and never run in the renderer,
 /// so they are not frame-profiler passes.
-const TEST_GPU_HARNESS_FILES: &[&str] = &["src/passes/world_mesh_forward/clear_stack_gpu.rs"];
+const TEST_GPU_HARNESS_FILES: &[&str] = &[
+    "src/passes/world_mesh_forward/clear_stack_gpu.rs",
+    "src/passes/world_mesh_forward/encode/object_motion_pixels.rs",
+];
 
 /// Files whose copy commands are covered by a caller-level GPU profiler scope.
 const PARENT_SCOPED_COPY_FILES: &[&str] = &[

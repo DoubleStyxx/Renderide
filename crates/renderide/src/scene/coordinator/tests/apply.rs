@@ -624,6 +624,73 @@ fn parallel_apply_extracted_commits_pose_writes_and_marks_dirty() {
     assert!(removal_events.is_empty());
 }
 
+/// A transform removal that swap-moves an object node, with no mesh update, must keep that
+/// node on the publish list so its previous matrix keeps tracking the current pose.
+#[test]
+fn transform_removal_keeps_relocated_object_node_listed_and_publishing() {
+    use crate::scene::transforms::ExtractedTransformsUpdate;
+    use crate::shared::MotionVectorMode;
+
+    use super::super::apply::{PerSpaceApplyInputs, apply_extracted_render_space_update};
+
+    let identity = identity_transform();
+    let mut space = RenderSpaceState {
+        id: RenderSpaceId(3),
+        nodes: vec![identity, identity],
+        node_parents: vec![-1, -1],
+        static_mesh_renderers: vec![StaticMeshRenderer {
+            node_id: 1,
+            motion_vector_mode: MotionVectorMode::Object,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    space.refresh_rigid_object_motion_nodes();
+    assert_eq!(space.rigid_object_motion_nodes, vec![1]);
+
+    let mut cache = WorldTransformCache::default();
+    compute_world_matrices_for_space(3, &space.nodes, &space.node_parents, &mut cache)
+        .expect("solve");
+    cache.seal_motion_history(&space.rigid_object_motion_nodes);
+    cache.publish_previous_world_matrices(&space.rigid_object_motion_nodes);
+    let published = cache.world_matrices[1];
+    assert_eq!(
+        cache.previous_world_matrix(1),
+        Some(published),
+        "the object node starts with a published previous pose"
+    );
+
+    let extracted = ExtractedRenderSpaceUpdate {
+        space_id: RenderSpaceId(3),
+        transforms: Some(ExtractedTransformsUpdate {
+            removals: vec![0, -1],
+            target_transform_count: 1,
+            ..Default::default()
+        }),
+        ..empty_extracted_render_space_update()
+    };
+    let mut removal_events = Vec::new();
+    apply_extracted_render_space_update(
+        &extracted,
+        PerSpaceApplyInputs {
+            space: &mut space,
+            cache: &mut cache,
+            removal_events: &mut removal_events,
+        },
+    );
+
+    assert_eq!(space.nodes.len(), 1);
+    assert_eq!(space.static_mesh_renderers[0].node_id, 0);
+    assert_eq!(space.rigid_object_motion_nodes, vec![0]);
+    assert!(space.requests_rigid_object_motion);
+    assert!(extracted.meshes.is_none());
+
+    let moved = glam::Mat4::from_translation(Vec3::new(4.0, 0.0, 0.0));
+    cache.world_matrices[0] = moved;
+    cache.publish_previous_world_matrices(&space.rigid_object_motion_nodes);
+    assert_eq!(cache.previous_world_matrix(0), Some(moved));
+}
+
 #[test]
 fn parallel_apply_extracted_remaps_camera_portal_static_mesh_target_before_mesh_removal() {
     use super::super::apply::{PerSpaceApplyInputs, apply_extracted_render_space_update};
