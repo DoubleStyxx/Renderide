@@ -143,6 +143,13 @@ mod tests {
         let mut moving = HysteresisHistoryWorkload::new(count, true);
         let moving_kept = moving.step();
         assert_eq!(moving_kept, u32::try_from(count).unwrap_or(0));
+        assert!(!stable.fast_path_engaged());
+        assert!(!moving.fast_path_engaged());
+        let mut visible = HysteresisHistoryWorkload::all_visible(count);
+        assert_eq!(visible.step(), u32::try_from(count).unwrap_or(0));
+        assert!(visible.fast_path_engaged());
+        assert_eq!(visible.step(), u32::try_from(count).unwrap_or(0));
+        assert!(visible.fast_path_engaged());
         assert_eq!(HYSTERESIS_HISTORY_COUNTS[0], 8_192);
         assert!(HYSTERESIS_HISTORY_COUNTS.contains(&10_000));
         assert!(HYSTERESIS_HISTORY_COUNTS.contains(&100_000));

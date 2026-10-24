@@ -66,6 +66,14 @@ fn hysteresis_classification(c: &mut Criterion) {
             });
         }
     }
+    for count in HYSTERESIS_HISTORY_COUNTS {
+        let mut workload = HysteresisHistoryWorkload::all_visible(count);
+        let _ = workload.step();
+        history.throughput(Throughput::Elements(u64::try_from(count).unwrap_or(0)));
+        history.bench_function(format!("{count}_all_visible"), |b| {
+            b.iter(|| black_box(workload.step()));
+        });
+    }
     history.finish();
 }
 

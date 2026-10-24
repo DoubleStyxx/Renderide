@@ -5,7 +5,9 @@
 //! than [`HISTORY_CASTER_BUDGET`] publish an empty history and leave the legacy Hi-Z test in
 //! place. The count is prepared casters in the view's render-space scope, not casters that
 //! survive the frustum. After the count crosses the cap, the pass stays off until it falls to
-//! [`crate::occlusion::hysteresis::HISTORY_CASTER_RESUME`].
+//! [`crate::occlusion::hysteresis::HISTORY_CASTER_RESUME`]. When the previous frame had no
+//! occluded caster and the prepared set is unchanged, the plan skips the present-key set. The
+//! cull still records a class change when the pyramid occludes a caster.
 
 use glam::{Mat4, Vec3};
 
@@ -15,7 +17,7 @@ use crate::hi_z_cpu::project_world_aabb_uv;
 use crate::occlusion::hysteresis::{
     CasterKey, DepthClip, HISTORY_CASTER_BUDGET, PresentCaster, ScreenRect, SpaceMotion,
     VisibilityFrameScratch, VisibilityHysteresis, VisibilityScratch, append_disocclusion_rects,
-    history_confirmation_applies, plan_disocclusion,
+    history_confirmation_applies, plan_disocclusion, prepare_fast_visible,
 };
 use crate::scene::{RenderSpaceId, SceneCoordinator};
 use crate::world_mesh::draw_prep::PreparedCasterBounds;
@@ -119,7 +121,12 @@ fn build_frame(
             );
         }
     }
-    if track_presence {
+    let fast_layout = if track_presence && history.no_occluded_casters() {
+        prepare_fast_visible(&history, &frame_scratch.present, &mut cull_buffers)
+    } else {
+        None
+    };
+    if fast_layout.is_none() && track_presence {
         plan_disocclusion(
             &history,
             &frame_scratch.present,
@@ -141,11 +148,9 @@ fn build_frame(
             cull_buffers.motions.insert(*space_id, *motion);
         }
     }
-    (
-        VisibilityHysteresis::from_parts(history, spare, cull_buffers),
-        frame_scratch,
-        true,
-    )
+    let mut frame = VisibilityHysteresis::from_parts(history, spare, cull_buffers);
+    frame.install_fast(fast_layout);
+    (frame, frame_scratch, true)
 }
 
 fn present_caster(caster: PreparedCasterBounds) -> PresentCaster {
