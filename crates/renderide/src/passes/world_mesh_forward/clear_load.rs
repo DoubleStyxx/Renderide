@@ -11,6 +11,7 @@
 
 use crate::frame_contract::{FrameViewClear, RenderTextureSelfSampling};
 use crate::graph_inputs::GraphPassFrameView;
+use crate::render_graph::compiled::ClearLoadDecisionInputs;
 use crate::shared::CameraClearMode;
 
 /// Cameras folded by one [`camera_clear_load_op_checksum`] sample.
@@ -22,7 +23,7 @@ pub(crate) const CAMERA_CLEAR_LOAD_OP_CAMERAS: usize = 4_096;
 const CAMERA_CLEAR_LOAD_OP_SEED: u32 = 0xC3A1_5EED;
 
 /// Inputs that decide whether this view copies its current color into HDR scene color.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ScenePreserveQuery {
     /// Raster sample count for the view. Multisample targets are not seeded.
     pub sample_count: u32,
@@ -128,7 +129,16 @@ pub(crate) fn forward_clear_loads(
 pub(crate) fn preserved_color_texture<'a>(
     view: &'a GraphPassFrameView<'_>,
 ) -> Option<&'a wgpu::Texture> {
-    if !seeds_preserved_scene_color(view.clear.mode, scene_preserve_query(view)) {
+    preserved_color_texture_for(view, scene_preserve_query(view))
+}
+
+/// Same seed decision as [`preserved_color_texture`], using a query already built for this view.
+#[inline]
+fn preserved_color_texture_for<'a>(
+    view: &'a GraphPassFrameView<'_>,
+    query: ScenePreserveQuery,
+) -> Option<&'a wgpu::Texture> {
+    if !seeds_preserved_scene_color(view.clear.mode, query) {
         return None;
     }
     if view.seed_published_color {
@@ -138,27 +148,81 @@ pub(crate) fn preserved_color_texture<'a>(
 }
 
 /// Decision used by the color-preserve pass, the opaque color override, and the depth prepass.
+///
+/// The query comes from [`scene_preserve_query`]. The seed bit stays
+/// [`preserved_color_texture`], including the execution-order choice of history versus the
+/// published image.
 #[inline]
 pub(crate) fn forward_clear_loads_for_view(view: &GraphPassFrameView<'_>) -> ForwardClearLoads {
+    let query = scene_preserve_query(view);
     loads_for_seed(
         view.clear.mode,
-        preserved_color_texture(view).is_some(),
-        view.persistent_depth_target,
+        preserved_color_texture_for(view, query).is_some(),
+        query.persistent_depth_target,
     )
 }
 
+/// Execution-order facts that sit beside [`ClearLoadDecisionInputs`].
+///
+/// Double-buffered cameras choose history or the published image from these bits. The
+/// view-target mapping does not know which writer in the frame this view is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ClearLoadSeedBits {
+    /// `true` when this view is the first writer of a swapped texture and history is attached.
+    has_history_color: bool,
+    /// `true` when a later writer copies the published image.
+    seed_published_color: bool,
+}
+
+/// Copies one pass view onto [`ClearLoadDecisionInputs`].
+///
+/// Attachment presence is already resolved. A missing color texture cannot seed, and
+/// [`GraphPassFrameView::persistent_depth_target`] is the depth image this view owns.
 #[inline]
-fn scene_preserve_query(view: &GraphPassFrameView<'_>) -> ScenePreserveQuery {
-    ScenePreserveQuery {
+#[must_use]
+fn clear_load_inputs_from_frame_view(view: &GraphPassFrameView<'_>) -> ClearLoadDecisionInputs {
+    ClearLoadDecisionInputs {
         sample_count: view.sample_count,
         has_color_texture: view.color_texture.is_some(),
         surface_format: view.surface_format,
         scene_color_format: view.scene_color_format,
         self_sampling: view.offscreen_write_target.render_texture_self_sampling(),
-        has_history_color: view.history_color_texture.is_some(),
-        seed_published_color: view.seed_published_color,
         persistent_depth_target: view.persistent_depth_target,
     }
+}
+
+/// Builds the preserve query from clear-load inputs and the execution-order seed bits.
+///
+/// This is the only inputs-to-query mapping. [`scene_preserve_query`] is the view entry.
+#[inline]
+#[must_use]
+fn scene_preserve_query_from_inputs(
+    inputs: ClearLoadDecisionInputs,
+    seed: ClearLoadSeedBits,
+) -> ScenePreserveQuery {
+    ScenePreserveQuery {
+        sample_count: inputs.sample_count,
+        has_color_texture: inputs.has_color_texture,
+        surface_format: inputs.surface_format,
+        scene_color_format: inputs.scene_color_format,
+        self_sampling: inputs.self_sampling,
+        has_history_color: seed.has_history_color,
+        seed_published_color: seed.seed_published_color,
+        persistent_depth_target: inputs.persistent_depth_target,
+    }
+}
+
+/// View-to-inputs-to-query mapping for one pass view.
+#[inline]
+#[must_use]
+fn scene_preserve_query(view: &GraphPassFrameView<'_>) -> ScenePreserveQuery {
+    scene_preserve_query_from_inputs(
+        clear_load_inputs_from_frame_view(view),
+        ClearLoadSeedBits {
+            has_history_color: view.history_color_texture.is_some(),
+            seed_published_color: view.seed_published_color,
+        },
+    )
 }
 
 #[inline]
@@ -542,16 +606,206 @@ mod tests {
     fn preserve_query(
         inputs: crate::render_graph::compiled::ClearLoadDecisionInputs,
     ) -> ScenePreserveQuery {
-        ScenePreserveQuery {
-            sample_count: inputs.sample_count,
-            has_color_texture: inputs.has_color_texture,
-            surface_format: inputs.surface_format,
-            scene_color_format: inputs.scene_color_format,
-            self_sampling: inputs.self_sampling,
-            has_history_color: false,
-            seed_published_color: false,
-            persistent_depth_target: inputs.persistent_depth_target,
+        mapped_query(inputs, no_seed())
+    }
+
+    fn mapped_query(
+        inputs: crate::render_graph::compiled::ClearLoadDecisionInputs,
+        seed: super::ClearLoadSeedBits,
+    ) -> ScenePreserveQuery {
+        super::scene_preserve_query_from_inputs(inputs, seed)
+    }
+
+    fn no_seed() -> super::ClearLoadSeedBits {
+        seed_bits(false, false)
+    }
+
+    fn seed_bits(has_history_color: bool, seed_published_color: bool) -> super::ClearLoadSeedBits {
+        super::ClearLoadSeedBits {
+            has_history_color,
+            seed_published_color,
         }
+    }
+
+    fn assert_mapped_query(
+        label: &str,
+        source: ClearLoadViewSource,
+        seed: super::ClearLoadSeedBits,
+        expected: ScenePreserveQuery,
+    ) {
+        let query = mapped_query(clear_load_inputs_from_view(source), seed);
+        assert_eq!(query, expected, "{label}");
+    }
+
+    fn extent() -> (u32, u32) {
+        (64, 32)
+    }
+
+    fn full_target_rect() -> CameraRenderRect {
+        CameraRenderRect {
+            origin_px: (0, 0),
+            extent_px: extent(),
+        }
+    }
+
+    fn partial_target_rect() -> CameraRenderRect {
+        CameraRenderRect {
+            origin_px: (16, 0),
+            extent_px: (32, 32),
+        }
+    }
+
+    fn host_sampling(self_sampling: RenderTextureSelfSampling) -> OffscreenWriteTarget {
+        OffscreenWriteTarget::host_render_texture_with_self_sampling(7, self_sampling)
+    }
+
+    fn offscreen_source(
+        viewport: CameraRenderRect,
+        sample_count: u32,
+        surface_format: wgpu::TextureFormat,
+        self_sampling: RenderTextureSelfSampling,
+    ) -> ClearLoadViewSource {
+        ClearLoadViewSource {
+            kind: FrameViewTargetKind::OffscreenRt,
+            viewport,
+            target_extent_px: extent(),
+            copies_partial_color: false,
+            sample_count,
+            surface_format,
+            scene_color_format: HDR,
+            write_target: host_sampling(self_sampling),
+        }
+    }
+
+    #[test]
+    fn window_and_openxr_decision_inputs_map_onto_the_preserve_query() {
+        let allow = RenderTextureSelfSampling::AllowPreviousContents;
+        assert_mapped_query(
+            "window",
+            ClearLoadViewSource {
+                kind: FrameViewTargetKind::Swapchain,
+                viewport: partial_target_rect(),
+                target_extent_px: extent(),
+                copies_partial_color: true,
+                sample_count: 1,
+                surface_format: wgpu::TextureFormat::Bgra8Unorm,
+                scene_color_format: HDR,
+                write_target: host_sampling(allow),
+            },
+            no_seed(),
+            query(1, false, wgpu::TextureFormat::Bgra8Unorm, None, true),
+        );
+        assert_mapped_query(
+            "openxr",
+            ClearLoadViewSource {
+                kind: FrameViewTargetKind::ExternalMultiview,
+                viewport: partial_target_rect(),
+                target_extent_px: extent(),
+                copies_partial_color: false,
+                sample_count: 1,
+                surface_format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                scene_color_format: HDR,
+                write_target: OffscreenWriteTarget::None,
+            },
+            no_seed(),
+            query(1, false, wgpu::TextureFormat::Rgba8UnormSrgb, None, true),
+        );
+    }
+
+    #[test]
+    fn offscreen_decision_inputs_map_onto_the_preserve_query() {
+        let suppress = RenderTextureSelfSampling::Suppress;
+        assert_mapped_query(
+            "offscreen full",
+            offscreen_source(full_target_rect(), 1, HDR, suppress),
+            no_seed(),
+            query(1, true, HDR, Some(suppress), true),
+        );
+        assert_mapped_query(
+            "offscreen partial rect",
+            offscreen_source(partial_target_rect(), 1, HDR, suppress),
+            no_seed(),
+            query(1, false, HDR, Some(suppress), false),
+        );
+        assert_mapped_query(
+            "offscreen partial copy",
+            ClearLoadViewSource {
+                copies_partial_color: true,
+                ..offscreen_source(full_target_rect(), 1, HDR, suppress)
+            },
+            no_seed(),
+            query(1, false, HDR, Some(suppress), false),
+        );
+        assert_mapped_query(
+            "rgba8",
+            offscreen_source(
+                full_target_rect(),
+                1,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+                suppress,
+            ),
+            no_seed(),
+            query(
+                1,
+                true,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+                Some(suppress),
+                true,
+            ),
+        );
+        assert_mapped_query(
+            "format mismatch",
+            offscreen_source(
+                full_target_rect(),
+                1,
+                wgpu::TextureFormat::Rgba8Unorm,
+                suppress,
+            ),
+            no_seed(),
+            query(
+                1,
+                true,
+                wgpu::TextureFormat::Rgba8Unorm,
+                Some(suppress),
+                true,
+            ),
+        );
+        assert_mapped_query(
+            "msaa",
+            offscreen_source(full_target_rect(), 4, HDR, suppress),
+            no_seed(),
+            query(4, true, HDR, Some(suppress), true),
+        );
+    }
+
+    #[test]
+    fn self_sampling_and_seed_bits_map_onto_the_preserve_query() {
+        let suppress = RenderTextureSelfSampling::Suppress;
+        let allow = RenderTextureSelfSampling::AllowPreviousContents;
+        assert_mapped_query(
+            "allow previous contents",
+            offscreen_source(full_target_rect(), 1, HDR, allow),
+            no_seed(),
+            query(1, true, HDR, Some(allow), true),
+        );
+        assert_mapped_query(
+            "allow previous contents with history",
+            offscreen_source(full_target_rect(), 1, HDR, allow),
+            seed_bits(true, false),
+            query(1, true, HDR, Some(allow), true).with_history(),
+        );
+        assert_mapped_query(
+            "later writer seeds the published image",
+            offscreen_source(full_target_rect(), 1, HDR, allow),
+            seed_bits(false, true),
+            query(1, true, HDR, Some(allow), true).with_published_seed(),
+        );
+        assert_mapped_query(
+            "self-sampling suppress",
+            offscreen_source(full_target_rect(), 1, HDR, suppress),
+            seed_bits(true, false),
+            query(1, true, HDR, Some(suppress), true).with_history(),
+        );
     }
 
     #[test]

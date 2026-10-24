@@ -606,6 +606,9 @@ pub(crate) struct ClearLoadViewSource {
 }
 
 /// Load-op inputs derived from [`ClearLoadViewSource`].
+///
+/// The forward pass reads every field when it builds its scene-preserve query. Resolve reads
+/// [`Self::has_color_texture`] and [`Self::persistent_depth_target`] when it chooses attachments.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ClearLoadDecisionInputs {
     /// Raster sample count, copied from the view.

@@ -420,7 +420,6 @@ mod pre_warm;
 mod recording;
 mod resolve;
 
+pub(crate) use resolve::ClearLoadDecisionInputs;
 #[cfg(test)]
-pub(crate) use resolve::{
-    ClearLoadDecisionInputs, ClearLoadViewSource, clear_load_inputs_from_view,
-};
+pub(crate) use resolve::{ClearLoadViewSource, clear_load_inputs_from_view};

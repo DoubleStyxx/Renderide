@@ -28,9 +28,10 @@ pub(super) use merge_cache::{
 #[cfg(test)]
 mod dot;
 
+pub(crate) use exec::ClearLoadDecisionInputs;
 pub(crate) use exec::CommandEncodingHudSnapshot;
 #[cfg(test)]
-pub(crate) use exec::{ClearLoadDecisionInputs, ClearLoadViewSource, clear_load_inputs_from_view};
+pub(crate) use exec::{ClearLoadViewSource, clear_load_inputs_from_view};
 pub(crate) use frame_view::{
     ExternalFrameTargets, ExternalOffscreenTargets, FrameGlobalView, FrameView, FrameViewLayout,
     FrameViewResourceHints, FrameViewTarget, OffscreenColorCopyTarget, RenderPathProfile,
