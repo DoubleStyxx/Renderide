@@ -25,37 +25,11 @@ use super::super::view_plan::FrameViewPlan;
 
 pub(super) use crate::occlusion::hysteresis::ViewHysteresisPlan;
 
-/// Fills a reused plan list and hands it to `finish` for the view cull.
+/// Builds one view's plan from that view's prepared snapshot and cull snapshot.
 ///
-/// The list is cleared at the start of the next call, so its allocation stays for the following
-/// frame. `finish` must recycle every plan before it returns; a plan left in the list is dropped
-/// with its pooled buffers on the next clear.
-pub(super) fn with_view_hysteresis_plans<R>(
-    scene: &SceneCoordinator,
-    occlusion: &crate::occlusion::OcclusionSystem,
-    prepared_views: &[FrameViewPlan<'_>],
-    prepared_renderables: &[Option<&FramePreparedRenderables>],
-    projections: &[Option<WorldMeshCullProjParams>],
-    temporals: &[Option<HiZTemporalState>],
-    finish: impl FnOnce(&mut Vec<Option<ViewHysteresisPlan>>) -> R,
-) -> R {
-    occlusion.with_hysteresis_plans(|plans| {
-        plans.clear();
-        for (index, view) in prepared_views.iter().enumerate() {
-            plans.push(view_hysteresis_plan(
-                scene,
-                occlusion,
-                view,
-                prepared_renderables.get(index).copied().flatten(),
-                projections.get(index).and_then(|proj| proj.as_ref()),
-                temporals.get(index).and_then(|temporal| temporal.as_ref()),
-            ));
-        }
-        finish(plans)
-    })
-}
-
-fn view_hysteresis_plan(
+/// `proj` and `temporal` are borrowed from the cull snapshot. The caller moves that snapshot into
+/// the cull input after every plan has been built, so the temporal `Arc` is not cloned here.
+pub(super) fn view_hysteresis_plan(
     scene: &SceneCoordinator,
     occlusion: &crate::occlusion::OcclusionSystem,
     view: &FrameViewPlan<'_>,
@@ -750,12 +724,11 @@ mod tests {
 
     #[test]
     fn nested_plan_list_keeps_the_outer_buffer() {
-        let scene = SceneCoordinator::new();
         let occlusion = OcclusionSystem::new();
-        super::with_view_hysteresis_plans(&scene, &occlusion, &[], &[], &[], &[], |outer| {
+        occlusion.with_hysteresis_plans(|outer| {
             outer.push(None);
             let outer_ptr = outer.as_ptr();
-            super::with_view_hysteresis_plans(&scene, &occlusion, &[], &[], &[], &[], |inner| {
+            occlusion.with_hysteresis_plans(|inner| {
                 assert!(inner.is_empty());
                 assert_ne!(inner.as_ptr(), outer_ptr);
             });

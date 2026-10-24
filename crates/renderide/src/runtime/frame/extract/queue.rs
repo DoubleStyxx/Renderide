@@ -109,87 +109,68 @@ pub(super) fn queue_view_draws(
         max_prepared_draw_count,
         setup.inner_parallelism,
     );
-    let projection_copies = cull_snapshots
-        .iter()
-        .map(|snapshot| snapshot.as_ref().map(|snapshot| snapshot.proj))
-        .collect::<Vec<_>>();
-    let temporal_copies = cull_snapshots
-        .iter()
-        .map(|snapshot| {
-            snapshot
-                .as_ref()
-                .and_then(|snapshot| snapshot.hi_z_temporal.clone())
-        })
-        .collect::<Vec<_>>();
-    let prepared_renderables = prepared
-        .iter()
-        .map(|view| setup.prepared_renderables_for(view.render_context()))
-        .collect::<Vec<_>>();
-    super::hysteresis::with_view_hysteresis_plans(
-        setup.scene,
-        setup.occlusion,
-        prepared,
-        &prepared_renderables,
-        &projection_copies,
-        &temporal_copies,
-        |plans| {
-            let view_draws = {
-                let (cull_inputs, cull_projs) =
-                    build_view_cull_inputs(prepared, cull_snapshots, plans);
-                let contexts = build_view_draw_collection_contexts(
-                    setup,
-                    prepared,
-                    &dict,
-                    &cull_inputs,
-                    mesh_lod_bias,
-                );
-                let shadow_contexts = build_shadow_caster_draw_collection_contexts(
-                    setup,
-                    prepared,
-                    &dict,
-                    mesh_lod_bias,
-                );
-                let world_draws =
-                    queue_prepared_draws_for_views_with_parallelism(&contexts, inner_parallelism);
-                let shadow_caster_draws = queue_prepared_draws_for_views_with_parallelism(
-                    &shadow_contexts,
-                    inner_parallelism,
-                );
-                let mut view_draws: Vec<QueuedViewDraws> = world_draws
-                    .into_iter()
-                    .zip(shadow_caster_draws)
-                    .zip(cull_projs)
-                    .map(|((world, shadow_casters), cull_proj)| QueuedViewDraws {
-                        world,
-                        shadow_casters,
-                        desktop_overlay: None,
-                        cull_proj,
-                    })
-                    .collect();
-                queue_desktop_overlay_draws(
-                    setup,
-                    prepared,
-                    &dict,
-                    mesh_lod_bias,
-                    inner_parallelism,
-                    &mut view_draws,
-                );
-                view_draws
-            };
-            for slot in plans.iter_mut() {
-                if let Some(plan) = slot.take() {
-                    let view_id = plan.view_id;
-                    let suspended = !plan.apply;
-                    setup.occlusion.store_visibility_history(
-                        view_id,
-                        suspended,
-                        plan.frame.recycle(),
-                    );
-                }
-            }
+    setup.occlusion.with_hysteresis_plans(|plans| {
+        plans.clear();
+        for (index, view) in prepared.iter().enumerate() {
+            let snapshot = cull_snapshots.get(index).and_then(Option::as_ref);
+            plans.push(super::hysteresis::view_hysteresis_plan(
+                setup.scene,
+                setup.occlusion,
+                view,
+                setup.prepared_renderables_for(view.render_context()),
+                snapshot.map(|snapshot| &snapshot.proj),
+                snapshot.and_then(|snapshot| snapshot.hi_z_temporal.as_ref()),
+            ));
+        }
+        let view_draws = {
+            let (cull_inputs, cull_projs) = build_view_cull_inputs(prepared, cull_snapshots, plans);
+            let contexts = build_view_draw_collection_contexts(
+                setup,
+                prepared,
+                &dict,
+                &cull_inputs,
+                mesh_lod_bias,
+            );
+            let shadow_contexts =
+                build_shadow_caster_draw_collection_contexts(setup, prepared, &dict, mesh_lod_bias);
+            let world_draws =
+                queue_prepared_draws_for_views_with_parallelism(&contexts, inner_parallelism);
+            let shadow_caster_draws = queue_prepared_draws_for_views_with_parallelism(
+                &shadow_contexts,
+                inner_parallelism,
+            );
+            let mut view_draws: Vec<QueuedViewDraws> = world_draws
+                .into_iter()
+                .zip(shadow_caster_draws)
+                .zip(cull_projs)
+                .map(|((world, shadow_casters), cull_proj)| QueuedViewDraws {
+                    world,
+                    shadow_casters,
+                    desktop_overlay: None,
+                    cull_proj,
+                })
+                .collect();
+            queue_desktop_overlay_draws(
+                setup,
+                prepared,
+                &dict,
+                mesh_lod_bias,
+                inner_parallelism,
+                &mut view_draws,
+            );
             view_draws
-        },
-    )
+        };
+        for slot in plans.iter_mut() {
+            if let Some(plan) = slot.take() {
+                let view_id = plan.view_id;
+                let suspended = !plan.apply;
+                setup
+                    .occlusion
+                    .store_visibility_history(view_id, suspended, plan.frame.recycle());
+            }
+        }
+        view_draws
+    })
 }
 
 fn build_view_draw_collection_contexts<'a>(

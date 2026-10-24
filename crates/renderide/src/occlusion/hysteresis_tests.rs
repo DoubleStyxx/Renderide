@@ -208,6 +208,30 @@ mod tests {
     }
 
     #[test]
+    fn visible_stamp_wins_over_occluded_slot_in_the_same_frame() {
+        let (min, max) = aabb();
+        let key = CasterKey::new(RenderSpaceId(1), 3, 9, 4, false);
+        let mut history = VisibilityHistory::default();
+        history
+            .casters
+            .insert(key, record(VisibilityClass::Visible, min, max));
+        let frame = VisibilityHysteresis::new(history, HashMap::new(), HashMap::new(), Vec::new());
+        let occluded = OcclusionFacts {
+            occluded: true,
+            other_occluder: true,
+            rects: [None, None],
+        };
+        assert!(frame.allows_draw(Some(caster_ref(key)), min, max, OcclusionFacts::keep()));
+        assert!(frame.allows_draw(Some(caster_ref(key)), min, max, occluded));
+        let committed = frame.finish();
+        let stored = committed.get(&key).expect("merged caster");
+        assert_eq!(stored.class, VisibilityClass::Visible);
+        assert_eq!(stored.mesh_asset_id, 1);
+        assert_eq!(stored.aabb_min, min);
+        assert_eq!(stored.aabb_max, max);
+    }
+
+    #[test]
     fn spare_map_capacity_survives_finish() {
         let mut spare = HashMap::with_capacity(64);
         spare.insert(

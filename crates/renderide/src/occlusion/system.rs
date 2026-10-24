@@ -74,6 +74,26 @@ impl Default for OcclusionSystem {
     }
 }
 
+/// Logs the first time the shared plan list is already borrowed.
+///
+/// A debug build outside tests also asserts, so a hot-path re-entry is obvious. Tests take this
+/// path on purpose, and release builds stay on the one-time warning.
+fn note_hysteresis_plan_list_fallback() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static NOTED: AtomicBool = AtomicBool::new(false);
+    let first = !NOTED.swap(true, Ordering::Relaxed);
+    if first {
+        logger::warn!(
+            "occlusion hysteresis plan list was already borrowed; this call used a fresh vector"
+        );
+    }
+    debug_assert!(
+        !first || cfg!(test),
+        "occlusion hysteresis plan list was already borrowed; this call used a fresh vector"
+    );
+}
+
 impl OcclusionSystem {
     /// Creates an empty occlusion system with no pyramid data.
     pub fn new() -> Self {
@@ -89,7 +109,7 @@ impl OcclusionSystem {
     ///
     /// The list is cleared by the caller at the start of the next frame. A nested call, or a
     /// second caller that already holds the list, gets a fresh vector so this does not panic or
-    /// deadlock.
+    /// deadlock. That fallback logs once and trips a debug assertion so the contention is visible.
     pub(crate) fn with_hysteresis_plans<R>(
         &self,
         use_plans: impl FnOnce(&mut Vec<Option<ViewHysteresisPlan>>) -> R,
@@ -97,6 +117,7 @@ impl OcclusionSystem {
         if let Some(mut plans) = self.hysteresis_plans.try_lock() {
             return use_plans(&mut plans);
         }
+        note_hysteresis_plan_list_fallback();
         let mut plans = Vec::new();
         use_plans(&mut plans)
     }
