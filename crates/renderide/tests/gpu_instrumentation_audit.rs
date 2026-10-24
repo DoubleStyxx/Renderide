@@ -28,6 +28,8 @@ const PARENT_SCOPED_COPY_FILES: &[&str] = &[
     "src/gpu/frame_bench_queries.rs",
     // Lavapipe unit test of render-texture ping-pong. Not a frame pass.
     "src/gpu_pools/pools/render_texture_ping_pong_gpu.rs",
+    // Throwaway pbs_lit depth readback after the color PNG. Not a frame pass.
+    "src/app/headless/pbs_depth.rs",
 ];
 
 /// GPU copy/clear commands that must be timestamped or explicitly parent-scoped.
@@ -62,6 +64,8 @@ const DIRECT_QUEUE_SUBMIT_FILES: &[&str] = &[
     "src/gpu/frame_bench_queries.rs",
     // Lavapipe unit test of render-texture ping-pong. Not a frame submission.
     "src/gpu_pools/pools/render_texture_ping_pong_gpu.rs",
+    // Throwaway pbs_lit depth readback after the color PNG. Outside primary frame timing.
+    "src/app/headless/pbs_depth.rs",
 ];
 
 /// Returns the renderide crate directory.
