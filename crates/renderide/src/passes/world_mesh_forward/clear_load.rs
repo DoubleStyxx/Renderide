@@ -16,6 +16,10 @@ use crate::shared::CameraClearMode;
 #[cfg(any(test, feature = "bench-api"))]
 pub(crate) const CAMERA_CLEAR_LOAD_OP_CAMERAS: usize = 4_096;
 
+/// Non-zero xorshift seed for [`camera_clear_load_op_inputs`].
+#[cfg(any(test, feature = "bench-api"))]
+const CAMERA_CLEAR_LOAD_OP_SEED: u32 = 0xC3A1_5EED;
+
 /// Inputs that decide whether this view copies its current color into HDR scene color.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ScenePreserveQuery {
@@ -114,62 +118,110 @@ pub(crate) fn forward_clear_loads_for_view(view: &GraphPassFrameView<'_>) -> For
     )
 }
 
-/// Folds the load-op policy for `cameras` synthetic views into one scalar.
+/// One synthetic camera passed to [`camera_clear_load_op_checksum`].
 ///
-/// The loop is allocation-free. It times the decision the opaque pass and depth prepass make
-/// once per view. It does not time the full-target color copy those passes record when the
-/// decision seeds.
+/// Callers build the slice once, outside the timed loop.
+#[cfg(any(test, feature = "bench-api"))]
+#[derive(Clone, Copy)]
+pub struct CameraClearLoadOpInput {
+    clear: FrameViewClear,
+    query: ScenePreserveQuery,
+}
+
+/// Builds `cameras` load-op inputs from a seeded xorshift.
+///
+/// The previous bench derived every camera from `index & 127`, so the same 128 decisions
+/// repeated and the checksum constant-folded. This sequence does not repeat inside 4096
+/// cameras. The returned vec is the only allocation; [`camera_clear_load_op_checksum`] does
+/// not allocate.
 #[cfg(any(test, feature = "bench-api"))]
 #[must_use]
-pub(crate) fn camera_clear_load_op_checksum(cameras: usize) -> u32 {
-    const MODES: [CameraClearMode; 4] = [
-        CameraClearMode::Skybox,
-        CameraClearMode::Color,
-        CameraClearMode::Depth,
-        CameraClearMode::Nothing,
-    ];
+pub(crate) fn camera_clear_load_op_inputs(cameras: usize) -> Vec<CameraClearLoadOpInput> {
+    let mut state = CAMERA_CLEAR_LOAD_OP_SEED;
+    let mut inputs = Vec::with_capacity(cameras);
+    for _ in 0..cameras {
+        let bits = xorshift32(&mut state);
+        inputs.push(camera_clear_load_op_input(bits));
+    }
+    inputs
+}
+
+/// Folds the load-op policy for `inputs` into one scalar.
+///
+/// Allocation-free. Each camera passes through [`std::hint::black_box`] before the decision,
+/// so the optimizer cannot fold or hoist [`forward_clear_loads`]. Does not time the full-target
+/// color copy a seeded Nothing or Depth camera records.
+#[cfg(any(test, feature = "bench-api"))]
+#[must_use]
+pub(crate) fn camera_clear_load_op_checksum(inputs: &[CameraClearLoadOpInput]) -> u32 {
     let mut acc = 0_u32;
-    let mut index = 0_usize;
-    while index < cameras {
-        let mode = MODES[index & 3];
-        let clear = FrameViewClear {
-            mode,
-            color: glam::Vec4::ZERO,
-        };
-        let samples = if index & 4 == 0 { 1 } else { 4 };
-        let persistent_depth = index & 8 == 0;
-        let has_color = index & 2 == 0;
-        let scene_format = if index & 16 == 0 {
-            wgpu::TextureFormat::Rgba16Float
-        } else {
-            wgpu::TextureFormat::Rgba8Unorm
-        };
-        let self_sampling = if index & 32 == 0 {
-            None
-        } else if index & 64 == 0 {
-            Some(RenderTextureSelfSampling::Suppress)
-        } else {
-            Some(RenderTextureSelfSampling::AllowPreviousContents)
-        };
-        let loads = forward_clear_loads(
-            clear,
-            ScenePreserveQuery {
-                sample_count: samples,
-                has_color_texture: has_color,
-                surface_format: wgpu::TextureFormat::Rgba16Float,
-                scene_color_format: scene_format,
-                self_sampling,
-                persistent_depth_target: persistent_depth,
-            },
-        );
+    for input in inputs {
+        let input = std::hint::black_box(*input);
+        let loads = forward_clear_loads(input.clear, input.query);
         acc = acc.wrapping_add(
             color_load_tag(loads.color)
                 .wrapping_mul(4)
                 .wrapping_add(depth_load_tag(loads.depth)),
         );
-        index += 1;
     }
     acc
+}
+
+#[cfg(any(test, feature = "bench-api"))]
+fn xorshift32(state: &mut u32) -> u32 {
+    let mut x = *state;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *state = x;
+    x
+}
+
+#[cfg(any(test, feature = "bench-api"))]
+fn camera_clear_load_op_input(bits: u32) -> CameraClearLoadOpInput {
+    let mode = match bits & 3 {
+        0 => CameraClearMode::Skybox,
+        1 => CameraClearMode::Color,
+        2 => CameraClearMode::Depth,
+        _ => CameraClearMode::Nothing,
+    };
+    let sample_count = if bits & 4 == 0 { 1 } else { 4 };
+    let has_color_texture = bits & 8 != 0;
+    let surface_format = if bits & 16 == 0 {
+        wgpu::TextureFormat::Rgba16Float
+    } else {
+        wgpu::TextureFormat::Rgba8Unorm
+    };
+    let scene_color_format = if bits & 32 == 0 {
+        wgpu::TextureFormat::Rgba16Float
+    } else {
+        wgpu::TextureFormat::Bgra8Unorm
+    };
+    let sampling_bits = (bits >> 6) & 3;
+    let self_sampling = if sampling_bits == 1 {
+        Some(RenderTextureSelfSampling::Suppress)
+    } else if sampling_bits == 2 {
+        Some(RenderTextureSelfSampling::AllowPreviousContents)
+    } else {
+        None
+    };
+    let persistent_depth_target = bits & 256 != 0;
+    let channel_byte = u8::try_from((bits >> 16) & 0xff).unwrap_or(0);
+    let channel = f32::from(channel_byte) / 255.0;
+    CameraClearLoadOpInput {
+        clear: FrameViewClear {
+            mode,
+            color: glam::Vec4::new(channel, 1.0 - channel, 0.5, 1.0),
+        },
+        query: ScenePreserveQuery {
+            sample_count,
+            has_color_texture,
+            surface_format,
+            scene_color_format,
+            self_sampling,
+            persistent_depth_target,
+        },
+    }
 }
 
 #[cfg(any(test, feature = "bench-api"))]
@@ -196,7 +248,8 @@ fn depth_load_tag(load: wgpu::LoadOp<f32>) -> u32 {
 mod tests {
     use super::{
         CAMERA_CLEAR_LOAD_OP_CAMERAS, ScenePreserveQuery, camera_clear_load_op_checksum,
-        forward_clear_loads, preserves_scene_color, preserves_scene_depth,
+        camera_clear_load_op_inputs, forward_clear_loads, preserves_scene_color,
+        preserves_scene_depth,
     };
     use crate::camera::CameraRenderRect;
     use crate::frame_contract::{FrameViewClear, OffscreenWriteTarget, RenderTextureSelfSampling};
@@ -435,13 +488,59 @@ mod tests {
 
     #[test]
     fn load_op_checksum_is_stable_and_allocation_free() {
-        let first = camera_clear_load_op_checksum(CAMERA_CLEAR_LOAD_OP_CAMERAS);
-        let second = camera_clear_load_op_checksum(CAMERA_CLEAR_LOAD_OP_CAMERAS);
+        let inputs = camera_clear_load_op_inputs(CAMERA_CLEAR_LOAD_OP_CAMERAS);
+        let again = camera_clear_load_op_inputs(CAMERA_CLEAR_LOAD_OP_CAMERAS);
+        assert_eq!(inputs.len(), CAMERA_CLEAR_LOAD_OP_CAMERAS);
+        let first = camera_clear_load_op_checksum(&inputs);
+        let second = camera_clear_load_op_checksum(&inputs);
         assert_eq!(first, second);
+        assert_eq!(first, camera_clear_load_op_checksum(&again));
         assert_ne!(first, 0);
         assert_ne!(
-            camera_clear_load_op_checksum(1),
-            camera_clear_load_op_checksum(2)
+            camera_clear_load_op_checksum(&inputs[..1]),
+            camera_clear_load_op_checksum(&inputs[..2])
         );
+        // The old generator repeated every 128 cameras, which let LLVM fold the checksum.
+        assert_ne!(
+            decision_mix(&inputs[..128]),
+            decision_mix(&inputs[128..256])
+        );
+    }
+
+    fn decision_mix(inputs: &[super::CameraClearLoadOpInput]) -> u64 {
+        let mut acc = 0_u64;
+        for input in inputs {
+            let mode = match input.clear.mode {
+                CameraClearMode::Skybox => 1_u64,
+                CameraClearMode::Color => 2,
+                CameraClearMode::Depth => 3,
+                CameraClearMode::Nothing => 4,
+            };
+            let sampling = match input.query.self_sampling {
+                None => 0_u64,
+                Some(RenderTextureSelfSampling::Suppress) => 1,
+                Some(RenderTextureSelfSampling::AllowPreviousContents) => 2,
+            };
+            let surface = format_tag(input.query.surface_format);
+            let scene = format_tag(input.query.scene_color_format);
+            let piece = mode
+                | (u64::from(input.query.sample_count) << 4)
+                | (u64::from(input.query.has_color_texture) << 8)
+                | (u64::from(input.query.persistent_depth_target) << 9)
+                | (sampling << 10)
+                | (surface << 16)
+                | (scene << 32);
+            acc = acc.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(piece);
+        }
+        acc
+    }
+
+    fn format_tag(format: wgpu::TextureFormat) -> u64 {
+        match format {
+            wgpu::TextureFormat::Rgba16Float => 1,
+            wgpu::TextureFormat::Rgba8Unorm => 2,
+            wgpu::TextureFormat::Bgra8Unorm => 3,
+            _ => 4,
+        }
     }
 }

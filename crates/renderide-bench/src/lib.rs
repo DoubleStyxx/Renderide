@@ -13,6 +13,7 @@ pub use renderide::bench_api::{
     MATERIAL_UNIFORM_BATCH, MaterialUniformUpdateWorkload, SHADOW_CHURN_CASTERS,
     SHADOW_CHURN_LIGHTS, ShadowChurnWorkload, TRANSFORM_BATCH, TransformWorkload,
     WORLD_MATRIX_NODES, WorldMatrixWorkload, camera_clear_load_op_checksum,
+    camera_clear_load_op_inputs,
 };
 
 #[cfg(test)]
@@ -21,7 +22,7 @@ mod tests {
         BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload,
         CAMERA_CLEAR_LOAD_OP_CAMERAS, CULL_BATCH, CullWorkload, KeywordVariantCacheWorkload,
         MaterialUniformUpdateWorkload, TransformWorkload, WORLD_MATRIX_NODES, WorldMatrixWorkload,
-        camera_clear_load_op_checksum,
+        camera_clear_load_op_checksum, camera_clear_load_op_inputs,
     };
 
     #[test]
@@ -123,9 +124,14 @@ mod tests {
 
     #[test]
     fn camera_clear_load_op_checksum_is_stable() {
-        let first = camera_clear_load_op_checksum(CAMERA_CLEAR_LOAD_OP_CAMERAS);
-        let second = camera_clear_load_op_checksum(CAMERA_CLEAR_LOAD_OP_CAMERAS);
+        let inputs = camera_clear_load_op_inputs(CAMERA_CLEAR_LOAD_OP_CAMERAS);
+        let first = camera_clear_load_op_checksum(&inputs);
+        let second = camera_clear_load_op_checksum(&inputs);
         assert_eq!(first, second);
         assert_ne!(first, 0);
+        assert_ne!(
+            camera_clear_load_op_checksum(&inputs[..128]),
+            camera_clear_load_op_checksum(&inputs[128..256])
+        );
     }
 }

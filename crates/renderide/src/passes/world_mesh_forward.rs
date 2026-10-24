@@ -68,7 +68,11 @@ mod clear_stack_gpu;
 mod forward_schedule_tests;
 
 #[cfg(feature = "bench-api")]
-pub(crate) use clear_load::{CAMERA_CLEAR_LOAD_OP_CAMERAS, camera_clear_load_op_checksum};
+pub use clear_load::CameraClearLoadOpInput;
+#[cfg(feature = "bench-api")]
+pub(crate) use clear_load::{
+    CAMERA_CLEAR_LOAD_OP_CAMERAS, camera_clear_load_op_checksum, camera_clear_load_op_inputs,
+};
 pub use color_preserve::WorldMeshForwardColorPreservePass;
 pub use depth_prepass::{WorldMeshForwardDepthPrepass, WorldMeshForwardDepthPrepassGraphResources};
 pub(crate) use depth_prepass::{
