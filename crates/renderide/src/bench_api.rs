@@ -37,6 +37,25 @@ pub use crate::materials::KeywordVariantCacheWorkload;
 pub use crate::materials::{
     BIND_GROUP_BATCH, BindGroupChurnWorkload, MATERIAL_UNIFORM_BATCH, MaterialUniformUpdateWorkload,
 };
+/// Cameras folded by one [`camera_clear_load_op_checksum`] sample.
+pub const CAMERA_CLEAR_LOAD_OP_CAMERAS: usize = crate::passes::CAMERA_CLEAR_LOAD_OP_CAMERAS;
+
+/// One synthetic camera for [`camera_clear_load_op_checksum`].
+pub use crate::passes::CameraClearLoadOpInput;
+
+/// Seeded, non-periodic load-op inputs. Build this once, outside the timed loop.
+#[must_use]
+pub fn camera_clear_load_op_inputs(cameras: usize) -> Vec<CameraClearLoadOpInput> {
+    crate::passes::camera_clear_load_op_inputs(cameras)
+}
+
+/// Allocation-free checksum of per-camera color and depth load ops.
+///
+/// Each input is passed through [`std::hint::black_box`] inside the loop.
+#[must_use]
+pub fn camera_clear_load_op_checksum(inputs: &[CameraClearLoadOpInput]) -> u32 {
+    crate::passes::camera_clear_load_op_checksum(inputs)
+}
 
 /// Sibling group width for [`WorldMatrixWorkload`]. Index 0 of each group is a root.
 const WORLD_MATRIX_GROUP: usize = 32;

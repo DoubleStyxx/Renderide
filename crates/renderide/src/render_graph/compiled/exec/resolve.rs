@@ -3,7 +3,8 @@
 
 use hashbrown::HashMap;
 
-use crate::frame_contract::{OffscreenWriteTarget, ViewWinding};
+use crate::camera::{CameraRenderRect, HostCameraFrame, ViewId};
+use crate::frame_contract::{OffscreenWriteTarget, RenderTextureSelfSampling, ViewWinding};
 use crate::gpu::GpuContext;
 use crate::gpu_resource::TextureViewDescriptorKey;
 
@@ -19,12 +20,12 @@ use super::super::super::resources::{
     ImportedBufferDecl, ImportedBufferHandle, ImportedTextureDecl, ImportedTextureHandle,
     SubresourceHandle, TextureHandle, TransientExtent,
 };
+use super::super::frame_view::FrameViewTargetKind;
 use super::super::helpers;
 use super::super::{
     CompiledRenderGraph, FrameViewLayout, FrameViewTarget, RenderPathProfile, ResolvedView,
 };
 use super::{OwnedResolvedView, ResolvedOffscreenColorCopy, TransientTextureResolveSurfaceParams};
-use crate::camera::{HostCameraFrame, ViewId};
 
 fn subresource_view_dimension(
     dimension: wgpu::TextureDimension,
@@ -417,6 +418,11 @@ impl CompiledRenderGraph {
                     view_id,
                     sample_count: layout.sample_count,
                     post_processing: layout.post_processing,
+                    color_texture: None,
+                    persistent_depth_target: non_offscreen_persistent_depth(
+                        FrameViewTargetKind::Swapchain,
+                        layout,
+                    ),
                 })
             }
             FrameViewTarget::ExternalMultiview(ext) => Ok(ResolvedView {
@@ -431,20 +437,36 @@ impl CompiledRenderGraph {
                 view_id,
                 sample_count: layout.sample_count,
                 post_processing: layout.post_processing,
+                color_texture: None,
+                persistent_depth_target: non_offscreen_persistent_depth(
+                    FrameViewTargetKind::ExternalMultiview,
+                    layout,
+                ),
             }),
-            FrameViewTarget::OffscreenRt(ext) => Ok(ResolvedView {
-                depth_texture: ext.depth_texture,
-                depth_view: ext.depth_view,
-                backbuffer: Some(ext.color_view),
-                surface_format: layout.surface_format,
-                viewport_px: layout.viewport_px,
-                multiview_stereo: layout.multiview_stereo,
-                offscreen_write_target: ext.write_target,
-                view_winding,
-                view_id,
-                sample_count: layout.sample_count,
-                post_processing: layout.post_processing,
-            }),
+            FrameViewTarget::OffscreenRt(ext) => {
+                let inputs = clear_load_inputs_from_offscreen(
+                    ext.extent_px,
+                    ext.copy_to_color,
+                    layout.sample_count,
+                    layout.surface_format,
+                    ext.write_target,
+                );
+                Ok(ResolvedView {
+                    depth_texture: ext.depth_texture,
+                    depth_view: ext.depth_view,
+                    backbuffer: Some(ext.color_view),
+                    surface_format: layout.surface_format,
+                    viewport_px: layout.viewport_px,
+                    multiview_stereo: layout.multiview_stereo,
+                    offscreen_write_target: ext.write_target,
+                    view_winding,
+                    view_id,
+                    sample_count: layout.sample_count,
+                    post_processing: layout.post_processing,
+                    color_texture: inputs.has_color_texture.then_some(ext.color_texture),
+                    persistent_depth_target: inputs.persistent_depth_target,
+                })
+            }
         }
     }
 
@@ -476,6 +498,11 @@ impl CompiledRenderGraph {
                     view_id,
                     sample_count: layout.sample_count,
                     post_processing: layout.post_processing,
+                    color_texture: None,
+                    persistent_depth_target: non_offscreen_persistent_depth(
+                        FrameViewTargetKind::Swapchain,
+                        layout,
+                    ),
                     offscreen_color_copy: None,
                 })
             }
@@ -491,29 +518,170 @@ impl CompiledRenderGraph {
                 view_id,
                 sample_count: layout.sample_count,
                 post_processing: layout.post_processing,
+                color_texture: None,
+                persistent_depth_target: non_offscreen_persistent_depth(
+                    FrameViewTargetKind::ExternalMultiview,
+                    layout,
+                ),
                 offscreen_color_copy: None,
             }),
-            FrameViewTarget::OffscreenRt(ext) => Ok(OwnedResolvedView {
-                depth_texture: (*ext.depth_texture).clone(),
-                depth_view: (*ext.depth_view).clone(),
-                backbuffer: Some((*ext.color_view).clone()),
-                surface_format: layout.surface_format,
-                viewport_px: layout.viewport_px,
-                multiview_stereo: layout.multiview_stereo,
-                offscreen_write_target: ext.write_target,
-                view_winding,
-                view_id,
-                sample_count: layout.sample_count,
-                post_processing: layout.post_processing,
-                offscreen_color_copy: ext.copy_to_color.map(|copy| ResolvedOffscreenColorCopy {
-                    source_texture: (*ext.color_texture).clone(),
-                    destination_texture: (*copy.destination_texture).clone(),
-                    destination_origin_px: copy.destination_origin_px,
-                    extent_px: copy.extent_px,
-                }),
-            }),
+            FrameViewTarget::OffscreenRt(ext) => {
+                let inputs = clear_load_inputs_from_offscreen(
+                    ext.extent_px,
+                    ext.copy_to_color,
+                    layout.sample_count,
+                    layout.surface_format,
+                    ext.write_target,
+                );
+                Ok(OwnedResolvedView {
+                    depth_texture: (*ext.depth_texture).clone(),
+                    depth_view: (*ext.depth_view).clone(),
+                    backbuffer: Some((*ext.color_view).clone()),
+                    surface_format: layout.surface_format,
+                    viewport_px: layout.viewport_px,
+                    multiview_stereo: layout.multiview_stereo,
+                    offscreen_write_target: ext.write_target,
+                    view_winding,
+                    view_id,
+                    sample_count: layout.sample_count,
+                    post_processing: layout.post_processing,
+                    color_texture: inputs
+                        .has_color_texture
+                        .then(|| (*ext.color_texture).clone()),
+                    persistent_depth_target: inputs.persistent_depth_target,
+                    offscreen_color_copy: ext.copy_to_color.map(|copy| {
+                        ResolvedOffscreenColorCopy {
+                            source_texture: (*ext.color_texture).clone(),
+                            destination_texture: (*copy.destination_texture).clone(),
+                            destination_origin_px: copy.destination_origin_px,
+                            extent_px: copy.extent_px,
+                        }
+                    }),
+                })
+            }
         }
     }
+}
+
+/// Facts copied from a resolved view into the camera-clear load-op decision.
+///
+/// Window and OpenXR targets never expose a color texture. An offscreen target does only when
+/// its viewport rect covers the whole render texture and no partial-color copy was recorded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ClearLoadViewSource {
+    /// Swapchain, OpenXR, or offscreen render texture.
+    pub kind: FrameViewTargetKind,
+    /// Camera rectangle inside the render texture. Ignored for window and OpenXR.
+    pub viewport: CameraRenderRect,
+    /// Full render-texture size. Ignored for window and OpenXR.
+    pub target_extent_px: (u32, u32),
+    /// `true` when this view copies a scratch color image onto a destination rect.
+    ///
+    /// Production sets this from `copy_to_color`. A copy means the viewport is partial even if
+    /// the recorded rect happens to cover the destination.
+    pub copies_partial_color: bool,
+    /// Raster sample count from the view layout.
+    pub sample_count: u32,
+    /// Camera color-target format.
+    pub surface_format: wgpu::TextureFormat,
+    /// HDR scene-color format. Copied onto the decision inputs; the load-op policy compares it
+    /// with [`Self::surface_format`].
+    pub scene_color_format: wgpu::TextureFormat,
+    /// Offscreen write target. Window and OpenXR ignore it and report no self-sampling policy.
+    pub write_target: OffscreenWriteTarget,
+}
+
+/// Load-op inputs derived from [`ClearLoadViewSource`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ClearLoadDecisionInputs {
+    /// Raster sample count, copied from the view.
+    pub sample_count: u32,
+    /// `true` when a full-target offscreen color texture can be copied into HDR scene color.
+    pub has_color_texture: bool,
+    /// Camera color-target format, copied from the view.
+    pub surface_format: wgpu::TextureFormat,
+    /// HDR scene-color format, copied from the view.
+    pub scene_color_format: wgpu::TextureFormat,
+    /// Host render-texture self-sampling policy. `None` for window and OpenXR.
+    pub self_sampling: Option<RenderTextureSelfSampling>,
+    /// `true` when depth is the persistent camera image rather than a partial-viewport scratch.
+    pub persistent_depth_target: bool,
+}
+
+/// Maps one view onto the inputs `forward_clear_loads` reads.
+#[must_use]
+pub(crate) fn clear_load_inputs_from_view(source: ClearLoadViewSource) -> ClearLoadDecisionInputs {
+    let full_offscreen = source.kind == FrameViewTargetKind::OffscreenRt
+        && !source.copies_partial_color
+        && source.viewport.is_full_target(source.target_extent_px);
+    ClearLoadDecisionInputs {
+        sample_count: source.sample_count,
+        has_color_texture: full_offscreen,
+        surface_format: source.surface_format,
+        scene_color_format: source.scene_color_format,
+        self_sampling: if source.kind == FrameViewTargetKind::OffscreenRt {
+            source.write_target.render_texture_self_sampling()
+        } else {
+            None
+        },
+        persistent_depth_target: match source.kind {
+            FrameViewTargetKind::Swapchain | FrameViewTargetKind::ExternalMultiview => true,
+            FrameViewTargetKind::OffscreenRt => full_offscreen,
+        },
+    }
+}
+
+fn non_offscreen_persistent_depth(kind: FrameViewTargetKind, layout: FrameViewLayout) -> bool {
+    let inputs = clear_load_inputs_from_view(ClearLoadViewSource {
+        kind,
+        viewport: CameraRenderRect {
+            origin_px: (0, 0),
+            extent_px: layout.viewport_px,
+        },
+        target_extent_px: layout.viewport_px,
+        copies_partial_color: false,
+        sample_count: layout.sample_count,
+        surface_format: layout.surface_format,
+        scene_color_format: layout.surface_format,
+        write_target: OffscreenWriteTarget::None,
+    });
+    debug_assert!(!inputs.has_color_texture);
+    inputs.persistent_depth_target
+}
+
+fn clear_load_inputs_from_offscreen(
+    extent_px: (u32, u32),
+    copy_to_color: Option<super::super::OffscreenColorCopyTarget<'_>>,
+    sample_count: u32,
+    surface_format: wgpu::TextureFormat,
+    write_target: OffscreenWriteTarget,
+) -> ClearLoadDecisionInputs {
+    let (viewport, copies_partial_color) = match copy_to_color {
+        None => (
+            CameraRenderRect {
+                origin_px: (0, 0),
+                extent_px,
+            },
+            false,
+        ),
+        Some(copy) => (
+            CameraRenderRect {
+                origin_px: copy.destination_origin_px,
+                extent_px: copy.extent_px,
+            },
+            true,
+        ),
+    };
+    clear_load_inputs_from_view(ClearLoadViewSource {
+        kind: FrameViewTargetKind::OffscreenRt,
+        viewport,
+        target_extent_px: extent_px,
+        copies_partial_color,
+        sample_count,
+        surface_format,
+        scene_color_format: surface_format,
+        write_target,
+    })
 }
 
 /// Resolves a texture history slot's scope for the current view.
@@ -563,3 +731,7 @@ fn buffer_history_half(
         (history.previous_index(), "previous")
     }
 }
+
+#[cfg(test)]
+#[path = "resolve_clear_load_inputs_tests.rs"]
+mod clear_load_inputs_tests;

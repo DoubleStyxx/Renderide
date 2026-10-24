@@ -80,6 +80,26 @@ pub trait RasterPass: Send + Sync {
         depth.stencil
     }
 
+    /// Optional: runtime color load override for one attachment.
+    ///
+    /// The compiled template is shared by every view. Passes that honor per-camera clear modes
+    /// return `Some` for the attachments whose load changes at record time. `None` keeps the
+    /// template load.
+    fn color_load_op_override(
+        &self,
+        _ctx: &RasterPassCtx<'_, '_>,
+        _attachment_index: usize,
+    ) -> Option<wgpu::LoadOp<wgpu::Color>> {
+        None
+    }
+
+    /// Optional: runtime depth load override.
+    ///
+    /// `None` keeps the depth load baked into the compiled template.
+    fn depth_load_op_override(&self, _ctx: &RasterPassCtx<'_, '_>) -> Option<wgpu::LoadOp<f32>> {
+        None
+    }
+
     /// Scheduling phase for multi-view execution. Defaults to [`PassPhase::PerView`].
     fn phase(&self) -> PassPhase {
         PassPhase::PerView

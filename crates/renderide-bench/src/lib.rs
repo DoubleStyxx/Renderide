@@ -8,19 +8,22 @@
 //! the default command.
 
 pub use renderide::bench_api::{
-    BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload, CULL_BATCH,
-    CullWorkload, KeywordVariantCacheWorkload, MATERIAL_UNIFORM_BATCH,
-    MaterialUniformUpdateWorkload, SHADOW_CHURN_CASTERS, SHADOW_CHURN_LIGHTS, ShadowChurnWorkload,
-    TRANSFORM_BATCH, TRANSPARENT_SORT_1K, TRANSPARENT_SORT_10K, TransformWorkload,
-    TransparentSortWorkload, WORLD_MATRIX_NODES, WorldMatrixWorkload,
+    BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload,
+    CAMERA_CLEAR_LOAD_OP_CAMERAS, CULL_BATCH, CullWorkload, KeywordVariantCacheWorkload,
+    MATERIAL_UNIFORM_BATCH, MaterialUniformUpdateWorkload, SHADOW_CHURN_CASTERS,
+    SHADOW_CHURN_LIGHTS, ShadowChurnWorkload, TRANSFORM_BATCH, TRANSPARENT_SORT_1K,
+    TRANSPARENT_SORT_10K, TransformWorkload, TransparentSortWorkload, WORLD_MATRIX_NODES,
+    WorldMatrixWorkload, camera_clear_load_op_checksum, camera_clear_load_op_inputs,
 };
 
 #[cfg(test)]
 mod tests {
     use super::{
         BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload,
-        CULL_BATCH, CullWorkload, KeywordVariantCacheWorkload, MaterialUniformUpdateWorkload,
-        TransformWorkload, TransparentSortWorkload, WORLD_MATRIX_NODES, WorldMatrixWorkload,
+        CAMERA_CLEAR_LOAD_OP_CAMERAS, CULL_BATCH, CullWorkload, KeywordVariantCacheWorkload,
+        MaterialUniformUpdateWorkload, TransformWorkload, TransparentSortWorkload,
+        WORLD_MATRIX_NODES, WorldMatrixWorkload, camera_clear_load_op_checksum,
+        camera_clear_load_op_inputs,
     };
 
     #[test]
@@ -118,6 +121,19 @@ mod tests {
         assert_eq!(workload.cache_hit(), hit);
         let composed = workload.compose();
         assert!(composed > 0);
+    }
+
+    #[test]
+    fn camera_clear_load_op_checksum_is_stable() {
+        let inputs = camera_clear_load_op_inputs(CAMERA_CLEAR_LOAD_OP_CAMERAS);
+        let first = camera_clear_load_op_checksum(&inputs);
+        let second = camera_clear_load_op_checksum(&inputs);
+        assert_eq!(first, second);
+        assert_ne!(first, 0);
+        assert_ne!(
+            camera_clear_load_op_checksum(&inputs[..128]),
+            camera_clear_load_op_checksum(&inputs[128..256])
+        );
     }
 
     #[test]
