@@ -23,6 +23,8 @@ RUNS = 9
 CONFIRM_ROUNDS = 3
 FLAG = 5.0
 FAIL = 10.0
+# Opt-in absolute floor used by the explicit floor tests (the gate default is 0, off; O8 open).
+FLOOR = 0.05
 
 # Noise model shaped like docs/perf-parity-plan.md section 5.1 (lavapipe, 5 runs x 300 frames):
 # per-invocation shift (round medians move ~5-10%), lognormal per-run noise, and an occasional
@@ -45,18 +47,30 @@ def invocation(rng: random.Random, true_ms: float, runs: int) -> list[float]:
     return out
 
 
-def simulate(true_pct: float, runs: int, rounds: int, flag: float, fail: float, trials: int, seed: int) -> float:
+def simulate(
+    true_pct: float,
+    runs: int,
+    rounds: int,
+    flag: float,
+    fail: float,
+    trials: int,
+    seed: int,
+    true_ms: float = 1.0,
+    abs_floor_ms: float = gate.DEFAULT_ABS_FLOOR_MS,
+) -> float:
     """Fraction of trials where the whole gate (first pass + pooled confirm) fails."""
     rng = random.Random(seed)
+    head_ms = true_ms * (1.0 + true_pct / 100.0)
     fails = 0
     for _ in range(trials):
-        first_base = invocation(rng, 1.0, runs)
-        first_head = invocation(rng, 1.0 + true_pct / 100.0, runs)
+        first_base = invocation(rng, true_ms, runs)
+        first_head = invocation(rng, head_ms, runs)
         confirm_base, confirm_head = [], []
         for _ in range(rounds):  # interleaved: base round, head round
-            confirm_base.append(invocation(rng, 1.0, runs))
-            confirm_head.append(invocation(rng, 1.0 + true_pct / 100.0, runs))
-        fails += gate.decide(first_base, first_head, confirm_base, confirm_head, flag, fail) == "fail"
+            confirm_base.append(invocation(rng, true_ms, runs))
+            confirm_head.append(invocation(rng, head_ms, runs))
+        verdict = gate.decide(first_base, first_head, confirm_base, confirm_head, flag, fail, abs_floor_ms=abs_floor_ms)
+        fails += verdict == "fail"
     return fails / trials
 
 
@@ -66,6 +80,26 @@ def old_rule_fails(base: list[float], head: list[float], threshold: float) -> bo
     delta = (statistics.median(head) - base_median) / base_median * 100.0
     spread = (max(base) - min(base)) / base_median * 100.0
     return delta > threshold and delta > spread
+
+
+# Schema-2 `runner` block (renderide-framebench --json / --output), as on a 7763 CI runner.
+RUNNER = {
+    "os": "linux",
+    "cpu_model": "AMD EPYC 7763 64-Core Processor",
+    "icd": {"path": "/usr/share/vulkan/icd.d/lvp_icd.x86_64.json", "source": "env", "var": "VK_DRIVER_FILES"},
+    "rayon_threads": 2,
+    "rayon_threads_source": "env",
+}
+
+
+def report2(scenarios: dict[str, list[float]]) -> dict:
+    """Schema-2 report: schema 1 plus `runner` (and fields the gate ignores)."""
+    doc = report(scenarios)
+    doc["schema"] = 2
+    doc["runner"] = dict(RUNNER)
+    for scenario in doc["scenarios"]:
+        scenario["draw_calls"] = {"p50": 676.0, "p95": 676.0, "p99": 676.0}
+    return doc
 
 
 def report(scenarios: dict[str, list[float]]) -> dict:
@@ -95,6 +129,11 @@ class GateTests(unittest.TestCase):
         path.write_text(json.dumps(report(scenarios)), encoding="utf-8")
         return path
 
+    def write2(self, name: str, scenarios: dict[str, list[float]]) -> Path:
+        path = self.dir / name
+        path.write_text(json.dumps(report2(scenarios)), encoding="utf-8")
+        return path
+
     def run_gate(self, *args: str) -> int:
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             return gate.main(list(args))
@@ -102,16 +141,20 @@ class GateTests(unittest.TestCase):
     def decide(self, fb, fh, cb, ch) -> str:
         return gate.decide(fb, fh, cb, ch, FLAG, FAIL)
 
-    def confirm_row(self, fb, fh, cb, ch) -> gate.Row:
+    def confirm_row(self, fb, fh, cb, ch, abs_floor_ms: float = gate.DEFAULT_ABS_FLOOR_MS) -> gate.Row:
         flat_cb = [v for r in cb for v in r]
         flat_ch = [v for r in ch for v in r]
-        return gate.evaluate_confirm({"s": fb}, {"s": fh}, {"s": flat_cb}, {"s": flat_ch}, FAIL, [])[0]
+        return gate.evaluate_confirm(
+            {"s": fb}, {"s": fh}, {"s": flat_cb}, {"s": flat_ch}, FAIL, [], abs_floor_ms=abs_floor_ms
+        )[0]
 
     # --- first pass and plumbing ----------------------------------------------------------
 
     def test_delta_inside_base_spread_is_flagged_then_cleared(self) -> None:
         # Shape of #178 run 40050133923: +~11% on p95 while base runs spread ~19%. The old
         # spread rule passed this; the first pass now flags it and a calm confirm clears it.
+        # Default rule (abs floor off). At ~0.21 ms this delta is 0.025 ms, which an opted-in
+        # 0.05 ms floor clears outright (test_abs_floor_clears_issue_178_shape).
         base = [0.19, 0.2145, 0.23, 0.21, 0.22]
         head = [0.2391, 0.23, 0.24, 0.25, 0.235]
         row = gate.evaluate_first({"s": base}, {"s": head}, FLAG, [])[0]
@@ -158,7 +201,7 @@ class GateTests(unittest.TestCase):
 
     def test_wrong_schema_is_an_input_error(self) -> None:
         path = self.dir / "bad.json"
-        path.write_text(json.dumps({"schema": 2, "scenarios": []}), encoding="utf-8")
+        path.write_text(json.dumps({"schema": 3, "scenarios": []}), encoding="utf-8")
         self.assertEqual(self.run_gate("--base", str(path), "--head", str(path)), 2)
 
     def test_threshold_arguments(self) -> None:
@@ -186,7 +229,8 @@ class GateTests(unittest.TestCase):
         # Like the workflow's deprecated `threshold` input: sets fail, lowers flag with a warning.
         base = self.write("b.json", {"s": flat(1.0)})
         head = self.write("h.json", {"s": flat(1.045)})  # +4.5%: under default flag 5
-        common = ["--base", str(base), "--head", str(head)]
+        # Relative thresholds only: +4.5% of 1 ms is 0.045 ms, under the default abs floor.
+        common = ["--base", str(base), "--head", str(head), "--abs-floor-ms", "0"]
         self.assertEqual(self.run_gate(*common), 0)
         code, out, err = self.run_gate_capture(*common, "--threshold", "4")
         self.assertEqual(code, 1)  # flag lowered 5 -> 4, so +4.5% is flagged
@@ -479,7 +523,9 @@ class GateTests(unittest.TestCase):
             with self.subTest(base=base, head=head):
                 self.assertGreater(gate.delta_percent(base, head), FAIL)
                 for rounds in (1, 2, CONFIRM_ROUNDS, 5):
-                    self.assertEqual(self.decide(base, head, [base] * rounds, [head] * rounds), "fail")
+                    # Mann-Whitney property, default rule (abs floor off).
+                    verdict = self.decide(base, head, [base] * rounds, [head] * rounds)
+                    self.assertEqual(verdict, "fail")
 
     def duplicated_slips(self, runs: int) -> tuple[int, int]:
         # Cases whose first-pass delta is above the fail bar, re-"confirmed" with copies of the
@@ -558,8 +604,9 @@ class GateTests(unittest.TestCase):
 
     def test_simulation_at_workflow_defaults(self) -> None:
         # runs=9, flag=5, fail=10, confirm_rounds=3; 4000 trials each, seeded (0%: seed 2,
-        # regressions: seed 1). Measured: 0% passes 99.925%; +10% fails 47.65% (10% is the bar
-        # itself, so ~50% is expected); +12% fails 69.725%; +15% fails 90.0%.
+        # regressions: seed 1), true value 1 ms, default rule (abs floor off). Measured: 0% passes
+        # 99.925%; +10% fails 47.65% (10% is the bar itself, so ~50% is expected); +12% fails
+        # 69.725%; +15% fails 90.0%.
         rates = {pct: simulate(pct, RUNS, CONFIRM_ROUNDS, FLAG, FAIL, trials=4000, seed=1) for pct in (10, 12, 15)}
         pass_0 = 1.0 - simulate(0.0, RUNS, CONFIRM_ROUNDS, FLAG, FAIL, trials=4000, seed=2)
         print(f"\n[sim runs={RUNS} rounds={CONFIRM_ROUNDS} flag={FLAG:g} fail={FAIL:g}] pass@0%={pass_0:.4f} "
@@ -570,6 +617,167 @@ class GateTests(unittest.TestCase):
         self.assertAlmostEqual(rates[12], 0.69725, places=5)
         self.assertAlmostEqual(rates[15], 0.9000, places=5)
         self.assertTrue(0.35 <= rates[10] <= 0.65)  # around the bar: a coin flip
+
+    def test_simulation_at_0_2_ms_floor_off_and_on(self) -> None:
+        # Why the abs floor is opt-in (O8 open): today's lavapipe scenarios run at ~0.2-0.4 ms.
+        # Same noise model and seeds as above at a true 0.2 ms median, 4000 trials each.
+        # Measured: floor off (default): 0% passes 99.925%, +15% fails 90.0%, +20% fails
+        # 98.95% (the model is scale-free, so this matches 1 ms). 0.05 ms floor: 0% passes
+        # 100%, +15% fails 0.0%, +20% fails 4.8%, since a 0.05 ms floor at 0.2 ms is a 25% bar.
+        def rate(pct: float, floor: float, seed: int = 1) -> float:
+            return simulate(pct, RUNS, CONFIRM_ROUNDS, FLAG, FAIL, trials=4000, seed=seed, true_ms=0.2,
+                            abs_floor_ms=floor)
+
+        off = {pct: rate(pct, gate.DEFAULT_ABS_FLOOR_MS) for pct in (15, 20)}
+        on = {pct: rate(pct, FLOOR) for pct in (15, 20)}
+        pass_0_off = 1.0 - rate(0.0, gate.DEFAULT_ABS_FLOOR_MS, seed=2)
+        pass_0_on = 1.0 - rate(0.0, FLOOR, seed=2)
+        print(f"\n[sim 0.2 ms] floor off: pass@0%={pass_0_off:.4f} fail@+15%={off[15]:.4f} fail@+20%={off[20]:.4f}; "
+              f"floor {FLOOR:g} ms: pass@0%={pass_0_on:.4f} fail@+15%={on[15]:.4f} fail@+20%={on[20]:.4f}",
+              file=sys.stderr)
+        self.assertEqual(gate.DEFAULT_ABS_FLOOR_MS, 0.0)
+        self.assertAlmostEqual(off[15], 0.9000, places=5)
+        self.assertAlmostEqual(off[20], 0.9895, places=5)
+        self.assertAlmostEqual(pass_0_off, 0.99925, places=5)
+        self.assertAlmostEqual(on[15], 0.0, places=5)
+        self.assertAlmostEqual(on[20], 0.048, places=5)
+        self.assertAlmostEqual(pass_0_on, 1.0, places=5)
+        self.assertGreaterEqual(off[15], 0.85)  # floor off keeps the +15% detection target
+        self.assertLessEqual(on[15], 0.05)  # a 0.05 ms floor suppresses it at 0.2 ms
+
+    # --- schema 2 ---------------------------------------------------------------------------
+
+    def test_schema_2_report_is_accepted(self) -> None:
+        path = self.write2("h2.json", {"s": [1.0, 2.0]})
+        self.assertEqual(gate.load([path]), {"s": [1.0, 2.0]})
+
+    def test_schema_1_base_and_schema_2_head_via_cli(self) -> None:
+        # The frame-bench.yml case for B1: base = master (schema 1), head = PR (schema 2).
+        base = self.write("b.json", {"s": flat(2.0), "t": flat(1.0)})
+        head = self.write2("h.json", {"s": flat(2.0), "t": flat(1.0)})
+        code, out, _ = self.run_gate_capture("--base", str(base), "--head", str(head))
+        self.assertEqual(code, 0)
+        self.assertIn("| s | 2.0000 | 2.0000 | +0.00% | 9/9 | ok |", out)
+        slow = self.write2("hs.json", {"s": flat(2.4), "t": flat(1.0)})
+        suspects = self.dir / "suspects.txt"
+        code = self.run_gate("--base", str(base), "--head", str(slow), "--suspects-out", str(suspects))
+        self.assertEqual(code, 1)
+        self.assertEqual(suspects.read_text(encoding="utf-8"), "s\n")
+
+    def test_schema_1_and_2_pool_the_same(self) -> None:
+        one = self.write("one.json", {"s": [1.0, 1.5]})
+        two = self.write2("two.json", {"s": [1.0, 1.5]})
+        self.assertEqual(gate.load([one]), gate.load([two]))
+        self.assertEqual(gate.load([one, two]), {"s": [1.0, 1.5, 1.0, 1.5]})
+
+    def test_confirm_mode_accepts_mixed_schemas(self) -> None:
+        base = self.write("b.json", {"s": flat(2.0)})
+        head = self.write2("h.json", {"s": flat(2.4)})
+        cb = self.write("cb.json", {"s": [2.0, 2.01, 1.99, 2.0, 2.0]})
+        ch = self.write2("ch.json", {"s": [2.4, 2.41, 2.39, 2.4, 2.4]})
+        code = self.run_gate("--mode", "confirm", "--base", str(base), "--head", str(head),
+                             "--confirm-base", str(cb), "--confirm-head", str(ch))
+        self.assertEqual(code, 1)
+
+    def test_schema_2_without_runner_is_an_input_error(self) -> None:
+        doc = report2({"s": flat(1.0)})
+        del doc["runner"]
+        path = self.write_raw("h.json", doc)
+        base = self.write("b.json", {"s": flat(1.0)})
+        self.assertEqual(self.run_gate("--base", str(base), "--head", str(path)), 2)
+
+    def test_unsupported_schema_values_are_input_errors(self) -> None:
+        base = self.write("b.json", {"s": flat(1.0)})
+        for value in (0, 3, "2", True, None, 2.0):
+            with self.subTest(schema=value):
+                doc = report2({"s": flat(1.0)})
+                doc["schema"] = value
+                head = self.write_raw("h.json", doc)
+                self.assertEqual(self.run_gate("--base", str(base), "--head", str(head)), 2)
+
+    def test_framebench_error_document_is_an_input_error(self) -> None:
+        # `renderide-framebench run --json` failure output: schema, error, runner; no scenarios.
+        doc = {"schema": 2, "error": {"exit_code": 3, "kind": "run_failure", "message": "handshake timed out"},
+               "runner": dict(RUNNER)}
+        bad = self.write_raw("err.json", doc)
+        good = self.write2("ok.json", {"s": flat(1.0)})
+        code, _, err = self.run_gate_capture("--base", str(good), "--head", str(bad))
+        self.assertEqual(code, 2)
+        self.assertIn("error document", err)
+        # On the base side too: an error document must not silently become "base N/A" rows.
+        self.assertEqual(self.run_gate("--base", str(bad), "--head", str(good)), 2)
+
+    def test_runner_lines_are_rendered_for_schema_2(self) -> None:
+        base = self.write("b.json", {"s": flat(1.0)})
+        head = self.write2("h.json", {"s": flat(1.0)})
+        _, out, _ = self.run_gate_capture("--base", str(base), "--head", str(head))
+        self.assertIn('- head runner: os=linux cpu="AMD EPYC 7763 64-Core Processor" '
+                      "icd=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json (VK_DRIVER_FILES) rayon_threads=2 (env)", out)
+        self.assertNotIn("base runner:", out)  # schema-1 base has no runner block
+
+    # --- absolute floor ---------------------------------------------------------------------
+
+    def test_abs_floor_clears_issue_178_shape(self) -> None:
+        # The #178 shape: +11.5% at ~0.21 ms is a 0.025 ms delta, so it never flags or fails.
+        base = [0.19, 0.2145, 0.23, 0.21, 0.22]
+        head = [0.2391, 0.23, 0.24, 0.25, 0.235]
+        row = gate.evaluate_first({"s": base}, {"s": head}, FLAG, [], FLOOR)[0]
+        self.assertGreater(row.delta, FAIL)
+        self.assertEqual(row.status, "ok (abs floor)")
+        self.assertFalse(gate.is_failure(row.status))
+        cb, ch = [base] * CONFIRM_ROUNDS, [head] * CONFIRM_ROUNDS
+        self.assertEqual(gate.decide(base, head, cb, ch, FLAG, FAIL, abs_floor_ms=FLOOR), "pass")
+        self.assertEqual(gate.decide(base, head, [], [], FLAG, FAIL, abs_floor_ms=FLOOR), "pass")
+        self.assertEqual(self.decide(base, head, cb, ch), "fail")  # default: floor off
+
+    def test_abs_floor_boundary_is_inclusive(self) -> None:
+        # Exactly 0.05 ms (+50% of 0.1 ms) does not flag; 0.0501 ms does.
+        def status(base: float, head: float, flag: float) -> str:
+            return gate.evaluate_first({"s": flat(base)}, {"s": flat(head)}, flag, [], FLOOR)[0].status
+
+        self.assertEqual(status(0.1, 0.15, FLAG), "ok (abs floor)")
+        self.assertEqual(status(1.0, 1.05, 4.0), "ok (abs floor)")
+        self.assertEqual(status(0.1, 0.1501, FLAG), "FLAG")
+
+    def test_abs_floor_applies_to_both_confirm_paths(self) -> None:
+        # Large, significant relative regressions under the floor never fail; above it they do.
+        base, head = [0.1, 0.101, 0.099, 0.1, 0.1], [0.14, 0.141, 0.139, 0.14, 0.14]  # +40%, 0.04 ms
+        row = self.confirm_row(base, head, [base] * CONFIRM_ROUNDS, [head] * CONFIRM_ROUNDS, FLOOR)
+        self.assertEqual(row.status, "ok (abs floor)")
+        self.assertLess(row.p_value, 0.05)
+        self.assertLess(row.confirm_p, 0.05)
+        big_base = [v * 10 for v in base]
+        big_head = [v * 10 for v in head]  # +40%, 0.4 ms
+        row = self.confirm_row(big_base, big_head, [big_base] * CONFIRM_ROUNDS, [big_head] * CONFIRM_ROUNDS, FLOOR)
+        self.assertEqual(row.status, "FAIL (pooled, confirm-only)")
+        row = self.confirm_row(base, head, [base] * CONFIRM_ROUNDS, [head] * CONFIRM_ROUNDS)
+        self.assertEqual(row.status, "FAIL (pooled, confirm-only)")  # default: floor off
+
+    def test_abs_floor_never_hides_a_regression_above_it(self) -> None:
+        # A +20% regression at 2 ms (0.4 ms) still flags and fails, with or without the floor.
+        base, head = [2.0, 2.02, 1.98, 2.0, 2.0], [2.4, 2.42, 2.38, 2.4, 2.4]
+        for floor in (0.0, FLOOR):
+            with self.subTest(floor=floor):
+                verdict = gate.decide(base, head, [base] * CONFIRM_ROUNDS, [head] * CONFIRM_ROUNDS, FLAG, FAIL,
+                                      abs_floor_ms=floor)
+                self.assertEqual(verdict, "fail")
+
+    def test_abs_floor_cli(self) -> None:
+        base = self.write("b.json", {"s": flat(0.2)})
+        head = self.write2("h.json", {"s": flat(0.24)})  # +20%, 0.04 ms
+        common = ["--base", str(base), "--head", str(head)]
+        code, out, _ = self.run_gate_capture(*common)
+        self.assertEqual(code, 1)  # default: floor off, +20% flags
+        self.assertNotIn("abs floor", out.lower())
+        code, out, _ = self.run_gate_capture(*common, "--abs-floor-ms", "0.05")
+        self.assertEqual(code, 0)
+        self.assertIn("| ok (abs floor) |", out)
+        self.assertIn("<= 0.05 ms never flags or fails", out)
+        self.assertEqual(self.run_gate(*common, "--abs-floor-ms", "0"), 1)
+        self.assertEqual(self.run_gate(*common, "--abs-floor-ms", "0.01"), 1)
+        self.assertEqual(self.run_gate(*common, "--abs-floor-ms", "-0.01"), 2)
+        self.assertEqual(self.run_gate(*common, "--abs-floor-ms", "nan"), 2)
+        self.assertEqual(self.run_gate(*common, "--abs-floor-ms", "inf"), 2)
 
 
 if __name__ == "__main__":
