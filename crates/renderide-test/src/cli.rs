@@ -119,15 +119,27 @@ fn run_suite_command(opts: &SuiteOpts) -> Result<(), HarnessError> {
     );
 
     let outcome = run_suite(config)?;
-    print_suite_outcome(&outcome, "PASS", "passed");
-    if outcome.passed() {
-        Ok(())
-    } else {
-        Err(HarnessError::SuiteFailed {
+    let log_dir = logger::log_dir_for(logger::LogComponent::Renderer);
+    let ruling = crate::warp_pbs::ruling(
+        crate::warp_pbs::directory_is_warp(&log_dir),
+        &outcome
+            .report
+            .cases
+            .iter()
+            .map(|case| (case.name.as_str(), case.passed))
+            .collect::<Vec<_>>(),
+    );
+    let expected = matches!(ruling, crate::warp_pbs::Ruling::ExpectedFailure);
+    print_suite_outcome(&outcome, "PASS", "passed", expected);
+    match ruling {
+        crate::warp_pbs::Ruling::UnexpectedPass => Err(HarnessError::WarpPbsUnexpectedPass),
+        crate::warp_pbs::Ruling::ExpectedFailure => Ok(()),
+        crate::warp_pbs::Ruling::Unchanged if outcome.passed() => Ok(()),
+        crate::warp_pbs::Ruling::Unchanged => Err(HarnessError::SuiteFailed {
             failed: outcome.report.failed,
             total: outcome.report.total,
             report_path: outcome.report_path,
-        })
+        }),
     }
 }
 
@@ -142,7 +154,7 @@ fn run_update_suite_command(opts: &SuiteOpts) -> Result<(), HarnessError> {
     );
 
     let outcome = update_suite(config)?;
-    print_suite_outcome(&outcome, "UPDATE", "updated");
+    print_suite_outcome(&outcome, "UPDATE", "updated", false);
     if outcome.passed() {
         Ok(())
     } else {
@@ -190,9 +202,16 @@ fn print_suite_outcome(
     outcome: &crate::scene_dsl::suite::SuiteRunOutcome,
     success_label: &str,
     result_label: &str,
+    warp_pbs_expected: bool,
 ) {
     for case in &outcome.report.cases {
-        if case.passed {
+        if warp_pbs_expected && case.name == crate::warp_pbs::PBS_LIT && !case.passed {
+            println!(
+                "EXPECTED FAIL {} ({}) WARP pbs_lit is the known mismatch (https://github.com/DoubleStyxx/Renderide/issues/212)",
+                case.name,
+                case.artifacts_dir.display()
+            );
+        } else if case.passed {
             println!(
                 "{} {} ({})",
                 success_label,
@@ -209,10 +228,17 @@ fn print_suite_outcome(
         }
     }
     println!("Suite report: {}", outcome.report_path.display());
-    println!(
-        "Suite result: {}/{} {}",
-        outcome.report.passed, outcome.report.total, result_label
-    );
+    if warp_pbs_expected {
+        println!(
+            "Suite result: {}/{} {} (1 WARP expected failure)",
+            outcome.report.passed, outcome.report.total, result_label
+        );
+    } else {
+        println!(
+            "Suite result: {}/{} {}",
+            outcome.report.passed, outcome.report.total, result_label
+        );
+    }
 }
 
 /// Cargo build profile selecting which `target/<profile>/renderide-renderer` binary to spawn.
