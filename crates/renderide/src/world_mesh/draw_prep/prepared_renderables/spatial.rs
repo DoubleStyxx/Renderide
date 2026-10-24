@@ -9,6 +9,7 @@ thread_local! {
     static SPATIAL_CANDIDATE_INDICES: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
     static SPATIAL_CANDIDATE_RUNS: RefCell<Vec<FramePreparedRun>> = const { RefCell::new(Vec::new()) };
     static SPATIAL_CANDIDATE_BITS: RefCell<DenseBitSet> = const { RefCell::new(DenseBitSet::new_empty()) };
+    static SPATIAL_CASTER_ROWS: RefCell<Vec<StoredWorldCaster>> = const { RefCell::new(Vec::new()) };
 }
 
 #[cfg(test)]
@@ -43,6 +44,7 @@ impl Drop for PreparedSpatialRunCandidates {
 }
 
 /// One prepared world caster plus the run whose first draw owns its bounds.
+#[derive(Clone, Copy)]
 struct StoredWorldCaster {
     run_index: usize,
     bounds: super::PreparedCasterBounds,
@@ -52,8 +54,12 @@ struct StoredWorldCaster {
 #[derive(Default)]
 pub(super) struct PreparedSpatialIndex {
     spaces: HashMap<RenderSpaceId, PreparedSpatialSpace>,
-    /// World casters in run order. Rebuilt with the index. Refit updates bounds and inserts
-    /// linear runs whose world AABB appeared, without scanning every caster.
+    /// Casters grouped by render space, each list sorted by run index.
+    ///
+    /// A refit rewrites only the spaces that changed. Linear and BVH runs are both included, so
+    /// an indexed run whose world AABB disappears and comes back is removed and inserted again.
+    casters_by_space: HashMap<RenderSpaceId, Vec<StoredWorldCaster>>,
+    /// World casters in global run order, published from [`Self::casters_by_space`].
     stored_world_casters: Vec<StoredWorldCaster>,
 }
 
@@ -150,16 +156,32 @@ impl PreparedSpatialIndex {
         I: IntoIterator<Item = RenderSpaceId>,
     {
         let mut refit_count = 0usize;
+        let mut membership_changed = false;
         for space_id in space_ids {
-            let Some(space) = self.spaces.get_mut(&space_id) else {
+            if !self.refit_one_space(draws, runs, space_id) {
                 continue;
-            };
-            profiling::scope!("mesh::prepared_renderables::spatial_refit");
-            space.refit(draws, runs);
-            self.refresh_world_casters(draws, runs, space_id);
+            }
+            membership_changed |= self.rewrite_space_casters(draws, runs, space_id);
             refit_count = refit_count.saturating_add(1);
         }
+        if membership_changed {
+            self.publish_world_casters();
+        }
         refit_count
+    }
+
+    fn refit_one_space(
+        &mut self,
+        draws: &[FramePreparedDraw],
+        runs: &[FramePreparedRun],
+        space_id: RenderSpaceId,
+    ) -> bool {
+        let Some(space) = self.spaces.get_mut(&space_id) else {
+            return false;
+        };
+        profiling::scope!("mesh::prepared_renderables::spatial_refit");
+        space.refit(draws, runs);
+        true
     }
 
     /// Fills the compact world-caster list from prepared runs without building a BVH.
@@ -172,7 +194,9 @@ impl PreparedSpatialIndex {
         draws: &[FramePreparedDraw],
         runs: &[FramePreparedRun],
     ) {
-        self.stored_world_casters.clear();
+        for bucket in self.casters_by_space.values_mut() {
+            bucket.clear();
+        }
         for (run_index, run) in runs.iter().copied().enumerate() {
             let Some(first) = draws.get(run.start as usize) else {
                 continue;
@@ -180,9 +204,13 @@ impl PreparedSpatialIndex {
             let Some(bounds) = prepared_world_caster(first) else {
                 continue;
             };
-            self.stored_world_casters
+            self.casters_by_space
+                .entry(bounds.space_id)
+                .or_default()
                 .push(StoredWorldCaster { run_index, bounds });
         }
+        self.casters_by_space.retain(|_, rows| !rows.is_empty());
+        self.publish_world_casters();
     }
 
     /// Prepared world casters in run order.
@@ -190,61 +218,41 @@ impl PreparedSpatialIndex {
         self.stored_world_casters.iter().map(|entry| &entry.bounds)
     }
 
-    /// Rewrites caster bounds for `space_id` and inserts linear runs that became casters.
+    /// Rebuilds one space's caster rows from its linear and indexed runs.
     ///
-    /// Rows that no longer qualify are removed in place so the list stays in run order.
-    /// Only this space's linear runs are considered for insertion. Indexed runs already had a
-    /// world AABB when the index was built.
-    fn refresh_world_casters(
+    /// Returns whether the set of run indices changed. Unchanged rows patch the published list in
+    /// place. A changed set is published once, after every refitted space has been rewritten.
+    fn rewrite_space_casters(
         &mut self,
         draws: &[FramePreparedDraw],
         runs: &[FramePreparedRun],
         space_id: RenderSpaceId,
-    ) {
-        let mut index = 0;
-        while index < self.stored_world_casters.len() {
-            if self.stored_world_casters[index].bounds.space_id != space_id {
-                index += 1;
-                continue;
-            }
-            let run_index = self.stored_world_casters[index].run_index;
-            let bounds = runs
-                .get(run_index)
-                .and_then(|run| draws.get(run.start as usize))
-                .and_then(prepared_world_caster);
-            if let Some(bounds) = bounds {
-                self.stored_world_casters[index].bounds = bounds;
-                index += 1;
-            } else {
-                self.stored_world_casters.remove(index);
-            }
-        }
-        let mut linear_runs = take_spatial_indices();
+    ) -> bool {
+        let mut fresh = take_stored_casters();
         if let Some(space) = self.spaces.get(&space_id) {
-            linear_runs.extend(space.linear.iter().map(|entry| entry.run_index));
+            push_space_casters(
+                &mut fresh,
+                draws,
+                runs,
+                space_id,
+                &space.linear,
+                &space.indexed,
+            );
         }
-        for run_index in linear_runs.iter().copied() {
-            if self
-                .stored_world_casters
-                .binary_search_by_key(&run_index, |entry| entry.run_index)
-                .is_ok()
-            {
-                continue;
-            }
-            let Some(bounds) = runs
-                .get(run_index)
-                .and_then(|run| draws.get(run.start as usize))
-                .and_then(prepared_world_caster)
-            else {
-                continue;
-            };
-            let insert_at = self
-                .stored_world_casters
-                .partition_point(|entry| entry.run_index < run_index);
-            self.stored_world_casters
-                .insert(insert_at, StoredWorldCaster { run_index, bounds });
+        fresh.sort_unstable_by_key(|entry| entry.run_index);
+        fresh.dedup_by_key(|entry| entry.run_index);
+        let membership_changed =
+            store_space_caster_rows(&mut self.casters_by_space, space_id, &mut fresh);
+        if !membership_changed {
+            patch_stored_caster_bounds(&mut self.stored_world_casters, &fresh);
         }
-        recycle_spatial_indices(linear_runs);
+        recycle_stored_casters(fresh);
+        membership_changed
+    }
+
+    fn publish_world_casters(&mut self) {
+        profiling::scope!("mesh::prepared_renderables::spatial_publish_casters");
+        publish_caster_run_order(&self.casters_by_space, &mut self.stored_world_casters);
     }
 
     /// Returns whether `space_id` uses a BVH instead of only linear buckets.
@@ -667,6 +675,104 @@ fn record_spatial_frustum_reject(
         .saturating_add(slot_count);
 }
 
+fn push_space_casters(
+    out: &mut Vec<StoredWorldCaster>,
+    draws: &[FramePreparedDraw],
+    runs: &[FramePreparedRun],
+    space_id: RenderSpaceId,
+    linear: &[LinearPreparedRun],
+    indexed: &[IndexedPreparedRun],
+) {
+    let run_indices = linear
+        .iter()
+        .map(|entry| entry.run_index)
+        .chain(indexed.iter().map(|entry| entry.run_index));
+    for run_index in run_indices {
+        let Some(bounds) = runs
+            .get(run_index)
+            .and_then(|run| draws.get(run.start as usize))
+            .and_then(prepared_world_caster)
+        else {
+            continue;
+        };
+        if bounds.space_id != space_id {
+            continue;
+        }
+        out.push(StoredWorldCaster { run_index, bounds });
+    }
+}
+
+fn store_space_caster_rows(
+    casters: &mut HashMap<RenderSpaceId, Vec<StoredWorldCaster>>,
+    space_id: RenderSpaceId,
+    fresh: &mut Vec<StoredWorldCaster>,
+) -> bool {
+    if fresh.is_empty() {
+        let Some(bucket) = casters.get_mut(&space_id) else {
+            return false;
+        };
+        let changed = !bucket.is_empty();
+        bucket.clear();
+        return changed;
+    }
+    let bucket = casters.entry(space_id).or_default();
+    let changed = bucket.len() != fresh.len()
+        || bucket
+            .iter()
+            .zip(fresh.iter())
+            .any(|(old, new)| old.run_index != new.run_index);
+    if changed {
+        bucket.clear();
+        bucket.append(fresh);
+    } else {
+        for (slot, row) in bucket.iter_mut().zip(fresh.iter()) {
+            slot.bounds = row.bounds;
+        }
+    }
+    changed
+}
+
+fn patch_stored_caster_bounds(stored: &mut [StoredWorldCaster], fresh: &[StoredWorldCaster]) {
+    for row in fresh {
+        if let Ok(position) = stored.binary_search_by_key(&row.run_index, |entry| entry.run_index) {
+            stored[position].bounds = row.bounds;
+        }
+    }
+}
+
+fn publish_caster_run_order(
+    casters: &HashMap<RenderSpaceId, Vec<StoredWorldCaster>>,
+    stored: &mut Vec<StoredWorldCaster>,
+) {
+    stored.clear();
+    let nonempty = casters.values().filter(|rows| !rows.is_empty()).count();
+    if nonempty == 0 {
+        return;
+    }
+    if nonempty == 1 {
+        if let Some(rows) = casters.values().find(|rows| !rows.is_empty()) {
+            stored.extend_from_slice(rows);
+        }
+        return;
+    }
+    for rows in casters.values() {
+        stored.extend_from_slice(rows);
+    }
+    stored.sort_unstable_by(|left, right| {
+        left.run_index
+            .cmp(&right.run_index)
+            .then_with(|| left.bounds.space_id.cmp(&right.bounds.space_id))
+    });
+}
+
+fn take_stored_casters() -> Vec<StoredWorldCaster> {
+    take_tls_vec(&SPATIAL_CASTER_ROWS)
+}
+
+fn recycle_stored_casters(rows: Vec<StoredWorldCaster>) {
+    recycle_tls_vec(&SPATIAL_CASTER_ROWS, rows);
+}
+
 fn prepared_world_caster(first: &FramePreparedDraw) -> Option<super::PreparedCasterBounds> {
     if first.is_overlay || first.is_hidden {
         return None;
@@ -734,199 +840,4 @@ fn axis_value(v: Vec3A, axis: usize) -> f32 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    use glam::Mat4;
-
-    use crate::camera::HostCameraFrame;
-    use crate::scene::{MeshRendererInstanceId, RenderSpaceId, SceneCoordinator};
-    use crate::shared::RenderTransform;
-    use crate::world_mesh::culling::{
-        MeshCullGeometry, WorldMeshCullInput, WorldMeshCullProjParams,
-    };
-
-    fn prepared_draw_with_bounds(
-        space_id: RenderSpaceId,
-        renderable_index: usize,
-        min: Vec3,
-        max: Vec3,
-    ) -> FramePreparedDraw {
-        FramePreparedDraw {
-            space_id,
-            renderable_index,
-            instance_id: MeshRendererInstanceId(renderable_index as u64 + 1),
-            renderer_ordinal: renderable_index,
-            node_id: renderable_index as i32,
-            mesh_asset_id: 10,
-            is_overlay: false,
-            is_hidden: false,
-            sorting_order: 0,
-            shadow_cast_mode: ShadowCastMode::On,
-            skinned: false,
-            world_space_deformed: false,
-            blendshape_deformed: false,
-            tangent_blendshape_deform_active: false,
-            slot_index: 0,
-            material_stack_order: None,
-            first_index: 0,
-            index_count: 3,
-            material_asset_id: 1,
-            property_block_id: None,
-            cull_geometry: Some(MeshCullGeometry {
-                world_aabb: Some((min, max)),
-                rigid_world_matrix: Some(Mat4::IDENTITY),
-                front_face_world_matrix: Some(Mat4::IDENTITY),
-            }),
-            rigid_world_matrix_override: None,
-            particle_draw: ParticleDrawParams::default(),
-        }
-    }
-
-    fn spatial_scene_and_cull(
-        space_id: RenderSpaceId,
-    ) -> (SceneCoordinator, HostCameraFrame, WorldMeshCullProjParams) {
-        let mut scene = SceneCoordinator::new();
-        scene.test_seed_space_identity_worlds(space_id, vec![RenderTransform::default()], vec![-1]);
-        (
-            scene,
-            HostCameraFrame::default(),
-            WorldMeshCullProjParams {
-                world_proj: Mat4::IDENTITY,
-                overlay_proj: Mat4::IDENTITY,
-                vr_stereo: None,
-            },
-        )
-    }
-
-    #[test]
-    fn spatial_refit_updates_bounds_without_rebuilding_run_membership() {
-        let space_id = RenderSpaceId(7);
-        let (scene, host_camera, proj) = spatial_scene_and_cull(space_id);
-        let culling = WorldMeshCullInput {
-            proj,
-            host_camera: &host_camera,
-            hi_z: None,
-            hi_z_temporal: None,
-            hysteresis: None,
-        };
-        let mut draws = (0..80)
-            .map(|idx| {
-                prepared_draw_with_bounds(
-                    space_id,
-                    idx,
-                    Vec3::new(2.0, -0.5, -0.5),
-                    Vec3::new(3.0, 0.5, 0.5),
-                )
-            })
-            .collect::<Vec<_>>();
-        let runs = (0..draws.len())
-            .map(|idx| FramePreparedRun {
-                start: idx as u32,
-                end: idx as u32 + 1,
-            })
-            .collect::<Vec<_>>();
-        let mut spatial = PreparedSpatialIndex::default();
-        spatial.rebuild(&draws, &runs);
-        let before = spatial.query_runs(&runs, &[space_id], &scene, Some(&culling));
-
-        draws[0].cull_geometry = Some(MeshCullGeometry {
-            world_aabb: Some((Vec3::new(-0.25, -0.25, -0.25), Vec3::new(0.25, 0.25, 0.25))),
-            rigid_world_matrix: Some(Mat4::IDENTITY),
-            front_face_world_matrix: Some(Mat4::IDENTITY),
-        });
-        let refit_count = spatial.refit_spaces(&draws, &runs, [space_id]);
-        let after = spatial.query_runs(&runs, &[space_id], &scene, Some(&culling));
-
-        assert!(spatial.space_uses_bvh_for_tests(space_id));
-        assert_eq!(before.runs.len(), 0);
-        assert_eq!(refit_count, 1);
-        assert_eq!(after.runs.len(), 1);
-        assert_eq!(after.runs[0], FramePreparedRun { start: 0, end: 1 });
-        let updated = spatial
-            .world_casters()
-            .find(|bounds| bounds.renderable_index == 0)
-            .expect("refit keeps the caster");
-        assert_eq!(updated.aabb_min, Vec3::new(-0.25, -0.25, -0.25));
-        assert_eq!(updated.aabb_max, Vec3::new(0.25, 0.25, 0.25));
-    }
-
-    #[test]
-    fn spatial_refit_inserts_a_caster_whose_bounds_appear_and_keeps_run_order() {
-        let space_id = RenderSpaceId(7);
-        let mut draws = vec![
-            prepared_draw_with_bounds(space_id, 0, Vec3::ZERO, Vec3::ONE),
-            prepared_draw_with_bounds(space_id, 1, Vec3::ZERO, Vec3::ONE),
-            prepared_draw_with_bounds(space_id, 2, Vec3::ZERO, Vec3::ONE),
-        ];
-        draws[1].cull_geometry = Some(MeshCullGeometry {
-            world_aabb: None,
-            rigid_world_matrix: Some(Mat4::IDENTITY),
-            front_face_world_matrix: Some(Mat4::IDENTITY),
-        });
-        let runs = (0..draws.len())
-            .map(|idx| FramePreparedRun {
-                start: idx as u32,
-                end: idx as u32 + 1,
-            })
-            .collect::<Vec<_>>();
-        let mut spatial = PreparedSpatialIndex::default();
-        spatial.rebuild(&draws, &runs);
-        let indices = spatial
-            .world_casters()
-            .map(|bounds| bounds.renderable_index)
-            .collect::<Vec<_>>();
-        assert_eq!(indices, vec![0, 2]);
-
-        draws[1].cull_geometry = Some(MeshCullGeometry {
-            world_aabb: Some((Vec3::ZERO, Vec3::ONE)),
-            rigid_world_matrix: Some(Mat4::IDENTITY),
-            front_face_world_matrix: Some(Mat4::IDENTITY),
-        });
-        spatial.refit_spaces(&draws, &runs, [space_id]);
-        let indices = spatial
-            .world_casters()
-            .map(|bounds| bounds.renderable_index)
-            .collect::<Vec<_>>();
-        assert_eq!(indices, vec![0, 1, 2]);
-
-        draws[0].cull_geometry = Some(MeshCullGeometry {
-            world_aabb: None,
-            rigid_world_matrix: Some(Mat4::IDENTITY),
-            front_face_world_matrix: Some(Mat4::IDENTITY),
-        });
-        spatial.refit_spaces(&draws, &runs, [space_id]);
-        let indices = spatial
-            .world_casters()
-            .map(|bounds| bounds.renderable_index)
-            .collect::<Vec<_>>();
-        assert_eq!(indices, vec![1, 2]);
-    }
-
-    #[test]
-    fn sparse_candidate_gather_preserves_prepared_order_and_dedups() {
-        let runs = [
-            FramePreparedRun { start: 0, end: 1 },
-            FramePreparedRun { start: 1, end: 2 },
-            FramePreparedRun { start: 2, end: 3 },
-            FramePreparedRun { start: 3, end: 4 },
-        ];
-        let mut candidate_indices = vec![2, 0, 2];
-
-        let gathered = gather_spatial_candidate_runs_sparse(&runs, &mut candidate_indices);
-
-        assert_eq!(
-            gathered,
-            vec![
-                FramePreparedRun { start: 0, end: 1 },
-                FramePreparedRun { start: 2, end: 3 },
-            ]
-        );
-    }
-
-    #[test]
-    fn spatial_candidate_gather_switches_to_dense_for_high_density() {
-        assert!(!should_gather_spatial_candidates_dense(1, 3));
-        assert!(should_gather_spatial_candidates_dense(2, 3));
-    }
-}
+include!("spatial_tests.rs");

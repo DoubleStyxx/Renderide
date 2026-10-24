@@ -445,4 +445,103 @@ mod tests {
         .expect("visible samples keep the base pad");
         assert!((visible - 0.02).abs() < 1.0e-6);
     }
+
+    #[test]
+    fn caster_goes_visible_then_occluded_then_culled() {
+        let (min, max) = aabb();
+        let key = CasterKey::new(RenderSpaceId(1), 3, 9, 4, false);
+        let caster = caster_ref(key);
+        let revealed = OcclusionFacts::keep();
+        let covered = OcclusionFacts {
+            occluded: true,
+            other_occluder: true,
+            rects: [None, None],
+        };
+        let still_covered = OcclusionFacts {
+            occluded: true,
+            other_occluder: true,
+            rects: [None, None],
+        };
+
+        let frame = VisibilityHysteresis::new(
+            VisibilityHistory::default(),
+            HashMap::new(),
+            HashMap::new(),
+            Vec::new(),
+        );
+        assert!(frame.allows_draw(Some(caster), min, max, revealed));
+        let first = frame.finish();
+        assert_eq!(
+            first.get(&key).map(|record| record.class),
+            Some(VisibilityClass::Visible)
+        );
+
+        let frame = VisibilityHysteresis::new(first, HashMap::new(), HashMap::new(), Vec::new());
+        assert!(frame.allows_draw(Some(caster), min, max, covered));
+        let second = frame.finish();
+        let stored = second.get(&key).expect("occluded row");
+        assert_eq!(stored.class, VisibilityClass::Occluded);
+        assert_eq!(stored.aabb_min, min);
+        assert_eq!(stored.aabb_max, max);
+        assert!(!second.any_visible());
+
+        let frame = VisibilityHysteresis::new(second, HashMap::new(), HashMap::new(), Vec::new());
+        assert!(!frame.allows_draw(Some(caster), min, max, still_covered));
+        let third = frame.finish();
+        assert_eq!(
+            third.get(&key).map(|record| record.class),
+            Some(VisibilityClass::Occluded)
+        );
+    }
+
+    #[test]
+    fn moving_caster_stores_this_frames_bounds_and_the_disocclusion_rect_stays_tight() {
+        let key = CasterKey::new(RenderSpaceId(1), 8, 1, 2, false);
+        let caster = caster_ref(key);
+        let first_min = Vec3::new(0.0, 0.0, 2.0);
+        let first_max = Vec3::new(1.0, 1.0, 3.0);
+        let second_min = Vec3::new(2.0, 0.0, 2.0);
+        let second_max = Vec3::new(3.0, 1.0, 3.0);
+        let third_min = Vec3::new(4.0, 0.0, 2.0);
+        let third_max = Vec3::new(5.0, 1.0, 3.0);
+
+        let frame = VisibilityHysteresis::new(
+            VisibilityHistory::default(),
+            HashMap::new(),
+            HashMap::new(),
+            Vec::new(),
+        );
+        assert!(frame.allows_draw(Some(caster), first_min, first_max, OcclusionFacts::keep()));
+        let first = frame.finish();
+
+        let frame = VisibilityHysteresis::new(first, HashMap::new(), HashMap::new(), Vec::new());
+        assert!(frame.allows_draw(Some(caster), second_min, second_max, OcclusionFacts::keep()));
+        let second = frame.finish();
+        let stored = second.get(&key).expect("moved row");
+        assert_eq!(stored.class, VisibilityClass::Visible);
+        assert_eq!(stored.aabb_min, second_min);
+        assert_eq!(stored.aabb_max, second_max);
+
+        let present = [PresentCaster {
+            key,
+            mesh_asset_id: 1,
+            aabb_min: third_min,
+            aabb_max: third_max,
+            space_id: RenderSpaceId(1),
+        }];
+        let mut present_keys = HashSet::new();
+        let mut movers = Vec::new();
+        plan_disocclusion(&second, &present, &mut present_keys, |_| true, &mut movers);
+        assert_eq!(movers.len(), 1);
+        assert_eq!(movers[0].previous_aabb, (second_min, second_max));
+        assert_eq!(movers[0].current_aabb, (third_min, third_max));
+
+        let rects = disocclusion_rects(&movers, |min, max| {
+            ScreenRect::from_uv((min.x * 0.1, 0.2), (max.x * 0.1, 0.4))
+        });
+        let previous = ScreenRect::from_uv((0.2, 0.2), (0.3, 0.4))
+            .expect("second-frame footprint")
+            .padded(5.0e-3);
+        assert_eq!(rects[0], previous);
+    }
 }
