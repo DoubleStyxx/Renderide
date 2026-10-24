@@ -1,8 +1,13 @@
 //! Field mapping from a view onto camera-clear load-op inputs.
 
-use super::{ClearLoadDecisionInputs, ClearLoadViewSource, clear_load_inputs_from_view};
+use super::{
+    ClearLoadDecisionInputs, ClearLoadViewSource, FrameViewLayout, OffscreenCopyRect,
+    clear_load_inputs_for_non_offscreen, clear_load_inputs_from_offscreen,
+    clear_load_inputs_from_view, offscreen_copy_viewport,
+};
 use crate::camera::CameraRenderRect;
-use crate::frame_contract::{OffscreenWriteTarget, RenderTextureSelfSampling};
+use crate::frame_contract::{OffscreenWriteTarget, RenderTextureSelfSampling, ViewPostProcessing};
+use crate::gpu::OutputDepthMode;
 
 use super::super::super::frame_view::FrameViewTargetKind;
 
@@ -199,4 +204,167 @@ fn allow_previous_contents_maps_self_sampling() {
             true,
         )
     );
+}
+
+fn layout(
+    kind: FrameViewTargetKind,
+    surface_format: wgpu::TextureFormat,
+    sample_count: u32,
+) -> FrameViewLayout {
+    let multiview_stereo = kind == FrameViewTargetKind::ExternalMultiview;
+    FrameViewLayout {
+        target_kind: kind,
+        viewport_px: EXTENT,
+        multiview_stereo,
+        sample_count,
+        surface_format,
+        output_depth_mode: OutputDepthMode::from_multiview_stereo(multiview_stereo),
+        post_processing: ViewPostProcessing::disabled(),
+    }
+}
+
+fn assert_hdr_not_surface(inputs: ClearLoadDecisionInputs, surface_format: wgpu::TextureFormat) {
+    assert_eq!(inputs.scene_color_format, HDR);
+    assert_ne!(inputs.scene_color_format, surface_format);
+}
+
+fn non_offscreen_source(
+    kind: FrameViewTargetKind,
+    surface_format: wgpu::TextureFormat,
+) -> ClearLoadViewSource {
+    ClearLoadViewSource {
+        kind,
+        viewport: full_rect(),
+        target_extent_px: EXTENT,
+        copies_partial_color: false,
+        sample_count: 1,
+        surface_format,
+        scene_color_format: HDR,
+        write_target: OffscreenWriteTarget::None,
+    }
+}
+
+#[test]
+fn production_window_matches_mapping_with_hdr_scene_color() {
+    let surface_format = wgpu::TextureFormat::Bgra8Unorm;
+    let inputs = clear_load_inputs_for_non_offscreen(
+        FrameViewTargetKind::Swapchain,
+        layout(FrameViewTargetKind::Swapchain, surface_format, 1),
+        HDR,
+    );
+    assert_eq!(
+        inputs,
+        clear_load_inputs_from_view(non_offscreen_source(
+            FrameViewTargetKind::Swapchain,
+            surface_format,
+        ))
+    );
+    assert_hdr_not_surface(inputs, surface_format);
+}
+
+#[test]
+fn production_openxr_matches_mapping_with_hdr_scene_color() {
+    let surface_format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let inputs = clear_load_inputs_for_non_offscreen(
+        FrameViewTargetKind::ExternalMultiview,
+        layout(FrameViewTargetKind::ExternalMultiview, surface_format, 1),
+        HDR,
+    );
+    assert_eq!(
+        inputs,
+        clear_load_inputs_from_view(non_offscreen_source(
+            FrameViewTargetKind::ExternalMultiview,
+            surface_format,
+        ))
+    );
+    assert_hdr_not_surface(inputs, surface_format);
+}
+
+fn host_write_target() -> OffscreenWriteTarget {
+    OffscreenWriteTarget::host_render_texture_with_self_sampling(
+        7,
+        RenderTextureSelfSampling::Suppress,
+    )
+}
+
+fn offscreen_production_source(
+    viewport: CameraRenderRect,
+    copies_partial_color: bool,
+    sample_count: u32,
+    surface_format: wgpu::TextureFormat,
+) -> ClearLoadViewSource {
+    ClearLoadViewSource {
+        kind: FrameViewTargetKind::OffscreenRt,
+        viewport,
+        target_extent_px: EXTENT,
+        copies_partial_color,
+        sample_count,
+        surface_format,
+        scene_color_format: HDR,
+        write_target: host_write_target(),
+    }
+}
+
+#[test]
+fn production_offscreen_full_matches_mapping_with_hdr_scene_color() {
+    let surface_format = wgpu::TextureFormat::Rgba8Unorm;
+    let inputs =
+        clear_load_inputs_from_offscreen(EXTENT, None, 1, surface_format, HDR, host_write_target());
+    assert_eq!(
+        inputs,
+        clear_load_inputs_from_view(offscreen_production_source(
+            full_rect(),
+            false,
+            1,
+            surface_format,
+        ))
+    );
+    assert_hdr_not_surface(inputs, surface_format);
+}
+
+#[test]
+fn production_offscreen_partial_rect_matches_mapping_with_hdr_scene_color() {
+    let surface_format = wgpu::TextureFormat::Rgba8Unorm;
+    let copy = OffscreenCopyRect {
+        destination_origin_px: (16, 0),
+        extent_px: (32, 32),
+    };
+    let (viewport, copies_partial_color) = offscreen_copy_viewport(EXTENT, Some(copy));
+    assert_eq!((viewport, copies_partial_color), (partial_rect(), true));
+    let inputs = clear_load_inputs_from_offscreen(
+        EXTENT,
+        Some(copy),
+        1,
+        surface_format,
+        HDR,
+        host_write_target(),
+    );
+    assert_eq!(
+        inputs,
+        clear_load_inputs_from_view(offscreen_production_source(
+            partial_rect(),
+            true,
+            1,
+            surface_format,
+        ))
+    );
+    assert_hdr_not_surface(inputs, surface_format);
+}
+
+#[test]
+fn production_offscreen_msaa_matches_mapping_with_hdr_scene_color() {
+    let surface_format = wgpu::TextureFormat::Rgba8Unorm;
+    let inputs =
+        clear_load_inputs_from_offscreen(EXTENT, None, 4, surface_format, HDR, host_write_target());
+    assert_eq!(
+        inputs,
+        clear_load_inputs_from_view(offscreen_production_source(
+            full_rect(),
+            false,
+            4,
+            surface_format,
+        ))
+    );
+    assert_hdr_not_surface(inputs, surface_format);
+    assert_eq!(inputs.sample_count, 4);
 }

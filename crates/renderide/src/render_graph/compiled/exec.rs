@@ -71,7 +71,7 @@ use types::{
     OwnedResolvedView, PerViewEncodeOutput, PerViewRecordInputs, PerViewRecordOutput,
     PerViewRecordShared, PerViewWorkItem, PreparedPerViewFrameInput, PreparedPerViewFrameParams,
     RecordedPerViewBatch, ResolvedOffscreenColorCopy, SubmitFrameBatchStats, SubmitFrameInputs,
-    TimedCommandBuffer, TransientTextureResolveSurfaceParams,
+    TimedCommandBuffer, TransientTextureResolveSurfaceParams, ViewTargetResolveInputs,
 };
 
 impl CompiledRenderGraph {
@@ -422,5 +422,5 @@ mod resolve;
 
 #[cfg(test)]
 pub(crate) use resolve::{
-    ClearLoadDecisionInputs, ClearLoadViewSource, clear_load_inputs_from_view,
+    ClearLoadViewSource, clear_load_inputs_from_view, full_offscreen_clear_load_inputs,
 };

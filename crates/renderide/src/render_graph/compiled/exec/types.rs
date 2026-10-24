@@ -4,7 +4,9 @@ use hashbrown::HashMap;
 use std::sync::Arc;
 
 use crate::camera::{HostCameraFrame, ViewId};
-use crate::frame_contract::{FrameViewClear, OffscreenWriteTarget, ViewWinding};
+use crate::frame_contract::{
+    ClearLoadDecisionInputs, FrameViewClear, OffscreenWriteTarget, ViewWinding,
+};
 use crate::gpu::{GpuLimits, GpuRetainedResources, MsaaDepthResolveResources};
 use crate::graph_inputs::{
     FrameSystemsShared, GraphPassFrame, GraphPassFrameView, GraphSceneView, PerViewFramePlan,
@@ -17,7 +19,9 @@ use super::super::super::blackboard::{Blackboard, GraphCommandStats};
 use super::super::super::context::GraphResolvedResources;
 use super::super::super::history::HistoryRegistry;
 use super::super::super::{GraphAssetResources, GraphFrameResources};
-use super::super::{FrameGlobalView, FrameView, ResolvedView, ViewPostProcessing};
+use super::super::{
+    FrameGlobalView, FrameView, RenderPathProfile, ResolvedView, ViewPostProcessing,
+};
 use super::recording_path::GraphCommandRecordingStrategy;
 use crate::frame_upload_batch::{FrameUploadBatch, FrameUploadBatchStats};
 
@@ -113,6 +117,24 @@ impl GraphCommandRecordingPath {
     }
 }
 
+/// Identity and HDR scene-color format for one view-target resolve.
+///
+/// Groups the arguments that would otherwise push the resolve entry points over the parameter
+/// limit. [`Self::scene_color_format`] is the backend snapshot the load-op mapping compares
+/// with the camera color target.
+pub(super) struct ViewTargetResolveInputs<'a> {
+    /// Stable occlusion slot for the view.
+    pub(super) view_id: ViewId,
+    /// Per-view winding policy before draw-local transform parity is applied.
+    pub(super) view_winding: ViewWinding,
+    /// Render-path profile that owns MSAA and the camera color format.
+    pub(super) profile: RenderPathProfile,
+    /// Host camera snapshot used for layout resolution.
+    pub(super) host_camera: &'a HostCameraFrame,
+    /// HDR scene-color format compared with the camera color target.
+    pub(super) scene_color_format: wgpu::TextureFormat,
+}
+
 /// Owned clone of a resolved view so per-view workers can borrow it without touching [`GpuContext`].
 #[derive(Clone)]
 pub(super) struct OwnedResolvedView {
@@ -144,8 +166,8 @@ pub(super) struct OwnedResolvedView {
     pub(super) history_color_texture: Option<wgpu::Texture>,
     /// `true` when a later double-buffered camera seeds the published write image.
     pub(super) seed_published_color: bool,
-    /// `true` when `depth_texture` is the persistent camera depth target.
-    pub(super) persistent_depth_target: bool,
+    /// Camera-clear inputs built by the view-target mapping for this target.
+    pub(super) clear_load_inputs: ClearLoadDecisionInputs,
     /// Optional color copy into a host render texture after this view's graph passes.
     pub(super) offscreen_color_copy: Option<ResolvedOffscreenColorCopy>,
 }
@@ -168,7 +190,7 @@ impl OwnedResolvedView {
             color_texture: self.color_texture.as_ref(),
             history_color_texture: self.history_color_texture.as_ref(),
             seed_published_color: self.seed_published_color,
-            persistent_depth_target: self.persistent_depth_target,
+            clear_load_inputs: self.clear_load_inputs,
         }
     }
 
@@ -269,7 +291,7 @@ impl PreparedPerViewFrameInput {
                 color_texture: inputs.resolved.color_texture,
                 history_color_texture: inputs.resolved.history_color_texture,
                 seed_published_color: inputs.resolved.seed_published_color,
-                persistent_depth_target: inputs.resolved.persistent_depth_target,
+                clear_load_inputs: inputs.resolved.clear_load_inputs,
                 post_processing: inputs.post_processing,
             },
         }
