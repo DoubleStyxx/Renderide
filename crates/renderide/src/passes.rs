@@ -52,3 +52,7 @@ pub(crate) use world_mesh_forward::{
     pre_warm_normal_pipeline, pre_warm_shadow_pipeline, prepare_world_mesh_forward_frame,
     record_object_motion_vectors,
 };
+#[cfg(test)]
+pub(crate) use world_mesh_forward::{
+    copy_preserved_scene_color, forward_clear_loads_for_view, preserved_color_texture,
+};

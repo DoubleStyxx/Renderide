@@ -39,6 +39,7 @@ mod capture;
 mod config;
 mod consts;
 mod custom_property;
+mod double_buffer_stack;
 mod exotic_pair;
 mod shadowed_caster;
 
@@ -126,6 +127,9 @@ pub enum SessionTemplate {
     ShadowedCasterMove,
     /// Thirty hard-shadow point lights over a small caster grid. Opt-in frame bench only.
     ManyShadowedPointLights,
+    /// Normal Skybox camera with a higher-depth double-buffered Nothing camera on one texture.
+    /// The main view displays that texture.
+    DoubleBufferNothingOnSkybox,
     /// One-bone skinned avatars; `offscreen` puts 256 of 272 behind the camera.
     SkinnedAvatars {
         /// Whether the bulk of the avatars sit outside the camera frustum.
@@ -163,6 +167,8 @@ pub(super) fn run_session(
         &prefix,
         DEFAULT_HANDSHAKE_TIMEOUT,
     )?;
+
+    double_buffer_stack::prepare_assets(&template, &mut session.queues, &mut lockstep)?;
 
     let property_recapture = matches!(template, SessionTemplate::CustomShaderPropertyUpdate);
     let exotic_pair = matches!(template, SessionTemplate::ExoticShaderPair);
@@ -247,6 +253,8 @@ struct TextureBinding {
     rgba_bytes: Vec<u8>,
     size: (u32, u32),
     color_profile: ColorProfile,
+    /// Packed host texture handle. `None` packs `asset_id` as a Texture2D and uploads `rgba_bytes`.
+    packed_handle: Option<i32>,
 }
 
 struct FloatBinding {
@@ -292,6 +300,7 @@ fn template_label(template: &SessionTemplate) -> &'static str {
         SessionTemplate::TiltedCanvasDistanceBias => "TiltedCanvasDistanceBias",
         SessionTemplate::ShadowedCasterMove => "ShadowedCasterMove",
         SessionTemplate::ManyShadowedPointLights => "ManyShadowedPointLights",
+        SessionTemplate::DoubleBufferNothingOnSkybox => "DoubleBufferNothingOnSkybox",
         SessionTemplate::SkinnedAvatars { .. } => "SkinnedAvatars",
     }
 }
@@ -328,6 +337,7 @@ fn build_scene_setup(template: SessionTemplate) -> SceneSetup {
         SessionTemplate::TiltedCanvasDistanceBias => canvas_ui::tilted_canvas_distance_bias_setup(),
         SessionTemplate::ShadowedCasterMove => shadowed_caster::scene_setup(),
         SessionTemplate::ManyShadowedPointLights => shadowed_caster::many_point_lights_setup(),
+        SessionTemplate::DoubleBufferNothingOnSkybox => double_buffer_stack::scene_setup(),
         SessionTemplate::SkinnedAvatars { offscreen } => {
             bench_scenes::skinned_avatars_setup(offscreen)
         }
@@ -531,6 +541,7 @@ fn multi_primitive_unlit_grid_setup(
             camera_world_pose: transform(Vec3::new(0.0, 0.0, -4.2), Vec3::ONE, Quat::IDENTITY),
             renderables,
             lights: Vec::new(),
+            cameras: Vec::new(),
             skinned: Vec::new(),
         },
     }
@@ -595,6 +606,7 @@ fn pbs_lit_material_matrix_setup() -> SceneSetup {
             camera_world_pose: transform(Vec3::new(0.0, 0.0, -4.0), Vec3::ONE, Quat::IDENTITY),
             renderables,
             lights,
+            cameras: Vec::new(),
             skinned: Vec::new(),
         },
     }
@@ -649,6 +661,7 @@ fn alpha_cutout_masked_quads_setup(mask_rgba: Vec<u8>, texture_size: (u32, u32))
             camera_world_pose: default_camera_world_pose(),
             renderables,
             lights: Vec::new(),
+            cameras: Vec::new(),
             skinned: Vec::new(),
         },
     }
@@ -686,6 +699,7 @@ fn gltf_textured_static_mesh_setup(
                 shadow_cast_mode: ShadowCastMode::Off,
             }],
             lights: Vec::new(),
+            cameras: Vec::new(),
             skinned: Vec::new(),
         },
     }
@@ -797,6 +811,7 @@ fn unlit_textured_material(params: UnlitTexturedMaterialParams) -> MaterialAsset
                 rgba_bytes: params.texture_rgba,
                 size: params.texture_size,
                 color_profile: ColorProfile::SRGB,
+                packed_handle: None,
             }],
             floats: params.floats,
             float4s: vec![Float4Binding {
@@ -839,6 +854,9 @@ fn apply_material_binding(
     )?;
 
     for tex in &binding.textures {
+        if tex.packed_handle.is_some() {
+            continue;
+        }
         let _uploaded_texture = upload_texture2d_rgba8(
             queues,
             lockstep,
@@ -891,7 +909,9 @@ fn apply_material_binding(
         cursor += 2;
         ops.push(MaterialUpdateOp::SetTexture {
             property_id: tex_property_id,
-            packed_handle: pack_texture2d_handle(tex.asset_id),
+            packed_handle: tex
+                .packed_handle
+                .unwrap_or_else(|| pack_texture2d_handle(tex.asset_id)),
         });
         ops.push(MaterialUpdateOp::SetFloat4 {
             property_id: tex_st_property_id,

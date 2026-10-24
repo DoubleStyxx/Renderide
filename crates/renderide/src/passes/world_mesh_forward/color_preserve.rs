@@ -2,8 +2,9 @@
 //!
 //! Forward shading writes a transient HDR image, and compose then blits that image over the
 //! camera target. Loading the transient does not keep the render texture. Depth-only and
-//! clear-none cameras therefore copy the current color in first, then load it. Skybox and color
-//! cameras skip this pass.
+//! clear-none cameras therefore copy the current color in first, then load it. The image they
+//! copy is [`preserved_color_texture`]: history for the first writer of a swapped texture, and
+//! the published image for every later writer. Skybox and color cameras skip this pass.
 
 use crate::passes::helpers::missing_pass_resource;
 use crate::render_graph::context::EncoderPassCtx;
@@ -12,6 +13,7 @@ use crate::render_graph::pass::{EncoderPass, PassBuilder};
 use crate::render_graph::resources::{ImportedTextureHandle, TextureAccess, TextureHandle};
 
 use super::clear_load::forward_clear_loads_for_view;
+pub(crate) use super::clear_load::preserved_color_texture;
 
 /// Encoder pass that seeds HDR scene color from the current full-target color texture.
 #[derive(Debug)]
@@ -43,16 +45,15 @@ impl EncoderPass for WorldMeshForwardColorPreservePass {
     }
 
     fn should_record(&self, ctx: &EncoderPassCtx<'_, '_, '_>) -> Result<bool, RenderPassError> {
+        // `seed_color` is `preserved_color_texture(view).is_some()`, so this pass records exactly
+        // when the forward color load keeps that copy.
         Ok(forward_clear_loads_for_view(ctx.frame.view).seed_color)
     }
 
     fn record(&self, ctx: &mut EncoderPassCtx<'_, '_, '_>) -> Result<(), RenderPassError> {
         let extent = ctx.frame.view.viewport_px;
-        let source = ctx
-            .frame
-            .view
-            .color_texture
-            .ok_or_else(|| missing_pass_resource(self.name(), "offscreen color texture"))?;
+        let source = preserved_color_texture(ctx.frame.view)
+            .ok_or_else(|| missing_pass_resource(self.name(), "preserved color texture"))?;
         let destination = ctx
             .graph_resources
             .transient_texture(self.scene_color_hdr)

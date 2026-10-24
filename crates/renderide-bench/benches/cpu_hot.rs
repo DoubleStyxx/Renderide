@@ -9,11 +9,11 @@ use std::hint::black_box;
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use renderide_bench::{
     BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload,
-    CAMERA_CLEAR_LOAD_OP_CAMERAS, CULL_BATCH, CullWorkload, KeywordVariantCacheWorkload,
-    MATERIAL_UNIFORM_BATCH, MaterialUniformUpdateWorkload, SHADOW_CHURN_CASTERS,
-    SHADOW_CHURN_LIGHTS, ShadowChurnWorkload, SkinnedGeometryWorkload, TRANSFORM_BATCH,
-    TransformWorkload, WORLD_MATRIX_NODES, WorldMatrixWorkload, camera_clear_load_op_checksum,
-    camera_clear_load_op_inputs,
+    CAMERA_CLEAR_LOAD_OP_CAMERAS, CULL_BATCH, CullWorkload, DOUBLE_BUFFER_CAMERAS,
+    DoubleBufferWorkload, KeywordVariantCacheWorkload, MATERIAL_UNIFORM_BATCH,
+    MaterialUniformUpdateWorkload, SHADOW_CHURN_CASTERS, SHADOW_CHURN_LIGHTS, ShadowChurnWorkload,
+    SkinnedGeometryWorkload, TRANSFORM_BATCH, TransformWorkload, WORLD_MATRIX_NODES,
+    WorldMatrixWorkload, camera_clear_load_op_checksum, camera_clear_load_op_inputs,
 };
 
 fn transforms(c: &mut Criterion) {
@@ -145,6 +145,17 @@ fn shadow_churn(c: &mut Criterion) {
     group.finish();
 }
 
+fn render_texture_double_buffer(c: &mut Criterion) {
+    let mut workload = DoubleBufferWorkload::standard();
+    let _ = workload.steady_frame();
+    let mut group = c.benchmark_group("render_texture_double_buffer");
+    group.throughput(Throughput::Elements(DOUBLE_BUFFER_CAMERAS as u64));
+    group.bench_function("steady_swap", |b| {
+        b.iter(|| black_box(workload.steady_frame()));
+    });
+    group.finish();
+}
+
 fn camera_clear_load_ops(c: &mut Criterion) {
     // Times the per-view load-op decision only. The full-target Rgba16Float copy is the real
     // cost of a seeded Nothing or Depth camera and is not in this group.
@@ -181,6 +192,7 @@ criterion_group!(
     culling,
     world_matrices,
     buffer_pool,
+    render_texture_double_buffer,
     material_uniforms,
     bind_groups,
     keyword_variants,

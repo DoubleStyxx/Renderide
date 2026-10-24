@@ -5,8 +5,9 @@
 //! applied when a pass opens its attachments.
 //!
 //! Color and depth stay a pair. A view loads preserved depth only when it also seeds color.
-//! Window, OpenXR, RGBA8, format-mismatch, MSAA, partial-viewport, and double-buffered
-//! (`AllowPreviousContents`) views do not seed, so they clear both attachments.
+//! Window, OpenXR, RGBA8, format-mismatch, MSAA, and partial-viewport views do not seed, so they
+//! clear both attachments. The first writer of a swapped texture seeds its history image. Every
+//! later writer of that texture seeds the published image.
 
 use crate::frame_contract::{FrameViewClear, RenderTextureSelfSampling};
 use crate::graph_inputs::GraphPassFrameView;
@@ -33,6 +34,16 @@ pub(crate) struct ScenePreserveQuery {
     pub scene_color_format: wgpu::TextureFormat,
     /// Host render-texture self-sampling policy. `None` for window, OpenXR, and untracked targets.
     pub self_sampling: Option<RenderTextureSelfSampling>,
+    /// `true` when this view is the first writer of a swapped texture and history is attached.
+    ///
+    /// That writer copies history even when it is not itself double-buffered. Without the image,
+    /// a double-buffered writer stays unseeded so the two-frame-old published image is not copied.
+    pub has_history_color: bool,
+    /// `true` when a writer after the first one this frame copies the published image.
+    ///
+    /// The published image already holds the earlier writers. Copying history again would replace
+    /// that output and pair last frame's color with this frame's depth.
+    pub seed_published_color: bool,
     /// `true` when the depth attachment is the persistent camera depth image.
     pub persistent_depth_target: bool,
 }
@@ -62,9 +73,9 @@ pub(crate) fn preserves_scene_depth(mode: CameraClearMode) -> bool {
 
 /// `true` when this view should copy its existing color into HDR scene color before opaque shading.
 ///
-/// Partial-viewport scratches, multisample targets, format mismatches, and double-buffered
-/// render textures stay on the clear path. Seeding those would keep the wrong image, copy the
-/// write buffer, or be overwritten by an MSAA resolve.
+/// Partial-viewport scratches, multisample targets, and format mismatches stay on the clear path.
+/// The first writer seeds when history is attached. A later writer seeds the published image,
+/// which already holds this frame. A double-buffered writer with neither stays unseeded.
 #[inline]
 pub(crate) fn seeds_preserved_scene_color(
     mode: CameraClearMode,
@@ -74,7 +85,20 @@ pub(crate) fn seeds_preserved_scene_color(
         && query.sample_count <= 1
         && query.has_color_texture
         && query.surface_format == query.scene_color_format
-        && query.self_sampling != Some(RenderTextureSelfSampling::AllowPreviousContents)
+        && history_image_ready(query)
+}
+
+/// `true` when this view's seed source exists.
+///
+/// The first writer of a swapped texture has history. A later writer seeds the published image.
+/// Any other camera seeds its color image. A double-buffered camera with neither image stays
+/// unseeded.
+#[inline]
+fn history_image_ready(query: ScenePreserveQuery) -> bool {
+    if query.seed_published_color || query.has_history_color {
+        return true;
+    }
+    query.self_sampling != Some(RenderTextureSelfSampling::AllowPreviousContents)
 }
 
 /// Color and depth loads for one camera.
@@ -86,7 +110,63 @@ pub(crate) fn forward_clear_loads(
     clear: FrameViewClear,
     query: ScenePreserveQuery,
 ) -> ForwardClearLoads {
-    let seed_color = seeds_preserved_scene_color(clear.mode, query);
+    loads_for_seed(
+        clear.mode,
+        seeds_preserved_scene_color(clear.mode, query),
+        query.persistent_depth_target,
+    )
+}
+
+/// Color image copied into HDR scene color, or `None` when this view clears.
+///
+/// This is the only seed decision. [`forward_clear_loads_for_view`] and the color-preserve pass
+/// both read it, so the preserve copy and the color load cannot disagree. The first writer of a
+/// swapped texture returns history. Every later writer returns the published image. A normal
+/// camera with no history returns its color image. A double-buffered camera with no history and
+/// no published-seed bit returns `None`.
+#[inline]
+pub(crate) fn preserved_color_texture<'a>(
+    view: &'a GraphPassFrameView<'_>,
+) -> Option<&'a wgpu::Texture> {
+    if !seeds_preserved_scene_color(view.clear.mode, scene_preserve_query(view)) {
+        return None;
+    }
+    if view.seed_published_color {
+        return view.color_texture;
+    }
+    view.history_color_texture.or(view.color_texture)
+}
+
+/// Decision used by the color-preserve pass, the opaque color override, and the depth prepass.
+#[inline]
+pub(crate) fn forward_clear_loads_for_view(view: &GraphPassFrameView<'_>) -> ForwardClearLoads {
+    loads_for_seed(
+        view.clear.mode,
+        preserved_color_texture(view).is_some(),
+        view.persistent_depth_target,
+    )
+}
+
+#[inline]
+fn scene_preserve_query(view: &GraphPassFrameView<'_>) -> ScenePreserveQuery {
+    ScenePreserveQuery {
+        sample_count: view.sample_count,
+        has_color_texture: view.color_texture.is_some(),
+        surface_format: view.surface_format,
+        scene_color_format: view.scene_color_format,
+        self_sampling: view.offscreen_write_target.render_texture_self_sampling(),
+        has_history_color: view.history_color_texture.is_some(),
+        seed_published_color: view.seed_published_color,
+        persistent_depth_target: view.persistent_depth_target,
+    }
+}
+
+#[inline]
+fn loads_for_seed(
+    mode: CameraClearMode,
+    seed_color: bool,
+    persistent_depth_target: bool,
+) -> ForwardClearLoads {
     ForwardClearLoads {
         seed_color,
         color: if seed_color {
@@ -94,28 +174,12 @@ pub(crate) fn forward_clear_loads(
         } else {
             wgpu::LoadOp::Clear(crate::present::SWAPCHAIN_CLEAR_COLOR)
         },
-        depth: if seed_color && query.persistent_depth_target && preserves_scene_depth(clear.mode) {
+        depth: if seed_color && persistent_depth_target && preserves_scene_depth(mode) {
             wgpu::LoadOp::Load
         } else {
             wgpu::LoadOp::Clear(crate::gpu::MAIN_FORWARD_DEPTH_CLEAR)
         },
     }
-}
-
-/// Decision used by the color-preserve pass, the opaque color override, and the depth prepass.
-#[inline]
-pub(crate) fn forward_clear_loads_for_view(view: &GraphPassFrameView<'_>) -> ForwardClearLoads {
-    forward_clear_loads(
-        view.clear,
-        ScenePreserveQuery {
-            sample_count: view.sample_count,
-            has_color_texture: view.color_texture.is_some(),
-            surface_format: view.surface_format,
-            scene_color_format: view.scene_color_format,
-            self_sampling: view.offscreen_write_target.render_texture_self_sampling(),
-            persistent_depth_target: view.persistent_depth_target,
-        },
-    )
 }
 
 /// One synthetic camera passed to [`camera_clear_load_op_checksum`].
@@ -206,6 +270,8 @@ fn camera_clear_load_op_input(bits: u32) -> CameraClearLoadOpInput {
         None
     };
     let persistent_depth_target = bits & 256 != 0;
+    let has_history_color = bits & 512 != 0;
+    let seed_published_color = bits & 1024 != 0;
     let channel_byte = u8::try_from((bits >> 16) & 0xff).unwrap_or(0);
     let channel = f32::from(channel_byte) / 255.0;
     CameraClearLoadOpInput {
@@ -219,6 +285,8 @@ fn camera_clear_load_op_input(bits: u32) -> CameraClearLoadOpInput {
             surface_format,
             scene_color_format,
             self_sampling,
+            has_history_color,
+            seed_published_color,
             persistent_depth_target,
         },
     }
@@ -280,7 +348,21 @@ mod tests {
             surface_format,
             scene_color_format: HDR,
             self_sampling,
+            has_history_color: false,
+            seed_published_color: false,
             persistent_depth_target,
+        }
+    }
+
+    impl ScenePreserveQuery {
+        fn with_history(mut self) -> Self {
+            self.has_history_color = true;
+            self
+        }
+
+        fn with_published_seed(mut self) -> Self {
+            self.seed_published_color = true;
+            self
         }
     }
 
@@ -466,16 +548,16 @@ mod tests {
             surface_format: inputs.surface_format,
             scene_color_format: inputs.scene_color_format,
             self_sampling: inputs.self_sampling,
+            has_history_color: false,
+            seed_published_color: false,
             persistent_depth_target: inputs.persistent_depth_target,
         }
     }
 
     #[test]
-    fn allow_previous_contents_stays_unseeded() {
-        // Double-buffered render textures expose the write image on the view. Seeding that image
-        // would copy the back buffer. A later change can point the seed at the history image.
+    fn allow_previous_contents_without_history_stays_unseeded() {
         assert_unseeded_pair(
-            "allow previous contents",
+            "allow previous contents without history",
             query(
                 1,
                 true,
@@ -484,6 +566,62 @@ mod tests {
                 true,
             ),
         );
+    }
+
+    #[test]
+    fn allow_previous_contents_with_history_seeds_color() {
+        let preserve = query(
+            1,
+            true,
+            HDR,
+            Some(RenderTextureSelfSampling::AllowPreviousContents),
+            true,
+        )
+        .with_history();
+        let nothing = forward_clear_loads(clear(CameraClearMode::Nothing), preserve);
+        assert!(nothing.seed_color);
+        assert!(matches!(nothing.color, wgpu::LoadOp::Load));
+        assert!(matches!(nothing.depth, wgpu::LoadOp::Load));
+        let depth = forward_clear_loads(clear(CameraClearMode::Depth), preserve);
+        assert!(depth.seed_color);
+        assert!(matches!(depth.color, wgpu::LoadOp::Load));
+        assert!(matches!(depth.depth, wgpu::LoadOp::Clear(_)));
+    }
+
+    #[test]
+    fn first_writer_history_seeds_without_allow_previous_contents() {
+        let preserve = query(
+            1,
+            true,
+            HDR,
+            Some(RenderTextureSelfSampling::Suppress),
+            true,
+        )
+        .with_history();
+        let nothing = forward_clear_loads(clear(CameraClearMode::Nothing), preserve);
+        assert!(nothing.seed_color);
+        assert!(matches!(nothing.color, wgpu::LoadOp::Load));
+        assert!(matches!(nothing.depth, wgpu::LoadOp::Load));
+    }
+
+    #[test]
+    fn later_double_buffered_writer_seeds_published_color_without_history() {
+        let preserve = query(
+            1,
+            true,
+            HDR,
+            Some(RenderTextureSelfSampling::AllowPreviousContents),
+            true,
+        )
+        .with_published_seed();
+        let nothing = forward_clear_loads(clear(CameraClearMode::Nothing), preserve);
+        assert!(nothing.seed_color);
+        assert!(matches!(nothing.color, wgpu::LoadOp::Load));
+        assert!(matches!(nothing.depth, wgpu::LoadOp::Load));
+        let depth = forward_clear_loads(clear(CameraClearMode::Depth), preserve);
+        assert!(depth.seed_color);
+        assert!(matches!(depth.color, wgpu::LoadOp::Load));
+        assert!(matches!(depth.depth, wgpu::LoadOp::Clear(_)));
     }
 
     #[test]
@@ -527,6 +665,8 @@ mod tests {
                 | (u64::from(input.query.sample_count) << 4)
                 | (u64::from(input.query.has_color_texture) << 8)
                 | (u64::from(input.query.persistent_depth_target) << 9)
+                | (u64::from(input.query.has_history_color) << 12)
+                | (u64::from(input.query.seed_published_color) << 13)
                 | (sampling << 10)
                 | (surface << 16)
                 | (scene << 32);

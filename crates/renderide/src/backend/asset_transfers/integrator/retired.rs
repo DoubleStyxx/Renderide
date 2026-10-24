@@ -1,6 +1,7 @@
 //! Retired GPU resources held alive across delayed-removal updates.
 
 use crate::assets::mesh::GpuMesh;
+use crate::gpu_pools::pools::render_texture::RetiredRenderTextureHistory;
 use crate::gpu_pools::{
     GpuCubemap, GpuRenderTexture, GpuResource, GpuTexture2d, GpuTexture3d, GpuVideoTexture,
 };
@@ -18,6 +19,8 @@ pub enum RetiredAssetResource {
     Cubemap(GpuCubemap),
     /// Removed resident render texture.
     RenderTexture(GpuRenderTexture),
+    /// History color image released after double buffering stays off.
+    RenderTextureHistory(RetiredRenderTextureHistory),
     /// Removed resident video texture.
     VideoTexture(GpuVideoTexture),
 }
@@ -30,6 +33,7 @@ impl RetiredAssetResource {
             Self::Texture3d(resource) => resource.resident_bytes(),
             Self::Cubemap(resource) => resource.resident_bytes(),
             Self::RenderTexture(resource) => resource.resident_bytes(),
+            Self::RenderTextureHistory(resource) => resource.resident_bytes(),
             Self::VideoTexture(resource) => resource.resident_bytes(),
         }
     }
