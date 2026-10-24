@@ -411,7 +411,7 @@ impl<'a> MaterialDrawResolver<'a> {
                 // Ready but empty is not a pending lookup. Count the skip so the
                 // harness does not accept the frame. A `None` lookup already counted.
                 registry.note_skipped_pipeline_draw();
-                crate::diagnostics::pbs_capture::note_resolve(
+                crate::pbs_diag::note_resolve(
                     &pipeline_key.shader_asset_id,
                     pipeline_kind,
                     "empty",
@@ -424,11 +424,7 @@ impl<'a> MaterialDrawResolver<'a> {
                     pipeline_key.shader_asset_id,
                     pipeline_kind
                 );
-                crate::diagnostics::pbs_capture::note_resolve(
-                    &pipeline_key.shader_asset_id,
-                    pipeline_kind,
-                    "none",
-                );
+                crate::pbs_diag::note_resolve(&pipeline_key.shader_asset_id, pipeline_kind, "none");
                 None
             }
         }
@@ -451,7 +447,7 @@ impl<'a> MaterialDrawResolver<'a> {
                     pipeline_key.shader_asset_id
                 );
                 registry.note_skipped_pipeline_draw();
-                crate::diagnostics::pbs_capture::note_resolve(
+                crate::pbs_diag::note_resolve(
                     &pipeline_key.shader_asset_id,
                     &RasterPipelineKind::Null,
                     "empty",
@@ -463,7 +459,7 @@ impl<'a> MaterialDrawResolver<'a> {
                     "WorldMeshForward: Null fallback pipeline unavailable for shader {:?}, skipping batch",
                     pipeline_key.shader_asset_id
                 );
-                crate::diagnostics::pbs_capture::note_resolve(
+                crate::pbs_diag::note_resolve(
                     &pipeline_key.shader_asset_id,
                     &RasterPipelineKind::Null,
                     "none",

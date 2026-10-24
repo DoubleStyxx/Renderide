@@ -230,8 +230,8 @@ pub(crate) fn draw_subset(batch: ForwardDrawBatch<'_, '_, '_, '_>) {
         viewport_px,
     } = batch;
     let full_viewport: (u32, u32, u32, u32) = (0, 0, viewport_px.0, viewport_px.1);
-    crate::diagnostics::pbs_capture::set_pass("forward");
-    crate::diagnostics::pbs_capture::note_viewport("forward", viewport_px, full_viewport);
+    crate::pbs_diag::set_pass("forward");
+    crate::pbs_diag::note_viewport("forward", viewport_px, full_viewport);
     let (subpass_batch_count, subpass_input_draws) = summarize_forward_groups(groups);
     let mut state = ForwardDrawState::new();
     let resources = ForwardDrawResources {
@@ -253,7 +253,7 @@ pub(crate) fn draw_subset(batch: ForwardDrawBatch<'_, '_, '_, '_>) {
 
     draw_forward_groups(rpass, groups, encode, &resources, &mut state);
     if let Some(scissor) = state.last_scissor {
-        crate::diagnostics::pbs_capture::note_viewport("forward-bound", viewport_px, scissor);
+        crate::pbs_diag::note_viewport("forward-bound", viewport_px, scissor);
     }
     reset_forward_scissor(rpass, full_viewport, state.last_scissor);
 
@@ -442,7 +442,7 @@ fn set_depth_like_pipeline_if_changed(
 /// Records the GTAO normal prepass draw subset.
 pub(crate) fn draw_normals_subset(batch: NormalDrawBatch<'_, '_, '_, '_>) {
     profiling::scope!("world_mesh::draw_normals_subset");
-    crate::diagnostics::pbs_capture::set_pass("normal_prepass");
+    crate::pbs_diag::set_pass("normal_prepass");
     let NormalDrawBatch {
         rpass,
         groups,
@@ -507,7 +507,7 @@ pub(crate) fn draw_normals_subset(batch: NormalDrawBatch<'_, '_, '_, '_>) {
 /// Records the safe opaque depth prepass draw subset.
 pub(crate) fn draw_depth_prepass_subset(batch: DepthPrepassDrawBatch<'_, '_, '_, '_>) {
     profiling::scope!("world_mesh::draw_depth_prepass_subset");
-    crate::diagnostics::pbs_capture::set_pass("depth_prepass");
+    crate::pbs_diag::set_pass("depth_prepass");
     let DepthPrepassDrawBatch {
         rpass,
         groups,
@@ -566,7 +566,7 @@ pub(crate) fn draw_depth_prepass_subset(batch: DepthPrepassDrawBatch<'_, '_, '_,
 /// Records one shadow-map depth layer by walking pre-built caster groups.
 pub(crate) fn draw_shadow_depth_subset(batch: ShadowDepthDrawBatch<'_, '_, '_, '_>) {
     profiling::scope!("world_mesh::draw_shadow_depth_subset");
-    crate::diagnostics::pbs_capture::set_pass("shadow");
+    crate::pbs_diag::set_pass("shadow");
     let ShadowDepthDrawBatch {
         rpass,
         groups,

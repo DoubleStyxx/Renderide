@@ -181,21 +181,21 @@ fn prepared_run_view_state<'a>(
             ) {
                 Err(CpuCullFailure::Frustum | CpuCullFailure::UiRectMask) => {
                     cull_stats.1 += run.len();
-                    crate::diagnostics::pbs_capture::note_cull(first.renderable_index, "frustum");
+                    crate::pbs_diag::note_cull(first.renderable_index, "frustum");
                     return (None, cull_stats);
                 }
                 Err(CpuCullFailure::HiZ) => {
                     cull_stats.2 += run.len();
-                    crate::diagnostics::pbs_capture::note_cull(first.renderable_index, "hiz");
+                    crate::pbs_diag::note_cull(first.renderable_index, "hiz");
                     return (None, cull_stats);
                 }
                 Ok(m) => {
-                    crate::diagnostics::pbs_capture::note_cull(first.renderable_index, "visible");
+                    crate::pbs_diag::note_cull(first.renderable_index, "visible");
                     rigid_world_matrix = m;
                 }
             }
         } else {
-            crate::diagnostics::pbs_capture::note_cull(first.renderable_index, "no-cull-input");
+            crate::pbs_diag::note_cull(first.renderable_index, "no-cull-input");
             if rigid_world_matrix.is_none() {
                 rigid_world_matrix = geom.rigid_world_matrix;
             }
