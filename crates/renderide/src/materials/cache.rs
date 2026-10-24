@@ -649,7 +649,6 @@ impl MaterialPipelineCache {
         shader_source_generation: u64,
         wgsl_override: Option<Arc<str>>,
     ) -> Result<MaterialPipelineSet, PipelineBuildError> {
-        super::test_pipeline_stall::stall_non_null_material_pipeline(kind);
         let PipelineBuildResources {
             shader_module_cache,
             device,

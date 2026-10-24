@@ -115,8 +115,21 @@ pub(in crate::materials) fn drain_render_thread_pipeline_builds(max_compiles: us
         let count = max_compiles.min(queue.len());
         queue.drain(..count).collect::<Vec<_>>()
     };
+    let mut deferred = Vec::new();
     for request in requests {
-        finish_pipeline_build(request);
+        if super::test_pipeline_stall::hold_render_thread_build(&request.kind, &request.key) {
+            deferred.push(request);
+        } else {
+            finish_pipeline_build(request);
+        }
+    }
+    if deferred.is_empty() {
+        return;
+    }
+    // The held build stays queued. The render thread publishes this frame instead of sleeping.
+    let mut queue = render_thread_pipeline_build_queue().lock();
+    for request in deferred.into_iter().rev() {
+        queue.insert(0, request);
     }
 }
 
