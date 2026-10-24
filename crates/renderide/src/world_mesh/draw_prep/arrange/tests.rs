@@ -52,6 +52,7 @@ fn set_render_queue(item: &mut WorldMeshDrawItem, render_queue: i32) {
 /// Sets the sort distance used by transparent strict ordering.
 fn set_camera_distance(item: &mut WorldMeshDrawItem, distance_sq: f32) {
     item.camera_distance_sq = distance_sq;
+    crate::world_mesh::draw_prep::sync_transparent_depth_key(item);
 }
 
 /// Sets stable renderer identity fields without changing the material batch key.

@@ -138,6 +138,10 @@ pub(super) struct OwnedResolvedView {
     pub(super) sample_count: u32,
     /// Post-processing permissions requested by this view.
     pub(super) post_processing: ViewPostProcessing,
+    /// Full-target offscreen color, when this view can seed HDR scene color from it.
+    pub(super) color_texture: Option<wgpu::Texture>,
+    /// `true` when `depth_texture` is the persistent camera depth target.
+    pub(super) persistent_depth_target: bool,
     /// Optional color copy into a host render texture after this view's graph passes.
     pub(super) offscreen_color_copy: Option<ResolvedOffscreenColorCopy>,
 }
@@ -157,6 +161,8 @@ impl OwnedResolvedView {
             view_id: self.view_id,
             sample_count: self.sample_count,
             post_processing: self.post_processing,
+            color_texture: self.color_texture.as_ref(),
+            persistent_depth_target: self.persistent_depth_target,
         }
     }
 
@@ -254,6 +260,8 @@ impl PreparedPerViewFrameInput {
                 gpu_limits: self.gpu_limits.clone(),
                 msaa_depth_resolve: self.msaa_depth_resolve.clone(),
                 clear: inputs.clear,
+                color_texture: inputs.resolved.color_texture,
+                persistent_depth_target: inputs.resolved.persistent_depth_target,
                 post_processing: inputs.post_processing,
             },
         }

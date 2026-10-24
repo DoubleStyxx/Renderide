@@ -488,22 +488,29 @@ fn resolve_merged_attachments<'a>(
         return Ok(None);
     };
     let first_pass = &sources.passes[sources.first_step.pass_idx];
+    let color_loads = helpers::color_load_overrides(first_pass, merged_template, ctx);
     let color_attachments = helpers::resolve_color_attachments(
         "render-graph-raster-merged",
         merged_template,
         graph_resources,
         sources.sample_count,
+        &color_loads,
     )?;
     let stencil_ops = merged_template
         .depth_stencil_attachment
         .as_ref()
         .and_then(|depth| first_pass.stencil_ops_override(ctx, depth));
+    let depth_load = merged_template
+        .depth_stencil_attachment
+        .as_ref()
+        .and_then(|_| first_pass.depth_load_op_override(ctx));
     let depth_stencil_attachment = helpers::resolve_depth_attachment_with_stencil(
         "render-graph-raster-merged",
         merged_template,
         graph_resources,
         sources.sample_count,
         stencil_ops,
+        depth_load,
     )?;
     let multiview_mask = first_pass.multiview_mask_override(ctx, merged_template);
     Ok(Some(ResolvedMergedPass {
