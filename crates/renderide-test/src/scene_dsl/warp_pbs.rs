@@ -29,6 +29,13 @@ const WARP_VENDOR: u32 = 0x1414;
 /// WARP device id. Logs print this as `0x008c`.
 const WARP_DEVICE: u32 = 0x008c;
 
+/// The selected adapter is WARP when its vendor and device match numerically.
+///
+/// `0x8c` and `0x008c` are the same id. The operating system is not consulted.
+pub(crate) const fn adapter_is_warp(vendor: u32, device: u32) -> bool {
+    vendor == WARP_VENDOR && device == WARP_DEVICE
+}
+
 /// Why a case failed, for the WARP exception.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CaseFault {
@@ -235,12 +242,29 @@ fn stamp_case_report(path: &Path) -> std::io::Result<()> {
     fs::write(path, json)
 }
 
+/// `Some` once the log for `output_png` contains a selected-adapter line.
+///
+/// `None` means the line is not on disk yet, so the harness keeps looking.
+/// A decided `false` is not WARP and must not grow the readiness budget.
+pub(crate) fn output_warp_decision(output_png: &Path) -> Option<bool> {
+    let log = log_for_output(output_png)?;
+    warp_decision_from_log(&log)
+}
+
 /// True when the renderer log for `output_png` selected WARP.
 fn output_is_warp(output_png: &Path) -> bool {
-    let Some(log) = log_for_output(output_png) else {
-        return false;
-    };
-    selected_adapter_is_warp(&log)
+    output_warp_decision(output_png).unwrap_or(false)
+}
+
+/// `None` until `log` contains a selected-adapter line.
+fn warp_decision_from_log(log: &str) -> Option<bool> {
+    if !log
+        .lines()
+        .any(|line| line.contains("wgpu adapter selected"))
+    {
+        return None;
+    }
+    Some(selected_adapter_is_warp(log))
 }
 
 fn log_for_output(output_png: &Path) -> Option<String> {
@@ -298,8 +322,10 @@ fn selected_adapter_is_warp(log: &str) -> bool {
     log.lines().any(|line| {
         line.contains("wgpu adapter candidate:")
             && adapter_identity(line) == Some(identity)
-            && hex_field(line, "vendor") == Some(WARP_VENDOR)
-            && hex_field(line, "device") == Some(WARP_DEVICE)
+            && match (hex_field(line, "vendor"), hex_field(line, "device")) {
+                (Some(vendor), Some(device)) => adapter_is_warp(vendor, device),
+                _ => false,
+            }
     })
 }
 
@@ -430,6 +456,18 @@ wgpu adapter selected (headless): NVIDIA GeForce RTX 4090 type=DiscreteGpu backe
         assert!(!selected_adapter_is_warp(
             "wgpu adapter selected (headless): Microsoft Basic Render Driver type=Cpu backend=Dx12"
         ));
+    }
+
+    #[test]
+    fn warp_decision_waits_until_the_selected_adapter_line_is_present() {
+        assert_eq!(
+            warp_decision_from_log("Headless mode: output=target/actual.png size=320x320\n"),
+            None
+        );
+        assert_eq!(warp_decision_from_log(WARP_LOG), Some(true));
+        assert_eq!(warp_decision_from_log(LAVAPIPE_LOG), Some(false));
+        assert!(adapter_is_warp(0x1414, 0x008c));
+        assert!(!adapter_is_warp(0x10005, 0));
     }
 
     #[test]

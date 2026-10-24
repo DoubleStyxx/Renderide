@@ -41,6 +41,7 @@ mod consts;
 mod custom_property;
 mod double_buffer_stack;
 mod exotic_pair;
+mod gpu_ready;
 mod shadowed_caster;
 
 pub use bench_drive::{BenchDriveConfig, drive_bench};

@@ -258,6 +258,9 @@ jobs:
       # can still follow a wider pool (https://github.com/DoubleStyxx/Renderide/issues/194).
       # #186's pending-count gate waits until shader pipelines are ready. It does
       # not make draw order independent of that pool.
+      # WARP (adapter vendor 0x1414, device 0x008c) may use a 300s readiness
+      # budget so a ~127s submission stall can finish (#216, #214). Other
+      # adapters stay on the 180s case timeout. This 20 minute cap is unchanged.
       - name: Run headless renderer suite
         timeout-minutes: 20
         shell: bash

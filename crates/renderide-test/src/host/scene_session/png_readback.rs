@@ -15,6 +15,7 @@ use crate::error::HarnessError;
 use super::super::lockstep::LockstepDriver;
 use super::config::SceneSessionOutcome;
 use super::consts::timing;
+use super::gpu_ready::{self, FrameReadiness, GpuFrameSettle, SettleDecision};
 
 /// Wall-clock + monotonic anchors for one readback wait.
 pub struct PngStabilityWaitTiming {
@@ -149,6 +150,10 @@ impl PngStabilityState {
 
 /// Keyword of the PNG `tEXt` chunk written by the headless PNG encoder.
 const PIPELINE_PENDING_TEXT_KEYWORD: &str = "renderide_pipeline_pending";
+/// `1` only after that frame's submission reached `on_submitted_work_done`.
+const GPU_DONE_TEXT_KEYWORD: &str = "renderide_gpu_done";
+/// Milliseconds spent waiting for that submission inside the headless readback.
+const SUBMIT_STALL_TEXT_KEYWORD: &str = "renderide_submit_stall_ms";
 
 /// Whether this PNG's own `tEXt` chunk says the frame had no compiling or skipped draws.
 ///
@@ -161,6 +166,10 @@ fn pipeline_frame_is_ready(path: &Path) -> bool {
 }
 
 fn pipeline_pending_text(path: &Path) -> Option<String> {
+    png_text_chunk(path, PIPELINE_PENDING_TEXT_KEYWORD)
+}
+
+fn png_text_chunk(path: &Path, keyword: &str) -> Option<String> {
     let file = std::fs::File::open(path).ok()?;
     let decoder = png::Decoder::new(std::io::BufReader::new(file));
     let reader = decoder.read_info().ok()?;
@@ -168,8 +177,25 @@ fn pipeline_pending_text(path: &Path) -> Option<String> {
         .info()
         .uncompressed_latin1_text
         .iter()
-        .find(|chunk| chunk.keyword == PIPELINE_PENDING_TEXT_KEYWORD)
+        .find(|chunk| chunk.keyword == keyword)
         .map(|chunk| chunk.text.clone())
+}
+
+fn read_frame_readiness(path: &Path) -> FrameReadiness {
+    let pending_text = pipeline_pending_text(path);
+    let (pending, dropped_draws) = gpu_ready::counts_from_pending_chunk(pending_text.as_deref());
+    let gpu_done =
+        png_text_chunk(path, GPU_DONE_TEXT_KEYWORD).is_some_and(|text| text.trim() == "1");
+    let stall_ms = png_text_chunk(path, SUBMIT_STALL_TEXT_KEYWORD)
+        .and_then(|text| text.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    FrameReadiness {
+        gpu_done,
+        pending,
+        dropped_draws,
+        flat: png_is_flat(path),
+        stall_ms,
+    }
 }
 
 /// Whether the PNG at `path` decodes to a flat single-color image.
@@ -203,18 +229,36 @@ pub(super) fn run_lockstep_until_png_stable(
 ) -> Result<SceneSessionOutcome, HarnessError> {
     let mut state = PngStabilityState::new(&wait_timing);
     let deadline_floor = state.min_wall_after_submit() + timing::PNG_DEADLINE_SLACK;
-    let deadline = Instant::now() + wait_timing.overall_timeout.max(deadline_floor);
+    let wait_started = Instant::now();
     let mut last_log_at = Instant::now();
-    let mut flat_candidate_seen = false;
-    let mut pending_pipeline_seen = false;
-    let mut chunks = ObservedChunks::default();
+    let mut warp = WarpBudgetWatch {
+        last_check: wait_started
+            .checked_sub(timing::LOG_INTERVAL)
+            .unwrap_or(wait_started),
+        decided: false,
+        used: false,
+        deadline: wait_started + wait_timing.overall_timeout.max(deadline_floor),
+    };
+    let mut progress = CaptureProgress::default();
+    let mut settle = GpuFrameSettle::default();
+    let mut stats = CaptureStatsWriter::new(
+        output_path.with_file_name(crate::scene_dsl::output::CAPTURE_STATS_FILENAME),
+    );
 
-    while Instant::now() < deadline {
+    while Instant::now() < warp.deadline {
+        extend_warp_budget(
+            output_path,
+            &wait_timing,
+            wait_started,
+            deadline_floor,
+            &mut warp,
+        );
+        stats.sync(settle.longest_stall_ms(), warp.used);
         let _ = lockstep.tick(queues);
 
         if let Ok(Some(status)) = renderer.try_wait() {
             return Err(HarnessError::AssetAckTimeout(
-                deadline.elapsed(),
+                wait_started.elapsed(),
                 if status.success() {
                     "renderer exited cleanly before producing PNG"
                 } else {
@@ -228,46 +272,21 @@ pub(super) fn run_lockstep_until_png_stable(
             state.observe(now, read_png_observation(output_path)),
             PngStabilityVerdict::Stable
         ) {
-            // Pipelines compile asynchronously. A draw whose pipeline is still pending,
-            // or that was skipped because no pipeline was available, is stamped on the
-            // PNG (materials/registry.rs). Keep pumping for a later write.
-            if png_is_flat(output_path) {
-                if !flat_candidate_seen {
-                    logger::info!(
-                        "Session: stable PNG is flat; waiting for a later frame (pipelines may still be compiling)"
-                    );
-                }
-                flat_candidate_seen = true;
-                let pending_text = pipeline_pending_text(output_path);
-                pending_pipeline_seen |= !pending_text
-                    .as_deref()
-                    .is_some_and(|text| text.trim() == "0");
-                chunks.note(pending_text.as_deref());
-                state.reject_candidate();
-                std::thread::sleep(timing::POLL_INTERVAL);
-                continue;
+            if settle_stable_frame(
+                output_path,
+                &wait_timing,
+                &mut state,
+                &mut progress,
+                &mut settle,
+                &mut stats,
+                warp.used,
+            ) {
+                return Ok(SceneSessionOutcome {
+                    png_path: output_path.to_path_buf(),
+                });
             }
-            if !pipeline_frame_is_ready(output_path) {
-                if !pending_pipeline_seen {
-                    logger::info!(
-                        "Session: stable PNG still has compiling or skipped material draws; waiting for a ready frame"
-                    );
-                }
-                pending_pipeline_seen = true;
-                chunks.note(pipeline_pending_text(output_path).as_deref());
-                state.reject_candidate();
-                std::thread::sleep(timing::POLL_INTERVAL);
-                continue;
-            }
-            chunks.note(pipeline_pending_text(output_path).as_deref());
-            logger::info!(
-                "Session: fresh PNG stabilized at {} after {:?}",
-                output_path.display(),
-                wait_timing.scene_submit_instant.elapsed()
-            );
-            return Ok(SceneSessionOutcome {
-                png_path: output_path.to_path_buf(),
-            });
+            std::thread::sleep(timing::POLL_INTERVAL);
+            continue;
         }
 
         if last_log_at.elapsed() >= timing::LOG_INTERVAL {
@@ -283,10 +302,73 @@ pub(super) fn run_lockstep_until_png_stable(
         std::thread::sleep(timing::POLL_INTERVAL);
     }
 
-    match classify_capture_timeout(&chunks, pending_pipeline_seen, flat_candidate_seen) {
+    let wait = reported_wait(wait_timing.overall_timeout, warp.used);
+    stats.sync(settle.longest_stall_ms(), warp.used);
+    timeout_outcome(
+        output_path,
+        wait,
+        &progress.chunks,
+        progress.pending_pipeline_seen,
+        progress.flat_candidate_seen,
+    )
+}
+
+/// Flags and chunk counts gathered while a capture is still waiting.
+#[derive(Default)]
+struct CaptureProgress {
+    flat_candidate_seen: bool,
+    pending_pipeline_seen: bool,
+    gpu_not_done_logged: bool,
+    settle_hold_logged: bool,
+    chunks: ObservedChunks,
+}
+
+/// Returns true when this stable PNG is the settled capture.
+fn settle_stable_frame(
+    output_path: &Path,
+    wait_timing: &PngStabilityWaitTiming,
+    state: &mut PngStabilityState,
+    progress: &mut CaptureProgress,
+    settle: &mut GpuFrameSettle,
+    stats: &mut CaptureStatsWriter,
+    warp_used: bool,
+) -> bool {
+    let Some(mtime) = state.last_seen_mtime() else {
+        state.reject_candidate();
+        return false;
+    };
+    let frame = read_frame_readiness(output_path);
+    note_stable_frame(output_path, &frame, progress);
+    stats.sync(settle.longest_stall_ms(), warp_used);
+    let decision = settle.observe(mtime, frame);
+    stats.sync(settle.longest_stall_ms(), warp_used);
+    if decision == SettleDecision::Accept {
+        logger::info!(
+            "Session: fresh PNG stabilized at {} after {:?}",
+            output_path.display(),
+            wait_timing.scene_submit_instant.elapsed()
+        );
+        return true;
+    }
+    if decision == SettleDecision::Hold && !progress.settle_hold_logged {
+        logger::info!("Session: GPU-completed frame recorded; waiting for a later settled frame");
+        progress.settle_hold_logged = true;
+    }
+    state.reject_candidate();
+    false
+}
+
+fn timeout_outcome(
+    output_path: &Path,
+    wait: Duration,
+    chunks: &ObservedChunks,
+    pending_pipeline_seen: bool,
+    flat_candidate_seen: bool,
+) -> Result<SceneSessionOutcome, HarnessError> {
+    match classify_capture_timeout(chunks, pending_pipeline_seen, flat_candidate_seen) {
         CaptureTimeout::FlatOrUnstable => Err(HarnessError::FlatOrUnstableFrame {
             path: PathBuf::from(output_path),
-            wait: wait_timing.overall_timeout,
+            wait,
             last_pending: chunks.last_pending.unwrap_or(0),
             ready_chunks: chunks.ready,
             pending_chunks: chunks.pending,
@@ -295,7 +377,7 @@ pub(super) fn run_lockstep_until_png_stable(
         }),
         CaptureTimeout::PipelineNotReady => Err(HarnessError::PipelineNotReady {
             path: PathBuf::from(output_path),
-            wait: wait_timing.overall_timeout,
+            wait,
         }),
         CaptureTimeout::FlatHandedOff => {
             // Never rendered anything but a flat frame, and the pending chunk was not
@@ -306,8 +388,120 @@ pub(super) fn run_lockstep_until_png_stable(
         }
         CaptureTimeout::Missing => Err(HarnessError::PngOutputMissing {
             path: PathBuf::from(output_path),
-            wait: wait_timing.overall_timeout,
+            wait,
         }),
+    }
+}
+
+/// Deadline state for one capture wait. WARP extends it once, from `wait_started`.
+struct WarpBudgetWatch {
+    last_check: Instant,
+    decided: bool,
+    used: bool,
+    deadline: Instant,
+}
+
+/// Grows the deadline once, from the start of the wait, when the selected adapter is WARP.
+fn extend_warp_budget(
+    output_path: &Path,
+    wait_timing: &PngStabilityWaitTiming,
+    wait_started: Instant,
+    deadline_floor: Duration,
+    watch: &mut WarpBudgetWatch,
+) {
+    if watch.decided || watch.last_check.elapsed() < timing::LOG_INTERVAL {
+        return;
+    }
+    watch.last_check = Instant::now();
+    let Some(is_warp) = crate::scene_dsl::output_warp_decision(output_path) else {
+        return;
+    };
+    watch.decided = true;
+    if !is_warp {
+        return;
+    }
+    let budget = gpu_ready::warp_readiness_budget(true, wait_timing.overall_timeout);
+    let extended = wait_started + budget.max(deadline_floor);
+    if extended > watch.deadline {
+        watch.deadline = extended;
+    }
+    watch.used = true;
+    logger::info!(
+        "Session: WARP adapter; readiness budget is {:?} (#216, #214)",
+        budget
+    );
+}
+
+fn reported_wait(overall: Duration, warp_budget_used: bool) -> Duration {
+    if warp_budget_used {
+        gpu_ready::warp_readiness_budget(true, overall)
+    } else {
+        overall
+    }
+}
+
+/// Records the stable frame and logs the same rejection lines the Linux suite greps for.
+fn note_stable_frame(path: &Path, frame: &FrameReadiness, progress: &mut CaptureProgress) {
+    let pending_text = pipeline_pending_text(path);
+    if frame.flat {
+        if !progress.flat_candidate_seen {
+            logger::info!(
+                "Session: stable PNG is flat; waiting for a later frame (pipelines may still be compiling)"
+            );
+        }
+        progress.flat_candidate_seen = true;
+        progress.pending_pipeline_seen |= !pipeline_frame_is_ready(path);
+    } else if !pipeline_frame_is_ready(path) {
+        // Pipelines compile asynchronously. A draw whose pipeline is still pending,
+        // or that was skipped because no pipeline was available, is stamped on the
+        // PNG (materials/registry.rs). Keep pumping for a later write.
+        if !progress.pending_pipeline_seen {
+            logger::info!(
+                "Session: stable PNG still has compiling or skipped material draws; waiting for a ready frame"
+            );
+        }
+        progress.pending_pipeline_seen = true;
+    } else if !frame.gpu_done && !progress.gpu_not_done_logged {
+        logger::info!("Session: stable PNG gpu submission is not done; waiting for a later frame");
+        progress.gpu_not_done_logged = true;
+    }
+    progress.chunks.note(pending_text.as_deref());
+}
+
+/// Writes the stall and WARP-budget flag beside the PNG on every exit, including timeout.
+struct CaptureStatsWriter {
+    path: PathBuf,
+    longest_submission_stall_ms: u64,
+    warp_readiness_budget_used: bool,
+}
+
+impl CaptureStatsWriter {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            longest_submission_stall_ms: 0,
+            warp_readiness_budget_used: false,
+        }
+    }
+
+    fn sync(&mut self, stall_ms: u64, warp_budget_used: bool) {
+        self.longest_submission_stall_ms = self.longest_submission_stall_ms.max(stall_ms);
+        self.warp_readiness_budget_used = warp_budget_used;
+    }
+}
+
+impl Drop for CaptureStatsWriter {
+    fn drop(&mut self) {
+        let payload = serde_json::json!({
+            "longest_submission_stall_ms": self.longest_submission_stall_ms,
+            "warp_readiness_budget_used": self.warp_readiness_budget_used,
+        });
+        let Ok(json) = serde_json::to_string_pretty(&payload) else {
+            return;
+        };
+        if let Err(err) = std::fs::write(&self.path, json) {
+            logger::warn!("capture stats write {}: {err}", self.path.display());
+        }
     }
 }
 
@@ -397,6 +591,32 @@ mod tests {
         }
         chunks.frames = frames;
         chunks
+    }
+
+    #[test]
+    fn non_warp_adapter_timeout_still_reports_flat_or_unstable() {
+        let budget =
+            super::super::gpu_ready::warp_readiness_budget(false, Duration::from_secs(180));
+        assert_eq!(budget, Duration::from_secs(180));
+        let ready = chunks_with_last(Some(0), 5);
+        assert_eq!(
+            classify_capture_timeout(&ready, false, true),
+            CaptureTimeout::FlatOrUnstable
+        );
+        let err = crate::error::HarnessError::FlatOrUnstableFrame {
+            path: std::path::PathBuf::from("actual.png"),
+            wait: budget,
+            last_pending: 0,
+            ready_chunks: ready.ready,
+            pending_chunks: ready.pending,
+            missing_chunks: ready.missing,
+            frame_count: ready.frames,
+        };
+        let text = err.to_string();
+        assert!(text.contains("flat or unstable"), "{text}");
+        assert!(text.contains("last pending=0"), "{text}");
+        assert!(text.contains("frames="), "{text}");
+        assert!(!text.contains("pipeline-pending"), "{text}");
     }
 
     #[test]

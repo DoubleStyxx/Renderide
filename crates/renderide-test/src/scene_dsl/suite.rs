@@ -20,6 +20,13 @@ use super::runner::{CaseRunOutcome, RunnerConfig, run_integration_case};
 /// Suite-level report filename written under the configured output root.
 pub const SUITE_REPORT_FILENAME: &str = "suite-report.json";
 
+/// Suite summary. WARP stalls stay bounded (#214); the black frame is the clear (#216).
+pub const SUITE_READINESS_SUMMARY: &str = "Each capture waits until that frame's GPU submission is done. WARP submission stalls stay bounded (#214); a black pbs_lit frame is the clear color until that submission completes (#216).";
+
+fn default_summary() -> String {
+    SUITE_READINESS_SUMMARY.to_string()
+}
+
 /// Suite cases assigned to one harness worker chunk.
 const SUITE_PARALLEL_CHUNK_CASES: usize = 1;
 /// Suite case count required before the harness fans out.
@@ -66,6 +73,9 @@ pub struct SuiteReport {
     pub expected_failures: usize,
     /// Per-case results, in registry or CLI selection order.
     pub cases: Vec<SuiteCaseReport>,
+    /// Points at the bounded WARP stall (#214) and the black clear captured during it (#216).
+    #[serde(default = "default_summary")]
+    pub summary: String,
 }
 
 impl SuiteReport {
@@ -77,6 +87,7 @@ impl SuiteReport {
             failed: 0,
             expected_failures: 0,
             cases,
+            summary: SUITE_READINESS_SUMMARY.to_string(),
         };
         report.recompute();
         report
@@ -390,5 +401,8 @@ mod tests {
         assert_eq!(json["passed"], 1);
         assert_eq!(json["failed"], 0);
         assert_eq!(json["cases"][0]["name"], "a");
+        let summary = json["summary"].as_str().unwrap_or("");
+        assert!(summary.contains("#216"), "{summary}");
+        assert!(summary.contains("#214"), "{summary}");
     }
 }
