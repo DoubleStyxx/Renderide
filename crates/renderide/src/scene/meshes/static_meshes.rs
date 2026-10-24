@@ -126,6 +126,7 @@ pub(crate) fn apply_mesh_renderables_update_extracted(
         active_rows,
         valid_plan_count,
     );
+    space.refresh_rigid_object_motion_nodes();
 }
 
 fn apply_static_mesh_state_plans(

@@ -357,6 +357,7 @@ fn draw_inputs<'a>(
             render_space_scope: ViewRenderSpaceScope::single(SPACE),
             layer_policy,
             reflection_probes: None,
+            consumes_motion_vectors: false,
         },
         caches: DrawCollectionFrameCaches {
             material_cache: None,

@@ -625,6 +625,7 @@ mod tests {
                     draws_hi_z_culled: 1,
                     visibility: Default::default(),
                     arrangement: Default::default(),
+                    has_rigid_object_motion: false,
                 },
                 None,
             )));
@@ -774,6 +775,7 @@ mod tests {
                     draws_hi_z_culled: 0,
                     visibility: Default::default(),
                     arrangement: Default::default(),
+                    has_rigid_object_motion: false,
                 },
                 None,
             ))),
@@ -787,6 +789,7 @@ mod tests {
                         draws_hi_z_culled: 0,
                         visibility: Default::default(),
                         arrangement: Default::default(),
+                        has_rigid_object_motion: false,
                     },
                     None,
                 ),

@@ -135,6 +135,10 @@ fn apply_render_space_geometry_phase(
     if has_transform_removals {
         profiling::scope!("scene::apply_render_space_chunk::fixup_meshes");
         fixup_static_meshes_for_transform_removals(space, transform_removals);
+        // Mesh apply is the other rebuild, and a removal tick often has none. Without this,
+        // a swap-moved object node keeps its old index, drops off the publish list, and its
+        // previous matrix stays valid without catching the new pose.
+        space.refresh_rigid_object_motion_nodes();
     }
     if let Some(ref mu) = extracted.meshes {
         {
