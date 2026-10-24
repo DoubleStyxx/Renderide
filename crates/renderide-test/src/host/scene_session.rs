@@ -44,6 +44,7 @@ mod shadowed_caster;
 
 pub use bench_drive::{BenchDriveConfig, drive_bench};
 pub mod png_readback;
+mod scene_ids;
 mod scene_state;
 mod shutdown;
 pub mod spawn;
@@ -52,6 +53,11 @@ pub use config::SceneSessionConfig;
 
 use config::SceneSessionOutcome;
 use consts::{asset_ids, shader_variants, sphere_tessellation, torus_geometry};
+use scene_ids::{
+    scene_material_id, scene_material_update_buffer_id, scene_mesh_buffer_id, scene_mesh_id,
+    scene_property_request_id, scene_shader_id, scene_texture_buffer_id, scene_texture_id,
+    scene_update_batch_id,
+};
 use scene_state::{
     SceneLight, SceneRenderable, SceneSubmission, default_camera_world_pose, directional_light,
     identity_transform, point_light,
@@ -959,42 +965,6 @@ fn bounds_for_mesh(mesh: &Mesh) -> RenderBoundingBox {
     let center = (min + max) * 0.5;
     let extents = ((max - min) * 0.5).max(Vec3::splat(0.05));
     RenderBoundingBox { center, extents }
-}
-
-const fn scene_mesh_id(index: i32) -> i32 {
-    asset_ids::SCENE_MESH_BASE + index
-}
-
-const fn scene_material_id(index: i32) -> i32 {
-    asset_ids::SCENE_MATERIAL_BASE + index
-}
-
-const fn scene_shader_id(index: i32) -> i32 {
-    asset_ids::SCENE_SHADER_BASE + index
-}
-
-const fn scene_texture_id(index: i32) -> i32 {
-    asset_ids::SCENE_TEXTURE_BASE + index
-}
-
-const fn scene_mesh_buffer_id(index: i32) -> i32 {
-    asset_ids::SCENE_MESH_BUFFER_BASE + index
-}
-
-const fn scene_texture_buffer_id(index: i32) -> i32 {
-    asset_ids::SCENE_TEXTURE_BUFFER_BASE + index
-}
-
-const fn scene_material_update_buffer_id(index: i32) -> i32 {
-    asset_ids::SCENE_MATERIAL_UPDATE_BUFFER_BASE + index * 4
-}
-
-const fn scene_update_batch_id(index: i32) -> i32 {
-    asset_ids::SCENE_MATERIAL_UPDATE_BATCH_BASE + index
-}
-
-const fn scene_property_request_id(index: i32) -> i32 {
-    asset_ids::SCENE_PROPERTY_ID_REQUEST_BASE + index
 }
 
 #[cfg(test)]
