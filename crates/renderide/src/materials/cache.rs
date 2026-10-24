@@ -633,6 +633,12 @@ impl MaterialPipelineCache {
                         "MaterialPipelineCache: async pipeline build failed for {:?}: {e}",
                         outcome.kind
                     );
+                    if crate::gpu::warp_black_diag::frame_log_armed() {
+                        crate::gpu::warp_black_diag::note_pipeline_build_failed(&format!(
+                            "{:?}",
+                            outcome.kind
+                        ));
+                    }
                     let mut shard = self.shard_for(&outcome.key).lock();
                     shard.pending.remove(&outcome.key);
                     shard.failed.insert(outcome.key, e);
@@ -691,6 +697,13 @@ impl MaterialPipelineCache {
             RasterPipelineKind::EmbeddedStem(_) => shader_specialization.for_wgsl_source(&wgsl),
             RasterPipelineKind::Null => MaterialShaderSpecializationKey::disabled(),
         };
+        if crate::gpu::warp_black_diag::frame_log_armed() {
+            crate::gpu::warp_black_diag::note_shader_compile(
+                &format!("{kind:?}"),
+                shader_specialization.static_variant_bits(),
+                wgsl.len(),
+            );
+        }
         let module = shader_module_cache.get_or_create(
             device.as_ref(),
             wgsl.clone(),

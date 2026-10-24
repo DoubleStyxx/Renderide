@@ -70,6 +70,7 @@ impl<'a> HeadlessDriver<'a> {
             params.height,
             params.interval_ms,
         );
+        crate::gpu::warp_black_diag::arm_frame_log(&params.output_path);
         crash_context::set_target_mode(TargetMode::Headless);
         crash_context::set_render_mode(RenderMode::Headless);
 
@@ -232,6 +233,8 @@ impl<'a> HeadlessDriver<'a> {
         self.note_control_presented(kind, render_skipped);
         if kind == HeadlessTickKind::FullFrame && !render_skipped {
             self.maybe_write_frame_png();
+        } else {
+            crate::gpu::warp_black_diag::discard_frame_log();
         }
         self.runtime
             .tick_frame_render_time_end(self.gpu.last_completed_gpu_render_time_seconds());
@@ -259,6 +262,7 @@ impl<'a> HeadlessDriver<'a> {
     }
 
     fn maybe_write_frame_png(&mut self) {
+        crate::gpu::warp_black_diag::flush_frame_log();
         if crate::app::frame_bench::active() {
             return;
         }

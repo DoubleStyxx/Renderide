@@ -215,6 +215,7 @@ struct DepthLikePerDrawBind<'a> {
 /// bind groups are bound directly from the table; no cache lookups occur during recording.
 pub(crate) fn draw_subset(batch: ForwardDrawBatch<'_, '_, '_, '_>) {
     profiling::scope!("world_mesh::draw_subset");
+    let _forward_pass = crate::gpu::warp_black_diag::EncodePassGuard::forward();
     let ForwardDrawBatch {
         rpass,
         groups,
@@ -325,6 +326,16 @@ fn issue_forward_group(
     set_forward_scissor_if_changed(rpass, resources, state, representative);
 
     let inst_range = instance_range_for_draw_group(group, resources.supports_base_instance);
+    if crate::gpu::warp_black_diag::frame_log_armed() {
+        crate::gpu::warp_black_diag::note_bound_pipeline(
+            &format!("{:?}", representative_item.batch_key.pipeline),
+            representative_item.batch_key.shader_asset_id,
+            representative_item
+                .batch_key
+                .shader_specialization
+                .static_variant_bits(),
+        );
+    }
     issue_material_pipeline_passes(
         rpass,
         encode,
@@ -501,6 +512,7 @@ pub(crate) fn draw_normals_subset(batch: NormalDrawBatch<'_, '_, '_, '_>) {
 /// Records the safe opaque depth prepass draw subset.
 pub(crate) fn draw_depth_prepass_subset(batch: DepthPrepassDrawBatch<'_, '_, '_, '_>) {
     profiling::scope!("world_mesh::draw_depth_prepass_subset");
+    let _depth_pass = crate::gpu::warp_black_diag::EncodePassGuard::depth_prepass();
     let DepthPrepassDrawBatch {
         rpass,
         groups,

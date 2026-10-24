@@ -412,6 +412,16 @@ impl QueuedWorldMeshDraws {
         self.len
     }
 
+    /// Pre-cull, frustum, Hi-Z, and surviving draw counts for the canary frame log.
+    pub(crate) fn cull_counters(&self) -> [usize; 4] {
+        [
+            self.draws_pre_cull,
+            self.draws_culled,
+            self.draws_hi_z_culled,
+            self.len,
+        ]
+    }
+
     /// Draw count and triangle count for the dev-only control stats probe.
     ///
     /// Instances are the draw count. Triangles are `index_count / 3` summed across chunks.
