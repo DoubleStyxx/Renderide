@@ -31,7 +31,7 @@ Scenes are host-driven (the framebench host replays a fixed scene over IPC; see 
 | S6 | `ui_canvas_stack` | UI draw ordering, transparent sort (#50) | hundreds of coplanar canvas quads | to add; CPU part already covered by `transparent_sort` Criterion bench on #50 |
 | S7 | `vr_mirror` | multiview + secondary view | stereo + mirror camera | **real GPU/OpenXR**; not representable on lavapipe |
 | S8 | `particles` | particle-system CPU update + draw | emitters with N particles | to add once a particle upload path is scriptable |
-| S9 | `secondary_camera_copy` | secondary render-texture cameras with non-clearing clears; the full-target `Rgba16Float` previous-color seed copy of fork PR #181 | S0 `unlit_sphere` scene (main camera `Skybox`) + 2 enabled, single-sample, non-double-buffered secondary cameras at the main pose, one `Depth` clear and one `Nothing` clear, each into its own 512x512 render texture (`Rgba16Float` + depth); 0 lights | implemented (host now allocates render textures and sends `cameras_update`) |
+| S9 | `secondary_camera_copy` | secondary render-texture cameras with non-clearing clears; the full-target `Rgba16Float` previous-colour seed copy (`WorldMeshForwardColorPreserve`), on fork master since 66421146 | S0 `unlit_sphere` scene (main camera `Skybox`) + 2 enabled, single-sample, non-double-buffered secondary cameras at the main pose, one `Depth` clear and one `Nothing` clear, each into its own 512x512 render texture (`Rgba16Float` + depth); 0 lights | implemented (host now allocates render textures and sends `cameras_update`) |
 
 Camera, resolution, warmup and frame counts are part of the scene definition: S1/S2 use the CI config (256x256, warmup 10, frames 20, runs 5) for the gate and 1920x1080 (warmup 30, frames 120, runs 3) for the reference table.
 
@@ -175,11 +175,11 @@ Multi-thread lock behaviour is not visible in framebench or Criterion; the `gaug
 
 ### S9 `secondary_camera_copy`: what it compares
 
-The scene is host-only, so it runs against any renderer, including master. **The meaningful comparison is master versus a tree that contains fork PR #181** (seeding a non-clearing HDR view from its render-texture target). On master the `Depth`/`Nothing` secondary cameras render with no copy; on a #181 tree each of the two adds one full-target 512x512 `Rgba16Float` `copy_texture_to_texture` per frame. The seed only applies to full-target, single-sample `Rgba16Float` views that are not double-buffered, which is why both cameras use flags bit 0 only (enabled) and a full viewport. In the frame-bench workflow, a base ref without this scenario (for example master before this branch merges) runs it on head only and reports base as `missing`.
+The scene is host-only, so it runs against any renderer. Since fork master 66421146 (the #181 merge) the `Depth`/`Nothing` secondary cameras each seed their target with one full-target 512x512 `Rgba16Float` previous-colour `copy_texture_to_texture` per frame (the `WorldMeshForwardColorPreserve` pass). **The meaningful A/B is 0104fee7 (the pre-copy base, no copy) versus 66421146 or later**, using one `renderide-framebench` host binary that knows the scenario against both renderers. The seed only applies to full-target, single-sample `Rgba16Float` views that are not double-buffered, which is why both cameras use flags bit 0 only (enabled) and a full viewport. In the frame-bench workflow, a base ref without this scenario (for example 0104fee7, or any master before this branch merges) runs it on head only and reports base as `missing`.
 
 `draw_calls` in the report is the last-applied world view's count, not the sum over views, so it reads 1 here although three views (main + 2 secondary) draw the sphere each frame. `upload_count` (11 vs 5 for `unlit_sphere`) and the summed `gpu_passes_ms` show the secondary views are rendering.
 
-Measured 2026-10-23 17:55 MDT, lavapipe, CI config (256x256, 2 cores, warmup 10, frames 20, runs 5), medians of 4 interleaved rounds (min-max in brackets), same `renderide-framebench` host binary for both renderers:
+Measured 2026-10-23 17:55 MDT, before #181 merged (the rows below predate 66421146), lavapipe, CI config (256x256, 2 cores, warmup 10, frames 20, runs 5), medians of 4 interleaved rounds (min-max in brackets), same `renderide-framebench` host binary for both renderers:
 
 | Renderer | S9 draws, cpu_frame p50 / p95 ms | `WorldMeshForwardColorPreserve` pass | S0 `unlit_sphere` p50 / p95 ms (same session) |
 |---|---|---|---|

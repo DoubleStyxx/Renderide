@@ -82,8 +82,9 @@ const ONSCREEN_SKINNED_AVATARS: Scenario = Scenario {
 
 /// The `unlit_sphere` scene with the main `Skybox` camera plus two enabled secondary cameras
 /// (`Depth` clear, `Nothing` clear), each rendering the sphere into its own 512x512 render
-/// texture. On a renderer that seeds non-clearing HDR views from the target (fork PR #181) each
-/// secondary camera adds a full-target `Rgba16Float` copy; on master it renders without one.
+/// texture. On fork master since 66421146 both non-clearing secondary cameras seed their target
+/// with a full-target `Rgba16Float` previous-colour copy (the `WorldMeshForwardColorPreserve`
+/// pass); 0104fee7 is the pre-copy base for an A/B.
 const SECONDARY_CAMERA_COPY: Scenario = Scenario {
     name: "secondary_camera_copy",
     camera_position: [0.0, 0.0, -3.0],

@@ -265,9 +265,10 @@ pub(super) struct SecondaryCameraRig {
 /// Two full-viewport, single-sample, non-double-buffered secondary cameras that share the main
 /// camera pose (so they draw the same sphere) and render into their own render textures.
 ///
-/// On a renderer that seeds a non-clearing HDR view from its render-texture target (fork PR #181)
-/// each camera adds one full-target `Rgba16Float` copy per frame; on master the scene renders the
-/// same draws with no copy. The main camera keeps the default `Skybox` clear.
+/// On fork master since 66421146 each of these non-clearing (`Depth` / `Nothing`) cameras seeds
+/// its target with one full-target `Rgba16Float` previous-colour copy per frame (the
+/// `WorldMeshForwardColorPreserve` pass); 0104fee7 is the pre-copy base that renders the same
+/// draws with no copy, for an A/B. The main camera keeps the default `Skybox` clear.
 pub(super) fn secondary_camera_copy_rig(scene: &SceneSubmission) -> SecondaryCameraRig {
     let first = next_free_transform_id(scene);
     let camera = |offset: i32, render_texture_asset_id, clear_mode, depth| SceneCamera {
