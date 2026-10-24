@@ -17,6 +17,7 @@ use crate::shared::FrameSubmitData;
 ///
 /// A poisoned settings lock disables history for the frame rather than propagating the poison
 /// into the render thread.
+///
 /// Global motion-blur gate for rigid object history and the draw-collection scan.
 ///
 /// True when post-processing and motion blur are both effectively enabled. Every color view
