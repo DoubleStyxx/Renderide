@@ -34,70 +34,12 @@ mod renderer_link;
 pub mod updater;
 mod watchdogs;
 
-#[cfg(test)]
-/// Test-only synchronization for process-wide environment variable mutations.
-pub(crate) mod test_env {
-    use std::ffi::OsString;
-    use std::sync::{Mutex, MutexGuard};
-
-    static INTERPROCESS_ENV_LOCK: Mutex<()> = Mutex::new(());
-    static PROCESS_ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    /// Locks process-wide test mutations of `RENDERIDE_INTERPROCESS_DIR`.
-    pub(crate) fn lock_interprocess_env() -> MutexGuard<'static, ()> {
-        INTERPROCESS_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    /// Locks process-wide test environment mutations for non-IPC env vars.
-    pub(crate) fn lock_process_env() -> MutexGuard<'static, ()> {
-        PROCESS_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    /// Captures and restores a fixed set of environment variables.
-    pub(crate) struct EnvSnapshot {
-        /// Captured values keyed by environment variable name.
-        values: Vec<(&'static str, Option<OsString>)>,
-    }
-
-    impl EnvSnapshot {
-        /// Captures current values for `keys`.
-        pub(crate) fn capture(keys: &[&'static str]) -> Self {
-            Self {
-                values: keys
-                    .iter()
-                    .map(|key| (*key, std::env::var_os(key)))
-                    .collect(),
-            }
-        }
-    }
-
-    impl Drop for EnvSnapshot {
-        fn drop(&mut self) {
-            for (key, value) in self.values.drain(..) {
-                restore_env(key, value);
-            }
-        }
-    }
-
-    /// Restores one env var to `value`, or removes it when `value` is [`None`].
-    pub(crate) fn restore_env(key: &str, value: Option<OsString>) {
-        if let Some(value) = value {
-            // SAFETY: env mutation in tests is serialized by the appropriate test env lock.
-            unsafe {
-                std::env::set_var(key, value);
-            }
-        } else {
-            // SAFETY: env mutation in tests is serialized by the appropriate test env lock.
-            unsafe {
-                std::env::remove_var(key);
-            }
-        }
-    }
-}
+/// Process-wide environment lock shared with [`interprocess::test_env`].
+///
+/// Not part of the supported API. Tests use it so environment mutation and
+/// restore reads take one mutex.
+#[doc(hidden)]
+pub use interprocess::test_env;
 pub mod vr_prompt;
 mod wine_detect;
 
@@ -155,5 +97,24 @@ pub fn run(options: BootstrapOptions) -> Result<(), BootstrapError> {
             logger::flush();
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod process_env_lock_reexport {
+    use std::ffi::OsStr;
+
+    const PROBE: &str = "RENDERIDE_BOOTSTRAPPER_ENV_LOCK_PROBE";
+
+    #[test]
+    fn reexport_holds_the_shared_process_env_lock() {
+        let guard = crate::test_env::lock();
+        crate::test_env::assert_shared_env_lock_held();
+        let _snapshot = guard.capture(&[PROBE]);
+        guard.set_var(PROBE, "bootstrapper");
+        assert_eq!(
+            guard.var_os(PROBE).as_deref(),
+            Some(OsStr::new("bootstrapper"))
+        );
     }
 }

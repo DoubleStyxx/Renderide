@@ -20,7 +20,9 @@
 //! `expect(unsafe_code)` on the mmap, ring, semaphore, publisher, subscriber,
 //! queue-resource, and Windows security modules. Those modules wrap FFI
 //! (`mmap` / `CreateFileMapping`, named semaphores) and raw ring views
-//! (`RingView::from_raw`). New `unsafe` anywhere else does not compile.
+//! (`RingView::from_raw`). [`test_env`] is a `doc(hidden)` test helper that
+//! wraps `std::env::set_var` and `std::env::remove_var` behind one process-wide
+//! mutex. New `unsafe` anywhere else does not compile.
 
 #![deny(unsafe_code)]
 #![deny(clippy::multiple_unsafe_ops_per_block)]
@@ -40,6 +42,8 @@ mod queue_resources;
 mod ring;
 mod semaphore;
 mod subscriber;
+#[doc(hidden)]
+pub mod test_env;
 #[cfg(windows)]
 mod windows_security;
 
