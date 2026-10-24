@@ -10,6 +10,8 @@ const TEST_GPU_HARNESS_FILES: &[&str] = &[
     "src/passes/world_mesh_forward/clear_stack_gpu.rs",
     // Lavapipe unit test of render-texture ping-pong. Not a frame pass.
     "src/gpu_pools/pools/render_texture_ping_pong_gpu.rs",
+    // Lavapipe unit test of stacked double-buffer seeding and portal handle refresh.
+    "src/runtime/frame/view_planning/double_buffer_seed_gpu.rs",
 ];
 
 /// Files whose copy commands are covered by a caller-level GPU profiler scope.

@@ -268,8 +268,10 @@ fn log_camera_portal_disable_per_pixel_lights(rt_id: i32) {
 struct ResidentSecondaryRenderTexture {
     /// Host render texture color storage.
     color_texture: Arc<wgpu::Texture>,
-    /// Previous-frame color image after a double-buffer swap. Absent for every other camera.
+    /// Previous-frame color image after the camera that claimed the swap. Absent otherwise.
     history_color_texture: Option<Arc<wgpu::Texture>>,
+    /// `true` when this camera did not claim the swap and must seed the published write image.
+    seed_published_color: bool,
     /// Full host render texture color view.
     color_view: Arc<wgpu::TextureView>,
     /// Full host render texture depth storage.
@@ -307,6 +309,7 @@ impl RendererRuntime {
         Some(ResidentSecondaryRenderTexture {
             color_texture: rt.color_texture.clone(),
             history_color_texture: None,
+            seed_published_color: false,
             color_view: rt.color_view.clone(),
             depth_format: depth_texture.format(),
             depth_texture,
@@ -338,6 +341,7 @@ impl RendererRuntime {
         Some(ResidentSecondaryRenderTexture {
             color_texture: rt.color_texture.clone(),
             history_color_texture: None,
+            seed_published_color: false,
             color_view: rt.color_view.clone(),
             depth_format: depth_texture.format(),
             depth_texture,
@@ -453,7 +457,7 @@ impl RendererRuntime {
     ///
     /// Reuses [`RendererRuntime::secondary_view_tasks_scratch`] for the depth-sort scratch buffer
     /// so a frame with secondary cameras does not allocate a fresh `Vec` for the sort each tick.
-    fn collect_secondary_rt_views<'a>(&mut self, gpu: &GpuContext) -> Vec<FrameViewPlan<'a>> {
+    fn collect_secondary_rt_views<'a>(&mut self, device: &wgpu::Device) -> Vec<FrameViewPlan<'a>> {
         let mut tasks = std::mem::take(&mut self.tick_state.secondary_view_tasks_scratch);
         let mut swapped =
             std::mem::take(&mut self.tick_state.double_buffered_render_texture_scratch);
@@ -461,12 +465,8 @@ impl RendererRuntime {
         tasks.clear();
         swapped.clear();
         flagged.clear();
-        let result = self.collect_secondary_rt_views_using(
-            gpu.device().as_ref(),
-            &mut tasks,
-            &mut swapped,
-            &mut flagged,
-        );
+        let result =
+            self.collect_secondary_rt_views_using(device, &mut tasks, &mut swapped, &mut flagged);
         self.tick_state.secondary_view_tasks_scratch = tasks;
         self.tick_state.double_buffered_render_texture_scratch = swapped;
         self.tick_state.double_buffer_flag_scratch = flagged;
@@ -479,21 +479,37 @@ impl RendererRuntime {
         gpu: &GpuContext,
         main_extent_px: (u32, u32),
     ) -> Vec<FrameViewPlan<'a>> {
-        let mut portal_views = self.collect_camera_portal_views(gpu, main_extent_px);
-        let mut secondary_views = self.collect_secondary_rt_views(gpu);
-        portal_views.append(&mut secondary_views);
-        portal_views
+        self.collect_offscreen_scene_views_with_device(gpu.device().as_ref(), main_extent_px)
+    }
+
+    /// Plans portals, then secondary cameras, then rewrites published handles after any swap.
+    ///
+    /// Portals and mirrors snapshot color before the double-buffer swap. The refresh makes every
+    /// view of a swapped texture write the post-swap published image.
+    fn collect_offscreen_scene_views_with_device<'a>(
+        &mut self,
+        device: &wgpu::Device,
+        main_extent_px: (u32, u32),
+    ) -> Vec<FrameViewPlan<'a>> {
+        let mut views = self.collect_camera_portal_views(device, main_extent_px);
+        views.extend(self.collect_secondary_rt_views(device));
+        double_buffer::refresh_swapped_view_color_handles(
+            self.backend.render_texture_pool(),
+            &self.tick_state.double_buffered_render_texture_scratch,
+            &mut views,
+        );
+        views
     }
 
     /// Collects active camera portals that render into resident host render textures.
     fn collect_camera_portal_views<'a>(
         &mut self,
-        gpu: &GpuContext,
+        device: &wgpu::Device,
         main_extent_px: (u32, u32),
     ) -> Vec<FrameViewPlan<'a>> {
         let mut tasks = std::mem::take(&mut self.tick_state.camera_portal_view_tasks_scratch);
         tasks.clear();
-        let result = self.collect_camera_portal_views_using(gpu, main_extent_px, &mut tasks);
+        let result = self.collect_camera_portal_views_using(device, main_extent_px, &mut tasks);
         self.tick_state.camera_portal_view_tasks_scratch = tasks;
         result
     }
@@ -501,7 +517,7 @@ impl RendererRuntime {
     /// Inner helper that consumes the supplied camera-portal scratch buffer.
     fn collect_camera_portal_views_using<'a>(
         &mut self,
-        gpu: &GpuContext,
+        device: &wgpu::Device,
         main_extent_px: (u32, u32),
         tasks: &mut Vec<(RenderSpaceId, usize)>,
     ) -> Vec<FrameViewPlan<'a>> {
@@ -510,7 +526,7 @@ impl RendererRuntime {
         let mut views: Vec<FrameViewPlan<'a>> = Vec::with_capacity(tasks.len().saturating_mul(2));
         for (sid, portal_idx) in tasks.drain(..) {
             self.append_camera_portal_views_for_task(
-                gpu,
+                device,
                 main_extent_px,
                 sid,
                 portal_idx,
@@ -522,7 +538,7 @@ impl RendererRuntime {
 
     fn append_camera_portal_views_for_task<'a>(
         &mut self,
-        gpu: &GpuContext,
+        device: &wgpu::Device,
         main_extent_px: (u32, u32),
         sid: RenderSpaceId,
         portal_idx: usize,
@@ -553,7 +569,7 @@ impl RendererRuntime {
         }
         for source_plan in source_plans.iter() {
             if let Some(plan) =
-                self.camera_portal_frame_view_plan(gpu, task, rt.clone(), source_plan)
+                self.camera_portal_frame_view_plan(device, task, rt.clone(), source_plan)
             {
                 views.push(plan);
             }
@@ -597,7 +613,7 @@ impl RendererRuntime {
 
     fn camera_portal_frame_view_plan<'a>(
         &mut self,
-        gpu: &GpuContext,
+        device: &wgpu::Device,
         task: CameraPortalViewTask,
         rt: ResidentSecondaryRenderTexture,
         source_plan: CameraPortalSourceViewPlan,
@@ -621,7 +637,7 @@ impl RendererRuntime {
         };
         let Some(target_handles) = secondary_rt_handles_for_rect(
             &mut self.backend,
-            gpu.device().as_ref(),
+            device,
             camera_portal_write_target(task.render_texture_id),
             rt,
             source_plan.render_rect,
@@ -846,5 +862,7 @@ fn assemble_ordered_view_plans<'a>(
     views
 }
 
+#[cfg(test)]
+mod double_buffer_seed_gpu;
 #[cfg(test)]
 mod tests;

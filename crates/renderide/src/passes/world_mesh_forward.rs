@@ -69,11 +69,14 @@ mod forward_schedule_tests;
 
 #[cfg(feature = "bench-api")]
 pub use clear_load::CameraClearLoadOpInput;
+pub(crate) use clear_load::forward_clear_loads_for_view;
 #[cfg(feature = "bench-api")]
 pub(crate) use clear_load::{
     CAMERA_CLEAR_LOAD_OP_CAMERAS, camera_clear_load_op_checksum, camera_clear_load_op_inputs,
 };
 pub use color_preserve::WorldMeshForwardColorPreservePass;
+#[cfg(test)]
+pub(crate) use color_preserve::{copy_preserved_scene_color, preserved_color_texture};
 pub use depth_prepass::{WorldMeshForwardDepthPrepass, WorldMeshForwardDepthPrepassGraphResources};
 pub(crate) use depth_prepass::{
     WorldMeshForwardDepthPrepassPipelineKey, depth_prepass_pipeline_key_for_draw,
@@ -113,7 +116,6 @@ use crate::render_graph::resources::{
 use crate::world_mesh::{InstancePlan, WorldMeshPhase};
 
 use attachments::declare_forward_color_depth_attachments;
-use clear_load::forward_clear_loads_for_view;
 use depth_resolve::encode_msaa_depth_resolve_after_clear_only;
 use depth_snapshot::{
     EncodeCtx as DepthSnapshotEncodeCtx, encode_world_mesh_forward_depth_snapshot,

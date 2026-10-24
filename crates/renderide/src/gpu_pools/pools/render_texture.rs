@@ -195,8 +195,8 @@ impl GpuRenderTexture {
     /// Color image completed on the previous double-buffered frame.
     ///
     /// `None` until the first rendered double-buffered pass allocates it, and again after idle
-    /// release. This is the image a Nothing or Depth camera must seed from, not the published
-    /// write image.
+    /// release. The camera that claimed this frame's swap seeds this image. Later cameras on
+    /// the same texture seed the published write image instead.
     #[inline]
     pub(crate) fn history_color_texture(&self) -> Option<Arc<wgpu::Texture>> {
         self.previous_color

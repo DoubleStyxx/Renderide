@@ -774,9 +774,15 @@ pub struct GraphPassFrameView<'a> {
     pub color_texture: Option<&'a wgpu::Texture>,
     /// Previous-frame color image for a double-buffered camera.
     ///
-    /// Nothing and Depth clear modes copy this into HDR scene color. [`Self::color_texture`] is
-    /// the image this frame writes, so seeding that image would copy the back buffer.
+    /// Nothing and Depth clear modes copy this into HDR scene color when this camera claimed
+    /// the double-buffer swap. [`Self::color_texture`] is the image this frame writes.
     pub history_color_texture: Option<&'a wgpu::Texture>,
+    /// `true` when a later double-buffered camera this frame seeds [`Self::color_texture`].
+    ///
+    /// The camera that claimed the swap leaves this false and seeds history. Copying history
+    /// again would replace the first writer's output and pair last frame's color with this
+    /// frame's depth.
+    pub seed_published_color: bool,
     /// `true` when [`Self::depth_texture`] is the persistent camera depth target.
     ///
     /// Window, OpenXR, and full render-texture views own that image. A partial viewport renders

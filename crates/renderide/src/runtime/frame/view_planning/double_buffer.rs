@@ -73,38 +73,80 @@ fn note_double_buffer_flag(flagged: &mut Vec<i32>, state: CameraState) {
 /// Swaps a ready double-buffered render texture once per planning pass.
 ///
 /// Call only after the camera has a resident target, a resolved viewport, scratch for a partial
-/// viewport, and a world matrix. The published color image becomes this frame's write target.
+/// viewport, and a world matrix. Returns `true` when this camera claimed the swap. Later cameras
+/// on the same texture get `false` and seed the published write image.
 pub(super) fn swap_double_buffer(
     backend: &mut RenderBackend,
     device: &wgpu::Device,
     state: CameraState,
     claimed: &mut Vec<i32>,
-) {
+) -> bool {
     let rt_id = state.render_texture_asset_id;
     if !camera_state_double_buffered(state.flags) {
-        return;
+        return false;
     }
     if !secondary_render_texture_ready(backend.render_texture_pool(), rt_id, state.viewport) {
-        return;
+        return false;
     }
     if !claim_double_buffer_swap(claimed, rt_id) {
-        return;
+        return false;
     }
     let _allocated = backend.begin_double_buffered_render_texture(device, rt_id);
+    true
 }
 
 /// Replaces the snapshotted color handles with the image published after the swap.
+///
+/// History is attached only for the camera that claimed the swap. A later camera on the same
+/// texture seeds the published write image, which already contains this frame's first writer.
 fn refresh_published_color(
     pool: &RenderTexturePool,
     rt_id: i32,
     rt: &mut ResidentSecondaryRenderTexture,
+    claimed_swap: bool,
 ) {
     let Some(texture) = pool.get(rt_id) else {
         return;
     };
     rt.color_texture = Arc::clone(&texture.color_texture);
     rt.color_view = Arc::clone(&texture.color_view);
-    rt.history_color_texture = texture.history_color_texture();
+    if claimed_swap {
+        rt.history_color_texture = texture.history_color_texture();
+        rt.seed_published_color = false;
+    } else {
+        rt.history_color_texture = None;
+        rt.seed_published_color = true;
+    }
+}
+
+/// Points every planned view of a swapped texture at the post-swap published color image.
+///
+/// Portals and mirrors are planned before secondary cameras, so their handles still name the
+/// image that the swap turns into history. Rewriting those handles makes every writer of the
+/// texture target the same published image. History attachments are left alone.
+pub(super) fn refresh_swapped_view_color_handles(
+    pool: &RenderTexturePool,
+    swapped: &[i32],
+    views: &mut [FrameViewPlan<'_>],
+) {
+    if swapped.is_empty() {
+        return;
+    }
+    for view in views {
+        let Some(asset_id) = view.write_target().host_render_texture_asset_id() else {
+            continue;
+        };
+        if !swapped.contains(&asset_id) {
+            continue;
+        }
+        let Some(texture) = pool.get(asset_id) else {
+            continue;
+        };
+        view.replace_published_color(
+            texture.color_texture.as_ref().clone(),
+            texture.color_view.as_ref().clone(),
+        );
+    }
 }
 
 /// Owned inputs for one secondary camera that is going to render.
@@ -193,8 +235,13 @@ pub(super) fn plan_secondary_rt_camera<'a>(
         runtime.host_camera.head_output_transform,
     )?;
     if camera_state_double_buffered(state.flags) {
-        swap_double_buffer(&mut runtime.backend, device, state, swapped);
-        refresh_published_color(runtime.backend.render_texture_pool(), rt_id, &mut rt);
+        let claimed_swap = swap_double_buffer(&mut runtime.backend, device, state, swapped);
+        refresh_published_color(
+            runtime.backend.render_texture_pool(),
+            rt_id,
+            &mut rt,
+            claimed_swap,
+        );
     }
     let handles = assemble_secondary_rt_handles(
         secondary_camera_write_target(rt_id, state.flags),
@@ -284,14 +331,19 @@ fn assemble_secondary_rt_handles(
     )
 }
 
-/// Attaches the post-swap history image when this camera double-buffered the texture.
+/// Attaches history for the swap claimer, or marks a later writer to seed the published image.
 fn with_history_color(
     handles: OffscreenTargetHandles,
     rt: &ResidentSecondaryRenderTexture,
 ) -> OffscreenTargetHandles {
-    match rt.history_color_texture.as_ref() {
+    let handles = match rt.history_color_texture.as_ref() {
         Some(texture) => handles.with_history_color(texture.as_ref().clone()),
         None => handles,
+    };
+    if rt.seed_published_color {
+        handles.with_seed_published_color()
+    } else {
+        handles
     }
 }
 

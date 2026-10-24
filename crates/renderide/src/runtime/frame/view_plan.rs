@@ -35,9 +35,11 @@ pub(in crate::runtime) struct OffscreenTargetHandles {
     pub(in crate::runtime) write_target: OffscreenWriteTarget,
     /// Color texture backing `color_view`.
     pub(in crate::runtime) color_texture: wgpu::Texture,
-    /// Previous-frame color image for a double-buffered camera. The preserve pass copies this
-    /// instead of `color_texture`, which is the image this frame writes.
+    /// Previous-frame color image for the double-buffered camera that claimed the swap.
+    /// The preserve pass copies this instead of `color_texture` for that camera only.
     pub(in crate::runtime) history_color_texture: Option<wgpu::Texture>,
+    /// `true` when a later double-buffered camera seeds `color_texture` rather than history.
+    pub(in crate::runtime) seed_published_color: bool,
     /// Color attachment view for this render texture.
     pub(in crate::runtime) color_view: wgpu::TextureView,
     /// Depth attachment backing texture.
@@ -72,6 +74,7 @@ impl OffscreenTargetHandles {
             extent_px,
             color_format,
             history_color_texture: None,
+            seed_published_color: false,
             copy_to_color: None,
         }
     }
@@ -82,6 +85,12 @@ impl OffscreenTargetHandles {
         history_color_texture: wgpu::Texture,
     ) -> Self {
         self.history_color_texture = Some(history_color_texture);
+        self
+    }
+
+    /// Marks a later double-buffered writer that seeds the published color image.
+    pub(in crate::runtime) fn with_seed_published_color(mut self) -> Self {
+        self.seed_published_color = true;
         self
     }
 
@@ -278,6 +287,7 @@ impl<'a> FrameViewPlan<'a> {
                     write_target: handles.write_target,
                     color_texture: &handles.color_texture,
                     history_color_texture: handles.history_color_texture.as_ref(),
+                    seed_published_color: handles.seed_published_color,
                     color_view: &handles.color_view,
                     depth_texture: &handles.depth_texture,
                     depth_view: &handles.depth_view,
@@ -294,6 +304,25 @@ impl<'a> FrameViewPlan<'a> {
             }
             FrameViewPlanTarget::Swapchain => FrameViewTarget::Swapchain,
         }
+    }
+
+    /// Replaces the published color image after a double-buffer swap.
+    ///
+    /// Portals and mirrors are planned before the swap, so their handles still name the image
+    /// that is now history. The destination of a partial-viewport copy is updated with them.
+    pub(in crate::runtime) fn replace_published_color(
+        &mut self,
+        color_texture: wgpu::Texture,
+        color_view: wgpu::TextureView,
+    ) {
+        let FrameViewPlanTarget::Offscreen(handles) = &mut self.target else {
+            return;
+        };
+        if let Some(copy) = handles.copy_to_color.as_mut() {
+            copy.destination_texture = color_texture.clone();
+        }
+        handles.color_texture = color_texture;
+        handles.color_view = color_view;
     }
 
     /// Offscreen target currently written by this view.

@@ -140,8 +140,10 @@ pub(super) struct OwnedResolvedView {
     pub(super) post_processing: ViewPostProcessing,
     /// Full-target offscreen color, when this view can seed HDR scene color from it.
     pub(super) color_texture: Option<wgpu::Texture>,
-    /// Previous-frame color image for a double-buffered camera.
+    /// Previous-frame color image for the double-buffered camera that claimed the swap.
     pub(super) history_color_texture: Option<wgpu::Texture>,
+    /// `true` when a later double-buffered camera seeds the published write image.
+    pub(super) seed_published_color: bool,
     /// `true` when `depth_texture` is the persistent camera depth target.
     pub(super) persistent_depth_target: bool,
     /// Optional color copy into a host render texture after this view's graph passes.
@@ -165,6 +167,7 @@ impl OwnedResolvedView {
             post_processing: self.post_processing,
             color_texture: self.color_texture.as_ref(),
             history_color_texture: self.history_color_texture.as_ref(),
+            seed_published_color: self.seed_published_color,
             persistent_depth_target: self.persistent_depth_target,
         }
     }
@@ -265,6 +268,7 @@ impl PreparedPerViewFrameInput {
                 clear: inputs.clear,
                 color_texture: inputs.resolved.color_texture,
                 history_color_texture: inputs.resolved.history_color_texture,
+                seed_published_color: inputs.resolved.seed_published_color,
                 persistent_depth_target: inputs.resolved.persistent_depth_target,
                 post_processing: inputs.post_processing,
             },

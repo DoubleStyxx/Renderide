@@ -45,3 +45,7 @@ pub(crate) use world_mesh_forward::{
     depth_prepass_pipeline_key_for_draw, draw_shadow_depth_subset, normal_pipeline_key_for_draw,
     pre_warm_depth_prepass_pipeline, pre_warm_normal_pipeline, prepare_world_mesh_forward_frame,
 };
+#[cfg(test)]
+pub(crate) use world_mesh_forward::{
+    copy_preserved_scene_color, forward_clear_loads_for_view, preserved_color_texture,
+};

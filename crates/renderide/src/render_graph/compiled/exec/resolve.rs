@@ -420,6 +420,7 @@ impl CompiledRenderGraph {
                     post_processing: layout.post_processing,
                     color_texture: None,
                     history_color_texture: None,
+                    seed_published_color: false,
                     persistent_depth_target: non_offscreen_persistent_depth(
                         FrameViewTargetKind::Swapchain,
                         layout,
@@ -440,6 +441,7 @@ impl CompiledRenderGraph {
                 post_processing: layout.post_processing,
                 color_texture: None,
                 history_color_texture: None,
+                seed_published_color: false,
                 persistent_depth_target: non_offscreen_persistent_depth(
                     FrameViewTargetKind::ExternalMultiview,
                     layout,
@@ -467,6 +469,7 @@ impl CompiledRenderGraph {
                     post_processing: layout.post_processing,
                     color_texture: inputs.has_color_texture.then_some(ext.color_texture),
                     history_color_texture: ext.history_color_texture,
+                    seed_published_color: ext.seed_published_color,
                     persistent_depth_target: inputs.persistent_depth_target,
                 })
             }
@@ -503,6 +506,7 @@ impl CompiledRenderGraph {
                     post_processing: layout.post_processing,
                     color_texture: None,
                     history_color_texture: None,
+                    seed_published_color: false,
                     persistent_depth_target: non_offscreen_persistent_depth(
                         FrameViewTargetKind::Swapchain,
                         layout,
@@ -524,6 +528,7 @@ impl CompiledRenderGraph {
                 post_processing: layout.post_processing,
                 color_texture: None,
                 history_color_texture: None,
+                seed_published_color: false,
                 persistent_depth_target: non_offscreen_persistent_depth(
                     FrameViewTargetKind::ExternalMultiview,
                     layout,
@@ -556,6 +561,7 @@ impl CompiledRenderGraph {
                     history_color_texture: ext
                         .history_color_texture
                         .map(|texture| (*texture).clone()),
+                    seed_published_color: ext.seed_published_color,
                     persistent_depth_target: inputs.persistent_depth_target,
                     offscreen_color_copy: ext.copy_to_color.map(|copy| {
                         ResolvedOffscreenColorCopy {

@@ -103,6 +103,7 @@ pub(in crate::render_graph::compiled) fn frame_render_params_from_shared<'a>(
             clear,
             color_texture: resolved.color_texture,
             history_color_texture: resolved.history_color_texture,
+            seed_published_color: resolved.seed_published_color,
             persistent_depth_target: resolved.persistent_depth_target,
             post_processing,
             // MSAA views now live in the per-view blackboard (MsaaViewsSlot), resolved from

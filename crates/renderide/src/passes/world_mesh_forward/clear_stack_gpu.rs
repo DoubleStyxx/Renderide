@@ -7,10 +7,19 @@
 
 use std::path::PathBuf;
 
-use crate::frame_contract::FrameViewClear;
-use crate::shared::CameraClearMode;
+use std::sync::Arc;
 
-use super::clear_load::{ScenePreserveQuery, forward_clear_loads};
+use parking_lot::Mutex;
+
+use crate::camera::{HostCameraFrame, ViewId};
+use crate::frame_contract::{
+    FrameViewClear, OffscreenWriteTarget, ViewPostProcessing, ViewWinding,
+};
+use crate::graph_inputs::GraphPassFrameView;
+use crate::occlusion::gpu::HiZGpuState;
+use crate::shared::{CameraClearMode, RenderingContext};
+
+use super::clear_load::{ScenePreserveQuery, forward_clear_loads, forward_clear_loads_for_view};
 use super::color_preserve::{copy_preserved_scene_color, preserved_color_texture};
 
 const WIDTH: u32 = 64;
@@ -116,31 +125,28 @@ fn nothing_camera_over_double_buffered_texture_seeds_the_history_image() {
     let write = color_texture(&device, "camera-clear-write-image");
     clear_solid(&device, &queue, &write, MAGENTA_CLEAR);
     renderer.prefill(&device, &queue);
-    let sampling = Some(crate::frame_contract::RenderTextureSelfSampling::AllowPreviousContents);
-    let source = preserved_color_texture(sampling, Some(&write), Some(&renderer.frame_color))
-        .expect("double-buffered seed source");
-    assert!(std::ptr::eq(
-        std::ptr::from_ref(source),
-        std::ptr::from_ref(&renderer.frame_color),
-    ));
-    let loads = forward_clear_loads(
-        FrameViewClear {
-            mode: CameraClearMode::Nothing,
-            color: glam::Vec4::ZERO,
-        },
-        ScenePreserveQuery {
-            sample_count: 1,
-            has_color_texture: true,
-            surface_format: wgpu::TextureFormat::Rgba8Unorm,
-            scene_color_format: wgpu::TextureFormat::Rgba8Unorm,
-            self_sampling: sampling,
-            has_history_color: true,
-            persistent_depth_target: true,
-        },
+    let depth_view = renderer
+        .depth
+        .create_view(&wgpu::TextureViewDescriptor::default());
+    let view = double_buffered_preserve_view(
+        &renderer.depth,
+        &depth_view,
+        &write,
+        &renderer.frame_color,
+        false,
+        CameraClearMode::Nothing,
     );
+    let loads = forward_clear_loads_for_view(&view);
     assert!(loads.seed_color);
     assert!(matches!(loads.color, wgpu::LoadOp::Load));
     assert!(matches!(loads.depth, wgpu::LoadOp::Load));
+    let source = preserved_color_texture(
+        view.offscreen_write_target.render_texture_self_sampling(),
+        view.color_texture,
+        view.history_color_texture,
+        view.seed_published_color,
+    )
+    .expect("double-buffered seed source");
     renderer.poison_scene_color(&device, &queue);
     renderer.copy_source(&device, &queue, source);
     renderer.draw_overlay(&device, &queue, loads.color, loads.depth);
@@ -149,6 +155,48 @@ fn nothing_camera_over_double_buffered_texture_seeds_the_history_image() {
     assert_eq!(write_pixels, fill(|_x, _y| MAGENTA));
     assert_eq!(actual, expected_nothing());
     assert_ne!(actual, write_pixels);
+}
+
+/// View whose color attachment is the magenta write image and whose history is the prefilled frame.
+fn double_buffered_preserve_view<'a>(
+    depth: &'a wgpu::Texture,
+    depth_view: &'a wgpu::TextureView,
+    write: &'a wgpu::Texture,
+    history: &'a wgpu::Texture,
+    seed_published_color: bool,
+    mode: CameraClearMode,
+) -> GraphPassFrameView<'a> {
+    GraphPassFrameView {
+        depth_texture: depth,
+        depth_view,
+        depth_sample_view: None,
+        surface_format: wgpu::TextureFormat::Rgba8Unorm,
+        scene_color_format: wgpu::TextureFormat::Rgba8Unorm,
+        viewport_px: (WIDTH, HEIGHT),
+        host_camera: HostCameraFrame::default(),
+        render_context: RenderingContext::Camera,
+        frame_time_seconds: 0.0,
+        multiview_stereo: false,
+        offscreen_write_target: OffscreenWriteTarget::host_render_texture_with_self_sampling(
+            7,
+            crate::frame_contract::RenderTextureSelfSampling::AllowPreviousContents,
+        ),
+        view_winding: ViewWinding::normal(),
+        view_id: ViewId::Main,
+        hi_z_slot: Arc::new(Mutex::new(HiZGpuState::default())),
+        sample_count: 1,
+        gpu_limits: None,
+        msaa_depth_resolve: None,
+        clear: FrameViewClear {
+            mode,
+            color: glam::Vec4::ZERO,
+        },
+        color_texture: Some(write),
+        history_color_texture: Some(history),
+        seed_published_color,
+        persistent_depth_target: true,
+        post_processing: ViewPostProcessing::disabled(),
+    }
 }
 
 fn assert_stacked(
@@ -183,6 +231,7 @@ fn render_second_camera(
             scene_color_format: wgpu::TextureFormat::Rgba8Unorm,
             self_sampling: Some(crate::frame_contract::RenderTextureSelfSampling::Suppress),
             has_history_color: false,
+            seed_published_color: false,
             persistent_depth_target: true,
         },
     );

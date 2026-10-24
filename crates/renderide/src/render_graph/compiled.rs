@@ -153,9 +153,11 @@ pub(super) struct ResolvedView<'a> {
     pub(super) post_processing: ViewPostProcessing,
     /// Full-target offscreen color, when this view can seed HDR scene color from it.
     pub(super) color_texture: Option<&'a wgpu::Texture>,
-    /// Previous-frame color image for a double-buffered camera. Nothing and Depth copy this
-    /// instead of [`Self::color_texture`].
+    /// Previous-frame color image for the double-buffered camera that claimed this frame's swap.
+    /// Nothing and Depth copy this instead of [`Self::color_texture`].
     pub(super) history_color_texture: Option<&'a wgpu::Texture>,
+    /// `true` when a later double-buffered camera seeds the published write image.
+    pub(super) seed_published_color: bool,
     /// `true` when `depth_texture` is the persistent camera depth target.
     pub(super) persistent_depth_target: bool,
     // MSAA views are now in the per-view blackboard (MsaaViewsSlot), resolved from graph
