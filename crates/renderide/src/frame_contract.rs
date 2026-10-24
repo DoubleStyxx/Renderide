@@ -100,6 +100,14 @@ impl OffscreenWriteTarget {
         self.host_render_texture_asset_id() == Some(sampled_asset_id)
             && self.render_texture_self_sampling() == Some(RenderTextureSelfSampling::Suppress)
     }
+
+    /// Returns `true` when materials in this view should sample the previous color image.
+    #[inline]
+    pub fn allows_previous_render_texture_contents(self, sampled_asset_id: i32) -> bool {
+        self.host_render_texture_asset_id() == Some(sampled_asset_id)
+            && self.render_texture_self_sampling()
+                == Some(RenderTextureSelfSampling::AllowPreviousContents)
+    }
 }
 
 /// Per-view winding policy before draw-local transform parity is applied.
@@ -294,6 +302,12 @@ mod tests {
             Some(RenderTextureSelfSampling::AllowPreviousContents)
         );
         assert!(!host_target.suppresses_render_texture_sampling(77));
+        assert!(host_target.allows_previous_render_texture_contents(77));
+        assert!(!host_target.allows_previous_render_texture_contents(78));
+        assert!(
+            !OffscreenWriteTarget::host_render_texture(77)
+                .allows_previous_render_texture_contents(77)
+        );
     }
 
     #[test]

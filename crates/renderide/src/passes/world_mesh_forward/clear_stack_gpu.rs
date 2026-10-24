@@ -7,11 +7,20 @@
 
 use std::path::PathBuf;
 
-use crate::frame_contract::FrameViewClear;
-use crate::shared::CameraClearMode;
+use std::sync::Arc;
 
-use super::clear_load::{ScenePreserveQuery, forward_clear_loads};
-use super::color_preserve::copy_preserved_scene_color;
+use parking_lot::Mutex;
+
+use crate::camera::{HostCameraFrame, ViewId};
+use crate::frame_contract::{
+    FrameViewClear, OffscreenWriteTarget, ViewPostProcessing, ViewWinding,
+};
+use crate::graph_inputs::GraphPassFrameView;
+use crate::occlusion::gpu::HiZGpuState;
+use crate::shared::{CameraClearMode, RenderingContext};
+
+use super::clear_load::{ScenePreserveQuery, forward_clear_loads, forward_clear_loads_for_view};
+use super::color_preserve::{copy_preserved_scene_color, preserved_color_texture};
 
 const WIDTH: u32 = 64;
 const HEIGHT: u32 = 32;
@@ -26,6 +35,13 @@ const YELLOW: wgpu::Color = wgpu::Color {
     r: 1.0,
     g: 1.0,
     b: 0.0,
+    a: 1.0,
+};
+const MAGENTA: [u8; 4] = [255, 0, 255, 255];
+const MAGENTA_CLEAR: wgpu::Color = wgpu::Color {
+    r: 1.0,
+    g: 0.0,
+    b: 1.0,
     a: 1.0,
 };
 
@@ -99,6 +115,84 @@ fn stacked_cameras_preserve_color_and_depth_for_nothing_and_depth_only() {
     assert_eq!(skybox, expected_skybox());
 }
 
+#[test]
+fn nothing_camera_over_double_buffered_texture_seeds_the_history_image() {
+    let Some((device, queue)) = adapter_device() else {
+        logger::info!("double-buffer clear seed skipped: no wgpu adapter");
+        return;
+    };
+    let renderer = StackRenderer::new(&device);
+    let write = color_texture(&device, "camera-clear-write-image");
+    clear_solid(&device, &queue, &write, MAGENTA_CLEAR);
+    renderer.prefill(&device, &queue);
+    let depth_view = renderer
+        .depth
+        .create_view(&wgpu::TextureViewDescriptor::default());
+    let view = double_buffered_preserve_view(
+        &renderer.depth,
+        &depth_view,
+        &write,
+        &renderer.frame_color,
+        false,
+        CameraClearMode::Nothing,
+    );
+    let loads = forward_clear_loads_for_view(&view);
+    assert!(loads.seed_color);
+    assert!(matches!(loads.color, wgpu::LoadOp::Load));
+    assert!(matches!(loads.depth, wgpu::LoadOp::Load));
+    let source = preserved_color_texture(&view).expect("double-buffered seed source");
+    renderer.poison_scene_color(&device, &queue);
+    renderer.copy_source(&device, &queue, source);
+    renderer.draw_overlay(&device, &queue, loads.color, loads.depth);
+    let actual = renderer.read_scene_color(&device, &queue);
+    let write_pixels = read_color(&device, &queue, &write);
+    assert_eq!(write_pixels, fill(|_x, _y| MAGENTA));
+    assert_eq!(actual, expected_nothing());
+    assert_ne!(actual, write_pixels);
+}
+
+/// View whose color attachment is the magenta write image and whose history is the prefilled frame.
+fn double_buffered_preserve_view<'a>(
+    depth: &'a wgpu::Texture,
+    depth_view: &'a wgpu::TextureView,
+    write: &'a wgpu::Texture,
+    history: &'a wgpu::Texture,
+    seed_published_color: bool,
+    mode: CameraClearMode,
+) -> GraphPassFrameView<'a> {
+    GraphPassFrameView {
+        depth_texture: depth,
+        depth_view,
+        depth_sample_view: None,
+        surface_format: wgpu::TextureFormat::Rgba8Unorm,
+        scene_color_format: wgpu::TextureFormat::Rgba8Unorm,
+        viewport_px: (WIDTH, HEIGHT),
+        host_camera: HostCameraFrame::default(),
+        render_context: RenderingContext::Camera,
+        frame_time_seconds: 0.0,
+        multiview_stereo: false,
+        offscreen_write_target: OffscreenWriteTarget::host_render_texture_with_self_sampling(
+            7,
+            crate::frame_contract::RenderTextureSelfSampling::AllowPreviousContents,
+        ),
+        view_winding: ViewWinding::normal(),
+        view_id: ViewId::Main,
+        hi_z_slot: Arc::new(Mutex::new(HiZGpuState::default())),
+        sample_count: 1,
+        gpu_limits: None,
+        msaa_depth_resolve: None,
+        clear: FrameViewClear {
+            mode,
+            color: glam::Vec4::ZERO,
+        },
+        color_texture: Some(write),
+        history_color_texture: Some(history),
+        seed_published_color,
+        persistent_depth_target: true,
+        post_processing: ViewPostProcessing::disabled(),
+    }
+}
+
 fn assert_stacked(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -130,6 +224,8 @@ fn render_second_camera(
             surface_format: wgpu::TextureFormat::Rgba8Unorm,
             scene_color_format: wgpu::TextureFormat::Rgba8Unorm,
             self_sampling: Some(crate::frame_contract::RenderTextureSelfSampling::Suppress),
+            has_history_color: false,
+            seed_published_color: false,
             persistent_depth_target: true,
         },
     );
@@ -247,15 +343,14 @@ impl StackRenderer {
     }
 
     fn copy_preserved_color(&self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        self.copy_source(device, queue, &self.frame_color);
+    }
+
+    fn copy_source(&self, device: &wgpu::Device, queue: &wgpu::Queue, source: &wgpu::Texture) {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("camera-clear-preserve"),
         });
-        copy_preserved_scene_color(
-            &mut encoder,
-            &self.frame_color,
-            &self.scene_color,
-            (WIDTH, HEIGHT),
-        );
+        copy_preserved_scene_color(&mut encoder, source, &self.scene_color, (WIDTH, HEIGHT));
         queue.submit(std::iter::once(encoder.finish()));
     }
 
@@ -294,6 +389,29 @@ impl StackRenderer {
     fn read_scene_color(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Vec<u8> {
         read_color(device, queue, &self.scene_color)
     }
+}
+
+fn clear_solid(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    color: wgpu::Color,
+) {
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("camera-clear-solid"),
+    });
+    {
+        let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("camera-clear-solid"),
+            color_attachments: &[Some(color_attachment(&view, wgpu::LoadOp::Clear(color)))],
+            depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes: None,
+            multiview_mask: None,
+        });
+    }
+    queue.submit(std::iter::once(encoder.finish()));
 }
 
 fn color_texture(device: &wgpu::Device, label: &str) -> wgpu::Texture {

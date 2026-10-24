@@ -176,8 +176,22 @@ pub(in crate::host) fn apply_material_batch(
 }
 
 /// Packs an asset-id Texture2D handle in the format the renderer's texture decoder expects.
+///
+/// Kind 0 leaves the high type bits clear, so the packed value is the raw asset id.
 pub(in crate::host) fn pack_texture2d_handle(asset_id: i32) -> i32 {
     asset_id
+}
+
+/// Packs a render-texture asset id with the host `TextureAssetType::RenderTexture` tag.
+///
+/// The tag is the same six-variant layout the renderer unpacks: `necessary_bits(6) == 3`, so the
+/// kind occupies bits 31..29 and the asset id occupies the low 29 bits.
+pub(in crate::host) fn pack_render_texture_handle(asset_id: i32) -> i32 {
+    const TYPE_BITS: u32 = 3;
+    const SHIFT: u32 = 32 - TYPE_BITS;
+    const RENDER_TEXTURE_KIND: u32 = 3;
+    debug_assert!(asset_id >= 0);
+    ((asset_id as u32) | (RENDER_TEXTURE_KIND << SHIFT)) as i32
 }
 
 /// Bytes produced by [`encode_material_batch`] for each SHM region.
@@ -470,5 +484,12 @@ mod tests {
         assert_eq!(pack_texture2d_handle(0), 0);
         assert_eq!(pack_texture2d_handle(42), 42);
         assert_eq!(pack_texture2d_handle(1234), 1234);
+    }
+
+    #[test]
+    fn pack_render_texture_handle_sets_kind_three() {
+        let packed = super::pack_render_texture_handle(900) as u32;
+        assert_eq!(packed >> 29, 3);
+        assert_eq!(packed & ((1 << 29) - 1), 900);
     }
 }

@@ -326,11 +326,13 @@ impl EmbeddedMaterialBindResources {
                 if offscreen_write_target.suppresses_render_texture_sampling(asset_id) {
                     return None;
                 }
+                let allow_previous =
+                    offscreen_write_target.allows_previous_render_texture_contents(asset_id);
                 pools
                     .render_texture
                     .get(asset_id)
                     .filter(|t| t.is_sampleable())
-                    .map(|t| t.color_view.clone())
+                    .map(|t| t.color_view_for_sampling(allow_previous))
             }
             SampledTextureSource::VideoTexture => {
                 pools.video_texture.get(asset_id).map(|t| t.view.clone())
@@ -470,6 +472,8 @@ impl EmbeddedMaterialBindResources {
             return None;
         }
         pools.render_texture.get(asset_id).map(|tex| {
+            let allow_previous =
+                offscreen_write_target.allows_previous_render_texture_contents(asset_id);
             self.cached_lifetime_sampler(
                 EmbeddedSamplerCacheKey::texture2d_with_lifetime(
                     &tex.sampler,
@@ -477,7 +481,7 @@ impl EmbeddedMaterialBindResources {
                     sampler_lifetime(
                         stem_hash,
                         shader_source_generation,
-                        tex.color_view_generation,
+                        tex.sampled_color_view_generation(allow_previous),
                         0,
                     ),
                 ),
