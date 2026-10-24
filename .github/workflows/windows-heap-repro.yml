@@ -10,16 +10,17 @@
 #
 # The main loop runs the test exe `iterations` times (default 50) with
 # `--test-threads` (default 16) and stops that loop on the first nonzero exit.
-# A second, shorter loop sets RUST_TEST_THREADS=1 for max(1, floor(iterations/5))
-# iterations (10 when iterations is 50) so a single-thread run can be compared
-# with the concurrent one. Full page heap is turned off at the end, including
-# when an earlier step failed.
+# It is not attached to a debugger. A following loop runs the same 16-thread
+# command under cdb -g -G up to 30 times and stops on the first break or
+# second-chance exception. A shorter loop sets RUST_TEST_THREADS=1 for
+# max(1, floor(iterations/5)) iterations (10 when iterations is 50). Full page
+# heap is turned off at the end, including when an earlier step failed.
 #
-# Dumps are minidumps (LocalDumps DumpType=1). A full dump of a page-heap
-# process is large enough to blow the artifact upload; minidumps still carry
-# the faulting stacks that !analyze and kb print. The crashing iteration is
-# dumped by WER, and cdb also reruns the exe with -g -G because a later rerun
-# may not hit an intermittent fault.
+# A verifier stop (0xC0000421, STATUS_VERIFIER_STOP) is recorded two ways.
+# WER LocalDumps for the hashed exe name uses DumpType=2 (full) and a
+# DumpFolder under the uploaded artifact directory. The cdb command script
+# runs !avrf, !analyze -v, !heap -p -a on the heap-block address when the
+# stop text includes one, ~*kb 30, and .dump /ma, then quits.
 name: Windows heap repro
 
 "on":
@@ -251,9 +252,11 @@ jobs:
           $iterations = Parse-PositiveInt $env:HEAP_REPRO_ITERATIONS 'iterations'
           $testThreads = Parse-PositiveInt $env:HEAP_REPRO_TEST_THREADS 'test_threads'
           $singlePlanned = [Math]::Max(1, [int][Math]::Floor($iterations / 5))
+          $cdbPlanned = 30
           Write-Host "exe: $($script:exe)"
           Write-Host "image: $($script:image)"
-          Write-Host "main loop: $iterations iterations, --test-threads $testThreads"
+          Write-Host "main loop: $iterations iterations, --test-threads $testThreads (no debugger)"
+          Write-Host "cdb loop: $cdbPlanned iterations, --test-threads $testThreads"
           Write-Host "single-thread loop: $singlePlanned iterations, RUST_TEST_THREADS=1"
           if ($script:filter) { Write-Host "filter: $($script:filter)" }
 
@@ -373,97 +376,237 @@ jobs:
             return $text.Contains('REPRO_MARKER_BROKE')
           }
 
+          function Test-CdbHit([string]$Path) {
+            if (Test-CapturedLog $Path) { return $true }
+            if (-not (Test-Path -LiteralPath $Path)) { return $false }
+            $text = Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue
+            if (-not $text) { return $false }
+            return $text -match 'VERIFIER STOP|STATUS_VERIFIER_STOP|\bC0000421\b'
+          }
+
+          function Get-VerifierStop([string]$Path) {
+            if (-not (Test-Path -LiteralPath $Path)) { return $null }
+            $text = Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue
+            if (-not $text) { return $null }
+            $m = [regex]::Match($text, 'VERIFIER STOP\s+([0-9A-Fa-f]+)', 'IgnoreCase')
+            if ($m.Success) { return $m.Groups[1].Value }
+            return $null
+          }
+
+          function Write-HeapExtractScript {
+            if ($script:heapExtract) { return }
+            $script:heapExtract = Join-Path $script:out 'extract-heap-addr.ps1'
+            $ps1 = @(
+              '$ErrorActionPreference = ''Stop'''
+              '$follow = $args[0]'
+              'if ([string]::IsNullOrWhiteSpace($follow)) { throw ''heap-follow path required'' }'
+              '$t = [Console]::In.ReadToEnd()'
+              '$addr = $null'
+              '$patterns = @('
+              '  ''(?im)^\s*([0-9A-Fa-f`]{8,})\s*:\s*[^\r\n]*\bheap\s+block\b'''
+              '  ''(?im)\bheap\s+block\b[^\r\n]{0,80}?([0-9A-Fa-f`]{8,})'''
+              ')'
+              'foreach ($p in $patterns) {'
+              '  $m = [regex]::Match($t, $p)'
+              '  if ($m.Success) {'
+              '    $addr = ($m.Groups[1].Value -replace ''`'', '''')'
+              '    break'
+              '  }'
+              '}'
+              'if ($addr -and $addr -match ''^[0-9A-Fa-f]{8,16}$'' -and $addr -ne (''0'' * $addr.Length)) {'
+              '  $body = ".echo REPRO_HEAP_ADDRESS $addr`r`n!heap -p -a $addr`r`n"'
+              '} else {'
+              '  $body = ".echo REPRO_NO_HEAP_ADDRESS`r`n"'
+              '}'
+              '[System.IO.File]::WriteAllText($follow, $body, [System.Text.Encoding]::ASCII)'
+            ) -join "`r`n"
+            $ascii = [System.Text.Encoding]::ASCII
+            [System.IO.File]::WriteAllText($script:heapExtract, $ps1 + "`r`n", $ascii)
+          }
+
+          function Write-CaptureScripts([string]$DumpPath) {
+            Write-HeapExtractScript
+            $follow = Join-Path $script:out 'heap-follow.txt'
+            $onstop = Join-Path $script:out 'cdb-on-stop.txt'
+            $loop = Join-Path $script:out 'cdb-loop.txt'
+            $ascii = [System.Text.Encoding]::ASCII
+            [System.IO.File]::WriteAllText($follow, ".echo REPRO_NO_HEAP_ADDRESS`r`n", $ascii)
+            $commands = @(
+              '.echo REPRO_MARKER_BROKE'
+              '.reload /f verifier.dll'
+              '.reload /f ntdll.dll'
+              '!avrf'
+              '!analyze -v'
+              '.echo REPRO_HEAP_QUERY'
+              ('.shell -ci "!avrf" powershell.exe -NoProfile -ExecutionPolicy Bypass -File {0} {1}' -f $script:heapExtract, $follow)
+              ('$<' + $follow)
+              '.echo REPRO_STACKS'
+              '~*kb 30'
+            )
+            if ($DumpPath) {
+              $commands += '.echo REPRO_DUMP'
+              $commands += ('.dump /ma /o {0}' -f $DumpPath)
+              $commands += '.echo REPRO_DUMP_DONE'
+            }
+            $commands += 'q'
+            [System.IO.File]::WriteAllText($onstop, (($commands -join "`r`n") + "`r`n"), $ascii)
+            # -cf runs this as cdb starts. Handlers are installed, then g continues.
+            # -g -G on the cdb command line skip the initial and exit breakpoints.
+            $loopLines = @(
+              '.echo REPRO_MARKER_START'
+              'sxi *'
+              ('sxe -c ".echo REPRO_EVENT bpe; $<{0}" bpe' -f $onstop)
+              ('sxe -c ".echo REPRO_EVENT asrt; $<{0}" asrt' -f $onstop)
+              ('sxe -c2 ".echo REPRO_EVENT second; $<{0}" *' -f $onstop)
+              'g'
+              '.echo REPRO_MARKER_CLEAN'
+              'q'
+            )
+            [System.IO.File]::WriteAllText($loop, (($loopLines -join "`r`n") + "`r`n"), $ascii)
+            return @{ OnStop = $onstop; Loop = $loop; Follow = $follow }
+          }
+
           function Wait-ForDumps([string]$Tag) {
-            $deadline = (Get-Date).AddSeconds(60)
+            $deadline = (Get-Date).AddSeconds(180)
             $found = @()
             do {
               $fresh = @(Get-ChildItem -LiteralPath $script:dumpDir -Filter *.dmp -File -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name -notmatch '^(main|single)-' })
+                Where-Object { $_.Name -notmatch '^(main-|single-|cdb-live-)' })
               if ($fresh.Count -gt 0) {
                 Start-Sleep -Seconds 2
                 $fresh = @(Get-ChildItem -LiteralPath $script:dumpDir -Filter *.dmp -File -ErrorAction SilentlyContinue |
-                  Where-Object { $_.Name -notmatch '^(main|single)-' })
+                  Where-Object { $_.Name -notmatch '^(main-|single-|cdb-live-)' })
                 $n = 0
                 foreach ($file in $fresh) {
                   $n++
                   $dest = Join-Path $script:dumpDir ("{0}-{1}-{2}" -f $Tag, $n, $file.Name)
                   Move-Item -LiteralPath $file.FullName -Destination $dest
                   $last = -1
-                  foreach ($attempt in 1..15) {
+                  foreach ($attempt in 1..60) {
                     $len = (Get-Item -LiteralPath $dest).Length
                     if ($len -gt 0 -and $len -eq $last) { break }
                     $last = $len
                     Start-Sleep -Seconds 1
                   }
+                  Write-Host "WER dump $dest size $((Get-Item -LiteralPath $dest).Length)"
                   $found += $dest
                 }
                 return $found
               }
               Start-Sleep -Seconds 2
             } while ((Get-Date) -lt $deadline)
+            Write-Host "[$Tag] no WER LocalDumps file appeared within 180s"
             return @()
           }
 
-          function Capture-Crash($Loop) {
+          function Analyze-WerDumps($Loop) {
             $tag = [string]$Loop.Name
             $dumps = @(Wait-ForDumps $tag)
-            $captured = $false
             foreach ($dump in $dumps) {
               $log = Join-Path $script:out ("cdb-dump-{0}.log" -f [System.IO.Path]::GetFileNameWithoutExtension([string]$dump))
+              $scripts = Write-CaptureScripts -DumpPath ''
               $dumpArgs = @(
                 '-z', [string]$dump,
                 '-lines',
                 '-logo', $log,
-                '-c', '.echo REPRO_MARKER_BROKE; !analyze -v; .ecxr; kb; ~*kb; q'
+                '-c', ('$<' + $scripts.OnStop)
               )
               Invoke-Cdb -LogPath $log -CdbArgs $dumpArgs
-              if (Test-CapturedLog $log) { $captured = $true }
             }
-            $liveBudget = if ($captured) { 1 } else { 3 }
-            for ($n = 1; $n -le $liveBudget; $n++) {
-              $log = Join-Path $script:out "cdb-live-$tag-$n.log"
-              # -g -G skip the initial and exit breakpoints. The leading g in -c
-              # runs to the exception, then !analyze / kb / ~*kb record that stop.
-              # qd leaves without the interactive quit prompt.
+          }
+
+          function Invoke-CdbReproLoop {
+            param(
+              [Parameter(Mandatory)][string]$Name,
+              [Parameter(Mandatory)][int]$Planned,
+              [string]$ThreadsFlag
+            )
+            $hit = $null
+            $ran = 0
+            for ($i = 1; $i -le $Planned; $i++) {
+              Write-Host "[$Name] iteration $i / $Planned"
+              $ran = $i
+              $log = Join-Path $script:out ("cdb-live-{0}-{1}.log" -f $Name, $i)
+              $dump = Join-Path $script:dumpDir ("cdb-live-{0}-{1}.dmp" -f $Name, $i)
+              $scripts = Write-CaptureScripts -DumpPath $dump
+              $sw = [System.Diagnostics.Stopwatch]::StartNew()
+              # -g -G skip the initial and exit breakpoints. -cf runs the handler
+              # script as the debugger starts, before -g continues the target, so
+              # sxe is installed in time for a verifier break.
               $liveArgs = @(
                 '-g', '-G', '-lines',
+                '-cf', $scripts.Loop,
                 '-logo', $log,
-                '-c', '.echo REPRO_MARKER_START; g; .echo REPRO_MARKER_BROKE; !analyze -v; .ecxr; kb; ~*kb; qd',
                 $script:exe
               )
-              if ($Loop.ThreadsFlag) {
-                $liveArgs += @('--test-threads', [string]$Loop.ThreadsFlag)
+              if ($ThreadsFlag) {
+                $liveArgs += @('--test-threads', [string]$ThreadsFlag)
               }
               if ($script:filter) {
                 $liveArgs += @('--', $script:filter)
               }
-              Invoke-Cdb -LogPath $log -CdbArgs $liveArgs -SingleThread:([bool]$Loop.SingleThread)
-              if (Test-CapturedLog $log) { break }
-              Write-Host "[$tag] live cdb attempt $n did not break on an exception"
+              Invoke-Cdb -LogPath $log -CdbArgs $liveArgs -TimeoutMs 600000
+              $secs = $sw.Elapsed.TotalSeconds.ToString('0.0')
+              if (Test-CdbHit $log) {
+                $stop = Get-VerifierStop $log
+                $hex = if ($stop) { $stop } else { 'BREAK' }
+                Write-Host "[$Name] iteration $i captured a stop ($hex) in ${secs}s"
+                $hit = @{ Kind = 'CRASH'; Iteration = $i; Hex = $hex }
+                break
+              }
+              Write-Host "[$Name] iteration $i did not break in ${secs}s"
+            }
+            return @{
+              Name         = $Name
+              Planned      = $Planned
+              Ran          = $ran
+              Hit          = $hit
+              ThreadsFlag  = $ThreadsFlag
+              SingleThread = $false
             }
           }
 
-          function Get-StackExcerpt([string]$Path) {
+          function Get-RegionExcerpt([string[]]$Lines, [int]$Start, [int]$Take) {
+            if ($Start -lt 0 -or $Lines.Count -eq 0) { return '' }
+            $last = [Math]::Min($Lines.Count - 1, $Start + $Take - 1)
+            return ($Lines[$Start..$last] -join "`n")
+          }
+
+          function Get-EvidenceExcerpt([string]$Path) {
             if (-not (Test-Path -LiteralPath $Path)) { return '' }
             $lines = @(Get-Content -LiteralPath $Path)
-            $prefer = -1
-            $fallback = -1
+            if ($lines.Count -eq 0) { return '' }
+            $parts = New-Object System.Collections.Generic.List[string]
+            $marker = -1
+            $heap = -1
+            $stack = -1
             for ($i = 0; $i -lt $lines.Count; $i++) {
-              if ($lines[$i] -match 'STACK_TEXT:') { $prefer = $i; break }
-              if ($fallback -lt 0 -and $lines[$i] -match 'Child-SP') { $fallback = $i }
+              if ($marker -lt 0 -and $lines[$i] -match 'VERIFIER STOP|REPRO_MARKER_BROKE') { $marker = $i }
+              if ($heap -lt 0 -and $lines[$i] -match 'REPRO_HEAP_ADDRESS|REPRO_NO_HEAP_ADDRESS|REPRO_HEAP_QUERY') { $heap = $i }
+              if ($stack -lt 0 -and $lines[$i] -match 'STACK_TEXT:|Child-SP|REPRO_STACKS') { $stack = $i }
             }
-            $start = if ($prefer -ge 0) { $prefer } else { $fallback }
-            if ($start -lt 0) { return '' }
-            $take = [Math]::Min(18, $lines.Count - $start)
-            return ($lines[$start..($start + $take - 1)] -join "`n")
+            $avrf = Get-RegionExcerpt $lines $marker 80
+            if ($avrf) {
+              $parts.Add($avrf)
+            }
+            if ($heap -ge 0 -and ($marker -lt 0 -or $heap -gt ($marker + 70))) {
+              $heapText = Get-RegionExcerpt $lines $heap 40
+              if ($heapText) { $parts.Add($heapText) }
+            }
+            if ($stack -ge 0 -and ($marker -lt 0 -or $stack -gt ($marker + 70))) {
+              $stackText = Get-RegionExcerpt $lines $stack 36
+              if ($stackText) { $parts.Add($stackText) }
+            }
+            return ($parts -join "`n")
           }
 
-          function Write-LoopSummary($Main, $Single) {
-            $rows = @($Main, $Single)
+          function Write-LoopSummary($Main, $Cdb, $Single) {
+            $rows = @($Main, $Cdb, $Single)
             $lines = New-Object System.Collections.Generic.List[string]
             $lines.Add('## Windows heap repro')
             $lines.Add('')
             $lines.Add("exe: ``$($script:exe)``")
+            $lines.Add("image: ``$($script:image)``")
             $lines.Add('')
             $lines.Add('| loop | threads | planned | ran | result | exit | iteration |')
             $lines.Add('| --- | --- | --- | --- | --- | --- | --- |')
@@ -471,7 +614,11 @@ jobs:
               $threads = if ($row.SingleThread) { 'RUST_TEST_THREADS=1' } else { "--test-threads $($row.ThreadsFlag)" }
               if ($row.Hit) {
                 $result = [string]$row.Hit.Kind
-                $exit = if ($row.Hit.Hex -eq 'TIMEOUT') { 'TIMEOUT' } else { "0x$($row.Hit.Hex)" }
+                if ($row.Hit.Hex -eq 'TIMEOUT' -or $row.Hit.Hex -eq 'BREAK') {
+                  $exit = [string]$row.Hit.Hex
+                } else {
+                  $exit = "0x$($row.Hit.Hex)"
+                }
                 $iter = [string]$row.Hit.Iteration
               } else {
                 $result = 'clean'
@@ -488,8 +635,16 @@ jobs:
               $lines.Add('reproduced: yes')
             }
             $logFiles = @(Get-ChildItem -LiteralPath $script:out -Filter 'cdb-*.log' -File -ErrorAction SilentlyContinue)
+            $interesting = @()
             foreach ($logFile in $logFiles) {
-              $excerpt = Get-StackExcerpt $logFile.FullName
+              if (Test-CdbHit $logFile.FullName) { $interesting += $logFile }
+            }
+            if ($interesting.Count -eq 0) {
+              $lines.Add('')
+              $lines.Add('no verifier stop captured in cdb logs')
+            }
+            foreach ($logFile in $interesting) {
+              $excerpt = Get-EvidenceExcerpt $logFile.FullName
               $lines.Add('')
               $lines.Add("### $($logFile.Name)")
               if ($excerpt) {
@@ -499,7 +654,7 @@ jobs:
                 $lines.Add('```')
               } else {
                 $lines.Add('')
-                $lines.Add('(no STACK_TEXT or kb header in this log)')
+                $lines.Add('(captured log has no verifier or stack excerpt)')
               }
             }
             $text = $lines -join "`n"
@@ -523,20 +678,29 @@ jobs:
               throw "gflags did not list $($script:image) after enabling full page heap"
             }
             New-Item -Path $script:dumpReg -Force | Out-Null
-            New-ItemProperty -Path $script:dumpReg -Name DumpType -PropertyType DWord -Value 1 -Force | Out-Null
-            New-ItemProperty -Path $script:dumpReg -Name DumpCount -PropertyType DWord -Value 10 -Force | Out-Null
+            New-ItemProperty -Path $script:dumpReg -Name DumpType -PropertyType DWord -Value 2 -Force | Out-Null
+            New-ItemProperty -Path $script:dumpReg -Name DumpCount -PropertyType DWord -Value 4 -Force | Out-Null
             New-ItemProperty -Path $script:dumpReg -Name DumpFolder -PropertyType ExpandString -Value $script:dumpDir -Force | Out-Null
+            Write-Host "LocalDumps key: $($script:dumpReg)"
+            Get-ItemProperty -LiteralPath $script:dumpReg | Format-List | Out-Host
+            @(
+              "image=$($script:image)"
+              "DumpType=2"
+              "DumpFolder=$($script:dumpDir)"
+              "key=$($script:dumpReg)"
+            ) | Set-Content -LiteralPath (Join-Path $script:out 'localdumps.txt') -Encoding ascii
 
             $main = Invoke-ReproLoop -Name 'main' -Planned $iterations -ThreadsFlag ([string]$testThreads)
             if ($main.Hit -and $main.Hit.Kind -eq 'CRASH') {
-              try { Capture-Crash $main } catch { Write-Host "stack capture failed for main: $($_.Exception.Message)" }
+              try { Analyze-WerDumps $main } catch { Write-Host "WER dump analysis failed for main: $($_.Exception.Message)" }
             }
+            $cdbLoop = Invoke-CdbReproLoop -Name 'cdb' -Planned $cdbPlanned -ThreadsFlag ([string]$testThreads)
             $single = Invoke-ReproLoop -Name 'single' -Planned $singlePlanned -SingleThread
             if ($single.Hit -and $single.Hit.Kind -eq 'CRASH') {
-              try { Capture-Crash $single } catch { Write-Host "stack capture failed for single: $($_.Exception.Message)" }
+              try { Analyze-WerDumps $single } catch { Write-Host "WER dump analysis failed for single: $($_.Exception.Message)" }
             }
-            Write-LoopSummary $main $single
-            $script:crashed = [bool]($main.Hit -or $single.Hit)
+            Write-LoopSummary $main $cdbLoop $single
+            $script:crashed = [bool]($main.Hit -or $cdbLoop.Hit -or $single.Hit)
           } finally {
             Disable-ReproHooks
           }
