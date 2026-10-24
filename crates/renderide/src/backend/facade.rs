@@ -418,6 +418,11 @@ impl RenderBackend {
         self.materials.material_registry()
     }
 
+    /// Headless and software adapters compile material pipelines on the render thread.
+    pub fn material_pipelines_compile_on_render_thread(&self) -> bool {
+        self.materials.compiles_pipelines_on_render_thread()
+    }
+
     /// Drains finished background pipeline builds into the cache (no-op before GPU attach).
     ///
     /// The renderer's per-tick render entry calls this before per-view recording starts so

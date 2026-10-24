@@ -431,6 +431,13 @@ pub struct MaterialPipelineCache {
 }
 
 impl MaterialPipelineCache {
+    /// Headless and software adapters compile on the render thread.
+    pub(super) fn compiles_on_render_thread(&self) -> bool {
+        self.compile_on_render_thread
+    }
+}
+
+impl MaterialPipelineCache {
     /// Creates an empty cache for `device` with the device's effective [`crate::gpu::GpuLimits`].
     ///
     /// `compile_on_render_thread` is set for headless and software adapters. Real GPUs pass false.

@@ -189,6 +189,13 @@ impl MaterialSystem {
         self.material_registry.as_ref()
     }
 
+    /// Whether pipeline builds for this device run on the render thread.
+    pub fn compiles_pipelines_on_render_thread(&self) -> bool {
+        self.material_registry
+            .as_ref()
+            .is_some_and(|registry| registry.compiles_on_render_thread())
+    }
+
     /// Drains finished background pipeline builds into the cache (no-op before GPU attach).
     ///
     /// Recording threads call into the cache concurrently; pulling completions here keeps the

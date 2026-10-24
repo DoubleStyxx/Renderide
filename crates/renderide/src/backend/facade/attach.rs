@@ -118,6 +118,9 @@ impl RenderBackend {
                 suppress_renderer_config_disk_writes,
             );
         }
+        logger::info!(
+            "material pipelines: compile_on_render_thread={compile_pipelines_on_render_thread}"
+        );
         self.materials.try_attach_gpu(
             device.clone(),
             &queue,

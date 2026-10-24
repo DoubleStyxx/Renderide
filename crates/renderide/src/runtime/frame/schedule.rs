@@ -201,8 +201,19 @@ impl Drop for CpuRenderPhaseScope {
 }
 
 /// Runs global asset/material preparation for a schedule-backed render submission.
-pub(in crate::runtime) fn prepare_assets_for_schedule(backend: &mut RenderBackend) {
+///
+/// Headless and software adapters compile at most one pipeline on this thread during the
+/// drain. That `create_render_pipeline` must not overlap the driver thread's `Queue::submit`
+/// of the previous frame: on DX12 WARP the overlap hangs the render thread and can publish
+/// a corrupt pipeline. Flush the driver first so the compile starts on an idle device.
+pub(in crate::runtime) fn prepare_assets_for_schedule(
+    backend: &mut RenderBackend,
+    gpu: &GpuContext,
+) {
     backend.sync_material_shader_hot_reload();
+    if backend.material_pipelines_compile_on_render_thread() {
+        gpu.flush_driver();
+    }
     backend.drain_pipeline_build_completions();
 }
 
@@ -238,7 +249,7 @@ pub(in crate::runtime) fn execute_one_shot_view_plans<'a>(
     let one_shot_views = view_ids_for_plans(&plans);
     schedule.run_phase(CpuRenderPhase::Extract, || {});
     schedule.run_phase(CpuRenderPhase::AssetPrepare, || {
-        prepare_assets_for_schedule(backend);
+        prepare_assets_for_schedule(backend, gpu);
     });
     let prepared_views = schedule.run_phase(CpuRenderPhase::ViewPlanning, || {
         let frame_global = plans

@@ -5,7 +5,10 @@
 //! `create_render_pipeline` deadlocks DX12 WARP while the render thread is inside
 //! a frame. That path compiles at most [`RENDER_THREAD_PIPELINE_COMPILES_PER_FRAME`]
 //! pipelines per drain, so a desktop software adapter cannot compile a whole scene
-//! in one frame. Queued builds stay pending and finish on later frames.
+//! in one frame. The caller flushes the driver thread before the drain so the compile
+//! does not overlap `Queue::submit`; on DX12 WARP that overlap hangs the render thread
+//! and can leave a corrupt pipeline marked ready. Queued builds stay pending and finish
+//! on later frames.
 
 use std::sync::{Arc, OnceLock};
 

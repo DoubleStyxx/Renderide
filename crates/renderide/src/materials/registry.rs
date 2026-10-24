@@ -258,11 +258,18 @@ impl MaterialRegistry {
             .variant_bits_for_shader_asset(shader_asset_id)
     }
 
+    /// Headless and software adapters compile on the render thread. Real GPUs do not.
+    pub(crate) fn compiles_on_render_thread(&self) -> bool {
+        self.cache.compiles_on_render_thread()
+    }
+
     /// Drains finished pipeline builds into the cache.
     ///
     /// Invoked once per frame from the renderer's tick before per-view recording so worker
     /// threads never touch the completion channel or the pending/failed mutexes during draw.
-    /// Headless and software adapters also compile at most one queued pipeline on this thread.
+    /// Headless and software adapters also compile at most one queued pipeline on this thread,
+    /// after the caller has flushed the driver thread so `create_render_pipeline` does not
+    /// overlap `Queue::submit`.
     pub fn drain_pipeline_build_completions(&self) {
         self.cache.drain_pipeline_build_completions();
     }
