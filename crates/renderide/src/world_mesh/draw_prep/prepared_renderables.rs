@@ -55,6 +55,27 @@ const PREPARED_EXPAND_PARALLEL_CHUNK_SPACES: usize = 1;
 #[cfg(test)]
 const PREPARED_EXPAND_PARALLEL_MIN_SPACES: usize = PREPARED_EXPAND_PARALLEL_CHUNK_SPACES * 2;
 
+/// World bounds of one prepared caster, used to build hysteresis disocclusion rectangles.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PreparedCasterBounds {
+    /// Render space that owns the caster.
+    pub space_id: RenderSpaceId,
+    /// Static or skinned renderer index.
+    pub renderable_index: usize,
+    /// Renderer-local id.
+    pub instance_id: u64,
+    /// Scene node id.
+    pub node_id: i32,
+    /// `true` when the caster comes from the skinned renderer list.
+    pub skinned: bool,
+    /// Mesh asset drawn for this caster. A swap with the same AABB is still a new surface.
+    pub mesh_asset_id: i32,
+    /// World AABB minimum.
+    pub aabb_min: glam::Vec3,
+    /// World AABB maximum.
+    pub aabb_max: glam::Vec3,
+}
+
 /// One fully-resolved draw slot (renderer x material slot mapped to a submesh range) for the current frame.
 ///
 /// All fields here are functions of `(scene, mesh_pool, render_context)` and are therefore safe
@@ -454,6 +475,53 @@ impl FramePreparedRenderables {
         }
     }
 
+    /// Count of prepared world casters accepted by `include_space`, stopping once it passes `limit`.
+    ///
+    /// This is not a frustum-visible count. Overlay runs, hidden runs, and runs without a world
+    /// AABB are skipped. `None` means the view has more casters than `limit`.
+    pub(crate) fn world_caster_count_at_most(
+        &self,
+        limit: usize,
+        include_space: impl FnMut(RenderSpaceId) -> bool,
+    ) -> Option<usize> {
+        let mut seen = 0usize;
+        let finished = self.each_world_caster(include_space, |_| {
+            seen += 1;
+            seen <= limit
+        });
+        finished.then_some(seen)
+    }
+
+    /// Visits one world-space caster per prepared renderer run.
+    ///
+    /// Overlay and hidden runs are skipped. `include_space` drops casters outside the view.
+    pub(crate) fn for_each_world_caster_bounds(
+        &self,
+        include_space: impl FnMut(RenderSpaceId) -> bool,
+        mut visit: impl FnMut(PreparedCasterBounds),
+    ) {
+        self.each_world_caster(include_space, |bounds| {
+            visit(bounds);
+            true
+        });
+    }
+
+    fn each_world_caster(
+        &self,
+        mut include_space: impl FnMut(RenderSpaceId) -> bool,
+        mut visit: impl FnMut(PreparedCasterBounds) -> bool,
+    ) -> bool {
+        for bounds in self.spatial.world_casters() {
+            if !include_space(bounds.space_id) {
+                continue;
+            }
+            if !visit(*bounds) {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Dense prepared draw slice backing [`Self::runs`].
     #[inline]
     pub(super) fn draws(&self) -> &[FramePreparedDraw] {
@@ -681,6 +749,62 @@ impl FramePreparedRenderables {
             self.extend_cached_draws(draws);
         }
         self.refresh_runs_material_keys_and_chunks::<SceneCoordinator>(None);
+    }
+
+    /// One world-caster run per requested renderer, for the history-budget tests.
+    ///
+    /// Each run has a finite world AABB and is neither overlay nor hidden. The compact caster
+    /// list is filled without building a BVH. Active space ids match the groups so the hysteresis
+    /// plan can resolve one camera pair per space.
+    #[cfg(test)]
+    pub(crate) fn test_with_caster_runs(groups: &[(RenderSpaceId, usize)]) -> Self {
+        let mut prepared = Self::empty(RenderingContext::UserView);
+        for &(space_id, count) in groups {
+            if count > 0 && !prepared.active_space_ids.contains(&space_id) {
+                prepared.active_space_ids.push(space_id);
+            }
+            for _ in 0..count {
+                let index = prepared.draws.len();
+                let start = u32::try_from(index).unwrap_or(u32::MAX);
+                prepared.draws.push(FramePreparedDraw {
+                    space_id,
+                    renderable_index: index,
+                    instance_id: MeshRendererInstanceId(u64::try_from(index).unwrap_or(u64::MAX)),
+                    renderer_ordinal: 0,
+                    node_id: i32::try_from(index).unwrap_or(i32::MAX),
+                    mesh_asset_id: 1,
+                    is_overlay: false,
+                    is_hidden: false,
+                    sorting_order: 0,
+                    shadow_cast_mode: ShadowCastMode::On,
+                    skinned: false,
+                    world_space_deformed: false,
+                    blendshape_deformed: false,
+                    tangent_blendshape_deform_active: false,
+                    slot_index: 0,
+                    material_stack_order: None,
+                    first_index: 0,
+                    index_count: 3,
+                    material_asset_id: 1,
+                    property_block_id: None,
+                    cull_geometry: Some(MeshCullGeometry {
+                        world_aabb: Some((glam::Vec3::ZERO, glam::Vec3::ONE)),
+                        rigid_world_matrix: None,
+                        front_face_world_matrix: None,
+                    }),
+                    rigid_world_matrix_override: None,
+                    particle_draw: ParticleDrawParams::default(),
+                });
+                prepared.runs.push(FramePreparedRun {
+                    start,
+                    end: start.saturating_add(1),
+                });
+            }
+        }
+        prepared
+            .spatial
+            .fill_world_casters(&prepared.draws, &prepared.runs);
+        prepared
     }
 }
 

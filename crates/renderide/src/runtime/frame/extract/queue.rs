@@ -109,34 +109,68 @@ pub(super) fn queue_view_draws(
         max_prepared_draw_count,
         setup.inner_parallelism,
     );
-    let (cull_inputs, cull_projs) = build_view_cull_inputs(prepared, cull_snapshots);
-    let contexts =
-        build_view_draw_collection_contexts(setup, prepared, &dict, &cull_inputs, mesh_lod_bias);
-    let shadow_contexts =
-        build_shadow_caster_draw_collection_contexts(setup, prepared, &dict, mesh_lod_bias);
-    let world_draws = queue_prepared_draws_for_views_with_parallelism(&contexts, inner_parallelism);
-    let shadow_caster_draws =
-        queue_prepared_draws_for_views_with_parallelism(&shadow_contexts, inner_parallelism);
-    let mut view_draws: Vec<QueuedViewDraws> = world_draws
-        .into_iter()
-        .zip(shadow_caster_draws)
-        .zip(cull_projs)
-        .map(|((world, shadow_casters), cull_proj)| QueuedViewDraws {
-            world,
-            shadow_casters,
-            desktop_overlay: None,
-            cull_proj,
-        })
-        .collect();
-    queue_desktop_overlay_draws(
-        setup,
-        prepared,
-        &dict,
-        mesh_lod_bias,
-        inner_parallelism,
-        &mut view_draws,
-    );
-    view_draws
+    setup.occlusion.with_hysteresis_plans(|plans| {
+        plans.clear();
+        for (index, view) in prepared.iter().enumerate() {
+            let snapshot = cull_snapshots.get(index).and_then(Option::as_ref);
+            plans.push(super::hysteresis::view_hysteresis_plan(
+                setup.scene,
+                setup.occlusion,
+                view,
+                setup.prepared_renderables_for(view.render_context()),
+                snapshot.map(|snapshot| &snapshot.proj),
+                snapshot.and_then(|snapshot| snapshot.hi_z_temporal.as_ref()),
+            ));
+        }
+        let view_draws = {
+            let (cull_inputs, cull_projs) = build_view_cull_inputs(prepared, cull_snapshots, plans);
+            let contexts = build_view_draw_collection_contexts(
+                setup,
+                prepared,
+                &dict,
+                &cull_inputs,
+                mesh_lod_bias,
+            );
+            let shadow_contexts =
+                build_shadow_caster_draw_collection_contexts(setup, prepared, &dict, mesh_lod_bias);
+            let world_draws =
+                queue_prepared_draws_for_views_with_parallelism(&contexts, inner_parallelism);
+            let shadow_caster_draws = queue_prepared_draws_for_views_with_parallelism(
+                &shadow_contexts,
+                inner_parallelism,
+            );
+            let mut view_draws: Vec<QueuedViewDraws> = world_draws
+                .into_iter()
+                .zip(shadow_caster_draws)
+                .zip(cull_projs)
+                .map(|((world, shadow_casters), cull_proj)| QueuedViewDraws {
+                    world,
+                    shadow_casters,
+                    desktop_overlay: None,
+                    cull_proj,
+                })
+                .collect();
+            queue_desktop_overlay_draws(
+                setup,
+                prepared,
+                &dict,
+                mesh_lod_bias,
+                inner_parallelism,
+                &mut view_draws,
+            );
+            view_draws
+        };
+        for slot in plans.iter_mut() {
+            if let Some(plan) = slot.take() {
+                let view_id = plan.view_id;
+                let suspended = !plan.apply;
+                setup
+                    .occlusion
+                    .store_visibility_history(view_id, suspended, plan.frame.recycle());
+            }
+        }
+        view_draws
+    })
 }
 
 fn build_view_draw_collection_contexts<'a>(
@@ -250,6 +284,7 @@ fn max_prepared_draw_count_for_views(
 fn build_view_cull_inputs<'a>(
     prepared: &'a [FrameViewPlan<'_>],
     cull_snapshots: Vec<Option<ViewCullSnapshot>>,
+    plans: &'a [Option<super::hysteresis::ViewHysteresisPlan>],
 ) -> (
     Vec<Option<WorldMeshCullInput<'a>>>,
     Vec<Option<WorldMeshCullProjParams>>,
@@ -258,7 +293,7 @@ fn build_view_cull_inputs<'a>(
     let mut cull_inputs = Vec::with_capacity(prepared.len());
     let mut cull_projs = Vec::with_capacity(prepared.len());
     let mut snapshots = cull_snapshots.into_iter();
-    for prep in prepared {
+    for (index, prep) in prepared.iter().enumerate() {
         let snap = snapshots.next().unwrap_or(None);
         let cull_proj = snap.as_ref().map(|s| s.proj);
         let culling = snap.map(|s| WorldMeshCullInput {
@@ -266,6 +301,9 @@ fn build_view_cull_inputs<'a>(
             host_camera: &prep.host_camera,
             hi_z: s.hi_z,
             hi_z_temporal: s.hi_z_temporal,
+            hysteresis: plans
+                .get(index)
+                .and_then(|plan| super::hysteresis::attached_hysteresis(plan.as_ref())),
         });
         cull_projs.push(cull_proj);
         cull_inputs.push(culling);

@@ -5,27 +5,60 @@
 //! loop uses, and they never open a wgpu device.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use glam::{Mat4, Quat, Vec3};
+use hashbrown::{HashMap, HashSet};
+use rayon::prelude::*;
 
+use crate::camera::reverse_z_perspective;
 use crate::gpu_pools::pools::render_texture::{claim_double_buffer_swap, swap_ping_pong};
-
+use crate::hi_z_cpu::project_world_aabb_uv;
+use crate::occlusion::hysteresis::{
+    CasterKey, CasterRecord, CasterRef, DepthClip, HistoryAction, HistoryInputs, MovedCaster,
+    OcclusionFacts, PresentCaster, ScreenRect, SpaceMotion, VisibilityClass, VisibilityCullBuffers,
+    VisibilityHistory, VisibilityHysteresis, append_disocclusion_rects, decide_visibility,
+    plan_disocclusion, screen_motion_uv_pad,
+};
 use crate::render_graph::resources::BufferSizePolicy;
 use crate::render_graph::{BufferKey, TransientPool};
 use crate::scene::{
-    RenderSpaceId, RenderSpaceRead, SceneSpaceRead, SceneTransformRead, SkinnedMeshRenderer,
-    WorldTransformCache, compute_world_matrices_for_space, render_matrix_has_degenerate_scale,
-    render_transform_has_degenerate_scale, render_transform_to_matrix,
+    RenderSpaceId, WorldTransformCache, compute_world_matrices_for_space,
+    render_matrix_has_degenerate_scale, render_transform_has_degenerate_scale,
+    render_transform_to_matrix,
 };
-use crate::shared::{LayerType, RenderBoundingBox, RenderSH2, RenderTransform, RenderingContext};
+use crate::shared::RenderTransform;
 use crate::world_mesh::culling::frustum::world_aabb_visible_in_homogeneous_clip;
-use crate::world_mesh::culling::{MeshCullTarget, mesh_world_geometry_for_cull_with_head};
+
+mod skinned_geometry;
+pub use skinned_geometry::SkinnedGeometryWorkload;
 
 /// Local TRS rows folded by one [`TransformWorkload::fold_matrices`] sample.
 pub const TRANSFORM_BATCH: usize = 4_096;
 
 /// World AABBs tested by one [`CullWorkload::visible_count`] sample.
 pub const CULL_BATCH: usize = 8_192;
+
+/// Casters classified by one [`HysteresisCullWorkload::kept_count`] sample.
+pub const HYSTERESIS_BATCH: usize = 4_096;
+
+/// Caster counts timed by [`HysteresisHistoryWorkload`].
+///
+/// The first entry is [`crate::occlusion::hysteresis::HISTORY_CASTER_BUDGET`], the production
+/// cutoff. Larger counts measure the uncapped history step that cutoff skips. On a 4-core guest
+/// that step was about 13 ms at 100_000 casters, past an 11.1 ms 90 Hz frame.
+pub const HYSTERESIS_HISTORY_COUNTS: [usize; 4] = [
+    crate::occlusion::hysteresis::HISTORY_CASTER_BUDGET,
+    10_000,
+    50_000,
+    100_000,
+];
+
+/// Screen-motion pad below which the history bench treats the pyramid as still occluding.
+///
+/// The bench does not sample a Hi-Z pyramid. This stand-in keeps the timed path on
+/// `plan_disocclusion`, the per-caster reprojection, the history lookup, and `finish`.
+const HISTORY_CONFIRM_UV: f32 = 0.02;
 
 /// Hierarchy nodes solved by one [`WorldMatrixWorkload::recompute`] sample.
 pub const WORLD_MATRIX_NODES: usize = 4_096;
@@ -328,6 +361,274 @@ impl BufferPoolWorkload {
     }
 }
 
+/// Owned history-confirmation query reused by [`HysteresisCullWorkload`].
+#[derive(Clone, Debug)]
+struct HysteresisQuery {
+    /// Index into the workload's caster records. `None` is a newly revealed caster.
+    previous: Option<usize>,
+    /// Bounds moved since the stored record.
+    caster_moved: bool,
+    /// Screen rect hits a moved occluder.
+    overlaps_disocclusion: bool,
+    /// Previous pyramid reports full occlusion.
+    hi_z_occludes: bool,
+    /// Covering depth is a separate occluder.
+    other_occluder: bool,
+}
+
+/// Classifies a fixed mix of stable occluded casters and disoccluded casters.
+#[derive(Debug)]
+pub struct HysteresisCullWorkload {
+    records: Vec<CasterRecord>,
+    queries: Vec<HysteresisQuery>,
+}
+
+impl HysteresisCullWorkload {
+    /// Builds [`HYSTERESIS_BATCH`] queries: one quarter stay culled, three quarters must be kept.
+    #[must_use]
+    pub fn standard() -> Self {
+        let bounds = Vec3::new(-0.5, -0.5, -2.0);
+        let records = vec![
+            CasterRecord::new(
+                VisibilityClass::Occluded,
+                bounds,
+                Vec3::new(0.5, 0.5, -1.0),
+                1,
+            ),
+            CasterRecord::new(
+                VisibilityClass::Visible,
+                bounds,
+                Vec3::new(0.5, 0.5, -1.0),
+                1,
+            ),
+        ];
+        let queries = (0..HYSTERESIS_BATCH)
+            .map(|index| match index % 4 {
+                0 => HysteresisQuery {
+                    previous: Some(0),
+                    caster_moved: false,
+                    overlaps_disocclusion: false,
+                    hi_z_occludes: true,
+                    other_occluder: false,
+                },
+                1 => HysteresisQuery {
+                    previous: None,
+                    caster_moved: false,
+                    overlaps_disocclusion: false,
+                    hi_z_occludes: true,
+                    other_occluder: false,
+                },
+                2 => HysteresisQuery {
+                    previous: Some(0),
+                    caster_moved: false,
+                    overlaps_disocclusion: true,
+                    hi_z_occludes: true,
+                    other_occluder: false,
+                },
+                _ => HysteresisQuery {
+                    previous: Some(1),
+                    caster_moved: false,
+                    overlaps_disocclusion: false,
+                    hi_z_occludes: false,
+                    other_occluder: false,
+                },
+            })
+            .collect();
+        Self { records, queries }
+    }
+
+    /// Number of casters history confirmation still draws.
+    #[must_use]
+    pub fn kept_count(&self) -> u32 {
+        let mut kept = 0_u32;
+        for query in &self.queries {
+            let previous = query.previous.and_then(|index| self.records.get(index));
+            let decision = decide_visibility(HistoryInputs {
+                previous,
+                caster_moved: query.caster_moved,
+                overlaps_disocclusion: query.overlaps_disocclusion,
+                hi_z_occludes: query.hi_z_occludes,
+                other_occluder: query.other_occluder,
+            });
+            if decision.action != HistoryAction::Culled {
+                kept = kept.saturating_add(1);
+            }
+        }
+        kept
+    }
+}
+
+/// History lookup, screen-motion pad, and `finish` over a prebuilt caster set.
+///
+/// Hi-Z pyramid sampling is not included. A pad under [`HISTORY_CONFIRM_UV`] stands in for a
+/// pyramid that still covers the expanded rectangle. This is the uncapped cost of
+/// `plan_disocclusion`, the per-caster reprojection, the history lookup, and `finish`.
+/// Production does not run it once the prepared caster count passes
+/// [`crate::occlusion::hysteresis::HISTORY_CASTER_BUDGET`]. The sequential prepared-draw scan
+/// that feeds the plan is a separate, cheaper walk and stops at that same cap. The count is
+/// prepared casters in scope, not casters that survive the frustum.
+pub struct HysteresisHistoryWorkload {
+    present: Vec<PresentCaster>,
+    present_keys: HashSet<CasterKey>,
+    movers: Vec<MovedCaster>,
+    previous_vp: Mat4,
+    current_vp: Mat4,
+    history: VisibilityHistory,
+    spare: HashMap<CasterKey, CasterRecord>,
+    buffers: VisibilityCullBuffers,
+}
+
+impl HysteresisHistoryWorkload {
+    /// Builds `count` casters. One quarter start occluded. `moving` separates the cameras.
+    #[must_use]
+    pub fn new(count: usize, moving: bool) -> Self {
+        let (previous_vp, current_vp) = history_view_projections(moving);
+        let mut side = 1_usize;
+        while side.saturating_mul(side) < count.max(1) {
+            side = side.saturating_add(1);
+        }
+        let mut casters = HashMap::with_capacity(count);
+        let mut present = Vec::with_capacity(count);
+        for index in 0..count {
+            let column = index % side;
+            let row = index / side;
+            let x = f32::from(u16::try_from(column).unwrap_or(0)).mul_add(0.45, -8.0);
+            let z = f32::from(u16::try_from(row).unwrap_or(0)).mul_add(0.45, -4.0);
+            let aabb_min = Vec3::new(x, 0.0, z);
+            let aabb_max = aabb_min + Vec3::splat(0.2);
+            let node_id = i32::try_from(index).unwrap_or(i32::MAX);
+            let key = CasterKey::new(
+                RenderSpaceId(1),
+                index,
+                u64::try_from(index).unwrap_or(u64::MAX),
+                node_id,
+                false,
+            );
+            let class = if index % 4 == 0 {
+                VisibilityClass::Occluded
+            } else {
+                VisibilityClass::Visible
+            };
+            casters.insert(key, CasterRecord::new(class, aabb_min, aabb_max, 1));
+            present.push(PresentCaster {
+                key,
+                mesh_asset_id: 1,
+                aabb_min,
+                aabb_max,
+                space_id: RenderSpaceId(1),
+            });
+        }
+        Self {
+            present,
+            present_keys: HashSet::new(),
+            movers: Vec::new(),
+            previous_vp,
+            current_vp,
+            history: VisibilityHistory::from_casters(casters),
+            spare: HashMap::new(),
+            buffers: VisibilityCullBuffers::default(),
+        }
+    }
+
+    /// Plans disocclusion, reprojects every caster, records the decision, and publishes history.
+    ///
+    /// The history map, spare map, mover list, and cull buffers stay on the workload. The next
+    /// call clears and refills them, matching the view slot's recycle path.
+    #[must_use]
+    pub fn step(&mut self) -> u32 {
+        let history = std::mem::take(&mut self.history);
+        let spare = std::mem::take(&mut self.spare);
+        let mut buffers = std::mem::take(&mut self.buffers);
+        plan_disocclusion(
+            &history,
+            &self.present,
+            &mut self.present_keys,
+            |_| true,
+            &mut self.movers,
+        );
+        let current_vp = self.current_vp;
+        let previous_vp = self.previous_vp;
+        buffers.stale_rects.clear();
+        append_disocclusion_rects(&mut buffers.stale_rects, &self.movers, |min, max| {
+            project_screen(current_vp, min, max)
+        });
+        buffers.motions.clear();
+        buffers.motions.insert(
+            RenderSpaceId(1),
+            SpaceMotion {
+                mono: Some((previous_vp, current_vp)),
+                stereo: None,
+                clip: DepthClip {
+                    near: 0.05,
+                    far: 200.0,
+                    orthographic: false,
+                },
+            },
+        );
+        let frame = VisibilityHysteresis::from_parts(history, spare, buffers);
+        let kept = AtomicU32::new(0);
+        self.present.par_iter().for_each(|caster| {
+            let facts = facts_for_motion_pad(screen_motion_uv_pad(
+                previous_vp,
+                current_vp,
+                caster.aabb_min,
+                caster.aabb_max,
+            ));
+            if frame.allows_draw(
+                Some(CasterRef {
+                    key: caster.key,
+                    mesh_asset_id: caster.mesh_asset_id,
+                }),
+                caster.aabb_min,
+                caster.aabb_max,
+                facts,
+            ) {
+                kept.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        let recycled = frame.recycle();
+        self.history = recycled.history;
+        self.spare = recycled.spare;
+        self.buffers = recycled.buffers;
+        kept.load(Ordering::Relaxed)
+    }
+}
+
+fn facts_for_motion_pad(pad: Option<f32>) -> OcclusionFacts {
+    match pad {
+        Some(pad) if pad < HISTORY_CONFIRM_UV => OcclusionFacts {
+            occluded: true,
+            other_occluder: true,
+            rects: [None, None],
+        },
+        _ => OcclusionFacts::keep(),
+    }
+}
+
+fn project_screen(view_proj: Mat4, min: Vec3, max: Vec3) -> Option<ScreenRect> {
+    let (uv_min, uv_max) = project_world_aabb_uv(view_proj, min, max)?;
+    ScreenRect::from_uv(uv_min, uv_max)
+}
+
+fn history_view_projections(moving: bool) -> (Mat4, Mat4) {
+    let projection = reverse_z_perspective(1.0, 70.0_f32.to_radians(), 0.05, 200.0);
+    let previous = glam::camera::rh::view::look_at_mat4(
+        Vec3::new(0.0, 1.5, 12.0),
+        Vec3::new(0.0, 1.5, 0.0),
+        Vec3::Y,
+    );
+    let current = if moving {
+        glam::camera::rh::view::look_at_mat4(
+            Vec3::new(2.0, 1.5, 12.0),
+            Vec3::new(2.0, 1.5, 0.0),
+            Vec3::Y,
+        )
+    } else {
+        previous
+    };
+    (projection * previous, projection * current)
+}
+
 /// Per-frame double-buffer bookkeeping for cameras that already own a second color image.
 ///
 /// The measured path is the same claim-once scan and three-slot swap the renderer runs after the
@@ -612,226 +913,4 @@ fn bench_view_proj() -> Mat4 {
         250.0,
     );
     projection * view
-}
-
-/// Skinned rows for [`mesh_world_geometry_for_cull_with_head`].
-///
-/// Each row has a host posed box. The rest mesh box sits far away so a fold of the returned
-/// world AABB only matches when the function uses the posed box. Setup allocates the rows;
-/// [`Self::fold`] only reads them.
-#[derive(Clone, Debug)]
-pub struct SkinnedGeometryWorkload {
-    scene: SkinnedGeometryScene,
-    rest: Vec<RenderBoundingBox>,
-    renderers: Vec<SkinnedMeshRenderer>,
-}
-
-impl SkinnedGeometryWorkload {
-    /// Builds [`CULL_BATCH`] skinned rows.
-    #[must_use]
-    pub fn standard() -> Self {
-        Self::batch(CULL_BATCH)
-    }
-
-    /// Builds `count` skinned rows with distinct root translations.
-    #[must_use]
-    pub fn batch(count: usize) -> Self {
-        let mut matrices = Vec::with_capacity(count);
-        let mut rest = Vec::with_capacity(count);
-        let mut renderers = Vec::with_capacity(count);
-        for index in 0..count {
-            let step = f32::from(u16::try_from(index % 4_096).unwrap_or(0));
-            matrices.push(Mat4::from_translation(Vec3::new(step * 0.01, 0.0, 0.0)));
-            rest.push(RenderBoundingBox {
-                center: Vec3::new(400.0 + step, 0.0, 0.0),
-                extents: Vec3::splat(0.5),
-            });
-            renderers.push(SkinnedMeshRenderer {
-                root_bone_transform_id: Some(i32::try_from(index).unwrap_or(i32::MAX)),
-                posed_object_bounds: Some(RenderBoundingBox {
-                    center: Vec3::ZERO,
-                    extents: Vec3::splat(0.25),
-                }),
-                ..SkinnedMeshRenderer::default()
-            });
-        }
-        Self {
-            scene: SkinnedGeometryScene {
-                space_id: RenderSpaceId(166),
-                root: RenderTransform {
-                    position: Vec3::ZERO,
-                    scale: Vec3::ONE,
-                    rotation: Quat::IDENTITY,
-                },
-                matrices,
-            },
-            rest,
-            renderers,
-        }
-    }
-
-    /// Folds world-AABB minima from [`mesh_world_geometry_for_cull_with_head`].
-    #[must_use]
-    pub fn fold(&self) -> f32 {
-        let mut acc = 0.0_f32;
-        for (index, renderer) in self.renderers.iter().enumerate() {
-            let geometry = mesh_world_geometry_for_cull_with_head(
-                &MeshCullTarget {
-                    scene: &self.scene,
-                    space_id: self.scene.space_id,
-                    mesh_bounds: &self.rest[index],
-                    skinned: true,
-                    skinned_renderer: Some(renderer),
-                    node_id: 0,
-                },
-                Mat4::IDENTITY,
-                RenderingContext::UserView,
-            );
-            if let Some((min, _)) = geometry.world_aabb {
-                acc += min.x;
-            }
-        }
-        acc
-    }
-}
-
-#[derive(Clone, Debug)]
-struct SkinnedGeometryScene {
-    space_id: RenderSpaceId,
-    root: RenderTransform,
-    matrices: Vec<Mat4>,
-}
-
-#[derive(Clone, Copy)]
-struct SkinnedGeometrySpace<'a> {
-    root: &'a RenderTransform,
-}
-
-impl<'a> RenderSpaceRead<'a> for SkinnedGeometrySpace<'a> {
-    fn is_active(self) -> bool {
-        true
-    }
-
-    fn is_overlay(self) -> bool {
-        false
-    }
-
-    fn is_private(self) -> bool {
-        false
-    }
-
-    fn root_transform(self) -> &'a RenderTransform {
-        self.root
-    }
-
-    fn view_transform(self) -> &'a RenderTransform {
-        self.root
-    }
-
-    fn local_transforms(self) -> &'a [RenderTransform] {
-        std::slice::from_ref(self.root)
-    }
-
-    fn node_parents(self) -> &'a [i32] {
-        &[]
-    }
-}
-
-impl SceneSpaceRead for SkinnedGeometryScene {
-    type Space<'a> = SkinnedGeometrySpace<'a>;
-    type RenderSpaceIds<'a> = std::iter::Once<RenderSpaceId>;
-
-    fn render_space_ids(&self) -> Self::RenderSpaceIds<'_> {
-        std::iter::once(self.space_id)
-    }
-
-    fn space(&self, id: RenderSpaceId) -> Option<Self::Space<'_>> {
-        (id == self.space_id).then_some(SkinnedGeometrySpace { root: &self.root })
-    }
-
-    fn active_main_space(&self) -> Option<Self::Space<'_>> {
-        self.space(self.space_id)
-    }
-
-    fn active_main_ambient_light(&self) -> RenderSH2 {
-        RenderSH2::default()
-    }
-
-    fn active_main_render_context(&self) -> RenderingContext {
-        RenderingContext::UserView
-    }
-
-    fn render_context_affects_draw_prep(&self, _context: RenderingContext) -> bool {
-        false
-    }
-}
-
-impl SceneTransformRead for SkinnedGeometryScene {
-    fn world_matrix_for_context(
-        &self,
-        id: RenderSpaceId,
-        transform_index: usize,
-        _context: RenderingContext,
-    ) -> Option<Mat4> {
-        self.world_matrix_for_render_context(
-            id,
-            transform_index,
-            RenderingContext::UserView,
-            Mat4::IDENTITY,
-        )
-    }
-
-    fn world_matrix_for_render_context(
-        &self,
-        id: RenderSpaceId,
-        transform_index: usize,
-        _context: RenderingContext,
-        _head_output_transform: Mat4,
-    ) -> Option<Mat4> {
-        if id != self.space_id {
-            return None;
-        }
-        self.matrices.get(transform_index).copied()
-    }
-
-    fn overlay_layer_model_matrix_for_context(
-        &self,
-        _id: RenderSpaceId,
-        _transform_index: usize,
-        _context: RenderingContext,
-    ) -> Option<Mat4> {
-        None
-    }
-
-    fn transform_special_layer(
-        &self,
-        _id: RenderSpaceId,
-        _transform_index: usize,
-    ) -> Option<LayerType> {
-        None
-    }
-
-    fn transform_is_in_overlay_layer(&self, _id: RenderSpaceId, _transform_index: usize) -> bool {
-        false
-    }
-
-    fn transform_has_degenerate_scale_for_context(
-        &self,
-        _id: RenderSpaceId,
-        _transform_index: usize,
-        _context: RenderingContext,
-    ) -> bool {
-        false
-    }
-
-    fn overridden_material_asset_id(
-        &self,
-        _space_id: RenderSpaceId,
-        _context: RenderingContext,
-        _skinned: bool,
-        _renderable_index: usize,
-        _slot_index: usize,
-    ) -> Option<i32> {
-        None
-    }
 }

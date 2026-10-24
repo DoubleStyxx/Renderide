@@ -6,6 +6,7 @@
 //! subsystem owner.
 
 mod cull;
+mod hysteresis;
 mod queue;
 mod sort;
 mod visible_deform;

@@ -134,6 +134,7 @@ fn identity_cull(host_camera: &HostCameraFrame) -> WorldMeshCullInput<'_> {
         host_camera,
         hi_z: None,
         hi_z_temporal: None,
+        hysteresis: None,
     }
 }
 
