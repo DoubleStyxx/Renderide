@@ -7,16 +7,17 @@
 //! survive the frustum. After the count crosses the cap, the pass stays off until it falls to
 //! [`crate::occlusion::hysteresis::HISTORY_CASTER_RESUME`].
 
+use std::cell::RefCell;
+
 use glam::{Mat4, Vec3};
-use hashbrown::HashMap;
 
 use crate::camera::{CameraProjectionKind, HostCameraFrame, view_matrix_for_host_world_mesh_space};
 use crate::cull_contract::HiZTemporalState;
 use crate::hi_z_cpu::project_world_aabb_uv;
 use crate::occlusion::hysteresis::{
-    CasterKey, DepthClip, HISTORY_CASTER_BUDGET, MovedCaster, PresentCaster, ScreenRect,
-    SpaceMotion, VisibilityFrameScratch, VisibilityHysteresis, VisibilityScratch,
-    disocclusion_rects, history_confirmation_applies, plan_disocclusion,
+    CasterKey, DepthClip, HISTORY_CASTER_BUDGET, PresentCaster, ScreenRect, SpaceMotion,
+    VisibilityFrameScratch, VisibilityHysteresis, VisibilityScratch, append_disocclusion_rects,
+    history_confirmation_applies, plan_disocclusion,
 };
 use crate::scene::{RenderSpaceId, SceneCoordinator};
 use crate::world_mesh::draw_prep::PreparedCasterBounds;
@@ -38,40 +39,66 @@ pub(super) struct ViewHysteresisPlan {
     pub apply: bool,
 }
 
-/// Builds one hysteresis plan per prepared view that has cull inputs.
-pub(super) fn build_view_hysteresis_plans(
+/// Fills a reused plan list and hands it to `finish` for the view cull.
+///
+/// The list is cleared at the start of the next call, so its allocation stays for the following
+/// frame. `finish` must recycle every plan before it returns; a plan left in the list is dropped
+/// with its pooled buffers on the next clear.
+pub(super) fn with_view_hysteresis_plans<R>(
     scene: &SceneCoordinator,
     occlusion: &crate::occlusion::OcclusionSystem,
     prepared_views: &[FrameViewPlan<'_>],
     prepared_renderables: &[Option<&FramePreparedRenderables>],
     projections: &[Option<WorldMeshCullProjParams>],
     temporals: &[Option<HiZTemporalState>],
-) -> Vec<Option<ViewHysteresisPlan>> {
-    prepared_views
-        .iter()
-        .enumerate()
-        .map(|(index, view)| {
-            let proj = projections.get(index)?.as_ref()?;
-            let temporal = temporals.get(index).and_then(|temporal| temporal.as_ref());
-            let scratch = occlusion.begin_visibility(view.view_id);
-            let prepared = prepared_renderables.get(index).copied().flatten();
-            let (frame, frame_scratch, apply) = build_frame(
+    finish: impl FnOnce(&mut Vec<Option<ViewHysteresisPlan>>) -> R,
+) -> R {
+    thread_local! {
+        static VIEW_HYSTERESIS_PLANS: RefCell<Vec<Option<ViewHysteresisPlan>>> =
+            const { RefCell::new(Vec::new()) };
+    }
+    VIEW_HYSTERESIS_PLANS.with(|plans| {
+        let mut plans = plans.borrow_mut();
+        plans.clear();
+        for (index, view) in prepared_views.iter().enumerate() {
+            plans.push(view_hysteresis_plan(
                 scene,
-                prepared,
-                view.render_space_scope,
-                &view.host_camera,
-                proj,
-                temporal,
-                scratch,
-            );
-            occlusion.restore_frame_scratch(view.view_id, frame_scratch);
-            Some(ViewHysteresisPlan {
-                view_id: view.view_id,
-                frame,
-                apply,
-            })
-        })
-        .collect()
+                occlusion,
+                view,
+                prepared_renderables.get(index).copied().flatten(),
+                projections.get(index).and_then(|proj| proj.as_ref()),
+                temporals.get(index).and_then(|temporal| temporal.as_ref()),
+            ));
+        }
+        finish(&mut plans)
+    })
+}
+
+fn view_hysteresis_plan(
+    scene: &SceneCoordinator,
+    occlusion: &crate::occlusion::OcclusionSystem,
+    view: &FrameViewPlan<'_>,
+    prepared: Option<&FramePreparedRenderables>,
+    proj: Option<&WorldMeshCullProjParams>,
+    temporal: Option<&HiZTemporalState>,
+) -> Option<ViewHysteresisPlan> {
+    let proj = proj?;
+    let scratch = occlusion.begin_visibility(view.view_id);
+    let (frame, frame_scratch, apply) = build_frame(
+        scene,
+        prepared,
+        view.render_space_scope,
+        &view.host_camera,
+        proj,
+        temporal,
+        scratch,
+    );
+    occlusion.restore_frame_scratch(view.view_id, frame_scratch);
+    Some(ViewHysteresisPlan {
+        view_id: view.view_id,
+        frame,
+        apply,
+    })
 }
 
 /// History plan the fine cull should consult.
@@ -98,8 +125,11 @@ fn build_frame(
         spare,
         suspended,
         mut frame_scratch,
+        mut cull_buffers,
     } = scratch;
     frame_scratch.clear();
+    cull_buffers.motions.clear();
+    cull_buffers.stale_rects.clear();
     let caster_count = prepared
         .map(|prepared| {
             prepared.world_caster_count_at_most(HISTORY_CASTER_BUDGET, |space_id| {
@@ -109,7 +139,7 @@ fn build_frame(
         .unwrap_or(Some(0));
     if !history_confirmation_applies(caster_count, suspended) {
         return (
-            VisibilityHysteresis::new(history, spare, HashMap::new(), Vec::new()),
+            VisibilityHysteresis::from_parts(history, spare, cull_buffers),
             frame_scratch,
             false,
         );
@@ -134,25 +164,30 @@ fn build_frame(
             );
         }
     }
-    let movers = if track_presence {
+    if track_presence {
         plan_disocclusion(
             &history,
             &frame_scratch.present,
             &mut frame_scratch.present_keys,
             |space_id| scope.includes(space_id),
-        )
-    } else {
-        Vec::new()
-    };
-    let stale_rects = stale_rects_for_movers(scene, host_camera, proj, &movers);
-    let mut motions = HashMap::with_capacity(frame_scratch.resolved_motion.len());
+            &mut frame_scratch.movers,
+        );
+    }
+    for mover in &frame_scratch.movers {
+        let space_id = mover.space_id;
+        append_disocclusion_rects(
+            &mut cull_buffers.stale_rects,
+            std::slice::from_ref(mover),
+            |min, max| project_union(scene, space_id, host_camera, proj, min, max),
+        );
+    }
     for (space_id, motion) in &frame_scratch.resolved_motion {
         if let Some(motion) = motion {
-            motions.insert(*space_id, *motion);
+            cull_buffers.motions.insert(*space_id, *motion);
         }
     }
     (
-        VisibilityHysteresis::new(history, spare, motions, stale_rects),
+        VisibilityHysteresis::from_parts(history, spare, cull_buffers),
         frame_scratch,
         true,
     )
@@ -172,22 +207,6 @@ fn present_caster(caster: PreparedCasterBounds) -> PresentCaster {
         aabb_max: caster.aabb_max,
         space_id: caster.space_id,
     }
-}
-
-fn stale_rects_for_movers(
-    scene: &SceneCoordinator,
-    host_camera: &HostCameraFrame,
-    proj: &WorldMeshCullProjParams,
-    movers: &[MovedCaster],
-) -> Vec<ScreenRect> {
-    let mut stale = Vec::new();
-    for mover in movers {
-        stale.extend(disocclusion_rects(
-            std::slice::from_ref(mover),
-            |min, max| project_union(scene, mover.space_id, host_camera, proj, min, max),
-        ));
-    }
-    stale
 }
 
 fn space_motion(
@@ -267,13 +286,20 @@ mod tests {
 
     use super::space_motion;
     use crate::camera::{
-        CameraClipPlanes, HostCameraFrame, reverse_z_perspective,
+        CameraClipPlanes, HostCameraFrame, ViewId, reverse_z_perspective,
         view_matrix_for_host_world_mesh_space,
     };
     use crate::cull_contract::{HiZTemporalState, WorldMeshCullProjParams};
-    use crate::occlusion::hysteresis::screen_motion_uv_pad;
+    use crate::occlusion::OcclusionSystem;
+    use crate::occlusion::hysteresis::{
+        CasterKey, CasterRecord, CasterRef, MovedCaster, OcclusionFacts, PresentCaster, ScreenRect,
+        SpaceMotion, VisibilityClass, VisibilityCullBuffers, VisibilityFrameScratch,
+        VisibilityHistory, VisibilityRecycle, screen_motion_uv_pad,
+    };
     use crate::scene::{RenderSpaceId, SceneCoordinator};
     use crate::shared::RenderTransform;
+    use crate::world_mesh::ViewRenderSpaceScope;
+    use crate::world_mesh::draw_prep::FramePreparedRenderables;
 
     fn host() -> HostCameraFrame {
         HostCameraFrame {
@@ -403,12 +429,12 @@ mod tests {
 
     fn hysteresis_attached(
         groups: &[(RenderSpaceId, usize)],
-        scope: crate::world_mesh::ViewRenderSpaceScope,
+        scope: ViewRenderSpaceScope,
         suspended: bool,
     ) -> bool {
         use crate::camera::ViewId;
         use crate::occlusion::hysteresis::{
-            VisibilityFrameScratch, VisibilityHistory, VisibilityScratch,
+            VisibilityCullBuffers, VisibilityFrameScratch, VisibilityHistory, VisibilityScratch,
         };
         use crate::world_mesh::culling::WorldMeshCullInput;
         use crate::world_mesh::draw_prep::FramePreparedRenderables;
@@ -417,10 +443,11 @@ mod tests {
         let proj = proj_with(60.0, None);
         let prepared = FramePreparedRenderables::test_with_caster_runs(groups);
         let scratch = VisibilityScratch {
-            history: Arc::new(VisibilityHistory::default()),
+            history: VisibilityHistory::default(),
             spare: HashMap::new(),
             suspended,
             frame_scratch: VisibilityFrameScratch::default(),
+            cull_buffers: VisibilityCullBuffers::default(),
         };
         let (frame, _frame_scratch, apply) = super::build_frame(
             &SceneCoordinator::new(),
@@ -485,78 +512,258 @@ mod tests {
         );
     }
 
-    #[test]
-    fn visibility_frame_scratch_reuses_storage_across_a_second_frame() {
-        use crate::camera::ViewId;
-        use crate::occlusion::OcclusionSystem;
-        use crate::occlusion::hysteresis::{
-            CasterKey, CasterRecord, VisibilityClass, VisibilityHistory,
-        };
-        use crate::world_mesh::ViewRenderSpaceScope;
-        use crate::world_mesh::draw_prep::FramePreparedRenderables;
+    fn moved_visible_history(key: CasterKey) -> VisibilityHistory {
+        let mut casters = HashMap::new();
+        casters.insert(
+            key,
+            CasterRecord::new(
+                VisibilityClass::Visible,
+                glam::Vec3::new(-0.2, -0.2, 2.0),
+                glam::Vec3::new(0.2, 0.2, 2.4),
+                1,
+            ),
+        );
+        VisibilityHistory::from_casters(casters)
+    }
 
-        let occlusion = OcclusionSystem::new();
-        let view = ViewId::Main;
-        let space_id = RenderSpaceId(1);
-        let key = CasterKey::new(space_id, 0, 0, 0, false);
-        let visible_history = || {
-            let mut casters = HashMap::new();
-            casters.insert(
-                key,
-                CasterRecord {
-                    class: VisibilityClass::Visible,
-                    aabb_min: glam::Vec3::ZERO,
-                    aabb_max: glam::Vec3::ONE,
-                    mesh_asset_id: 1,
-                },
-            );
-            VisibilityHistory::from_casters(casters)
-        };
-        occlusion.store_visibility_history(view, visible_history(), false);
-        let prepared = FramePreparedRenderables::test_with_caster_runs(&[(space_id, 3)]);
-        let host = HostCameraFrame::default();
-        let proj = proj_with(60.0, None);
+    fn empty_recycle() -> VisibilityRecycle {
+        VisibilityRecycle {
+            history: VisibilityHistory::default(),
+            spare: HashMap::new(),
+            buffers: VisibilityCullBuffers::default(),
+        }
+    }
 
-        let drive = || {
+    fn park_history(
+        occlusion: &OcclusionSystem,
+        view: ViewId,
+        history: VisibilityHistory,
+        recycled: VisibilityRecycle,
+    ) {
+        occlusion.store_visibility_history(
+            view,
+            false,
+            VisibilityRecycle {
+                history,
+                spare: recycled.spare,
+                buffers: recycled.buffers,
+            },
+        );
+    }
+
+    struct DriveCtx<'a> {
+        scene: &'a SceneCoordinator,
+        prepared: &'a FramePreparedRenderables,
+        host: &'a HostCameraFrame,
+        proj: &'a WorldMeshCullProjParams,
+        temporal: &'a HiZTemporalState,
+        key: CasterKey,
+    }
+
+    impl DriveCtx<'_> {
+        fn drive(
+            &self,
+            occlusion: &OcclusionSystem,
+            view: ViewId,
+            expect_present: bool,
+        ) -> (VisibilityFrameScratch, VisibilityRecycle) {
             let scratch = occlusion.begin_visibility(view);
             let (frame, frame_scratch, apply) = super::build_frame(
-                &SceneCoordinator::new(),
-                Some(&prepared),
+                self.scene,
+                Some(self.prepared),
                 ViewRenderSpaceScope::AllActive,
-                &host,
-                &proj,
-                None,
+                self.host,
+                self.proj,
+                Some(self.temporal),
                 scratch,
             );
             assert!(apply);
-            assert!(!frame_scratch.present.is_empty());
-            assert!(frame_scratch.present_keys.contains(&key));
-            drop(frame);
-            occlusion.store_visibility_history(view, visible_history(), false);
-            frame_scratch
+            assert_eq!(!frame_scratch.present.is_empty(), expect_present);
+            assert_eq!(!frame_scratch.movers.is_empty(), expect_present);
+            if expect_present {
+                assert!(frame_scratch.present_keys.contains(&self.key));
+                assert!(frame.allows_draw(
+                    Some(CasterRef {
+                        key: self.key,
+                        mesh_asset_id: 1,
+                    }),
+                    glam::Vec3::ZERO,
+                    glam::Vec3::ONE,
+                    OcclusionFacts::keep(),
+                ));
+            }
+            (frame_scratch, frame.recycle())
+        }
+    }
+
+    #[test]
+    fn visibility_frame_scratch_reuses_storage_across_a_second_frame() {
+        let occlusion = OcclusionSystem::new();
+        let (scene, space_id) = seeded();
+        let key = CasterKey::new(space_id, 0, 0, 0, false);
+        let prepared = FramePreparedRenderables::test_with_caster_runs(&[(space_id, 3)]);
+        let host = host();
+        let proj = proj_with(60.0, None);
+        let temporal = temporal_with_view(&scene, space_id, &host, &proj);
+        let ctx = DriveCtx {
+            scene: &scene,
+            prepared: &prepared,
+            host: &host,
+            proj: &proj,
+            temporal: &temporal,
+            key,
         };
+        let main = ViewId::Main;
+        let secondary = ViewId::secondary_camera(space_id, 0);
+        park_history(
+            &occlusion,
+            main,
+            moved_visible_history(key),
+            empty_recycle(),
+        );
+        let (first_scratch, first_recycled) = ctx.drive(&occlusion, main, true);
+        let first = PoolPtrs::capture(&first_scratch, &first_recycled.buffers, space_id, key);
+        first.assert_filled();
+        occlusion.restore_frame_scratch(main, first_scratch);
+        park_history(&occlusion, main, moved_visible_history(key), first_recycled);
 
-        let first = drive();
-        let motion_ptr = first.resolved_motion.as_ptr();
-        let motion_cap = first.resolved_motion.capacity();
-        let present_ptr = first.present.as_ptr();
-        let present_cap = first.present.capacity();
-        let stored = first.present_keys.get(&key).expect("present key");
-        let key_ptr: *const CasterKey = stored;
-        let key_cap = first.present_keys.capacity();
-        assert!(motion_cap > 0);
-        assert!(present_cap > 0);
-        assert!(key_cap > 0);
-        occlusion.restore_frame_scratch(view, first);
+        let (second_scratch, second_recycled) = ctx.drive(&occlusion, main, true);
+        let second = PoolPtrs::capture(&second_scratch, &second_recycled.buffers, space_id, key);
+        second.assert_reuses(&first);
+        occlusion.restore_frame_scratch(main, second_scratch);
 
-        let second = drive();
-        assert_eq!(second.resolved_motion.as_ptr(), motion_ptr);
-        assert_eq!(second.resolved_motion.capacity(), motion_cap);
-        assert_eq!(second.present.as_ptr(), present_ptr);
-        assert_eq!(second.present.capacity(), present_cap);
-        let stored = second.present_keys.get(&key).expect("present key");
-        let second_ptr: *const CasterKey = stored;
-        assert_eq!(second_ptr, key_ptr);
-        assert_eq!(second.present_keys.capacity(), key_cap);
+        park_history(
+            &occlusion,
+            secondary,
+            moved_visible_history(key),
+            empty_recycle(),
+        );
+        let (other_scratch, other_recycled) = ctx.drive(&occlusion, secondary, true);
+        let other = PoolPtrs::capture(&other_scratch, &other_recycled.buffers, space_id, key);
+        other.assert_filled();
+        other.assert_distinct(&second);
+        occlusion.restore_frame_scratch(secondary, other_scratch);
+        park_history(
+            &occlusion,
+            secondary,
+            moved_visible_history(key),
+            other_recycled,
+        );
+
+        park_history(
+            &occlusion,
+            main,
+            VisibilityHistory::default(),
+            second_recycled,
+        );
+        let (skipped_scratch, skipped_recycled) = ctx.drive(&occlusion, main, false);
+        let skipped = PoolPtrs::capture(&skipped_scratch, &skipped_recycled.buffers, space_id, key);
+        skipped.assert_present_skipped(&second);
+        assert!(skipped_recycled.buffers.motions.contains_key(&space_id));
+    }
+
+    struct PoolPtrs {
+        motion: *const (RenderSpaceId, Option<SpaceMotion>),
+        motion_cap: usize,
+        present: *const PresentCaster,
+        present_cap: usize,
+        key: *const CasterKey,
+        key_cap: usize,
+        movers: *const MovedCaster,
+        movers_cap: usize,
+        stale: *const ScreenRect,
+        stale_cap: usize,
+        shard: *const (CasterKey, CasterRecord),
+        shard_cap: usize,
+        space_motion: *const SpaceMotion,
+        space_motion_cap: usize,
+    }
+
+    impl PoolPtrs {
+        fn capture(
+            scratch: &VisibilityFrameScratch,
+            buffers: &VisibilityCullBuffers,
+            space_id: RenderSpaceId,
+            key: CasterKey,
+        ) -> Self {
+            let stored = scratch.present_keys.get(&key);
+            let key_ptr: *const CasterKey = stored.map_or(std::ptr::null(), |stored| stored);
+            let shard = buffers.shards[0].lock();
+            let space_motion = buffers.motions.get(&space_id);
+            let space_motion_ptr: *const SpaceMotion =
+                space_motion.map_or(std::ptr::null(), |motion| motion);
+            Self {
+                motion: scratch.resolved_motion.as_ptr(),
+                motion_cap: scratch.resolved_motion.capacity(),
+                present: scratch.present.as_ptr(),
+                present_cap: scratch.present.capacity(),
+                key: key_ptr,
+                key_cap: scratch.present_keys.capacity(),
+                movers: scratch.movers.as_ptr(),
+                movers_cap: scratch.movers.capacity(),
+                stale: buffers.stale_rects.as_ptr(),
+                stale_cap: buffers.stale_rects.capacity(),
+                shard: shard.as_ptr(),
+                shard_cap: shard.capacity(),
+                space_motion: space_motion_ptr,
+                space_motion_cap: buffers.motions.capacity(),
+            }
+        }
+
+        fn assert_filled(&self) {
+            assert!(self.motion_cap > 0);
+            assert!(self.present_cap > 0);
+            assert!(self.key_cap > 0);
+            assert!(!self.key.is_null());
+            assert!(self.movers_cap > 0);
+            assert!(self.stale_cap > 0);
+            assert!(self.shard_cap > 0);
+            assert!(self.space_motion_cap > 0);
+            assert!(!self.space_motion.is_null());
+        }
+
+        fn assert_reuses(&self, previous: &Self) {
+            assert_eq!(self.motion, previous.motion);
+            assert!(self.motion_cap >= previous.motion_cap);
+            assert_eq!(self.present, previous.present);
+            assert!(self.present_cap >= previous.present_cap);
+            assert_eq!(self.key, previous.key);
+            assert!(self.key_cap >= previous.key_cap);
+            assert_eq!(self.movers, previous.movers);
+            assert!(self.movers_cap >= previous.movers_cap);
+            assert_eq!(self.stale, previous.stale);
+            assert!(self.stale_cap >= previous.stale_cap);
+            assert_eq!(self.shard, previous.shard);
+            assert!(self.shard_cap >= previous.shard_cap);
+            assert_eq!(self.space_motion, previous.space_motion);
+            assert!(self.space_motion_cap >= previous.space_motion_cap);
+        }
+
+        fn assert_distinct(&self, other: &Self) {
+            assert_ne!(self.motion, other.motion);
+            assert_ne!(self.present, other.present);
+            assert_ne!(self.key, other.key);
+            assert_ne!(self.movers, other.movers);
+            assert_ne!(self.stale, other.stale);
+            assert_ne!(self.shard, other.shard);
+            assert_ne!(self.space_motion, other.space_motion);
+        }
+
+        fn assert_present_skipped(&self, filled: &Self) {
+            assert!(self.key.is_null());
+            assert_eq!(self.motion, filled.motion);
+            assert!(self.motion_cap >= filled.motion_cap);
+            assert_eq!(self.present, filled.present);
+            assert!(self.present_cap >= filled.present_cap);
+            assert!(self.key_cap >= filled.key_cap);
+            assert_eq!(self.movers, filled.movers);
+            assert!(self.movers_cap >= filled.movers_cap);
+            assert_eq!(self.stale, filled.stale);
+            assert!(self.stale_cap >= filled.stale_cap);
+            assert_eq!(self.shard, filled.shard);
+            assert!(self.shard_cap >= filled.shard_cap);
+            assert_eq!(self.space_motion, filled.space_motion);
+            assert!(self.space_motion_cap >= filled.space_motion_cap);
+        }
     }
 }

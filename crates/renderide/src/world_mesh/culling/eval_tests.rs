@@ -438,7 +438,7 @@ mod hysteresis_cull_integration {
     ) -> VisibilityHysteresis {
         let mut motions = HashMap::new();
         motions.insert(space_id, *motion);
-        VisibilityHysteresis::new(Arc::new(history), HashMap::new(), motions, Vec::new())
+        VisibilityHysteresis::new(history, HashMap::new(), motions, Vec::new())
     }
 
     struct CullCase<'a> {

@@ -38,7 +38,7 @@
 //! scene, headset capture, or discrete-GPU measurement for that issue, so the pass mitigates the
 //! rejection rather than demonstrating that the issue is closed.
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use glam::{Mat4, Vec3};
 use hashbrown::{HashMap, HashSet};
@@ -133,7 +133,10 @@ pub(crate) enum VisibilityClass {
 }
 
 /// Bounds and mesh remembered with [`VisibilityClass`].
-#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// `seen_epoch` is stamped when this frame tests the caster and leaves the row unchanged.
+/// [`VisibilityHysteresis::recycle`] drops rows whose epoch is older than the frame.
+#[derive(Debug)]
 pub(crate) struct CasterRecord {
     /// Classification written at the end of the previous tested frame.
     pub class: VisibilityClass,
@@ -143,6 +146,27 @@ pub(crate) struct CasterRecord {
     pub aabb_max: Vec3,
     /// Mesh asset at that classification.
     pub mesh_asset_id: i32,
+    /// Frame epoch that last tested this caster. Not part of the published classification.
+    seen_epoch: AtomicU32,
+}
+
+impl CasterRecord {
+    /// Builds a record that has not been tested in the current epoch.
+    #[cfg(any(test, feature = "bench-api"))]
+    pub(crate) fn new(
+        class: VisibilityClass,
+        aabb_min: Vec3,
+        aabb_max: Vec3,
+        mesh_asset_id: i32,
+    ) -> Self {
+        Self {
+            class,
+            aabb_min,
+            aabb_max,
+            mesh_asset_id,
+            seen_epoch: AtomicU32::new(0),
+        }
+    }
 }
 
 /// Draw-or-reject outcome of history confirmation for one caster.
@@ -298,6 +322,8 @@ pub(crate) struct VisibilityFrameScratch {
     pub present: Vec<PresentCaster>,
     /// Keys inserted while planning disocclusion. Cleared and refilled with the present list.
     pub present_keys: HashSet<CasterKey>,
+    /// Visible casters whose footprint must punch a hole. Cleared when presence is not tracked.
+    pub movers: Vec<MovedCaster>,
 }
 
 impl VisibilityFrameScratch {
@@ -306,25 +332,46 @@ impl VisibilityFrameScratch {
         self.resolved_motion.clear();
         self.present.clear();
         self.present_keys.clear();
+        self.movers.clear();
     }
+}
+
+/// Motions, disocclusion rectangles, and update shards for one view's cull.
+///
+/// The occlusion system parks one of these on the view. [`VisibilityHysteresis::recycle`]
+/// returns it with the shard vectors drained, so the next frame does not allocate them again.
+#[derive(Default)]
+pub(crate) struct VisibilityCullBuffers {
+    /// In-scope space motions. Cleared and refilled while the plan is built.
+    pub motions: HashMap<RenderSpaceId, SpaceMotion>,
+    /// Padded rectangles for movers. Read by the parallel cull, then returned with the view.
+    pub stale_rects: Vec<ScreenRect>,
+    /// One record buffer per rayon worker, plus one for callers outside the pool.
+    pub shards: Vec<Mutex<Vec<(CasterKey, CasterRecord)>>>,
 }
 
 /// History snapshot plus the cleared map the next [`VisibilityHysteresis::finish`] refills.
 pub(crate) struct VisibilityScratch {
     /// Classification published by the previous tested frame.
-    pub history: Arc<VisibilityHistory>,
+    pub history: VisibilityHistory,
     /// Cleared caster map retained from an earlier publication.
     pub spare: HashMap<CasterKey, CasterRecord>,
     /// `true` when the previous frame skipped history because the prepared count was over the cap.
     pub suspended: bool,
     /// Motion, present-caster, and present-key buffers reused across frames for this view.
     pub frame_scratch: VisibilityFrameScratch,
+    /// Cull buffers returned by [`VisibilityHysteresis::recycle`].
+    pub cull_buffers: VisibilityCullBuffers,
 }
 
 /// Per-view classification carried from the previous tested frame.
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub(crate) struct VisibilityHistory {
     casters: HashMap<CasterKey, CasterRecord>,
+    /// Casters whose class is [`VisibilityClass::Visible`].
+    visible_count: u32,
+    /// Epoch stamped on rows written or confirmed by the last [`VisibilityHysteresis::recycle`].
+    epoch: u32,
 }
 
 impl VisibilityHistory {
@@ -334,7 +381,15 @@ impl VisibilityHistory {
     /// history through [`VisibilityHysteresis::finish`].
     #[cfg(any(test, feature = "bench-api"))]
     pub(crate) fn from_casters(casters: HashMap<CasterKey, CasterRecord>) -> Self {
-        Self { casters }
+        let visible_count = casters
+            .values()
+            .filter(|record| record.class == VisibilityClass::Visible)
+            .count();
+        Self {
+            casters,
+            visible_count: u32::try_from(visible_count).unwrap_or(u32::MAX),
+            epoch: 0,
+        }
     }
 
     /// `true` when any remembered caster was drawn.
@@ -342,9 +397,7 @@ impl VisibilityHistory {
     /// Disocclusion only punches holes for previously visible casters. A history with none of
     /// them has nothing to plan, so the frame can skip the present-caster set.
     pub(crate) fn any_visible(&self) -> bool {
-        self.casters
-            .values()
-            .any(|record| record.class == VisibilityClass::Visible)
+        self.visible_count > 0
     }
 
     /// Record stored for `key`, if this caster was tested last frame.
@@ -367,11 +420,6 @@ impl VisibilityHistory {
     /// Visits every remembered caster. Order is not significant.
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&CasterKey, &CasterRecord)> {
         self.casters.iter()
-    }
-
-    /// Releases the caster map so the next frame can refill it.
-    pub(crate) fn into_casters(self) -> HashMap<CasterKey, CasterRecord> {
-        self.casters
     }
 }
 
@@ -403,48 +451,84 @@ pub(crate) struct PresentCaster {
 
 /// Read-only history plus this frame's motion bounds, disocclusion regions, and update shards.
 pub(crate) struct VisibilityHysteresis {
-    history: Arc<VisibilityHistory>,
-    motions: HashMap<RenderSpaceId, SpaceMotion>,
-    stale_rects: Vec<ScreenRect>,
-    updates: Vec<Mutex<Vec<(CasterKey, CasterRecord)>>>,
+    history: VisibilityHistory,
+    buffers: VisibilityCullBuffers,
     spare: HashMap<CasterKey, CasterRecord>,
+    /// Epoch stamped onto every caster this frame actually tests.
+    epoch: u32,
+}
+
+/// History map plus the spare map and cull buffers to park on the view.
+pub(crate) struct VisibilityRecycle {
+    /// Classification to publish for the next frame.
+    pub history: VisibilityHistory,
+    /// Unused spare map. Its allocation stays on the view.
+    pub spare: HashMap<CasterKey, CasterRecord>,
+    /// Drained cull buffers. Shard capacity is kept.
+    pub buffers: VisibilityCullBuffers,
 }
 
 impl VisibilityHysteresis {
     /// Builds the frame plan consulted by every fine cull in one view.
     ///
-    /// `spare` is a cleared map from the previous publication. [`Self::finish`] refills it
-    /// instead of allocating a new one. Update shards are one buffer per rayon worker, plus one
-    /// for callers outside the pool.
+    /// `spare` is a cleared map from the previous publication. [`Self::finish`] keeps that
+    /// allocation. Shards are created for this call; the view path uses [`Self::from_parts`]
+    /// so the same shard vectors are drained and reused.
+    #[cfg(test)]
     pub(crate) fn new(
-        history: Arc<VisibilityHistory>,
+        history: VisibilityHistory,
         spare: HashMap<CasterKey, CasterRecord>,
         motions: HashMap<RenderSpaceId, SpaceMotion>,
         stale_rects: Vec<ScreenRect>,
     ) -> Self {
+        Self::from_parts(
+            history,
+            spare,
+            VisibilityCullBuffers {
+                motions,
+                stale_rects,
+                shards: Vec::new(),
+            },
+        )
+    }
+
+    /// Builds the frame plan from pooled shard, motion, and rectangle buffers.
+    pub(crate) fn from_parts(
+        history: VisibilityHistory,
+        spare: HashMap<CasterKey, CasterRecord>,
+        mut buffers: VisibilityCullBuffers,
+    ) -> Self {
+        let epoch = next_epoch(history.epoch);
         let threads = rayon::current_num_threads().saturating_add(1);
-        let updates = (0..threads).map(|_| Mutex::new(Vec::new())).collect();
+        if buffers.shards.len() < threads {
+            buffers.shards.reserve(threads - buffers.shards.len());
+            while buffers.shards.len() < threads {
+                buffers.shards.push(Mutex::new(Vec::new()));
+            }
+        }
+        for shard in &buffers.shards {
+            shard.lock().clear();
+        }
         Self {
             history,
-            motions,
-            stale_rects,
-            updates,
+            buffers,
             spare,
+            epoch,
         }
     }
 
     /// Camera pair cached for `space_id` while this view's plan was built.
     pub(crate) fn space_motion(&self, space_id: RenderSpaceId) -> Option<&SpaceMotion> {
-        self.motions.get(&space_id)
+        self.buffers.motions.get(&space_id)
     }
 
-    /// Decides whether `caster` is drawn and records the class to commit at the end of the view.
+    /// Decides whether `caster` is drawn and records a class only when it is new or changed.
     ///
     /// A missing `caster` id cannot be tracked, so the draw is kept. A caster the pyramid does
-    /// not occlude is drawn and stored as visible without a history lookup: the rejection gate
-    /// requires `facts.occluded`, and a non-occluded sample is not another occluder, so the next
-    /// class is visible either way. The record is still written, or the caster can never become
-    /// previously occluded.
+    /// not occlude stays visible. When that visible row is already stored with the same mesh and
+    /// bounds, the existing row is stamped and no shard record is queued. Occluded casters, and
+    /// any caster whose class, mesh, or bounds changed, are queued. Casters that are not tested
+    /// this frame are dropped in [`Self::recycle`], so a frustum miss is newly revealed next time.
     pub(crate) fn allows_draw(
         &self,
         caster: Option<CasterRef>,
@@ -456,6 +540,14 @@ impl VisibilityHysteresis {
             return true;
         };
         if !facts.occluded {
+            if let Some(previous) = self.history.get(&caster.key)
+                && previous.class == VisibilityClass::Visible
+                && previous.mesh_asset_id == caster.mesh_asset_id
+                && !bounds_moved((previous.aabb_min, previous.aabb_max), (aabb_min, aabb_max))
+            {
+                previous.seen_epoch.store(self.epoch, Ordering::Relaxed);
+                return true;
+            }
             self.remember(caster, aabb_min, aabb_max, VisibilityClass::Visible);
             return true;
         }
@@ -467,7 +559,7 @@ impl VisibilityHysteresis {
         let decision = decide_visibility(HistoryInputs {
             previous,
             caster_moved,
-            overlaps_disocclusion: rects_hit_disocclusion(facts.rects, &self.stale_rects),
+            overlaps_disocclusion: rects_hit_disocclusion(facts.rects, &self.buffers.stale_rects),
             hi_z_occludes: facts.occluded,
             other_occluder: facts.other_occluder,
         });
@@ -483,39 +575,95 @@ impl VisibilityHysteresis {
                 aabb_min,
                 aabb_max,
                 mesh_asset_id: caster.mesh_asset_id,
+                seen_epoch: AtomicU32::new(self.epoch),
             },
         ));
     }
 
-    /// Replaces the view history with the casters tested this frame.
-    ///
-    /// Casters that missed the frustum are absent, so the next time they enter they are treated
-    /// as newly revealed and drawn. Duplicate material-slot updates collapse here: `Visible`
-    /// wins, and the bounds are the union.
+    /// Publishes this frame's classification and drops the pooled buffers.
+    #[cfg(test)]
     pub(crate) fn finish(self) -> VisibilityHistory {
+        self.recycle().history
+    }
+
+    /// Publishes this frame's classification and returns the view's pooled buffers.
+    ///
+    /// Untested casters are removed. Duplicate material-slot updates collapse here: `Visible`
+    /// wins, and the bounds are the union. Shard vectors are drained, not freed.
+    pub(crate) fn recycle(self) -> VisibilityRecycle {
         let Self {
             history,
-            updates,
-            mut spare,
-            ..
+            buffers,
+            spare,
+            epoch,
         } = self;
-        drop(history);
-        spare.clear();
-        let total = updates.iter().map(|shard| shard.lock().len()).sum();
-        spare.reserve(total);
-        for shard in updates {
-            for (key, record) in shard.into_inner() {
-                merge_record(&mut spare, key, record);
+        let (mut history, spare) = adopt_spare(history, spare);
+        for shard in &buffers.shards {
+            let mut records = shard.lock();
+            for (key, record) in records.drain(..) {
+                merge_record(&mut history.casters, key, record);
             }
+            drop(records);
         }
-        VisibilityHistory { casters: spare }
+        let mut visible_count = 0u32;
+        history.casters.retain(|_, record| {
+            if record.seen_epoch.load(Ordering::Relaxed) != epoch {
+                return false;
+            }
+            if record.class == VisibilityClass::Visible {
+                visible_count = visible_count.saturating_add(1);
+            }
+            true
+        });
+        history.visible_count = visible_count;
+        history.epoch = epoch;
+        VisibilityRecycle {
+            history,
+            spare,
+            buffers,
+        }
     }
 
     fn shard(&self) -> &Mutex<Vec<(CasterKey, CasterRecord)>> {
         let index = rayon::current_thread_index().map_or(0, |thread| thread.saturating_add(1));
-        let index = index.min(self.updates.len().saturating_sub(1));
-        &self.updates[index]
+        let index = index.min(self.buffers.shards.len().saturating_sub(1));
+        &self.buffers.shards[index]
     }
+}
+
+fn next_epoch(epoch: u32) -> u32 {
+    match epoch.wrapping_add(1) {
+        0 => 1,
+        next => next,
+    }
+}
+
+/// Keeps the larger of the history map and the spare map as the map `recycle` mutates.
+fn adopt_spare(
+    history: VisibilityHistory,
+    mut spare: HashMap<CasterKey, CasterRecord>,
+) -> (VisibilityHistory, HashMap<CasterKey, CasterRecord>) {
+    if history.casters.capacity() >= spare.capacity() {
+        return (history, spare);
+    }
+    spare.clear();
+    spare.reserve(history.casters.len());
+    let VisibilityHistory {
+        casters,
+        visible_count,
+        epoch,
+    } = history;
+    for (key, record) in casters {
+        spare.insert(key, record);
+    }
+    (
+        VisibilityHistory {
+            casters: spare,
+            visible_count,
+            epoch,
+        },
+        HashMap::new(),
+    )
 }
 
 /// Classifies one frustum-visible caster.
@@ -703,10 +851,11 @@ pub(crate) fn plan_disocclusion(
     present: &[PresentCaster],
     present_keys: &mut HashSet<CasterKey>,
     mut include_space: impl FnMut(RenderSpaceId) -> bool,
-) -> Vec<MovedCaster> {
+    movers: &mut Vec<MovedCaster>,
+) {
     present_keys.clear();
     present_keys.reserve(present.len());
-    let mut movers = Vec::new();
+    movers.clear();
     for caster in present {
         if !include_space(caster.space_id) {
             continue;
@@ -745,26 +894,31 @@ pub(crate) fn plan_disocclusion(
             current_aabb: aabb,
         });
     }
-    movers
 }
 
 /// Projects moved or removed visible casters into padded disocclusion rectangles.
-pub(crate) fn disocclusion_rects<F>(movers: &[MovedCaster], mut project: F) -> Vec<ScreenRect>
+#[cfg(test)]
+pub(crate) fn disocclusion_rects<F>(movers: &[MovedCaster], project: F) -> Vec<ScreenRect>
 where
     F: FnMut(Vec3, Vec3) -> Option<ScreenRect>,
 {
     let mut rects = Vec::new();
-    for mover in movers {
-        push_padded(
-            &mut rects,
-            project(mover.previous_aabb.0, mover.previous_aabb.1),
-        );
-        push_padded(
-            &mut rects,
-            project(mover.current_aabb.0, mover.current_aabb.1),
-        );
-    }
+    append_disocclusion_rects(&mut rects, movers, project);
     rects
+}
+
+/// Appends padded rectangles for `movers` into `rects`, keeping that buffer's spare capacity.
+pub(crate) fn append_disocclusion_rects<F>(
+    rects: &mut Vec<ScreenRect>,
+    movers: &[MovedCaster],
+    mut project: F,
+) where
+    F: FnMut(Vec3, Vec3) -> Option<ScreenRect>,
+{
+    for mover in movers {
+        push_padded(rects, project(mover.previous_aabb.0, mover.previous_aabb.1));
+        push_padded(rects, project(mover.current_aabb.0, mover.current_aabb.1));
+    }
 }
 
 fn mono_motion_pad(motion: &SpaceMotion, min: Vec3, max: Vec3) -> Option<f32> {
@@ -826,6 +980,10 @@ fn merge_record(
             } else if existing.class != VisibilityClass::Visible {
                 existing.mesh_asset_id = incoming.mesh_asset_id;
             }
+            existing.seen_epoch.store(
+                incoming.seen_epoch.load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
         }
     }
 }

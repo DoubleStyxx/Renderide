@@ -14,10 +14,10 @@ use rayon::prelude::*;
 use crate::camera::reverse_z_perspective;
 use crate::hi_z_cpu::project_world_aabb_uv;
 use crate::occlusion::hysteresis::{
-    CasterKey, CasterRecord, CasterRef, DepthClip, HistoryAction, HistoryInputs, OcclusionFacts,
-    PresentCaster, ScreenRect, SpaceMotion, VisibilityClass, VisibilityHistory,
-    VisibilityHysteresis, decide_visibility, disocclusion_rects, plan_disocclusion,
-    screen_motion_uv_pad,
+    CasterKey, CasterRecord, CasterRef, DepthClip, HistoryAction, HistoryInputs, MovedCaster,
+    OcclusionFacts, PresentCaster, ScreenRect, SpaceMotion, VisibilityClass, VisibilityCullBuffers,
+    VisibilityHistory, VisibilityHysteresis, append_disocclusion_rects, decide_visibility,
+    plan_disocclusion, screen_motion_uv_pad,
 };
 use crate::render_graph::resources::BufferSizePolicy;
 use crate::render_graph::{BufferKey, TransientPool};
@@ -358,7 +358,7 @@ struct HysteresisQuery {
 }
 
 /// Classifies a fixed mix of stable occluded casters and disoccluded casters.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct HysteresisCullWorkload {
     records: Vec<CasterRecord>,
     queries: Vec<HysteresisQuery>,
@@ -370,18 +370,18 @@ impl HysteresisCullWorkload {
     pub fn standard() -> Self {
         let bounds = Vec3::new(-0.5, -0.5, -2.0);
         let records = vec![
-            CasterRecord {
-                class: VisibilityClass::Occluded,
-                aabb_min: bounds,
-                aabb_max: Vec3::new(0.5, 0.5, -1.0),
-                mesh_asset_id: 1,
-            },
-            CasterRecord {
-                class: VisibilityClass::Visible,
-                aabb_min: bounds,
-                aabb_max: Vec3::new(0.5, 0.5, -1.0),
-                mesh_asset_id: 1,
-            },
+            CasterRecord::new(
+                VisibilityClass::Occluded,
+                bounds,
+                Vec3::new(0.5, 0.5, -1.0),
+                1,
+            ),
+            CasterRecord::new(
+                VisibilityClass::Visible,
+                bounds,
+                Vec3::new(0.5, 0.5, -1.0),
+                1,
+            ),
         ];
         let queries = (0..HYSTERESIS_BATCH)
             .map(|index| match index % 4 {
@@ -451,10 +451,12 @@ impl HysteresisCullWorkload {
 pub struct HysteresisHistoryWorkload {
     present: Vec<PresentCaster>,
     present_keys: HashSet<CasterKey>,
+    movers: Vec<MovedCaster>,
     previous_vp: Mat4,
     current_vp: Mat4,
-    history: Arc<VisibilityHistory>,
+    history: VisibilityHistory,
     spare: HashMap<CasterKey, CasterRecord>,
+    buffers: VisibilityCullBuffers,
 }
 
 impl HysteresisHistoryWorkload {
@@ -488,15 +490,7 @@ impl HysteresisHistoryWorkload {
             } else {
                 VisibilityClass::Visible
             };
-            casters.insert(
-                key,
-                CasterRecord {
-                    class,
-                    aabb_min,
-                    aabb_max,
-                    mesh_asset_id: 1,
-                },
-            );
+            casters.insert(key, CasterRecord::new(class, aabb_min, aabb_max, 1));
             present.push(PresentCaster {
                 key,
                 mesh_asset_id: 1,
@@ -508,28 +502,39 @@ impl HysteresisHistoryWorkload {
         Self {
             present,
             present_keys: HashSet::new(),
+            movers: Vec::new(),
             previous_vp,
             current_vp,
-            history: Arc::new(VisibilityHistory::from_casters(casters)),
+            history: VisibilityHistory::from_casters(casters),
             spare: HashMap::new(),
+            buffers: VisibilityCullBuffers::default(),
         }
     }
 
     /// Plans disocclusion, reprojects every caster, records the decision, and publishes history.
     ///
-    /// The published map's allocation is recycled into the spare for the next call, matching
-    /// [`crate::occlusion::OcclusionSystem::store_visibility_history`].
+    /// The history map, spare map, mover list, and cull buffers stay on the workload. The next
+    /// call clears and refills them, matching the view slot's recycle path.
     #[must_use]
     pub fn step(&mut self) -> u32 {
-        let movers =
-            plan_disocclusion(&self.history, &self.present, &mut self.present_keys, |_| {
-                true
-            });
+        let history = std::mem::take(&mut self.history);
+        let spare = std::mem::take(&mut self.spare);
+        let mut buffers = std::mem::take(&mut self.buffers);
+        plan_disocclusion(
+            &history,
+            &self.present,
+            &mut self.present_keys,
+            |_| true,
+            &mut self.movers,
+        );
         let current_vp = self.current_vp;
         let previous_vp = self.previous_vp;
-        let stale = disocclusion_rects(&movers, |min, max| project_screen(current_vp, min, max));
-        let mut motions = HashMap::new();
-        motions.insert(
+        buffers.stale_rects.clear();
+        append_disocclusion_rects(&mut buffers.stale_rects, &self.movers, |min, max| {
+            project_screen(current_vp, min, max)
+        });
+        buffers.motions.clear();
+        buffers.motions.insert(
             RenderSpaceId(1),
             SpaceMotion {
                 mono: Some((previous_vp, current_vp)),
@@ -541,12 +546,7 @@ impl HysteresisHistoryWorkload {
                 },
             },
         );
-        let frame = VisibilityHysteresis::new(
-            Arc::clone(&self.history),
-            std::mem::take(&mut self.spare),
-            motions,
-            stale,
-        );
+        let frame = VisibilityHysteresis::from_parts(history, spare, buffers);
         let kept = AtomicU32::new(0);
         self.present.par_iter().for_each(|caster| {
             let facts = facts_for_motion_pad(screen_motion_uv_pad(
@@ -567,13 +567,10 @@ impl HysteresisHistoryWorkload {
                 kept.fetch_add(1, Ordering::Relaxed);
             }
         });
-        let next = frame.finish();
-        let old = std::mem::replace(&mut self.history, Arc::new(next));
-        if let Ok(old) = Arc::try_unwrap(old) {
-            let mut recycled = old.into_casters();
-            recycled.clear();
-            self.spare = recycled;
-        }
+        let recycled = frame.recycle();
+        self.history = recycled.history;
+        self.spare = recycled.spare;
+        self.buffers = recycled.buffers;
         kept.load(Ordering::Relaxed)
     }
 }

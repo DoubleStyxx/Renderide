@@ -52,7 +52,8 @@ struct StoredWorldCaster {
 #[derive(Default)]
 pub(super) struct PreparedSpatialIndex {
     spaces: HashMap<RenderSpaceId, PreparedSpatialSpace>,
-    /// World casters in run order. Rebuilt with the index and refit when dynamic bounds move.
+    /// World casters in run order. Rebuilt with the index. Refit updates bounds and inserts
+    /// linear runs whose world AABB appeared, without scanning every caster.
     stored_world_casters: Vec<StoredWorldCaster>,
 }
 
@@ -189,7 +190,11 @@ impl PreparedSpatialIndex {
         self.stored_world_casters.iter().map(|entry| &entry.bounds)
     }
 
-    /// Rewrites caster bounds for `space_id` from the current draws, dropping rows that no longer qualify.
+    /// Rewrites caster bounds for `space_id` and inserts linear runs that became casters.
+    ///
+    /// Rows that no longer qualify are removed in place so the list stays in run order.
+    /// Only this space's linear runs are considered for insertion. Indexed runs already had a
+    /// world AABB when the index was built.
     fn refresh_world_casters(
         &mut self,
         draws: &[FramePreparedDraw],
@@ -211,9 +216,35 @@ impl PreparedSpatialIndex {
                 self.stored_world_casters[index].bounds = bounds;
                 index += 1;
             } else {
-                self.stored_world_casters.swap_remove(index);
+                self.stored_world_casters.remove(index);
             }
         }
+        let mut linear_runs = take_spatial_indices();
+        if let Some(space) = self.spaces.get(&space_id) {
+            linear_runs.extend(space.linear.iter().map(|entry| entry.run_index));
+        }
+        for run_index in linear_runs.iter().copied() {
+            if self
+                .stored_world_casters
+                .binary_search_by_key(&run_index, |entry| entry.run_index)
+                .is_ok()
+            {
+                continue;
+            }
+            let Some(bounds) = runs
+                .get(run_index)
+                .and_then(|run| draws.get(run.start as usize))
+                .and_then(prepared_world_caster)
+            else {
+                continue;
+            };
+            let insert_at = self
+                .stored_world_casters
+                .partition_point(|entry| entry.run_index < run_index);
+            self.stored_world_casters
+                .insert(insert_at, StoredWorldCaster { run_index, bounds });
+        }
+        recycle_spatial_indices(linear_runs);
     }
 
     /// Returns whether `space_id` uses a BVH instead of only linear buckets.
@@ -818,6 +849,58 @@ mod tests {
             .expect("refit keeps the caster");
         assert_eq!(updated.aabb_min, Vec3::new(-0.25, -0.25, -0.25));
         assert_eq!(updated.aabb_max, Vec3::new(0.25, 0.25, 0.25));
+    }
+
+    #[test]
+    fn spatial_refit_inserts_a_caster_whose_bounds_appear_and_keeps_run_order() {
+        let space_id = RenderSpaceId(7);
+        let mut draws = vec![
+            prepared_draw_with_bounds(space_id, 0, Vec3::ZERO, Vec3::ONE),
+            prepared_draw_with_bounds(space_id, 1, Vec3::ZERO, Vec3::ONE),
+            prepared_draw_with_bounds(space_id, 2, Vec3::ZERO, Vec3::ONE),
+        ];
+        draws[1].cull_geometry = Some(MeshCullGeometry {
+            world_aabb: None,
+            rigid_world_matrix: Some(Mat4::IDENTITY),
+            front_face_world_matrix: Some(Mat4::IDENTITY),
+        });
+        let runs = (0..draws.len())
+            .map(|idx| FramePreparedRun {
+                start: idx as u32,
+                end: idx as u32 + 1,
+            })
+            .collect::<Vec<_>>();
+        let mut spatial = PreparedSpatialIndex::default();
+        spatial.rebuild(&draws, &runs);
+        let indices = spatial
+            .world_casters()
+            .map(|bounds| bounds.renderable_index)
+            .collect::<Vec<_>>();
+        assert_eq!(indices, vec![0, 2]);
+
+        draws[1].cull_geometry = Some(MeshCullGeometry {
+            world_aabb: Some((Vec3::ZERO, Vec3::ONE)),
+            rigid_world_matrix: Some(Mat4::IDENTITY),
+            front_face_world_matrix: Some(Mat4::IDENTITY),
+        });
+        spatial.refit_spaces(&draws, &runs, [space_id]);
+        let indices = spatial
+            .world_casters()
+            .map(|bounds| bounds.renderable_index)
+            .collect::<Vec<_>>();
+        assert_eq!(indices, vec![0, 1, 2]);
+
+        draws[0].cull_geometry = Some(MeshCullGeometry {
+            world_aabb: None,
+            rigid_world_matrix: Some(Mat4::IDENTITY),
+            front_face_world_matrix: Some(Mat4::IDENTITY),
+        });
+        spatial.refit_spaces(&draws, &runs, [space_id]);
+        let indices = spatial
+            .world_casters()
+            .map(|bounds| bounds.renderable_index)
+            .collect::<Vec<_>>();
+        assert_eq!(indices, vec![1, 2]);
     }
 
     #[test]

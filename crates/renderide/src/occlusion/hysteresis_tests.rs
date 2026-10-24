@@ -1,7 +1,5 @@
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use glam::Vec3;
     use rayon::prelude::*;
 
@@ -9,12 +7,7 @@ mod tests {
     use crate::camera::reverse_z_perspective;
 
     fn record(class: VisibilityClass, min: Vec3, max: Vec3) -> CasterRecord {
-        CasterRecord {
-            class,
-            aabb_min: min,
-            aabb_max: max,
-            mesh_asset_id: 1,
-        }
+        CasterRecord::new(class, min, max, 1)
     }
 
     fn aabb() -> (Vec3, Vec3) {
@@ -160,7 +153,6 @@ mod tests {
         history
             .casters
             .insert(hidden, record(VisibilityClass::Occluded, min, max));
-        let history = Arc::new(history);
         let frame = VisibilityHysteresis::new(history, HashMap::new(), HashMap::new(), Vec::new());
         let facts = OcclusionFacts {
             occluded: true,
@@ -186,7 +178,7 @@ mod tests {
         let (min, max) = aabb();
         let key = CasterKey::new(RenderSpaceId(1), 3, 9, 4, false);
         let frame = VisibilityHysteresis::new(
-            Arc::new(VisibilityHistory::default()),
+            VisibilityHistory::default(),
             HashMap::new(),
             HashMap::new(),
             Vec::new(),
@@ -225,7 +217,7 @@ mod tests {
         spare.clear();
         let capacity = spare.capacity();
         let frame = VisibilityHysteresis::new(
-            Arc::new(VisibilityHistory::default()),
+            VisibilityHistory::default(),
             spare,
             HashMap::new(),
             Vec::new(),
@@ -237,7 +229,7 @@ mod tests {
     #[test]
     fn parallel_updates_merge_into_one_history() {
         let frame = VisibilityHysteresis::new(
-            Arc::new(VisibilityHistory::default()),
+            VisibilityHistory::default(),
             HashMap::new(),
             HashMap::new(),
             Vec::new(),
@@ -376,7 +368,8 @@ mod tests {
             },
         ];
         let mut present_keys = HashSet::new();
-        let movers = plan_disocclusion(&history, &present, &mut present_keys, |_| true);
+        let mut movers = Vec::new();
+        plan_disocclusion(&history, &present, &mut present_keys, |_| true, &mut movers);
         assert!(movers.iter().any(|mover| {
             mover.previous_aabb == (min, max) && mover.current_aabb == (min, max)
         }));

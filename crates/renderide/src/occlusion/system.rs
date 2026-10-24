@@ -16,7 +16,8 @@ use crate::hi_z_cpu::HiZCullData;
 use crate::history_texture::HistoryTextureMipViews;
 use crate::occlusion::gpu::{HiZBuildRecord, HiZGpuState, HiZHistoryTarget, encode_hi_z_build};
 use crate::occlusion::hysteresis::{
-    CasterKey, CasterRecord, VisibilityFrameScratch, VisibilityHistory, VisibilityScratch,
+    CasterKey, CasterRecord, VisibilityCullBuffers, VisibilityFrameScratch, VisibilityHistory,
+    VisibilityRecycle, VisibilityScratch,
 };
 
 /// Depth source, layout, and logical view for [`OcclusionSystem::encode_hi_z_build_pass`].
@@ -43,22 +44,25 @@ pub struct OcclusionSystem {
     visibility: Mutex<HashMap<ViewId, VisibilitySlot>>,
 }
 
-/// Published history and the cleared map waiting for the next frame.
+/// Published history, the spare map, and the pooled cull buffers for one view.
 struct VisibilitySlot {
-    published: Arc<VisibilityHistory>,
+    published: VisibilityHistory,
     spare: HashMap<CasterKey, CasterRecord>,
     /// Previous frame skipped history because the prepared caster count was over the cap.
     suspended: bool,
     /// Serial-plan buffers returned by [`OcclusionSystem::restore_frame_scratch`].
     frame_scratch: VisibilityFrameScratch,
+    /// Motions, disocclusion rectangles, and shard vectors drained by recycle.
+    cull_buffers: VisibilityCullBuffers,
 }
 
 fn empty_visibility_slot() -> VisibilitySlot {
     VisibilitySlot {
-        published: Arc::new(VisibilityHistory::default()),
+        published: VisibilityHistory::default(),
         spare: HashMap::new(),
         suspended: false,
         frame_scratch: VisibilityFrameScratch::default(),
+        cull_buffers: VisibilityCullBuffers::default(),
     }
 }
 
@@ -161,20 +165,21 @@ impl OcclusionSystem {
         removed
     }
 
-    /// Borrows the published classification and takes the spare map and frame buffers for `view`.
+    /// Takes the published classification, spare map, and pooled buffers for `view`.
     ///
     /// Missing history is an empty snapshot: every caster is treated as newly revealed.
-    /// The spare map keeps its allocation across frames when [`Self::store_visibility_history`]
-    /// can unwrap the previous publication. The frame buffers keep theirs when
-    /// [`Self::restore_frame_scratch`] puts them back before the next begin.
+    /// [`Self::store_visibility_history`] puts the history, spare map, and cull buffers back.
+    /// [`Self::restore_frame_scratch`] puts the serial-plan buffers back before the cull, because
+    /// those buffers are not needed while the parallel cull reads the plan.
     pub(crate) fn begin_visibility(&self, view: ViewId) -> VisibilityScratch {
         let mut slots = self.visibility.lock();
         let slot = slots.entry(view).or_insert_with(empty_visibility_slot);
         let scratch = VisibilityScratch {
-            history: Arc::clone(&slot.published),
+            history: std::mem::take(&mut slot.published),
             spare: std::mem::take(&mut slot.spare),
             suspended: slot.suspended,
             frame_scratch: std::mem::take(&mut slot.frame_scratch),
+            cull_buffers: std::mem::take(&mut slot.cull_buffers),
         };
         drop(slots);
         scratch
@@ -196,27 +201,24 @@ impl OcclusionSystem {
         drop(slots);
     }
 
-    /// Stores the classification produced by this frame's fine cull.
+    /// Stores the classification and pooled buffers produced by this frame's fine cull.
     ///
-    /// When this view is the last owner of the previous publication, that map is cleared and
-    /// kept as the spare for the next frame. `suspended` records that this frame did not attach
-    /// history confirmation, so the next frame stays off until the prepared count falls through
-    /// the resume band.
+    /// `suspended` records that this frame did not attach history confirmation, so the next frame
+    /// stays off until the prepared count falls through the resume band. The spare map and the
+    /// cull buffers are the ones [`VisibilityRecycle`] returned, so their allocations stay on the
+    /// view.
     pub(crate) fn store_visibility_history(
         &self,
         view: ViewId,
-        history: VisibilityHistory,
         suspended: bool,
+        recycled: VisibilityRecycle,
     ) {
         let mut slots = self.visibility.lock();
         let slot = slots.entry(view).or_insert_with(empty_visibility_slot);
         slot.suspended = suspended;
-        let old = std::mem::replace(&mut slot.published, Arc::new(history));
-        if let Ok(old_history) = Arc::try_unwrap(old) {
-            let mut recycled = old_history.into_casters();
-            recycled.clear();
-            slot.spare = recycled;
-        }
+        slot.published = recycled.history;
+        slot.spare = recycled.spare;
+        slot.cull_buffers = recycled.buffers;
         drop(slots);
     }
 
