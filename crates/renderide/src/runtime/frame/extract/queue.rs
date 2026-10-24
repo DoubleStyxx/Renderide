@@ -109,11 +109,6 @@ pub(super) fn queue_view_draws(
         max_prepared_draw_count,
         setup.inner_parallelism,
     );
-    if setup.occlusion.suppress_hiz_after_unready_pipelines() {
-        // The previous classification may already say Occluded from a frame that never
-        // rasterized the caster. Drop it so this frame treats the caster as newly revealed.
-        setup.occlusion.drop_visibility_history();
-    }
     setup.occlusion.with_hysteresis_plans(|plans| {
         plans.clear();
         for (index, view) in prepared.iter().enumerate() {
