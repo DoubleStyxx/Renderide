@@ -1,0 +1,499 @@
+"""Unit tests for frame_bench_gate.py. Run: python3 -m unittest discover -s scripts/ci -p 'test_*.py'"""
+
+from __future__ import annotations
+
+import io
+import json
+import math
+import random
+import statistics
+import sys
+import tempfile
+import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import frame_bench_gate as gate  # noqa: E402
+
+# Workflow defaults (.github/workflows/frame-bench.yml).
+RUNS = 9
+CONFIRM_ROUNDS = 3
+FLAG = 5.0
+FAIL = 10.0
+
+# Noise model shaped like docs/perf-parity-plan.md section 5.1 (lavapipe, 5 runs x 300 frames):
+# per-invocation shift (round medians move ~5-10%), lognormal per-run noise, and an occasional
+# slow run 1.15-1.5x. Gives a median 5-run p95 spread of ~18% with IQR ~12-34% (asserted below).
+SIGMA_INVOCATION = 0.03
+SIGMA_RUN = 0.06
+P_SLOW = 0.10
+SLOW_RANGE = (1.15, 1.5)
+
+
+def invocation(rng: random.Random, true_ms: float, runs: int) -> list[float]:
+    """Per-run p95s for one `renderide-framebench run --runs <runs>` invocation."""
+    shift = math.exp(rng.gauss(0.0, SIGMA_INVOCATION))
+    out = []
+    for _ in range(runs):
+        value = true_ms * shift * math.exp(rng.gauss(0.0, SIGMA_RUN))
+        if rng.random() < P_SLOW:
+            value *= rng.uniform(*SLOW_RANGE)
+        out.append(value)
+    return out
+
+
+def simulate(true_pct: float, runs: int, rounds: int, flag: float, fail: float, trials: int, seed: int) -> float:
+    """Fraction of trials where the whole gate (first pass + pooled confirm) fails."""
+    rng = random.Random(seed)
+    fails = 0
+    for _ in range(trials):
+        first_base = invocation(rng, 1.0, runs)
+        first_head = invocation(rng, 1.0 + true_pct / 100.0, runs)
+        confirm_base, confirm_head = [], []
+        for _ in range(rounds):  # interleaved: base round, head round
+            confirm_base.append(invocation(rng, 1.0, runs))
+            confirm_head.append(invocation(rng, 1.0 + true_pct / 100.0, runs))
+        fails += gate.decide(first_base, first_head, confirm_base, confirm_head, flag, fail) == "fail"
+    return fails / trials
+
+
+def old_rule_fails(base: list[float], head: list[float], threshold: float) -> bool:
+    """The rule Prism rejected on #192 (b56748f6): fail when delta > max(threshold, base spread)."""
+    base_median = statistics.median(base)
+    delta = (statistics.median(head) - base_median) / base_median * 100.0
+    spread = (max(base) - min(base)) / base_median * 100.0
+    return delta > threshold and delta > spread
+
+
+def report(scenarios: dict[str, list[float]]) -> dict:
+    return {
+        "schema": 1,
+        "scenarios": [
+            {"name": name, "cpu_frame_ms": {"p50": 0.0, "p95": runs[0], "p99": 0.0}, "per_run_cpu_frame_ms_p95": runs}
+            for name, runs in scenarios.items()
+        ],
+    }
+
+
+def flat(value: float, n: int = RUNS) -> list[float]:
+    return [value] * n
+
+
+class GateTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def write(self, name: str, scenarios: dict[str, list[float]]) -> Path:
+        path = self.dir / name
+        path.write_text(json.dumps(report(scenarios)), encoding="utf-8")
+        return path
+
+    def run_gate(self, *args: str) -> int:
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            return gate.main(list(args))
+
+    def decide(self, fb, fh, cb, ch) -> str:
+        return gate.decide(fb, fh, cb, ch, FLAG, FAIL)
+
+    def confirm_row(self, fb, fh, cb, ch) -> gate.Row:
+        flat_cb = [v for r in cb for v in r]
+        flat_ch = [v for r in ch for v in r]
+        return gate.evaluate_confirm({"s": fb}, {"s": fh}, {"s": flat_cb}, {"s": flat_ch}, FAIL, [])[0]
+
+    # --- first pass and plumbing ----------------------------------------------------------
+
+    def test_delta_inside_base_spread_is_flagged_then_cleared(self) -> None:
+        # Shape of #178 run 40050133923: +~11% on p95 while base runs spread ~19%. The old
+        # spread rule passed this; the first pass now flags it and a calm confirm clears it.
+        base = [0.19, 0.2145, 0.23, 0.21, 0.22]
+        head = [0.2391, 0.23, 0.24, 0.25, 0.235]
+        row = gate.evaluate_first({"s": base}, {"s": head}, FLAG, [])[0]
+        self.assertGreater(row.delta, FAIL)
+        self.assertEqual(row.status, "FLAG")
+        calm = [[0.21, 0.215, 0.22, 0.212, 0.218]] * CONFIRM_ROUNDS
+        self.assertEqual(self.decide(base, head, calm, calm), "pass")
+
+    def test_flag_threshold_decides_what_is_flagged(self) -> None:
+        base, head = flat(1.0), flat(1.08)
+        self.assertEqual(gate.evaluate_first({"s": base}, {"s": head}, FLAG, [])[0].status, "FLAG")
+        self.assertEqual(gate.evaluate_first({"s": base}, {"s": flat(1.04)}, FLAG, [])[0].status, "ok")
+
+    def test_delta_beyond_threshold_is_flagged_via_cli(self) -> None:
+        base = self.write("b.json", {"s": [1.0, 1.01, 0.99, 1.0, 1.0], "t": flat(1.0)})
+        head = self.write("h.json", {"s": [1.2, 1.21, 1.19, 1.2, 1.2], "t": flat(1.0)})
+        suspects = self.dir / "suspects.txt"
+        code = self.run_gate("--base", str(base), "--head", str(head), "--suspects-out", str(suspects))
+        self.assertEqual(code, 1)
+        self.assertEqual(suspects.read_text(encoding="utf-8"), "s\n")
+
+    def test_threshold_equality_passes(self) -> None:
+        base, head = flat(1.0, 3), flat(1.1, 3)
+        self.assertEqual(gate.evaluate_first({"s": base}, {"s": head}, 10.000001, [])[0].status, "ok")
+        row = gate.evaluate_confirm({"s": base}, {"s": head}, {"s": base * 3}, {"s": head * 3}, 10.000001, [])[0]
+        self.assertEqual(row.status, "ok")
+
+    def test_reports_are_pooled(self) -> None:
+        b1 = self.write("b1.json", {"s": [1.0]})
+        b2 = self.write("b2.json", {"s": [2.0, 3.0]})
+        self.assertEqual(gate.load([b1, b2]), {"s": [1.0, 2.0, 3.0]})
+
+    def test_base_missing_and_head_missing_never_fail(self) -> None:
+        base = {"a": [1.0, 1.0]}
+        head = {"a": [1.0, 1.0], "new_scene": [5.0, 5.0]}
+        expected = {"a": "ok", "new_scene": "base N/A", "gone_scene": "head N/A, skipped"}
+        rows = gate.evaluate_first(base, head, FLAG, ["gone_scene"])
+        self.assertEqual({r.scenario: r.status for r in rows}, expected)
+        self.assertIn("| gone_scene | n/a | n/a | n/a | 0/0 | head N/A, skipped |", gate.render(rows, "t", FLAG, FAIL))
+        rows = gate.evaluate_confirm(base, head, {}, {}, FAIL, ["gone_scene"])
+        self.assertEqual({r.scenario: r.status for r in rows}, expected)
+        md = gate.render(rows, "t", FLAG, FAIL, mode="confirm")
+        self.assertIn("| gone_scene | n/a | n/a | n/a | 0/0 | n/a | n/a | 0/0 | n/a | head N/A, skipped |", md)
+
+    def test_wrong_schema_is_an_input_error(self) -> None:
+        path = self.dir / "bad.json"
+        path.write_text(json.dumps({"schema": 2, "scenarios": []}), encoding="utf-8")
+        self.assertEqual(self.run_gate("--base", str(path), "--head", str(path)), 2)
+
+    def test_threshold_arguments(self) -> None:
+        base = self.write("b.json", {"s": flat(1.0)})
+        head = self.write("h.json", {"s": flat(1.08)})
+        common = ["--base", str(base), "--head", str(head)]
+        self.assertEqual(self.run_gate(*common), 1)  # default flag 5
+        self.assertEqual(self.run_gate(*common, "--flag-threshold", "9"), 0)
+        self.assertEqual(self.run_gate(*common, "--flag-threshold", "11", "--fail-threshold", "10"), 2)
+        self.assertEqual(self.run_gate(*common, "--flag-threshold", "-1"), 2)
+        # Deprecated --threshold maps to --fail-threshold; 4 < default flag 5 lowers the flag to 4
+        # (test_legacy_threshold_alias_lowers_flag) instead of erroring.
+        self.assertEqual(self.run_gate(*common, "--threshold", "4"), 1)
+        self.assertEqual(self.run_gate(*common, "--threshold", "7", "--flag-threshold", "7"), 1)
+        self.assertEqual(self.run_gate(*common, "--threshold", "9", "--flag-threshold", "9"), 0)
+        self.assertEqual(self.run_gate(*common, "--confirm-base", str(base)), 2)  # confirm data needs --mode confirm
+
+    def run_gate_capture(self, *args: str) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = gate.main(list(args))
+        return code, out.getvalue(), err.getvalue()
+
+    def test_legacy_threshold_alias_lowers_flag(self) -> None:
+        # Like the workflow's deprecated `threshold` input: sets fail, lowers flag with a warning.
+        base = self.write("b.json", {"s": flat(1.0)})
+        head = self.write("h.json", {"s": flat(1.045)})  # +4.5%: under default flag 5
+        common = ["--base", str(base), "--head", str(head)]
+        self.assertEqual(self.run_gate(*common), 0)
+        code, out, err = self.run_gate_capture(*common, "--threshold", "4")
+        self.assertEqual(code, 1)  # flag lowered 5 -> 4, so +4.5% is flagged
+        self.assertIn("--threshold is deprecated", err)
+        self.assertIn("lowering --flag-threshold", err)
+        self.assertIn("FLAG when delta > 4%", out)
+        self.assertIn("fail only above 4%", out)
+        # Not larger: the flag is kept and no lowering warning is printed.
+        code, out, err = self.run_gate_capture(*common, "--threshold", "8", "--flag-threshold", "3")
+        self.assertEqual(code, 1)
+        self.assertNotIn("lowering", err)
+        self.assertIn("FLAG when delta > 3%", out)
+        self.assertIn("fail only above 8%", out)
+        # Confirm mode: the alias is the fail bar there too (+4.5% > 4, all runs slower).
+        cb = self.write("cb.json", {"s": flat(1.0)})
+        ch = self.write("ch.json", {"s": flat(1.045)})
+        code, out, _ = self.run_gate_capture(
+            "--mode", "confirm", *common, "--confirm-base", str(cb), "--confirm-head", str(ch), "--threshold", "4"
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("FAIL (pooled, confirm-only)", out)
+
+    # --- input errors (exit 2) ---------------------------------------------------------------
+
+    def write_raw(self, name: str, report_obj: dict) -> Path:
+        path = self.dir / name
+        path.write_text(json.dumps(report_obj), encoding="utf-8")  # NaN is written as `NaN`
+        return path
+
+    def test_head_report_with_zero_scenarios_is_an_input_error(self) -> None:
+        base = self.write("b.json", {"s": flat(1.0)})
+        empty = self.write_raw("h.json", {"schema": 1, "scenarios": []})
+        code, _, err = self.run_gate_capture("--base", str(base), "--head", str(empty))
+        self.assertEqual(code, 2)
+        self.assertIn("head report has zero scenarios", err)
+        missing_key = self.write_raw("h2.json", {"schema": 1})
+        self.assertEqual(self.run_gate("--base", str(base), "--head", str(missing_key)), 2)
+        # A confirm-round head report with zero scenarios is an error too.
+        head = self.write("h3.json", {"s": flat(1.2)})
+        code, _, err = self.run_gate_capture(
+            "--mode", "confirm", "--base", str(base), "--head", str(head),
+            "--confirm-base", str(base), "--confirm-head", str(empty),
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("zero scenarios", err)
+
+    def test_zero_base_median_is_an_input_error(self) -> None:
+        head = self.write("h.json", {"s": flat(1.0), "t": flat(1.0)})
+        zero = self.write("b.json", {"s": [0.0] * 5 + [1.0] * 4, "t": flat(1.0)})  # median 0
+        code, _, err = self.run_gate_capture("--base", str(zero), "--head", str(head))
+        self.assertEqual(code, 2)
+        self.assertIn("base median for 's' is 0.0", err)
+        # Confirm rounds alone with a zero base median (first pass fine).
+        good = self.write("b2.json", {"s": flat(1.0), "t": flat(1.0)})
+        cb = self.write("cb.json", {"s": flat(0.0)})
+        ch = self.write("ch.json", {"s": flat(1.2)})
+        code, _, err = self.run_gate_capture(
+            "--mode", "confirm", "--base", str(good), "--head", str(head),
+            "--confirm-base", str(cb), "--confirm-head", str(ch),
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("confirm-round base median", err)
+        # A non-zero median with a single 0 run is fine.
+        some_zero = self.write("b3.json", {"s": [0.0] + [1.0] * 8, "t": flat(1.0)})
+        self.assertEqual(self.run_gate("--base", str(some_zero), "--head", str(head)), 0)
+
+    def test_nan_value_is_an_input_error(self) -> None:
+        base = self.write("b.json", {"s": flat(1.0)})
+        head = self.write("h.json", {"s": flat(1.0)})
+        nan_head = self.write("hn.json", {"s": [1.0] * 8 + [float("nan")]})
+        nan_base = self.write("bn.json", {"s": [float("nan")] + [1.0] * 8})
+        for args in (
+            ("--base", str(base), "--head", str(nan_head)),
+            ("--base", str(nan_base), "--head", str(head)),
+            ("--mode", "confirm", "--base", str(base), "--head", str(head),
+             "--confirm-base", str(nan_base), "--confirm-head", str(head)),
+        ):
+            code, _, err = self.run_gate_capture(*args)
+            self.assertEqual(code, 2, args)
+            self.assertIn("non-finite value (nan)", err)
+        # The single-p95 fallback (no per-run list) is checked as well.
+        fallback = self.write_raw("hf.json", {"schema": 1, "scenarios": [
+            {"name": "s", "cpu_frame_ms": {"p50": 0.0, "p95": float("nan"), "p99": 0.0}}]})
+        self.assertEqual(self.run_gate("--base", str(base), "--head", str(fallback)), 2)
+
+    # --- confirm paths --------------------------------------------------------------------
+
+    def test_path_a_alone_fails(self) -> None:
+        # Pooled (first + 1 round): +24.5% and significant. Confirm-only: +9%, under the bar.
+        fb, fh = flat(1.0), flat(1.4)
+        cb, ch = [flat(1.0)], [flat(1.09)]
+        row = self.confirm_row(fb, fh, cb, ch)
+        self.assertGreater(row.delta, FAIL)
+        self.assertLessEqual(row.confirm_delta, FAIL)
+        self.assertEqual(row.status, "FAIL (pooled)")
+        self.assertEqual(self.decide(fb, fh, cb, ch), "fail")
+
+    def test_path_b_alone_fails(self) -> None:
+        # First pass +7% (flagged). Confirm rounds alone: median +14%, every head run slower.
+        # Pooled: the first-pass head runs pull the pooled head median down to +8%: (a) passes.
+        fb, fh = flat(1.0), flat(1.07)
+        confirm_head = [1.08] * 13 + [1.14] * 14
+        cb = [flat(1.0)] * CONFIRM_ROUNDS
+        ch = [confirm_head[i * RUNS:(i + 1) * RUNS] for i in range(CONFIRM_ROUNDS)]
+        row = self.confirm_row(fb, fh, cb, ch)
+        self.assertLessEqual(row.delta, FAIL)
+        self.assertGreater(row.confirm_delta, FAIL)
+        self.assertLess(row.confirm_p, gate.DEFAULT_ALPHA)
+        self.assertEqual(row.status, "FAIL (confirm-only)")
+        self.assertEqual(self.decide(fb, fh, cb, ch), "fail")
+
+    def test_both_paths_fail(self) -> None:
+        fb, fh = flat(1.0), flat(1.3)
+        cb, ch = [flat(1.0)] * CONFIRM_ROUNDS, [flat(1.3)] * CONFIRM_ROUNDS
+        self.assertEqual(self.confirm_row(fb, fh, cb, ch).status, "FAIL (pooled, confirm-only)")
+
+    def test_neither_path_fails(self) -> None:
+        # A +20% first-pass spike that the confirm rounds do not reproduce.
+        fb, fh = flat(1.0), flat(1.2)
+        cb, ch = [flat(1.0)] * CONFIRM_ROUNDS, [flat(1.0)] * CONFIRM_ROUNDS
+        row = self.confirm_row(fb, fh, cb, ch)
+        self.assertLessEqual(row.delta, FAIL)
+        self.assertLessEqual(row.confirm_delta, FAIL)
+        self.assertEqual(row.status, "ok")
+        self.assertEqual(self.decide(fb, fh, cb, ch), "pass")
+
+    def test_large_delta_without_significance_passes(self) -> None:
+        # Delta > bar on both paths, but the runs interleave: neither Mann-Whitney test fires.
+        base = [1.0, 1.0, 1.0, 1.25, 1.3, 1.3, 1.35, 1.0]
+        head = [0.95, 0.98, 1.3, 1.3, 1.32, 1.35, 1.36, 0.97]
+        row = gate.evaluate_confirm({"s": base}, {"s": head}, {"s": base}, {"s": head}, FAIL, [])[0]
+        self.assertGreater(row.delta, FAIL)
+        self.assertGreater(row.confirm_delta, FAIL)
+        self.assertGreaterEqual(row.p_value, gate.DEFAULT_ALPHA)
+        self.assertEqual(row.status, "ok")
+
+    def test_delta_between_flag_and_fail_is_flagged_then_cleared(self) -> None:
+        fb, fh = flat(1.0), flat(1.08)  # +8%: above flag 5, below fail 10
+        self.assertEqual(gate.evaluate_first({"s": fb}, {"s": fh}, FLAG, [])[0].status, "FLAG")
+        # Even when the confirm reproduces +8% exactly, nothing is above the bar.
+        self.assertEqual(self.decide(fb, fh, [fb] * CONFIRM_ROUNDS, [fh] * CONFIRM_ROUNDS), "pass")
+        self.assertEqual(self.decide(fb, fh, [flat(1.0)] * 3, [flat(1.0)] * 3), "pass")
+
+    def test_confirm_rounds_zero_uses_fail_threshold(self) -> None:
+        self.assertEqual(self.decide(flat(1.0), flat(1.08), [], []), "pass")  # flagged-only band passes
+        self.assertEqual(self.decide(flat(1.0), flat(1.12), [], []), "fail")
+        self.assertEqual(self.decide(flat(1.0), flat(1.0999), [], []), "pass")  # just under the bar
+
+    def test_cli_confirm_mode_reports_both_paths(self) -> None:
+        fb = self.write("base.json", {"s": flat(1.0), "calm": flat(1.0)})
+        fh = self.write("head.json", {"s": flat(1.07), "calm": flat(1.0)})
+        confirm_head = [1.08] * 13 + [1.14] * 14
+        args = ["--mode", "confirm", "--base", str(fb), "--head", str(fh)]
+        for i in range(CONFIRM_ROUNDS):
+            args += ["--confirm-base", str(self.write(f"cb{i}.json", {"s": flat(1.0)}))]
+            args += ["--confirm-head", str(self.write(f"ch{i}.json", {"s": confirm_head[i * RUNS:(i + 1) * RUNS]}))]
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(gate.main(args), 1)
+        self.assertIn("FAIL (confirm-only)", out.getvalue())
+        self.assertIn("| calm |", out.getvalue())
+        self.assertIn("result: fail (s)", out.getvalue())
+
+    # --- earlier cases: one slow base run must not hide a regression ----------------------
+
+    def test_one_slow_base_run_does_not_hide_17_percent(self) -> None:
+        base, head = [1.0, 1.0, 1.0, 1.0, 1.5], [1.17] * 5
+        self.assertFalse(old_rule_fails(base, head, FAIL))  # the original bug: spread 50% hid it
+        self.assertEqual(gate.evaluate_first({"s": base}, {"s": head}, FLAG, [])[0].status, "FLAG")
+        self.assertEqual(self.decide(base, head, [base] * CONFIRM_ROUNDS, [head] * CONFIRM_ROUNDS), "fail")
+        self.assertEqual(self.decide(base, head, [], []), "fail")  # confirm_rounds=0
+
+    def test_one_slow_base_run_does_not_hide_40_percent(self) -> None:
+        base, head = [1.0, 1.0, 1.0, 1.0, 1.5], [1.4] * 5
+        self.assertFalse(old_rule_fails(base, head, FAIL))
+        self.assertEqual(self.decide(base, head, [base] * CONFIRM_ROUNDS, [head] * CONFIRM_ROUNDS), "fail")
+        self.assertEqual(self.decide(base, head, [], []), "fail")
+
+    def test_one_slow_base_run_via_cli_confirm(self) -> None:
+        base = self.write("base.json", {"s": [1.0, 1.0, 1.0, 1.0, 1.5]})
+        head = self.write("head.json", {"s": [1.17] * 5})
+        suspects = self.dir / "suspects.txt"
+        self.assertEqual(self.run_gate("--base", str(base), "--head", str(head), "--suspects-out", str(suspects)), 1)
+        self.assertEqual(suspects.read_text(encoding="utf-8"), "s\n")
+        args = ["--mode", "confirm", "--base", str(base), "--head", str(head)]
+        for i in range(CONFIRM_ROUNDS):
+            args += ["--confirm-base", str(self.write(f"cb{i}.json", {"s": [1.0, 1.0, 1.0, 1.0, 1.5]}))]
+            args += ["--confirm-head", str(self.write(f"ch{i}.json", {"s": [1.17] * 5}))]
+        self.assertEqual(self.run_gate(*args), 1)
+
+    def test_old_pooled_spread_passed_new_rule_fails(self) -> None:
+        # Tight first-pass base, +20%: the old rule flagged it. Each confirm round carries one
+        # slow base run, so the old pooled-spread confirm saw spread 50% > delta 20% and passed.
+        first_base, first_head = [1.0, 1.02, 0.98, 1.0, 1.01], [1.2] * 5
+        confirm_base = [[1.0, 1.0, 1.0, 1.0, 1.5]] * CONFIRM_ROUNDS
+        confirm_head = [[1.2] * 5] * CONFIRM_ROUNDS
+        self.assertTrue(old_rule_fails(first_base, first_head, FAIL))
+        pooled_base = first_base + [v for r in confirm_base for v in r]
+        pooled_head = first_head + [v for r in confirm_head for v in r]
+        self.assertFalse(old_rule_fails(pooled_base, pooled_head, FAIL))
+        self.assertEqual(self.decide(first_base, first_head, confirm_base, confirm_head), "fail")
+
+    # --- duplicated-confirm property ------------------------------------------------------
+
+    def test_flag_with_duplicated_confirm_data_fails(self) -> None:
+        cases = [
+            ([1.0, 1.0, 1.0, 1.0, 1.5], [1.17] * 5),
+            ([1.0, 1.0, 1.0, 1.0, 1.5], [1.4] * 5),
+            ([1.0, 1.01, 0.99, 1.0, 1.0], [1.2, 1.21, 1.19, 1.2, 1.2]),
+            ([0.19, 0.2145, 0.23, 0.21, 0.22], [0.2391, 0.23, 0.24, 0.25, 0.235]),
+            ([1.0, 1.1, 0.95, 1.3, 1.05], [1.2, 1.15, 1.25, 1.18, 1.4]),
+        ]
+        for base, head in cases:
+            with self.subTest(base=base, head=head):
+                self.assertGreater(gate.delta_percent(base, head), FAIL)
+                for rounds in (1, 2, CONFIRM_ROUNDS, 5):
+                    self.assertEqual(self.decide(base, head, [base] * rounds, [head] * rounds), "fail")
+
+    def duplicated_slips(self, runs: int) -> tuple[int, int]:
+        # Cases whose first-pass delta is above the fail bar, re-"confirmed" with copies of the
+        # first-pass runs. Path (b) then sees the same runs again, so a slip means both
+        # Mann-Whitney tests stayed above alpha. Seeded, so the counts are fixed.
+        rng = random.Random(3)
+        eligible = slipped = 0
+        for _ in range(4000):
+            base = invocation(rng, 1.0, runs)
+            head = invocation(rng, 1.0 + rng.choice([15, 20, 30]) / 100.0, runs)
+            if gate.delta_percent(base, head) <= FAIL:
+                continue
+            eligible += 1
+            if self.decide(base, head, [base] * CONFIRM_ROUNDS, [head] * CONFIRM_ROUNDS) != "fail":
+                slipped += 1
+                self.assertGreaterEqual(sum(v >= statistics.median(head) for v in base), 1)
+        return eligible, slipped
+
+    def test_duplicated_confirm_on_simulated_cases(self) -> None:
+        # runs=5 (old default): 47 of 3511 slip, as before; path (b) adds nothing on copied data.
+        # runs=9 (new default): 6 of 3605.
+        self.assertEqual(self.duplicated_slips(5), (3511, 47))
+        self.assertEqual(self.duplicated_slips(RUNS), (3605, 6))
+
+    # --- Mann-Whitney implementation ------------------------------------------------------
+
+    def test_mann_whitney_exact_known_values(self) -> None:
+        self.assertAlmostEqual(gate.mann_whitney_greater([1, 2, 3, 4, 5], [6, 7, 8, 9, 10]), 1 / 252)
+        self.assertAlmostEqual(gate.mann_whitney_greater([6, 7, 8, 9, 10], [1, 2, 3, 4, 5]), 1.0)
+        self.assertAlmostEqual(gate.mann_whitney_greater([1, 2], [3]), 1 / 3)
+        self.assertAlmostEqual(gate.mann_whitney_greater([1, 1, 1, 1, 1.5], [1.17] * 5), 6 / 252)
+
+    def test_mann_whitney_ties(self) -> None:
+        self.assertEqual(gate.mann_whitney_greater([1.0] * 5, [1.0] * 5), 1.0)
+        self.assertEqual(gate.mann_whitney_greater([1.0] * 30, [1.0] * 30), 1.0)  # zero variance
+        p_tie = gate.mann_whitney_greater([1, 2, 3], [3, 4, 5])
+        self.assertLess(gate.mann_whitney_greater([1, 2, 3], [4, 5, 6]), p_tie)
+        self.assertLess(p_tie, gate.mann_whitney_greater([1, 2, 4], [3, 5, 6]) + 1e-12)
+
+    def test_mann_whitney_normal_close_to_exact(self) -> None:
+        rng = random.Random(11)
+        base = [rng.uniform(1.0, 1.3) for _ in range(8)]
+        head = [rng.uniform(1.05, 1.35) for _ in range(8)]
+        exact = gate.mann_whitney_greater(base, head)
+        saved = gate.EXACT_MAX_COMBINATIONS
+        try:
+            gate.EXACT_MAX_COMBINATIONS = 0
+            approx = gate.mann_whitney_greater(base, head)
+        finally:
+            gate.EXACT_MAX_COMBINATIONS = saved
+        self.assertAlmostEqual(exact, approx, delta=0.02)
+
+    def test_mann_whitney_is_deterministic_for_pooled_defaults(self) -> None:
+        rng = random.Random(5)
+        base = [rng.uniform(1.0, 1.3) for _ in range(RUNS * (CONFIRM_ROUNDS + 1))]
+        head = [v * 1.12 for v in base]
+        self.assertEqual(gate.mann_whitney_greater(base, head), gate.mann_whitney_greater(base, head))
+
+    def test_alpha_must_be_a_probability(self) -> None:
+        base = self.write("b.json", {"s": [1.0]})
+        for alpha in ("0", "1", "-0.1"):
+            with redirect_stderr(io.StringIO()):
+                self.assertEqual(
+                    self.run_gate("--mode", "confirm", "--alpha", alpha, "--base", str(base), "--head", str(base)), 2
+                )
+
+    # --- seeded simulation, noise shaped like section 5.1 ---------------------------------
+
+    def test_noise_model_matches_section_5_1_spreads(self) -> None:
+        rng = random.Random(7)
+        spreads = sorted(
+            (max(x) - min(x)) / statistics.median(x) * 100 for x in (invocation(rng, 1.0, 5) for _ in range(4000))
+        )
+        median_spread = spreads[len(spreads) // 2]
+        self.assertTrue(15.0 <= median_spread <= 30.0, median_spread)
+
+    def test_simulation_at_workflow_defaults(self) -> None:
+        # runs=9, flag=5, fail=10, confirm_rounds=3; 4000 trials each, seeded (0%: seed 2,
+        # regressions: seed 1). Measured: 0% passes 99.925%; +10% fails 47.65% (10% is the bar
+        # itself, so ~50% is expected); +12% fails 69.725%; +15% fails 90.0%.
+        rates = {pct: simulate(pct, RUNS, CONFIRM_ROUNDS, FLAG, FAIL, trials=4000, seed=1) for pct in (10, 12, 15)}
+        pass_0 = 1.0 - simulate(0.0, RUNS, CONFIRM_ROUNDS, FLAG, FAIL, trials=4000, seed=2)
+        print(f"\n[sim runs={RUNS} rounds={CONFIRM_ROUNDS} flag={FLAG:g} fail={FAIL:g}] pass@0%={pass_0:.4f} "
+              + " ".join(f"fail@+{k}%={v:.4f}" for k, v in rates.items()), file=sys.stderr)
+        self.assertGreaterEqual(pass_0, 0.95)
+        self.assertAlmostEqual(pass_0, 0.99925, places=5)
+        self.assertAlmostEqual(rates[10], 0.4765, places=5)
+        self.assertAlmostEqual(rates[12], 0.69725, places=5)
+        self.assertAlmostEqual(rates[15], 0.9000, places=5)
+        self.assertTrue(0.35 <= rates[10] <= 0.65)  # around the bar: a coin flip
+
+
+if __name__ == "__main__":
+    unittest.main()
