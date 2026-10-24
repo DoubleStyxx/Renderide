@@ -1,6 +1,6 @@
 //! Open-HUD proof that the work counters are wired.
 //!
-//! The 300-frame hidden proof lives in `runtime/debug_hud_frame.rs` so this module does not
+//! The hidden-frame proofs live in `runtime/debug_hud_frame.rs` so this module does not
 //! depend on the runtime (that edge would cycle `backend -> diagnostics -> runtime`).
 
 use crate::frontend::input::WindowInputAccumulator;
@@ -35,7 +35,6 @@ fn assert_open_counters_wired(counts: HudWorkCounts) {
 
 #[test]
 fn open_hud_wires_work_counters() {
-    let _guard = work_counters::test_lock();
     work_counters::reset();
     let mut ui = HudUi::from_measure_fixture(HudMeasureView::Stats);
     for _ in 0..3 {
@@ -46,7 +45,6 @@ fn open_hud_wires_work_counters() {
 
 #[test]
 fn input_build_counter_tracks_frame_hud_input() {
-    let _guard = work_counters::test_lock();
     work_counters::reset();
     let mut acc = WindowInputAccumulator::default();
     let _input = frame_hud_input(true, 1.0, &mut acc);

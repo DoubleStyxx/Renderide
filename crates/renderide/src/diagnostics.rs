@@ -14,12 +14,11 @@ mod watchdog;
 
 pub(crate) use hud::DebugHudOverlayContext;
 pub(crate) use hud::input::frame_hud_input;
-pub(crate) use hud::work_counters::{note_settings_lock, note_snapshot_clone};
 #[cfg(test)]
 pub(crate) use hud::work_counters::{
-    reset as reset_hud_work_counters, snapshot as snapshot_hud_work_counters,
-    test_lock as lock_hud_work_counters,
+    HudWorkCounts, reset as reset_hud_work_counters, snapshot as snapshot_hud_work_counters,
 };
+pub(crate) use hud::work_counters::{note_settings_lock, note_snapshot_clone};
 pub use hud::{
     DebugHud, DebugHudInput, DebugHudMetricInterest, sanitize_input_state_for_imgui_host,
 };

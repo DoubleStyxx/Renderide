@@ -285,7 +285,8 @@ impl RendererRuntime {
     /// Hidden-HUD encode early-out shared with [`Self::encode_debug_hud_overlay_on_surface`].
     ///
     /// Returns `true` when nothing visible would draw. Callers skip command-encoder creation.
-    /// The hidden counter test drives this without a device; H7 un-ignores that test.
+    /// The hidden counter tests drive this without a device. Capture counters are asserted
+    /// now; H7 un-ignores the `input_builds` half.
     pub(crate) fn skip_debug_hud_overlay_encode(&mut self) -> bool {
         if self.backend.debug_hud_has_visible_content() {
             false
@@ -382,45 +383,52 @@ mod hidden_zero_work {
     use crate::config::RendererSettings;
     use crate::diagnostics::hud_measure::{HudMeasureView, HudUi};
     use crate::diagnostics::{
-        frame_hud_input, lock_hud_work_counters, reset_hud_work_counters,
+        DebugHudMetricInterest, HudWorkCounts, frame_hud_input, reset_hud_work_counters,
         snapshot_hud_work_counters,
     };
     use crate::frontend::input::WindowInputAccumulator;
+    use crate::hud_contract::{PerViewHudConfig, PerViewHudOutputs};
 
     use super::super::RendererRuntime;
 
     const HIDDEN_FRAMES: u32 = 300;
 
-    /// H7 un-ignores this. Master still builds HUD input on hidden frames
-    /// (`DebugHudInput::from_winit` via `frame_hud_input` in `app/driver/frame.rs`), so
-    /// `input_builds` is non-zero. `settings_locks` stay above zero until H8 and are not asserted.
-    #[test]
-    #[ignore = "H7 un-ignores this: hidden frames still build DebugHudInput::from_winit (app/driver/frame.rs)"]
-    fn hidden_frames_do_no_hud_work() {
-        let _guard = lock_hud_work_counters();
-        reset_hud_work_counters();
-        let mut open = HudUi::from_measure_fixture(HudMeasureView::Stats);
-        for _ in 0..3 {
-            open.run_measure_frame();
-        }
-        let mut acc = WindowInputAccumulator::default();
-        let _open_input = frame_hud_input(true, 1.0, &mut acc);
-        let open_counts = snapshot_hud_work_counters();
-        assert!(open_counts.ui_frames > 0);
-        assert!(open_counts.draw_lists > 0);
-        assert!(open_counts.fmt_calls > 0);
-        assert!(open_counts.settings_locks > 0);
-        assert!(open_counts.input_builds > 0);
-        drop(open);
-
-        reset_hud_work_counters();
+    fn hidden_capture_settings() -> RendererSettings {
         let mut settings = RendererSettings::default();
         settings.debug.hud.imgui_visible = false;
+        settings.debug.debug_hud_frame_timing = true;
+        settings.debug.debug_hud_enabled = true;
+        settings.debug.debug_hud_transforms = true;
+        settings.debug.debug_hud_textures = true;
+        settings
+    }
+
+    fn assert_hidden_settings_disable_capture(settings: &RendererSettings) {
+        let interest = super::debug_hud_metric_interest(settings);
+        assert_eq!(interest, DebugHudMetricInterest::default());
+        let config = interest.per_view_hud_config();
+        assert_eq!(config, PerViewHudConfig::default());
+        assert!(!config.capture_world_mesh_draw_stats);
+        assert!(!config.capture_world_mesh_view_stats);
+        assert!(!config.capture_world_mesh_draw_state_rows);
+        assert!(!config.capture_current_view_texture_2d_asset_ids);
+    }
+
+    fn drive_mounted_hidden_frames() -> HudWorkCounts {
+        let settings = hidden_capture_settings();
+        assert_hidden_settings_disable_capture(&settings);
         let mut runtime = RendererRuntime::new(
             None,
             Arc::new(RwLock::new(settings)),
             PathBuf::from("hud-hidden-counter.toml"),
         );
+        runtime
+            .backend
+            .mount_measure_hud(HudUi::from_measure_fixture(HudMeasureView::Hidden));
+        reset_hud_work_counters();
+        runtime
+            .backend
+            .apply_debug_hud_per_view_outputs(&PerViewHudOutputs::default());
         let mut acc = WindowInputAccumulator::default();
         for _ in 0..HIDDEN_FRAMES {
             let input = frame_hud_input(false, 1.0, &mut acc);
@@ -429,15 +437,46 @@ mod hidden_zero_work {
             runtime.capture_debug_hud_frame(None);
             assert!(runtime.skip_debug_hud_overlay_encode());
         }
+        snapshot_hud_work_counters()
+    }
 
-        let counts = snapshot_hud_work_counters();
+    #[test]
+    fn hidden_mounted_hud_does_no_capture_work() {
+        let counts = drive_mounted_hidden_frames();
         assert!(
             counts.ui_frames == 0
                 && counts.draw_lists == 0
                 && counts.encodes == 0
                 && counts.snapshot_clones == 0
-                && counts.fmt_calls == 0
-                && counts.input_builds == 0,
+                && counts.fmt_calls == 0,
+            "hidden mounted HUD still did capture work over {HIDDEN_FRAMES} frames: \
+             ui_frames={} draw_lists={} encodes={} snapshot_clones={} fmt_calls={} \
+             input_builds={} settings_locks={}. input_builds stays non-zero until H7 \
+             (frame_hud_input ignores hud_visible). settings_locks are residual until H8.",
+            counts.ui_frames,
+            counts.draw_lists,
+            counts.encodes,
+            counts.snapshot_clones,
+            counts.fmt_calls,
+            counts.input_builds,
+            counts.settings_locks,
+        );
+        assert!(
+            counts.settings_locks > u64::from(HIDDEN_FRAMES) * 2,
+            "mounted HUD visibility was not consulted: settings_locks={} over {HIDDEN_FRAMES} frames. \
+             sync and capture take two locks per frame; has_visible_content must take another.",
+            counts.settings_locks,
+        );
+    }
+
+    /// H7 un-ignores this. `frame_hud_input` still builds HUD input on hidden frames
+    /// (`DebugHudInput::from_winit` in `app/driver/frame.rs`), so `input_builds` is non-zero.
+    #[test]
+    #[ignore = "H7 un-ignores this: hidden frames still build DebugHudInput::from_winit (app/driver/frame.rs)"]
+    fn hidden_frames_do_no_hud_work() {
+        let counts = drive_mounted_hidden_frames();
+        assert!(
+            counts.input_builds == 0,
             "hidden HUD still did work over {HIDDEN_FRAMES} frames: \
              ui_frames={} draw_lists={} encodes={} snapshot_clones={} fmt_calls={} input_builds={} \
              settings_locks={}. input_builds is non-zero because app/driver/frame.rs still builds \
