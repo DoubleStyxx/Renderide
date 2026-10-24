@@ -23,6 +23,8 @@ RUNS = 9
 CONFIRM_ROUNDS = 3
 FLAG = 5.0
 FAIL = 10.0
+# Opt-in absolute floor used by the explicit floor tests (the gate default is 0, off; O8 open).
+FLOOR = 0.05
 
 # Noise model shaped like docs/perf-parity-plan.md section 5.1 (lavapipe, 5 runs x 300 frames):
 # per-invocation shift (round medians move ~5-10%), lognormal per-run noise, and an occasional
@@ -45,18 +47,30 @@ def invocation(rng: random.Random, true_ms: float, runs: int) -> list[float]:
     return out
 
 
-def simulate(true_pct: float, runs: int, rounds: int, flag: float, fail: float, trials: int, seed: int) -> float:
+def simulate(
+    true_pct: float,
+    runs: int,
+    rounds: int,
+    flag: float,
+    fail: float,
+    trials: int,
+    seed: int,
+    true_ms: float = 1.0,
+    abs_floor_ms: float = gate.DEFAULT_ABS_FLOOR_MS,
+) -> float:
     """Fraction of trials where the whole gate (first pass + pooled confirm) fails."""
     rng = random.Random(seed)
+    head_ms = true_ms * (1.0 + true_pct / 100.0)
     fails = 0
     for _ in range(trials):
-        first_base = invocation(rng, 1.0, runs)
-        first_head = invocation(rng, 1.0 + true_pct / 100.0, runs)
+        first_base = invocation(rng, true_ms, runs)
+        first_head = invocation(rng, head_ms, runs)
         confirm_base, confirm_head = [], []
         for _ in range(rounds):  # interleaved: base round, head round
-            confirm_base.append(invocation(rng, 1.0, runs))
-            confirm_head.append(invocation(rng, 1.0 + true_pct / 100.0, runs))
-        fails += gate.decide(first_base, first_head, confirm_base, confirm_head, flag, fail) == "fail"
+            confirm_base.append(invocation(rng, true_ms, runs))
+            confirm_head.append(invocation(rng, head_ms, runs))
+        verdict = gate.decide(first_base, first_head, confirm_base, confirm_head, flag, fail, abs_floor_ms=abs_floor_ms)
+        fails += verdict == "fail"
     return fails / trials
 
 
@@ -127,25 +141,27 @@ class GateTests(unittest.TestCase):
     def decide(self, fb, fh, cb, ch) -> str:
         return gate.decide(fb, fh, cb, ch, FLAG, FAIL)
 
-    def confirm_row(self, fb, fh, cb, ch) -> gate.Row:
+    def confirm_row(self, fb, fh, cb, ch, abs_floor_ms: float = gate.DEFAULT_ABS_FLOOR_MS) -> gate.Row:
         flat_cb = [v for r in cb for v in r]
         flat_ch = [v for r in ch for v in r]
-        return gate.evaluate_confirm({"s": fb}, {"s": fh}, {"s": flat_cb}, {"s": flat_ch}, FAIL, [])[0]
+        return gate.evaluate_confirm(
+            {"s": fb}, {"s": fh}, {"s": flat_cb}, {"s": flat_ch}, FAIL, [], abs_floor_ms=abs_floor_ms
+        )[0]
 
     # --- first pass and plumbing ----------------------------------------------------------
 
     def test_delta_inside_base_spread_is_flagged_then_cleared(self) -> None:
         # Shape of #178 run 40050133923: +~11% on p95 while base runs spread ~19%. The old
         # spread rule passed this; the first pass now flags it and a calm confirm clears it.
-        # Relative rule only (abs floor off): at ~0.21 ms this delta is 0.025 ms, which the
-        # default 0.05 ms floor clears outright (test_abs_floor_clears_issue_178_shape).
+        # Default rule (abs floor off). At ~0.21 ms this delta is 0.025 ms, which an opted-in
+        # 0.05 ms floor clears outright (test_abs_floor_clears_issue_178_shape).
         base = [0.19, 0.2145, 0.23, 0.21, 0.22]
         head = [0.2391, 0.23, 0.24, 0.25, 0.235]
-        row = gate.evaluate_first({"s": base}, {"s": head}, FLAG, [], abs_floor_ms=0.0)[0]
+        row = gate.evaluate_first({"s": base}, {"s": head}, FLAG, [])[0]
         self.assertGreater(row.delta, FAIL)
         self.assertEqual(row.status, "FLAG")
         calm = [[0.21, 0.215, 0.22, 0.212, 0.218]] * CONFIRM_ROUNDS
-        self.assertEqual(gate.decide(base, head, calm, calm, FLAG, FAIL, abs_floor_ms=0.0), "pass")
+        self.assertEqual(self.decide(base, head, calm, calm), "pass")
 
     def test_flag_threshold_decides_what_is_flagged(self) -> None:
         base, head = flat(1.0), flat(1.08)
@@ -507,8 +523,8 @@ class GateTests(unittest.TestCase):
             with self.subTest(base=base, head=head):
                 self.assertGreater(gate.delta_percent(base, head), FAIL)
                 for rounds in (1, 2, CONFIRM_ROUNDS, 5):
-                    # Mann-Whitney property, so the abs floor is off (the 0.2 ms case is under it).
-                    verdict = gate.decide(base, head, [base] * rounds, [head] * rounds, FLAG, FAIL, abs_floor_ms=0.0)
+                    # Mann-Whitney property, default rule (abs floor off).
+                    verdict = self.decide(base, head, [base] * rounds, [head] * rounds)
                     self.assertEqual(verdict, "fail")
 
     def duplicated_slips(self, runs: int) -> tuple[int, int]:
@@ -588,20 +604,46 @@ class GateTests(unittest.TestCase):
 
     def test_simulation_at_workflow_defaults(self) -> None:
         # runs=9, flag=5, fail=10, confirm_rounds=3; 4000 trials each, seeded (0%: seed 2,
-        # regressions: seed 1), true value 1 ms, default 0.05 ms abs floor. Measured: 0% passes
-        # 99.925%; +10% fails 47.625% (10% is the bar itself, so ~50% is expected; 47.65% before
-        # the floor: one of 4000 trials had a confirm delta under 0.05 ms); +12% fails 69.725%;
-        # +15% fails 90.0%.
+        # regressions: seed 1), true value 1 ms, default rule (abs floor off). Measured: 0% passes
+        # 99.925%; +10% fails 47.65% (10% is the bar itself, so ~50% is expected); +12% fails
+        # 69.725%; +15% fails 90.0%.
         rates = {pct: simulate(pct, RUNS, CONFIRM_ROUNDS, FLAG, FAIL, trials=4000, seed=1) for pct in (10, 12, 15)}
         pass_0 = 1.0 - simulate(0.0, RUNS, CONFIRM_ROUNDS, FLAG, FAIL, trials=4000, seed=2)
         print(f"\n[sim runs={RUNS} rounds={CONFIRM_ROUNDS} flag={FLAG:g} fail={FAIL:g}] pass@0%={pass_0:.4f} "
               + " ".join(f"fail@+{k}%={v:.4f}" for k, v in rates.items()), file=sys.stderr)
         self.assertGreaterEqual(pass_0, 0.95)
         self.assertAlmostEqual(pass_0, 0.99925, places=5)
-        self.assertAlmostEqual(rates[10], 0.47625, places=5)
+        self.assertAlmostEqual(rates[10], 0.4765, places=5)
         self.assertAlmostEqual(rates[12], 0.69725, places=5)
         self.assertAlmostEqual(rates[15], 0.9000, places=5)
         self.assertTrue(0.35 <= rates[10] <= 0.65)  # around the bar: a coin flip
+
+    def test_simulation_at_0_2_ms_floor_off_and_on(self) -> None:
+        # Why the abs floor is opt-in (O8 open): today's lavapipe scenarios run at ~0.2-0.4 ms.
+        # Same noise model and seeds as above at a true 0.2 ms median, 4000 trials each.
+        # Measured: floor off (default): 0% passes 99.925%, +15% fails 90.0%, +20% fails
+        # 98.95% (the model is scale-free, so this matches 1 ms). 0.05 ms floor: 0% passes
+        # 100%, +15% fails 0.0%, +20% fails 4.8%, since a 0.05 ms floor at 0.2 ms is a 25% bar.
+        def rate(pct: float, floor: float, seed: int = 1) -> float:
+            return simulate(pct, RUNS, CONFIRM_ROUNDS, FLAG, FAIL, trials=4000, seed=seed, true_ms=0.2,
+                            abs_floor_ms=floor)
+
+        off = {pct: rate(pct, gate.DEFAULT_ABS_FLOOR_MS) for pct in (15, 20)}
+        on = {pct: rate(pct, FLOOR) for pct in (15, 20)}
+        pass_0_off = 1.0 - rate(0.0, gate.DEFAULT_ABS_FLOOR_MS, seed=2)
+        pass_0_on = 1.0 - rate(0.0, FLOOR, seed=2)
+        print(f"\n[sim 0.2 ms] floor off: pass@0%={pass_0_off:.4f} fail@+15%={off[15]:.4f} fail@+20%={off[20]:.4f}; "
+              f"floor {FLOOR:g} ms: pass@0%={pass_0_on:.4f} fail@+15%={on[15]:.4f} fail@+20%={on[20]:.4f}",
+              file=sys.stderr)
+        self.assertEqual(gate.DEFAULT_ABS_FLOOR_MS, 0.0)
+        self.assertAlmostEqual(off[15], 0.9000, places=5)
+        self.assertAlmostEqual(off[20], 0.9895, places=5)
+        self.assertAlmostEqual(pass_0_off, 0.99925, places=5)
+        self.assertAlmostEqual(on[15], 0.0, places=5)
+        self.assertAlmostEqual(on[20], 0.048, places=5)
+        self.assertAlmostEqual(pass_0_on, 1.0, places=5)
+        self.assertGreaterEqual(off[15], 0.85)  # floor off keeps the +15% detection target
+        self.assertLessEqual(on[15], 0.05)  # a 0.05 ms floor suppresses it at 0.2 ms
 
     # --- schema 2 ---------------------------------------------------------------------------
 
@@ -679,35 +721,42 @@ class GateTests(unittest.TestCase):
         # The #178 shape: +11.5% at ~0.21 ms is a 0.025 ms delta, so it never flags or fails.
         base = [0.19, 0.2145, 0.23, 0.21, 0.22]
         head = [0.2391, 0.23, 0.24, 0.25, 0.235]
-        row = gate.evaluate_first({"s": base}, {"s": head}, FLAG, [])[0]
+        row = gate.evaluate_first({"s": base}, {"s": head}, FLAG, [], FLOOR)[0]
         self.assertGreater(row.delta, FAIL)
         self.assertEqual(row.status, "ok (abs floor)")
         self.assertFalse(gate.is_failure(row.status))
-        self.assertEqual(self.decide(base, head, [base] * CONFIRM_ROUNDS, [head] * CONFIRM_ROUNDS), "pass")
-        self.assertEqual(self.decide(base, head, [], []), "pass")
+        cb, ch = [base] * CONFIRM_ROUNDS, [head] * CONFIRM_ROUNDS
+        self.assertEqual(gate.decide(base, head, cb, ch, FLAG, FAIL, abs_floor_ms=FLOOR), "pass")
+        self.assertEqual(gate.decide(base, head, [], [], FLAG, FAIL, abs_floor_ms=FLOOR), "pass")
+        self.assertEqual(self.decide(base, head, cb, ch), "fail")  # default: floor off
 
     def test_abs_floor_boundary_is_inclusive(self) -> None:
         # Exactly 0.05 ms (+50% of 0.1 ms) does not flag; 0.0501 ms does.
-        self.assertEqual(gate.evaluate_first({"s": flat(0.1)}, {"s": flat(0.15)}, FLAG, [])[0].status, "ok (abs floor)")
-        self.assertEqual(gate.evaluate_first({"s": flat(1.0)}, {"s": flat(1.05)}, 4.0, [])[0].status, "ok (abs floor)")
-        self.assertEqual(gate.evaluate_first({"s": flat(0.1)}, {"s": flat(0.1501)}, FLAG, [])[0].status, "FLAG")
+        def status(base: float, head: float, flag: float) -> str:
+            return gate.evaluate_first({"s": flat(base)}, {"s": flat(head)}, flag, [], FLOOR)[0].status
+
+        self.assertEqual(status(0.1, 0.15, FLAG), "ok (abs floor)")
+        self.assertEqual(status(1.0, 1.05, 4.0), "ok (abs floor)")
+        self.assertEqual(status(0.1, 0.1501, FLAG), "FLAG")
 
     def test_abs_floor_applies_to_both_confirm_paths(self) -> None:
         # Large, significant relative regressions under the floor never fail; above it they do.
         base, head = [0.1, 0.101, 0.099, 0.1, 0.1], [0.14, 0.141, 0.139, 0.14, 0.14]  # +40%, 0.04 ms
-        row = self.confirm_row(base, head, [base] * CONFIRM_ROUNDS, [head] * CONFIRM_ROUNDS)
+        row = self.confirm_row(base, head, [base] * CONFIRM_ROUNDS, [head] * CONFIRM_ROUNDS, FLOOR)
         self.assertEqual(row.status, "ok (abs floor)")
         self.assertLess(row.p_value, 0.05)
         self.assertLess(row.confirm_p, 0.05)
         big_base = [v * 10 for v in base]
         big_head = [v * 10 for v in head]  # +40%, 0.4 ms
-        row = self.confirm_row(big_base, big_head, [big_base] * CONFIRM_ROUNDS, [big_head] * CONFIRM_ROUNDS)
+        row = self.confirm_row(big_base, big_head, [big_base] * CONFIRM_ROUNDS, [big_head] * CONFIRM_ROUNDS, FLOOR)
         self.assertEqual(row.status, "FAIL (pooled, confirm-only)")
+        row = self.confirm_row(base, head, [base] * CONFIRM_ROUNDS, [head] * CONFIRM_ROUNDS)
+        self.assertEqual(row.status, "FAIL (pooled, confirm-only)")  # default: floor off
 
     def test_abs_floor_never_hides_a_regression_above_it(self) -> None:
         # A +20% regression at 2 ms (0.4 ms) still flags and fails, with or without the floor.
         base, head = [2.0, 2.02, 1.98, 2.0, 2.0], [2.4, 2.42, 2.38, 2.4, 2.4]
-        for floor in (0.0, gate.DEFAULT_ABS_FLOOR_MS):
+        for floor in (0.0, FLOOR):
             with self.subTest(floor=floor):
                 verdict = gate.decide(base, head, [base] * CONFIRM_ROUNDS, [head] * CONFIRM_ROUNDS, FLAG, FAIL,
                                       abs_floor_ms=floor)
@@ -718,6 +767,9 @@ class GateTests(unittest.TestCase):
         head = self.write2("h.json", {"s": flat(0.24)})  # +20%, 0.04 ms
         common = ["--base", str(base), "--head", str(head)]
         code, out, _ = self.run_gate_capture(*common)
+        self.assertEqual(code, 1)  # default: floor off, +20% flags
+        self.assertNotIn("abs floor", out.lower())
+        code, out, _ = self.run_gate_capture(*common, "--abs-floor-ms", "0.05")
         self.assertEqual(code, 0)
         self.assertIn("| ok (abs floor) |", out)
         self.assertIn("<= 0.05 ms never flags or fails", out)

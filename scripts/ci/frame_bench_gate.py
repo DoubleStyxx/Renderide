@@ -19,10 +19,14 @@ Two thresholds, both percent, `--flag-threshold <= --fail-threshold`:
   `--threshold` is a deprecated alias of `--fail-threshold`, like the workflow input: it sets the
   fail threshold and, with a warning, lowers `--flag-threshold` to it when the flag is larger.
 
-Absolute floor (`--abs-floor-ms`, default 0.05): a scenario whose head median minus base
-median is at most the floor (in ms) never flags and never fails, whatever its percent. The floor
-applies to every data set the rule looks at (first pass, pooled, confirm-only). Such rows show
-`ok (abs floor)`. `--abs-floor-ms 0` restores the relative-only rule.
+Absolute floor (`--abs-floor-ms`, default 0, i.e. off; opt-in): a scenario whose head median
+minus base median is at most the floor (in ms) never flags and never fails, whatever its percent.
+The floor applies to every data set the rule looks at (first pass, pooled, confirm-only). Such
+rows show `ok (abs floor)`. Whether CI should use a nonzero default is open question O8
+(plans/test-bench-rewrite.md); it is off by default because at today's lavapipe medians
+(~0.2-0.4 ms) a 0.05 ms floor is a 12.5-25% effective bar, above the 10% fail threshold (seeded
+simulation at a 0.2 ms median, test_simulation_at_0_2_ms_floor_off_and_on: a true +15% fails
+about 90% of the time with the floor off and almost never with a 0.05 ms floor).
 
 Decision rule:
 
@@ -48,9 +52,9 @@ Decision rule:
    implements the same rule.
 
 Measured at the workflow defaults (`runs=9`, flag 5, fail 10, `confirm_rounds=3`; seeded noise
-model below, true value 1 ms, default 0.05 ms abs floor, 4000 trials per point): a true 0%
-passes 99.925%; a true +10% fails 47.625% (10% is the bar itself, so about 50% is expected;
-47.65% with the floor off); +12% fails 69.725%; +15% fails 90.0%. Flag 5 was
+model below, true value 1 ms, no abs floor, 4000 trials per point): a true 0% passes
+99.925%; a true +10% fails 47.65% (10% is the bar itself, so about 50% is expected); +12%
+fails 69.725%; +15% fails 90.0%. Flag 5 was
 chosen over 6 (+15% failed 87.875%) to reach the 90% target at the same 0% pass rate.
 
 Known limit (tested, see test_frame_bench_gate.py): if confirm rounds add no new information
@@ -100,8 +104,9 @@ from pathlib import Path
 SCHEMA = 2  # newest schema renderide-framebench writes
 SUPPORTED_SCHEMAS = (1, 2)
 DEFAULT_ALPHA = 0.05
-# Head-minus-base median deltas at or below this many ms never flag or fail.
-DEFAULT_ABS_FLOOR_MS = 0.05
+# Head-minus-base median deltas at or below this many ms never flag or fail. 0 = off (default);
+# the floor is opt-in via --abs-floor-ms until O8 is decided.
+DEFAULT_ABS_FLOOR_MS = 0.0
 # Float slack at the floor boundary (1.05 - 1.0 is 0.05000000000000004).
 ABS_FLOOR_EPSILON_MS = 1e-9
 # C(14, 7) = 3432 and C(16, 8) = 12870 are exact; C(18, 9) = 48620 uses the normal approximation.
@@ -486,7 +491,7 @@ def main(argv: list[str] | None = None) -> int:
         "--abs-floor-ms",
         type=float,
         default=DEFAULT_ABS_FLOOR_MS,
-        help="ms; a head-minus-base median delta at or below this never flags or fails (0 disables)",
+        help="ms; a head-minus-base median delta at or below this never flags or fails (default 0 = off; opt-in, O8)",
     )
     parser.add_argument("--head-missing", action="append", default=[], help="requested scenario head does not define")
     parser.add_argument("--title", default="Frame bench gate")

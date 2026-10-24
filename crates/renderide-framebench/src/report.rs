@@ -123,7 +123,8 @@ pub struct FrameBenchReport {
     pub runs: u32,
     /// Adapter from the first run.
     pub adapter: AdapterInfo,
-    /// Schema 2: machine and environment the runs used. Absent in schema-1 reports.
+    /// Schema 2: machine and environment the runs used. Absent in schema-1 reports. `Option`
+    /// only so schema 1 deserializes: `compare` and the CI gate reject a schema-2 report without it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runner: Option<RunnerInfo>,
     /// True when at least one scenario published GPU pass times.

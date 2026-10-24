@@ -116,6 +116,30 @@ fn run_with_bad_resolution_or_zero_runs_exits_2() {
 }
 
 #[test]
+fn clap_usage_error_with_json_prints_one_error_document() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let output = run(&["run", "--json", "--no-such-flag"], dir.path());
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let doc = stdout_json(&output);
+    assert_error_document(&doc, 2, "usage");
+    assert!(
+        doc["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("--no-such-flag")),
+        "{doc}"
+    );
+    let output = run(&["run", "--no-such-flag"], dir.path());
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(
+        output.stdout.is_empty(),
+        "no --json, no document: {output:?}"
+    );
+    let output = run(&["--help"], dir.path());
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(!output.stdout.is_empty(), "{output:?}");
+}
+
+#[test]
 fn run_without_json_keeps_stdout_free_of_error_documents() {
     let dir = tempfile::tempdir().expect("tempdir");
     let output = run(
@@ -239,8 +263,33 @@ fn compare_exit_codes() {
     );
     assert_eq!(
         compare(&tiny_base, &tiny_slow, d).status.code(),
+        Some(1),
+        "+20% at 0.04 ms fails: the abs floor is off by default"
+    );
+    let floored = run(
+        &[
+            "compare",
+            "--baseline",
+            tiny_base.to_str().expect("utf8"),
+            "--candidate",
+            tiny_slow.to_str().expect("utf8"),
+            "--abs-floor-ms",
+            "0.05",
+        ],
+        d,
+    );
+    assert_eq!(
+        floored.status.code(),
         Some(0),
-        "+20% but 0.04 ms is under the 0.05 ms floor"
+        "+20% but 0.04 ms is under an opted-in 0.05 ms floor"
+    );
+    let mut bare = report(2, 2.0);
+    bare.as_object_mut().expect("object").remove("runner");
+    let bare = write(d, "bare2.json", &bare);
+    assert_eq!(
+        compare(&base1, &bare, d).status.code(),
+        Some(2),
+        "schema 2 without runner, as in the gate"
     );
     assert_eq!(
         compare(&base1, &future, d).status.code(),

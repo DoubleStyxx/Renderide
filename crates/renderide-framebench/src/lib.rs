@@ -2,8 +2,8 @@
 //!
 //! The runner launches fixed scenes through the headless harness and writes relative
 //! percentiles. [`compare_reports`] fails only when a gated metric regresses by more than
-//! the threshold percent. Absolute milliseconds are not a gate; deltas at or below
-//! [`ABS_FLOOR_MS`] never fail. Reports are schema 2 ([`SCHEMA`]), a superset of schema 1 with
+//! the threshold percent. Absolute milliseconds are not a gate; an opt-in absolute floor
+//! (default [`DEFAULT_ABS_FLOOR_MS`], 0 = off) can clear small ms deltas. Reports are schema 2 ([`SCHEMA`]), a superset of schema 1 with
 //! a [`RunnerInfo`] block. Exit codes are in [`exit_code`].
 
 #![forbid(unsafe_code)]
@@ -20,8 +20,8 @@ mod stats;
 
 pub use cli::cli_main;
 pub use compare::{
-    ABS_FLOOR_MS, CompareOptions, CompareOutcome, DEFAULT_GATE_METRIC, DEFAULT_THRESHOLD_PERCENT,
-    compare_loaded, compare_reports,
+    CompareOptions, CompareOutcome, DEFAULT_ABS_FLOOR_MS, DEFAULT_GATE_METRIC,
+    DEFAULT_THRESHOLD_PERCENT, compare_loaded, compare_reports,
 };
 pub use error::{BenchError, exit_code};
 pub use report::{

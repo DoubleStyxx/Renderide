@@ -1,8 +1,8 @@
 # Manual lavapipe frame benchmark. Does not run on push or pull_request.
 # The job builds master and the selected head on one runner and gates only on
-# relative regression of cpu_frame_ms.p95. Absolute milliseconds are not a gate; they only
-# clear rows: a head-minus-base median delta <= 0.05 ms never flags or fails (the gate's
-# --abs-floor-ms default).
+# relative regression of cpu_frame_ms.p95. Absolute milliseconds are not a gate. The gate's
+# --abs-floor-ms (a head-minus-base median delta at or below it never flags or fails) defaults
+# to 0, off, and this job does not set it; a nonzero floor is open question O8.
 #
 # Gate (scripts/ci/frame_bench_gate.py, taken from the ref that dispatched this workflow;
 # its docstring is the full rule). delta = (median head per-run p95 - median base per-run p95)

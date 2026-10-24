@@ -13,7 +13,9 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 
-use crate::compare::{ABS_FLOOR_MS, CompareOptions, DEFAULT_THRESHOLD_PERCENT, compare_reports};
+use crate::compare::{
+    CompareOptions, DEFAULT_ABS_FLOOR_MS, DEFAULT_THRESHOLD_PERCENT, compare_reports,
+};
 use crate::error::{BenchError, exit_code};
 use crate::report::SCHEMA;
 use crate::runner::{RunConfig, resolve_renderer_path, run_bench};
@@ -21,11 +23,32 @@ use crate::runner_env::{self, RunnerInfo};
 
 /// Binary entry point. Exit codes are listed in [`exit_code`].
 pub fn cli_main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(err) => return ExitCode::from(parse_error(&err)),
+    };
     ExitCode::from(match cli.command {
         Command::Run(opts) => run_command(opts),
         Command::Compare(opts) => compare_command(opts),
     })
+}
+
+/// Clap parse failure. `--help` and `--version` print to stdout and exit 0, as with
+/// `Cli::parse`. A usage error prints clap's message on stderr and exits 2; when `--json` is on
+/// the command line, stdout also gets one error document (`kind: "usage"`), so `--json` callers
+/// always get a document on a usage error.
+fn parse_error(err: &clap::Error) -> u8 {
+    if !err.use_stderr() {
+        let _ = err.print();
+        return exit_code::OK;
+    }
+    let _ = err.print();
+    if std::env::args_os().any(|arg| arg == "--json") {
+        let message = err.render().to_string();
+        let usage = BenchError::Usage(message.trim().to_string());
+        print_error_document(&usage, exit_code::USAGE, runner_env::detect());
+    }
+    exit_code::USAGE
 }
 
 fn run_command(opts: RunOpts) -> u8 {
@@ -178,7 +201,7 @@ fn parse_resolution(text: &str) -> Result<(u32, u32), BenchError> {
 #[derive(Parser, Debug)]
 #[command(
     name = "renderide-framebench",
-    about = "Renderer frame benchmarks. Gates are relative percent; deltas at or under an absolute ms floor never fail.",
+    about = "Renderer frame benchmarks. Gates are relative percent; an opt-in absolute ms floor (--abs-floor-ms) can clear small deltas.",
     after_help = "Exit codes: 0 ok, 1 compare found a gated regression, 2 usage or input error, \
 3 run failure (renderer ran, no usable measurement), 5 environment (renderer missing, spawn or \
 filesystem failure).",
@@ -253,7 +276,8 @@ struct CompareOpts {
     /// Metric to gate, repeatable. Default: cpu_frame_ms.p95.
     #[arg(long)]
     gate: Vec<String>,
-    /// Millisecond-metric deltas at or below this never fail, whatever their percent. 0 disables.
-    #[arg(long, default_value_t = ABS_FLOOR_MS)]
+    /// Millisecond-metric deltas at or below this never fail, whatever their percent.
+    /// Default 0 (off); opt-in until open question O8 decides a default.
+    #[arg(long, default_value_t = DEFAULT_ABS_FLOOR_MS)]
     abs_floor_ms: f64,
 }
