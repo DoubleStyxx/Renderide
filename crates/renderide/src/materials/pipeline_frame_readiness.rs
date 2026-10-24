@@ -15,6 +15,11 @@
 //! The headless PNG writer stores that snapshot in a `tEXt` chunk of the PNG itself.
 //! The golden harness refuses a frame until the count is zero, instead of skipping a
 //! fixed number of non-flat images.
+//!
+//! On a render-thread compile (headless or a software adapter), a positive count also
+//! means the next frame must not Hi-Z reject world meshes. Those draws were not
+//! rasterized, so the pyramid from this frame is not evidence they are occluded. Real
+//! GPUs leave the flag clear.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -50,6 +55,11 @@ impl PendingPipelineDraws {
         self.count.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// How many draws are currently counted. Does not reset.
+    pub(super) fn outstanding(&self) -> u64 {
+        self.count.load(Ordering::Relaxed)
+    }
+
     /// Returns how many pending-pipeline draws were noted since the last take, then resets the count.
     ///
     /// Callers must treat the returned value as the sum across every view and every frame
@@ -57,4 +67,16 @@ impl PendingPipelineDraws {
     pub(super) fn take(&self) -> u64 {
         self.count.swap(0, Ordering::Relaxed)
     }
+}
+
+/// Whether the next frame should skip Hi-Z rejection of world meshes.
+///
+/// Real GPUs pass `compile_on_render_thread = false` and always return false. A
+/// render-thread compile returns true while any draw is still counted, because that
+/// draw was not written into the depth pyramid.
+pub(super) fn suppress_hiz_while_pipelines_unready(
+    compile_on_render_thread: bool,
+    outstanding: u64,
+) -> bool {
+    compile_on_render_thread && outstanding > 0
 }

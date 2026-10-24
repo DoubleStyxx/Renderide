@@ -5,6 +5,7 @@
 //! [`crate::passes::HiZBuildPass`].
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use hashbrown::HashMap;
 use parking_lot::Mutex;
@@ -44,6 +45,11 @@ pub struct OcclusionSystem {
     visibility: Mutex<HashMap<ViewId, VisibilitySlot>>,
     /// Plan list reused across frames. A nested call uses a fresh list instead of waiting.
     hysteresis_plans: Mutex<Vec<Option<ViewHysteresisPlan>>>,
+    /// Previous frame counted compiling or skipped pipeline draws on a render-thread compile.
+    ///
+    /// Those draws were not rasterized, so this frame's Hi-Z pyramid is not evidence they
+    /// are occluded. Real GPUs leave this clear.
+    suppress_hiz_after_unready_pipelines: AtomicBool,
 }
 
 /// Published history, the spare map, and the pooled cull buffers for one view.
@@ -102,7 +108,25 @@ impl OcclusionSystem {
             offscreen: Mutex::new(HashMap::new()),
             visibility: Mutex::new(HashMap::new()),
             hysteresis_plans: Mutex::new(Vec::new()),
+            suppress_hiz_after_unready_pipelines: AtomicBool::new(false),
         }
+    }
+
+    /// The next cull should keep world meshes instead of trusting the Hi-Z pyramid.
+    pub(crate) fn set_suppress_hiz_after_unready_pipelines(&self, suppress: bool) {
+        self.suppress_hiz_after_unready_pipelines
+            .store(suppress, Ordering::Relaxed);
+    }
+
+    /// Whether [`Self::set_suppress_hiz_after_unready_pipelines`] is set.
+    pub(crate) fn suppress_hiz_after_unready_pipelines(&self) -> bool {
+        self.suppress_hiz_after_unready_pipelines
+            .load(Ordering::Relaxed)
+    }
+
+    /// Drops published caster classifications so the next cull treats every caster as new.
+    pub(crate) fn drop_visibility_history(&self) {
+        self.visibility.lock().clear();
     }
 
     /// Lends the reused per-frame plan list.

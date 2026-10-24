@@ -310,6 +310,11 @@ impl MaterialRegistry {
         self.pending_draws.take()
     }
 
+    /// Draws still counted since the previous take. Does not reset the count.
+    pub(crate) fn pending_pipeline_draws_outstanding(&self) -> u64 {
+        self.pending_draws.outstanding()
+    }
+
     /// Drains finished pipeline builds into the cache.
     ///
     /// Invoked once per frame from the renderer's tick before per-view recording so worker
@@ -376,5 +381,35 @@ mod tests {
         draws.note_dropped();
         assert_eq!(draws.take(), 1);
         assert_eq!(other.take(), 0);
+    }
+
+    #[test]
+    fn unready_render_thread_compiles_suppress_the_next_hiz_reject() {
+        use super::super::pipeline_frame_readiness::suppress_hiz_while_pipelines_unready;
+
+        let draws = PendingPipelineDraws::new();
+        assert!(!suppress_hiz_while_pipelines_unready(
+            true,
+            draws.outstanding()
+        ));
+        assert!(!suppress_hiz_while_pipelines_unready(false, 4));
+
+        draws.note(&MaterialPipelineLookup::Pending);
+        assert!(suppress_hiz_while_pipelines_unready(
+            true,
+            draws.outstanding()
+        ));
+        // The PNG take clears the count. The next publish then lets Hi-Z reject again.
+        assert_eq!(draws.take(), 1);
+        assert!(!suppress_hiz_while_pipelines_unready(
+            true,
+            draws.outstanding()
+        ));
+
+        draws.note_dropped();
+        assert!(suppress_hiz_while_pipelines_unready(
+            true,
+            draws.outstanding()
+        ));
     }
 }

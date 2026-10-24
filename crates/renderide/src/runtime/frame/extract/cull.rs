@@ -40,7 +40,12 @@ pub(super) fn build_cull_snapshot_for_view(
     let camera_proj = build_world_mesh_cull_proj_params(scene, prep.viewport_px, &prep.host_camera);
     let proj = cull_projection_for_write_target(&camera_proj, prep.write_target());
     let depth_mode = prep.output_depth_mode();
-    let (hi_z, hi_z_temporal) = if prep.host_camera.suppress_occlusion_temporal {
+    // A render-thread compile that skipped draws did not write those casters into the
+    // pyramid. Rejecting them from that pyramid keeps the frame empty after the pipelines
+    // are ready. Real GPUs leave the flag clear.
+    let (hi_z, hi_z_temporal) = if prep.host_camera.suppress_occlusion_temporal
+        || occlusion.suppress_hiz_after_unready_pipelines()
+    {
         (None, None)
     } else {
         (

@@ -213,6 +213,20 @@ impl MaterialSystem {
             .unwrap_or(0)
     }
 
+    /// The next frame should not Hi-Z reject world meshes.
+    ///
+    /// True only when this attach compiles on the render thread and draws are still
+    /// counted. Real GPUs return false. The count is left in place for the PNG take.
+    pub fn unready_pipelines_block_next_hiz_cull(&self) -> bool {
+        let Some(registry) = self.material_registry.as_ref() else {
+            return false;
+        };
+        super::pipeline_frame_readiness::suppress_hiz_while_pipelines_unready(
+            registry.compiles_on_render_thread(),
+            registry.pending_pipeline_draws_outstanding(),
+        )
+    }
+
     /// Drains finished background pipeline builds into the cache (no-op before GPU attach).
     ///
     /// Recording threads call into the cache concurrently; pulling completions here keeps the

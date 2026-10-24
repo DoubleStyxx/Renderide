@@ -455,6 +455,28 @@ impl RenderBackend {
         self.materials.take_pending_pipeline_draws()
     }
 
+    /// Publishes whether the next frame may Hi-Z reject world meshes.
+    ///
+    /// A render-thread compile that counted a pending or skipped draw did not rasterize
+    /// that draw. The depth pyramid from this frame is not evidence the caster is
+    /// occluded, so the next cull keeps it. Real GPUs clear the flag. The pending count
+    /// stays put for the headless PNG.
+    pub fn publish_unready_pipeline_cull_latch(&self) {
+        let suppress = self.materials.unready_pipelines_block_next_hiz_cull();
+        let was = self.occlusion.suppress_hiz_after_unready_pipelines();
+        if suppress != was {
+            if suppress {
+                logger::info!(
+                    "material draws are compiling or were skipped; the next frame will not Hi-Z reject world meshes"
+                );
+            } else {
+                logger::info!("material draws are ready; Hi-Z rejection is enabled again");
+            }
+        }
+        self.occlusion
+            .set_suppress_hiz_after_unready_pipelines(suppress);
+    }
+
     /// Drains finished background pipeline builds into the cache (no-op before GPU attach).
     ///
     /// The renderer's per-tick render entry calls this before per-view recording starts so

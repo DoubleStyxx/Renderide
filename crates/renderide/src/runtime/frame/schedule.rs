@@ -297,6 +297,7 @@ fn execute_prepared_views_with_cleanup<'a>(
             "render schedule skipped: kind={} no prepared views",
             schedule.kind().as_str()
         );
+        backend.publish_unready_pipeline_cull_latch();
         schedule.run_phase(CpuRenderPhase::Cleanup, || cleanup(backend));
         return Ok(());
     }
@@ -319,6 +320,8 @@ fn execute_prepared_views_with_cleanup<'a>(
     let result = schedule.run_phase(CpuRenderPhase::CommandRecord, || {
         submit_frame.execute_after_resource_prepare(gpu, scene, backend)
     });
+    // Notes land during recording. Publish after that so the next frame's cull sees them.
+    backend.publish_unready_pipeline_cull_latch();
     schedule.run_phase(CpuRenderPhase::Cleanup, || cleanup(backend));
     result
 }
