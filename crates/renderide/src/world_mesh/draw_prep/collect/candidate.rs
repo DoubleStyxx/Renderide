@@ -286,6 +286,10 @@ fn finite_nonnegative_distance_sq(value: f32) -> Option<f32> {
 }
 
 #[cfg(test)]
+#[path = "candidate_boxless_skinned_tests.rs"]
+mod candidate_boxless_skinned_tests;
+
+#[cfg(test)]
 mod tests {
     //! CPU-only draw-candidate identity tests.
 

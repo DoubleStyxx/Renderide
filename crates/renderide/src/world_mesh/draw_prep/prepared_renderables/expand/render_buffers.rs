@@ -225,7 +225,7 @@ where
     let target = MeshCullTarget {
         scene: ctx.scene,
         space_id: ctx.space_id,
-        mesh,
+        mesh_bounds: &mesh.bounds,
         skinned: false,
         skinned_renderer: None,
         node_id,

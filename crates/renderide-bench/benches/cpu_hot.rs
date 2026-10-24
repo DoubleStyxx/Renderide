@@ -12,8 +12,8 @@ use renderide_bench::{
     CAMERA_CLEAR_LOAD_OP_CAMERAS, CULL_BATCH, CullWorkload, DOUBLE_BUFFER_CAMERAS,
     DoubleBufferWorkload, KeywordVariantCacheWorkload, MATERIAL_UNIFORM_BATCH,
     MaterialUniformUpdateWorkload, SHADOW_CHURN_CASTERS, SHADOW_CHURN_LIGHTS, ShadowChurnWorkload,
-    TRANSFORM_BATCH, TransformWorkload, WORLD_MATRIX_NODES, WorldMatrixWorkload,
-    camera_clear_load_op_checksum, camera_clear_load_op_inputs,
+    SkinnedGeometryWorkload, TRANSFORM_BATCH, TransformWorkload, WORLD_MATRIX_NODES,
+    WorldMatrixWorkload, camera_clear_load_op_checksum, camera_clear_load_op_inputs,
 };
 
 fn transforms(c: &mut Criterion) {
@@ -28,10 +28,14 @@ fn transforms(c: &mut Criterion) {
 
 fn culling(c: &mut Criterion) {
     let workload = CullWorkload::standard();
+    let skinned = SkinnedGeometryWorkload::standard();
     let mut group = c.benchmark_group("culling");
     group.throughput(Throughput::Elements(CULL_BATCH as u64));
     group.bench_function("homogeneous_clip_aabb", |b| {
         b.iter(|| black_box(workload.visible_count()));
+    });
+    group.bench_function("skinned_mesh_world_geometry", |b| {
+        b.iter(|| black_box(skinned.fold()));
     });
     group.finish();
 }
