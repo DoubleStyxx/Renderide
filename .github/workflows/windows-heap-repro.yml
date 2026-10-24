@@ -424,12 +424,21 @@ jobs:
             [System.IO.File]::WriteAllText($script:heapExtract, $ps1 + "`r`n", $ascii)
           }
 
+          function Convert-CdbPath([string]$Path) {
+            # Debugger command strings treat \_ as an escape, so D:\a\_temp
+            # becomes a missing path (Win32 error 2) inside sxe -c "$<...>".
+            return ($Path -replace '\\', '/')
+          }
+
           function Write-CaptureScripts([string]$DumpPath) {
             Write-HeapExtractScript
             $follow = Join-Path $script:out 'heap-follow.txt'
             $onstop = Join-Path $script:out 'cdb-on-stop.txt'
             $loop = Join-Path $script:out 'cdb-loop.txt'
             $ascii = [System.Text.Encoding]::ASCII
+            $followCmd = Convert-CdbPath $follow
+            $onstopCmd = Convert-CdbPath $onstop
+            $extractCmd = Convert-CdbPath $script:heapExtract
             [System.IO.File]::WriteAllText($follow, ".echo REPRO_NO_HEAP_ADDRESS`r`n", $ascii)
             $commands = @(
               '.echo REPRO_MARKER_BROKE'
@@ -438,26 +447,29 @@ jobs:
               '!avrf'
               '!analyze -v'
               '.echo REPRO_HEAP_QUERY'
-              ('.shell -ci "!avrf" powershell.exe -NoProfile -ExecutionPolicy Bypass -File {0} {1}' -f $script:heapExtract, $follow)
-              ('$<' + $follow)
+              ('.shell -ci "!avrf" powershell.exe -NoProfile -ExecutionPolicy Bypass -File {0} {1}' -f $extractCmd, $followCmd)
+              ('$<' + $followCmd)
               '.echo REPRO_STACKS'
               '~*kb 30'
             )
             if ($DumpPath) {
               $commands += '.echo REPRO_DUMP'
-              $commands += ('.dump /ma /o {0}' -f $DumpPath)
+              $commands += ('.dump /ma /o {0}' -f (Convert-CdbPath $DumpPath))
               $commands += '.echo REPRO_DUMP_DONE'
             }
             $commands += 'q'
             [System.IO.File]::WriteAllText($onstop, (($commands -join "`r`n") + "`r`n"), $ascii)
             # -cf runs this as cdb starts. Handlers are installed, then g continues.
             # -g -G on the cdb command line skip the initial and exit breakpoints.
+            # If $< cannot open the stop script, the same sxe command still runs
+            # !avrf and ~*kb before quitting.
+            $fallback = '.echo REPRO_FILE_FAILED; !avrf; !analyze -v; ~*kb 30; q'
             $loopLines = @(
               '.echo REPRO_MARKER_START'
               'sxi *'
-              ('sxe -c ".echo REPRO_EVENT bpe; $<{0}" bpe' -f $onstop)
-              ('sxe -c ".echo REPRO_EVENT asrt; $<{0}" asrt' -f $onstop)
-              ('sxe -c2 ".echo REPRO_EVENT second; $<{0}" *' -f $onstop)
+              ('sxe -c ".echo REPRO_EVENT bpe; $<{0}; {1}" bpe' -f $onstopCmd, $fallback)
+              ('sxe -c ".echo REPRO_EVENT asrt; $<{0}; {1}" asrt' -f $onstopCmd, $fallback)
+              ('sxe -c2 ".echo REPRO_EVENT second; $<{0}; {1}" *' -f $onstopCmd, $fallback)
               'g'
               '.echo REPRO_MARKER_CLEAN'
               'q'
@@ -509,7 +521,7 @@ jobs:
                 '-z', [string]$dump,
                 '-lines',
                 '-logo', $log,
-                '-c', ('$<' + $scripts.OnStop)
+                '-c', ('$<' + (Convert-CdbPath $scripts.OnStop))
               )
               Invoke-Cdb -LogPath $log -CdbArgs $dumpArgs
             }
