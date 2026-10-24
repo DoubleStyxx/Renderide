@@ -10,21 +10,22 @@
 pub use renderide::bench_api::SkinnedGeometryWorkload;
 pub use renderide::bench_api::{
     BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload,
-    CAMERA_CLEAR_LOAD_OP_CAMERAS, CULL_BATCH, CullWorkload, KeywordVariantCacheWorkload,
-    MATERIAL_UNIFORM_BATCH, MaterialUniformUpdateWorkload, SHADOW_CHURN_CASTERS,
-    SHADOW_CHURN_LIGHTS, ShadowChurnWorkload, TRANSFORM_BATCH, TRANSPARENT_SORT_1K,
-    TRANSPARENT_SORT_10K, TransformWorkload, TransparentSortWorkload, WORLD_MATRIX_NODES,
-    WorldMatrixWorkload, camera_clear_load_op_checksum, camera_clear_load_op_inputs,
+    CAMERA_CLEAR_LOAD_OP_CAMERAS, CULL_BATCH, CullWorkload, DOUBLE_BUFFER_CAMERAS,
+    DoubleBufferWorkload, KeywordVariantCacheWorkload, MATERIAL_UNIFORM_BATCH,
+    MaterialUniformUpdateWorkload, SHADOW_CHURN_CASTERS, SHADOW_CHURN_LIGHTS, ShadowChurnWorkload,
+    TRANSFORM_BATCH, TRANSPARENT_SORT_1K, TRANSPARENT_SORT_10K, TransformWorkload,
+    TransparentSortWorkload, WORLD_MATRIX_NODES, WorldMatrixWorkload,
+    camera_clear_load_op_checksum, camera_clear_load_op_inputs,
 };
 
 #[cfg(test)]
 mod tests {
     use super::{
         BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload,
-        CAMERA_CLEAR_LOAD_OP_CAMERAS, CULL_BATCH, CullWorkload, KeywordVariantCacheWorkload,
-        MaterialUniformUpdateWorkload, SkinnedGeometryWorkload, TransformWorkload,
-        TransparentSortWorkload, WORLD_MATRIX_NODES, WorldMatrixWorkload,
-        camera_clear_load_op_checksum, camera_clear_load_op_inputs,
+        CAMERA_CLEAR_LOAD_OP_CAMERAS, CULL_BATCH, CullWorkload, DOUBLE_BUFFER_CAMERAS,
+        DoubleBufferWorkload, KeywordVariantCacheWorkload, MaterialUniformUpdateWorkload,
+        SkinnedGeometryWorkload, TransformWorkload, TransparentSortWorkload, WORLD_MATRIX_NODES,
+        WorldMatrixWorkload, camera_clear_load_op_checksum, camera_clear_load_op_inputs,
     };
 
     #[test]
@@ -122,6 +123,19 @@ mod tests {
         assert_eq!(workload.cache_hit(), hit);
         let composed = workload.compose();
         assert!(composed > 0);
+    }
+
+    #[test]
+    fn double_buffer_steady_swap_reuses_scratch_and_alternates() {
+        let mut workload = DoubleBufferWorkload::standard();
+        let capacity = workload.scratch_capacity();
+        assert!(capacity >= DOUBLE_BUFFER_CAMERAS);
+        let first = workload.steady_frame();
+        let second = workload.steady_frame();
+        let third = workload.steady_frame();
+        assert_ne!(first, second);
+        assert_eq!(first, third);
+        assert_eq!(workload.scratch_capacity(), capacity);
     }
 
     #[test]

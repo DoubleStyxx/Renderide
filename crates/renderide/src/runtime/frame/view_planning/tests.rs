@@ -1,13 +1,18 @@
-//! Data-only tests for [`RendererRuntime::collect_prepared_views`]. No GPU is created.
+//! Tests for [`RendererRuntime::collect_prepared_views`].
+//!
+//! Most cases are data-only. `skipped_double_buffered_camera_does_not_swap` opens a device and
+//! returns when none is available.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use super::double_buffer::secondary_camera_write_target;
 use super::*;
 use crate::camera::{HostCameraFrame, StereoViewMatrices};
 use crate::config::{RendererSettings, RendererSettingsHandle};
 use crate::connection::ConnectionParams;
 use crate::gpu::OutputDepthMode;
+use crate::graph_inputs::RenderTextureSelfSampling;
 use crate::materials::ShaderPermutation;
 use crate::scene::{CameraRenderableEntry, SceneCoordinator};
 use crate::shared::{CameraPortalState, CameraState, RenderTransform};
@@ -149,7 +154,7 @@ fn secondary_camera_write_target_uses_double_buffer_policy() {
     assert_eq!(
         secondary_camera_write_target(9, double_buffered | post_processing)
             .render_texture_self_sampling(),
-        Some(RenderTextureSelfSampling::Suppress)
+        Some(RenderTextureSelfSampling::AllowPreviousContents)
     );
 }
 
@@ -615,4 +620,184 @@ fn prepared_view_helpers_prefer_eye_world_position_over_head_output() {
         glam::Vec3::new(7.0, 8.0, 9.0),
         "explicit camera view still wins over eye_world_position"
     );
+}
+
+const DOUBLE_BUFFER_ASSET: i32 = 7;
+const SKIP_SPACE: RenderSpaceId = RenderSpaceId(41);
+const RENDER_SPACE: RenderSpaceId = RenderSpaceId(42);
+
+fn open_secondary_camera_device() -> Option<wgpu::Device> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
+    let adapter = adapters.into_iter().next()?;
+    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("secondary-camera-double-buffer-plan"),
+        ..Default::default()
+    }))
+    .ok()
+    .map(|(device, _queue)| device)
+}
+
+fn double_buffered_camera(transform_id: i32) -> CameraRenderableEntry {
+    CameraRenderableEntry {
+        renderable_index: 0,
+        transform_id,
+        state: CameraState {
+            flags: 1 | (1 << 2),
+            render_texture_asset_id: DOUBLE_BUFFER_ASSET,
+            viewport: crate::shared::RenderRect {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+            ..CameraState::default()
+        },
+        selective_transform_ids: Vec::new(),
+        exclude_transform_ids: Vec::new(),
+    }
+}
+
+fn insert_history_target(runtime: &mut RendererRuntime, device: &wgpu::Device) {
+    let limits = crate::gpu::GpuLimits::synthetic_for_tests(
+        wgpu::Limits {
+            max_texture_dimension_2d: 8192,
+            ..Default::default()
+        },
+        wgpu::Features::empty(),
+        hashbrown::HashMap::new(),
+    );
+    let mut fmt = crate::gpu_pools::test_support::render_texture_format(
+        crate::shared::TextureWrapMode::Clamp,
+        crate::shared::TextureWrapMode::Clamp,
+    );
+    fmt.asset_id = DOUBLE_BUFFER_ASSET;
+    fmt.size = glam::IVec2::new(4, 4);
+    let texture = crate::gpu_pools::GpuRenderTexture::new_from_format(device, &limits, &fmt)
+        .expect("4x4 render texture");
+    runtime
+        .backend
+        .asset_transfers
+        .render_texture_pool_mut()
+        .insert(texture);
+}
+
+fn seed_double_buffer_spaces(runtime: &mut RendererRuntime) {
+    seed_view_task_space(&mut runtime.scene, SKIP_SPACE, true);
+    seed_view_task_space(&mut runtime.scene, RENDER_SPACE, false);
+    runtime
+        .scene
+        .test_push_cameras(SKIP_SPACE, [double_buffered_camera(99)]);
+    runtime
+        .scene
+        .test_push_cameras(RENDER_SPACE, [double_buffered_camera(0)]);
+}
+
+fn collect_plans<'a>(
+    runtime: &mut RendererRuntime,
+    device: &wgpu::Device,
+) -> Vec<FrameViewPlan<'a>> {
+    let mut tasks = Vec::new();
+    let mut swapped = Vec::new();
+    let mut flagged = Vec::new();
+    runtime.collect_secondary_rt_views_using(device, &mut tasks, &mut swapped, &mut flagged)
+}
+
+fn published_color(runtime: &RendererRuntime) -> Arc<wgpu::Texture> {
+    Arc::clone(
+        &runtime
+            .backend
+            .render_texture_pool()
+            .get(DOUBLE_BUFFER_ASSET)
+            .expect("resident")
+            .color_texture,
+    )
+}
+
+fn published_view(runtime: &RendererRuntime) -> Arc<wgpu::TextureView> {
+    Arc::clone(
+        &runtime
+            .backend
+            .render_texture_pool()
+            .get(DOUBLE_BUFFER_ASSET)
+            .expect("resident")
+            .color_view,
+    )
+}
+
+fn has_history(runtime: &RendererRuntime) -> bool {
+    runtime
+        .backend
+        .render_texture_pool()
+        .get(DOUBLE_BUFFER_ASSET)
+        .expect("resident")
+        .has_previous_color()
+}
+
+fn plan_writes_published_image(runtime: &RendererRuntime, plan: &FrameViewPlan<'_>) -> bool {
+    let FrameViewPlanTarget::Offscreen(handles) = &plan.target else {
+        return false;
+    };
+    let previous = runtime
+        .backend
+        .render_texture_pool()
+        .get(DOUBLE_BUFFER_ASSET)
+        .expect("resident")
+        .color_view_for_sampling(true);
+    &handles.color_view == published_view(runtime).as_ref()
+        && &handles.color_view != previous.as_ref()
+}
+
+/// A camera with no world matrix does not publish the history image.
+///
+/// A camera that does render swaps first and plans against the published image. While the flag
+/// stays set, a later skipped camera keeps the history. After the flag is off for
+/// `DOUBLE_BUFFER_HISTORY_IDLE_FRAMES` passes the history is released, then recreated when a
+/// rendering camera sets the flag again.
+#[test]
+fn skipped_double_buffered_camera_does_not_swap() {
+    let Some(device) = open_secondary_camera_device() else {
+        logger::info!("double-buffer skip test skipped: no adapter");
+        return;
+    };
+    let mut runtime = build_runtime();
+    insert_history_target(&mut runtime, &device);
+    seed_double_buffer_spaces(&mut runtime);
+    let before = published_color(&runtime);
+
+    let skipped = collect_plans(&mut runtime, &device);
+    assert!(skipped.is_empty());
+    assert!(!has_history(&runtime));
+    assert!(Arc::ptr_eq(&before, &published_color(&runtime)));
+
+    runtime.scene.test_set_space_active(SKIP_SPACE, false);
+    runtime.scene.test_set_space_active(RENDER_SPACE, true);
+    let rendered = collect_plans(&mut runtime, &device);
+    assert_eq!(rendered.len(), 1);
+    assert!(has_history(&runtime));
+    assert!(!Arc::ptr_eq(&before, &published_color(&runtime)));
+    assert!(plan_writes_published_image(&runtime, &rendered[0]));
+
+    runtime.scene.test_set_space_active(RENDER_SPACE, false);
+    runtime.scene.test_set_space_active(SKIP_SPACE, true);
+    let stable = published_color(&runtime);
+    let idle_frames =
+        usize::from(crate::gpu_pools::pools::render_texture::DOUBLE_BUFFER_HISTORY_IDLE_FRAMES);
+    for _ in 0..idle_frames {
+        assert!(collect_plans(&mut runtime, &device).is_empty());
+        assert!(has_history(&runtime));
+        assert!(Arc::ptr_eq(&stable, &published_color(&runtime)));
+    }
+
+    runtime.scene.test_set_space_active(SKIP_SPACE, false);
+    for frame in 0..idle_frames {
+        assert!(collect_plans(&mut runtime, &device).is_empty());
+        assert_eq!(!has_history(&runtime), frame + 1 == idle_frames);
+    }
+
+    runtime.scene.test_set_space_active(RENDER_SPACE, true);
+    let recreated = collect_plans(&mut runtime, &device);
+    assert_eq!(recreated.len(), 1);
+    assert!(has_history(&runtime));
+    assert!(plan_writes_published_image(&runtime, &recreated[0]));
 }

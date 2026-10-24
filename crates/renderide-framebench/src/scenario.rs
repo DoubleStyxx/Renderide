@@ -10,13 +10,14 @@ pub const DEFAULT_SCENARIOS: [&str; 2] = ["unlit_sphere", "multi_primitive_unlit
 
 /// Extra scenarios selectable with `--scenario`. They are not in the default CI gate set.
 #[cfg(test)]
-const EXTRA_SCENARIOS: [&str; 6] = [
+const EXTRA_SCENARIOS: [&str; 7] = [
     "pbs_lit_material_matrix",
     "many_static_meshes",
     "lights_shadows",
     "offscreen_skinned_avatars",
     "onscreen_skinned_avatars",
     "secondary_camera_copy",
+    "secondary_camera_double_buffer",
 ];
 
 /// Transport name recorded in every report. The socket is not implemented.
@@ -91,6 +92,16 @@ const SECONDARY_CAMERA_COPY: Scenario = Scenario {
     camera_rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
 };
 
+/// `secondary_camera_copy` pose with two stacked double-buffered cameras writing one 512² texture.
+///
+/// Depth at depth 0 is the first writer. Nothing at depth 1 is the later writer. Both set flags
+/// `1 | 4` (enabled and double-buffered). Opt-in, same as the other extra scenarios.
+const SECONDARY_CAMERA_DOUBLE_BUFFER: Scenario = Scenario {
+    name: "secondary_camera_double_buffer",
+    camera_position: [0.0, 0.0, -3.0],
+    camera_rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+};
+
 /// Thirty shadowed point lights. Opt-in: absent from [`DEFAULT_SCENARIOS`] so the default CI
 /// window stays on the unshadowed scenes. The host raises `per_pixel_lights` to 32 and asks for
 /// 128-texel shadow faces.
@@ -112,6 +123,7 @@ pub fn by_name(name: &str) -> Option<&'static Scenario> {
         "offscreen_skinned_avatars" => Some(&OFFSCREEN_SKINNED_AVATARS),
         "onscreen_skinned_avatars" => Some(&ONSCREEN_SKINNED_AVATARS),
         "secondary_camera_copy" => Some(&SECONDARY_CAMERA_COPY),
+        "secondary_camera_double_buffer" => Some(&SECONDARY_CAMERA_DOUBLE_BUFFER),
         _ => None,
     }
 }

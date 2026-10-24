@@ -133,6 +133,16 @@ impl SceneCoordinator {
         );
     }
 
+    /// Appends one static mesh renderer to a seeded render space (unit tests only).
+    pub(crate) fn test_push_static_mesh_renderer(
+        &mut self,
+        id: RenderSpaceId,
+        renderer: StaticMeshRenderer,
+    ) {
+        let space = self.spaces.get_mut(&id).expect("seeded space");
+        space.static_mesh_renderers.push(renderer);
+    }
+
     /// Appends camera renderables to a seeded render space (unit tests only).
     pub(crate) fn test_push_cameras(
         &mut self,
