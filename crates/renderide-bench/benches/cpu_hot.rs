@@ -8,10 +8,12 @@ use std::hint::black_box;
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use renderide_bench::{
-    BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload, CULL_BATCH,
-    CullWorkload, KeywordVariantCacheWorkload, MATERIAL_UNIFORM_BATCH,
-    MaterialUniformUpdateWorkload, SHADOW_CHURN_CASTERS, SHADOW_CHURN_LIGHTS, ShadowChurnWorkload,
-    TRANSFORM_BATCH, TransformWorkload, WORLD_MATRIX_NODES, WorldMatrixWorkload,
+    BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload,
+    CAMERA_CLEAR_LOAD_OP_CAMERAS, CULL_BATCH, CullWorkload, KeywordVariantCacheWorkload,
+    MATERIAL_UNIFORM_BATCH, MaterialUniformUpdateWorkload, SHADOW_CHURN_CASTERS,
+    SHADOW_CHURN_LIGHTS, ShadowChurnWorkload, SkinnedGeometryWorkload, TRANSFORM_BATCH,
+    TransformWorkload, WORLD_MATRIX_NODES, WorldMatrixWorkload, camera_clear_load_op_checksum,
+    camera_clear_load_op_inputs,
 };
 
 fn transforms(c: &mut Criterion) {
@@ -26,10 +28,14 @@ fn transforms(c: &mut Criterion) {
 
 fn culling(c: &mut Criterion) {
     let workload = CullWorkload::standard();
+    let skinned = SkinnedGeometryWorkload::standard();
     let mut group = c.benchmark_group("culling");
     group.throughput(Throughput::Elements(CULL_BATCH as u64));
     group.bench_function("homogeneous_clip_aabb", |b| {
         b.iter(|| black_box(workload.visible_count()));
+    });
+    group.bench_function("skinned_mesh_world_geometry", |b| {
+        b.iter(|| black_box(skinned.fold()));
     });
     group.finish();
 }
@@ -120,6 +126,20 @@ fn shadow_churn(c: &mut Criterion) {
     group.finish();
 }
 
+fn camera_clear_load_ops(c: &mut Criterion) {
+    // Times the per-view load-op decision only. The full-target Rgba16Float copy is the real
+    // cost of a seeded Nothing or Depth camera and is not in this group.
+    // Inputs are built once. The timed loop only reads them, and each element is black-boxed
+    // inside the checksum so a repeating 128-camera pattern cannot be folded.
+    let inputs = camera_clear_load_op_inputs(CAMERA_CLEAR_LOAD_OP_CAMERAS);
+    let mut group = c.benchmark_group("camera_clear");
+    group.throughput(Throughput::Elements(inputs.len() as u64));
+    group.bench_function("load_op_checksum", |b| {
+        b.iter(|| black_box(camera_clear_load_op_checksum(black_box(inputs.as_slice()))));
+    });
+    group.finish();
+}
+
 fn buffer_pool(c: &mut Criterion) {
     let mut workload = BufferPoolWorkload::standard();
     let mut group = c.benchmark_group("buffer_pool");
@@ -145,7 +165,8 @@ criterion_group!(
     material_uniforms,
     bind_groups,
     keyword_variants,
-    shadow_churn
+    shadow_churn,
+    camera_clear_load_ops
 );
 
 #[cfg(feature = "gpu")]

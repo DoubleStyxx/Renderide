@@ -215,7 +215,7 @@ fn static_renderer_cull_geometry(
     let target = MeshCullTarget {
         scene,
         space_id,
-        mesh,
+        mesh_bounds: &mesh.bounds,
         skinned: false,
         skinned_renderer: None,
         node_id: renderer.node_id,
@@ -252,7 +252,7 @@ fn skinned_renderer_cull_geometry(
     let target = MeshCullTarget {
         scene,
         space_id,
-        mesh,
+        mesh_bounds: &mesh.bounds,
         skinned: true,
         skinned_renderer: Some(renderer),
         node_id: base.node_id,

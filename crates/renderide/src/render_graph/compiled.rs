@@ -29,13 +29,17 @@ pub(super) use merge_cache::{
 mod dot;
 
 pub(crate) use exec::CommandEncodingHudSnapshot;
+#[cfg(test)]
+pub(crate) use exec::{ClearLoadDecisionInputs, ClearLoadViewSource, clear_load_inputs_from_view};
 pub(crate) use frame_view::{
     ExternalFrameTargets, ExternalOffscreenTargets, FrameGlobalView, FrameView, FrameViewLayout,
     FrameViewResourceHints, FrameViewTarget, OffscreenColorCopyTarget, RenderPathProfile,
     ViewFamilyGraphRequirements, ViewPostProcessing,
 };
 #[cfg(test)]
-pub(crate) use frame_view::{RenderPathProfileId, RenderPathSampleCountPolicy};
+pub(crate) use frame_view::{
+    FrameViewTargetKind, RenderPathProfileId, RenderPathSampleCountPolicy,
+};
 pub(super) use resource::{
     CompileStats, CompiledBufferResource, CompiledPassInfo, CompiledTextureResource,
     ResourceLifetime, ResourceLifetimeLane, ResourceLifetimeSegment,
@@ -147,6 +151,10 @@ pub(super) struct ResolvedView<'a> {
     pub(super) view_id: ViewId,
     pub(super) sample_count: u32,
     pub(super) post_processing: ViewPostProcessing,
+    /// Full-target offscreen color, when this view can seed HDR scene color from it.
+    pub(super) color_texture: Option<&'a wgpu::Texture>,
+    /// `true` when `depth_texture` is the persistent camera depth target.
+    pub(super) persistent_depth_target: bool,
     // MSAA views are now in the per-view blackboard (MsaaViewsSlot), resolved from graph
     // transient textures by the executor via resolve_forward_msaa_views_from_graph_resources.
 }

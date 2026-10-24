@@ -13,6 +13,7 @@ pub(super) struct MainGraphPassIds {
     pub(super) shadows: PassId,
     pub(super) clustered: PassId,
     pub(super) depth_prepass: PassId,
+    pub(super) color_preserve: PassId,
     pub(super) forward_opaque: PassId,
     pub(super) gtao: Option<GtaoNode>,
     pub(super) depth_snapshot: PassId,
@@ -100,6 +101,9 @@ pub(super) fn register_main_graph_passes(
     )));
     let forward_resources = main_forward_resources(h);
     let depth_prepass = add_world_mesh_depth_prepass(builder, h);
+    let color_preserve = builder.add_encoder_pass(Box::new(
+        crate::passes::WorldMeshForwardColorPreservePass::new(h.color, h.scene_color_hdr),
+    ));
     let forward_opaque = builder.add_raster_pass(Box::new(
         crate::passes::WorldMeshForwardOpaquePass::new(forward_resources),
     ));
@@ -146,6 +150,7 @@ pub(super) fn register_main_graph_passes(
         shadows,
         clustered,
         depth_prepass,
+        color_preserve,
         forward_opaque,
         gtao,
         depth_snapshot,
