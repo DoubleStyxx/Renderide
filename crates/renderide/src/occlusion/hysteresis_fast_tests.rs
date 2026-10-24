@@ -139,12 +139,12 @@ mod fast_path_tests {
         HashMap<CasterKey, CasterRecord>,
         VisibilityCullBuffers,
     ) {
-        let mut present_keys = HashSet::new();
         let layout = if enable_fast {
-            prepare_fast_visible(&history, &frame.present, &mut present_keys)
+            prepare_fast_visible(&history, &frame.present, &mut buffers)
         } else {
             None
         };
+        let mut present_keys = HashSet::new();
         buffers.stale_rects.clear();
         if layout.is_none() {
             let mut movers = Vec::new();
@@ -510,6 +510,45 @@ mod fast_path_tests {
         assert!(fast[0].draws.iter().all(|draw| *draw));
         assert_eq!(class_of(&fast[0], 7), Some(VisibilityClass::Occluded));
         assert_eq!(class_of(&fast[0], 3), Some(VisibilityClass::Visible));
+    }
+
+    #[test]
+    fn fast_matches_slow_when_parallel_duplicates_hide_a_miss() {
+        let entries: Vec<(u64, i32)> = (0..32).map(|index| (index, 1)).collect();
+        let mut calls: Vec<DrawCall> = (0..31).map(|index| call(index, keep())).collect();
+        calls.push(call(0, keep()));
+        let frames = [Frame {
+            present: present_of(&entries),
+            calls,
+            parallel: true,
+        }];
+        let fast = run(visible_history(&entries), &frames, true);
+        let slow = run(visible_history(&entries), &frames, false);
+        assert!(fast[0].armed);
+        assert_same(&fast, &slow);
+        assert!(
+            class_of(&fast[0], 31).is_none(),
+            "the untested caster is dropped"
+        );
+        assert_eq!(fast[0].rows.len(), 31);
+    }
+
+    #[test]
+    fn fast_matches_slow_when_indices_are_not_dense() {
+        let entries = [(0, 1), (2, 1)];
+        let frames = [Frame {
+            present: present_of(&entries),
+            calls: vec![call(0, keep()), call(2, keep())],
+            parallel: false,
+        }];
+        let fast = run(visible_history(&entries), &frames, true);
+        let slow = run(visible_history(&entries), &frames, false);
+        assert!(
+            !fast[0].armed,
+            "a hole in the renderer index stays on the full update"
+        );
+        assert_same(&fast, &slow);
+        assert_eq!(fast[0].rows.len(), 2);
     }
 
     #[test]

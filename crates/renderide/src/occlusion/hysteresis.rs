@@ -20,10 +20,11 @@
 //! longer covers.
 //!
 //! When the previous frame stored no occluded caster and this frame's prepared set is the same
-//! keys, meshes, and bounds, disocclusion rectangles are empty and publishing the history skips
-//! the retain scan. A caster the pyramid does not occlude is stamped in its existing row. A
-//! caster the pyramid does occlude, a moved or missing caster, and any row that is not tested
-//! still take the full update, so the published classification matches that slower path.
+//! dense keys, meshes, and bounds, disocclusion rectangles are empty. A caster the pyramid does
+//! not occlude is marked in a reused index table instead of probing the history map. Publishing
+//! skips the retain scan when every remembered caster was marked. A non-dense index, a moved or
+//! occluded caster, and any row that is not tested still take the full update, so the published
+//! classification matches that slower path.
 //!
 //! The cap counts prepared casters: one renderer run with a world AABB, inside the view's
 //! render-space scope, and not overlay or hidden. It does not count frustum-visible casters,
@@ -361,6 +362,8 @@ pub(crate) struct VisibilityCullBuffers {
     pub stale_rects: Vec<ScreenRect>,
     /// One record buffer per rayon worker, plus one for callers outside the pool.
     pub shards: Vec<Mutex<Vec<(CasterKey, CasterRecord)>>>,
+    /// Dense index table for the stable-visible fast path. Capacity stays across frames.
+    fast_slots: fast::FastSlots,
 }
 
 /// History snapshot plus the cleared map the next [`VisibilityHysteresis::finish`] refills.
@@ -488,8 +491,6 @@ pub(crate) struct VisibilityHysteresis {
     epoch: u32,
     /// Remembered-caster count when the stable-visible fast path is armed. `0` keeps the full update.
     fast_expected: u32,
-    /// Distinct stable-visible accepts. Compared with [`Self::fast_expected`].
-    fast_visits: AtomicU32,
 }
 
 /// History map plus the spare map and cull buffers to park on the view.
@@ -522,6 +523,7 @@ impl VisibilityHysteresis {
                 motions,
                 stale_rects,
                 shards: Vec::new(),
+                fast_slots: fast::FastSlots::default(),
             },
         )
     }
@@ -549,7 +551,6 @@ impl VisibilityHysteresis {
             spare,
             epoch,
             fast_expected: 0,
-            fast_visits: AtomicU32::new(0),
         }
     }
 
@@ -638,15 +639,14 @@ impl VisibilityHysteresis {
     pub(crate) fn recycle(self) -> VisibilityRecycle {
         let Self {
             history,
-            buffers,
+            mut buffers,
             spare,
             epoch,
             fast_expected,
-            fast_visits,
         } = self;
-        let visits = fast_visits.load(Ordering::Relaxed);
+        let visits = fast::visited_casters(&buffers.fast_slots);
         let shards_empty = buffers.shards.iter().all(|shard| shard.lock().is_empty());
-        // Each remembered caster was restamped once, and no class change was queued.
+        // Each remembered caster was marked once, and no class change was queued.
         if shards_empty && fast_expected > 0 && visits == fast_expected {
             let (mut history, spare) = adopt_spare(history, spare);
             history.epoch = epoch;
@@ -656,6 +656,10 @@ impl VisibilityHysteresis {
                 buffers,
             };
         }
+        if fast_expected > 0 {
+            fast::stamp_visited_epochs(&buffers.fast_slots, &history, epoch);
+        }
+        fast::invalidate(&mut buffers.fast_slots);
         let (mut history, spare) = adopt_spare(history, spare);
         for shard in &buffers.shards {
             let mut records = shard.lock();
