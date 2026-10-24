@@ -18,3 +18,8 @@ pub mod scene_dsl;
 mod image_io;
 
 pub use error::HarnessError;
+
+/// CI canary. The unused binding must fail `cargo clippy -- -D warnings`.
+pub fn ci_canary_unused() {
+    let canary_unused = 1;
+}
