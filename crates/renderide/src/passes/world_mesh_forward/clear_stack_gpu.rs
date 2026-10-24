@@ -160,21 +160,23 @@ fn double_buffered_preserve_view<'a>(
     seed_published_color: bool,
     mode: CameraClearMode,
 ) -> GraphPassFrameView<'a> {
+    let surface_format = wgpu::TextureFormat::Rgba8Unorm;
+    let offscreen_write_target = OffscreenWriteTarget::host_render_texture_with_self_sampling(
+        7,
+        crate::frame_contract::RenderTextureSelfSampling::AllowPreviousContents,
+    );
     GraphPassFrameView {
         depth_texture: depth,
         depth_view,
         depth_sample_view: None,
-        surface_format: wgpu::TextureFormat::Rgba8Unorm,
-        scene_color_format: wgpu::TextureFormat::Rgba8Unorm,
+        surface_format,
+        scene_color_format: surface_format,
         viewport_px: (WIDTH, HEIGHT),
         host_camera: HostCameraFrame::default(),
         render_context: RenderingContext::Camera,
         frame_time_seconds: 0.0,
         multiview_stereo: false,
-        offscreen_write_target: OffscreenWriteTarget::host_render_texture_with_self_sampling(
-            7,
-            crate::frame_contract::RenderTextureSelfSampling::AllowPreviousContents,
-        ),
+        offscreen_write_target,
         view_winding: ViewWinding::normal(),
         view_id: ViewId::Main,
         hi_z_slot: Arc::new(Mutex::new(HiZGpuState::default())),
@@ -189,8 +191,38 @@ fn double_buffered_preserve_view<'a>(
         history_color_texture: Some(history),
         seed_published_color,
         persistent_depth_target: true,
+        clear_load_inputs: full_offscreen_clear_load_inputs(
+            (WIDTH, HEIGHT),
+            surface_format,
+            offscreen_write_target,
+        ),
         post_processing: ViewPostProcessing::disabled(),
     }
+}
+
+/// Full-target offscreen inputs for a test view that always attaches color and depth.
+fn full_offscreen_clear_load_inputs(
+    viewport_px: (u32, u32),
+    surface_format: wgpu::TextureFormat,
+    write_target: OffscreenWriteTarget,
+) -> crate::render_graph::compiled::ClearLoadDecisionInputs {
+    use crate::camera::CameraRenderRect;
+    use crate::render_graph::compiled::{
+        ClearLoadViewSource, FrameViewTargetKind, clear_load_inputs_from_view,
+    };
+    clear_load_inputs_from_view(ClearLoadViewSource {
+        kind: FrameViewTargetKind::OffscreenRt,
+        viewport: CameraRenderRect {
+            origin_px: (0, 0),
+            extent_px: viewport_px,
+        },
+        target_extent_px: viewport_px,
+        copies_partial_color: false,
+        sample_count: 1,
+        surface_format,
+        scene_color_format: surface_format,
+        write_target,
+    })
 }
 
 fn assert_stacked(

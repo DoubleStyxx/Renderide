@@ -71,7 +71,7 @@ use types::{
     OwnedResolvedView, PerViewEncodeOutput, PerViewRecordInputs, PerViewRecordOutput,
     PerViewRecordShared, PerViewWorkItem, PreparedPerViewFrameInput, PreparedPerViewFrameParams,
     RecordedPerViewBatch, ResolvedOffscreenColorCopy, SubmitFrameBatchStats, SubmitFrameInputs,
-    TimedCommandBuffer, TransientTextureResolveSurfaceParams,
+    TimedCommandBuffer, TransientTextureResolveSurfaceParams, ViewTargetResolveInputs,
 };
 
 impl CompiledRenderGraph {

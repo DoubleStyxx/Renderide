@@ -9,7 +9,7 @@ use super::super::super::error::GraphExecuteError;
 use super::super::super::history::{HistoryResourceScope, TextureHistorySpec};
 use super::super::helpers;
 use super::super::{CompiledRenderGraph, FrameView, MultiViewExecutionContext};
-use super::{GraphResolveKey, TransientTextureResolveSurfaceParams};
+use super::{GraphResolveKey, TransientTextureResolveSurfaceParams, ViewTargetResolveInputs};
 use crate::frame_upload_batch::{FrameUploadBatch, GraphUploadSink};
 use crate::gpu::OutputDepthMode;
 use crate::graph_inputs::PreRecordViewResourceLayout;
@@ -186,11 +186,15 @@ impl CompiledRenderGraph {
     ) -> Result<(), GraphExecuteError> {
         profiling::scope!("render::pre_resolve_transients");
         for view in views {
+            let scene_color_format = mv_ctx.backend.scene_color_format_wgpu();
             let resolved = Self::resolve_owned_view_metadata_from_target(
-                view.view_id(),
-                view.view_winding,
-                view.profile,
-                &view.host_camera,
+                ViewTargetResolveInputs {
+                    view_id: view.view_id(),
+                    view_winding: view.view_winding,
+                    profile: view.profile,
+                    host_camera: &view.host_camera,
+                    scene_color_format,
+                },
                 &view.target,
                 mv_ctx.gpu,
             )?;

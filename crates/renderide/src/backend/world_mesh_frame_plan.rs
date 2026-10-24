@@ -15,6 +15,7 @@ use hashbrown::HashMap;
 use parking_lot::Mutex;
 
 use crate::camera::ViewId;
+use crate::frame_contract::ClearLoadDecisionInputs;
 use crate::frame_upload_batch::GraphUploadSink;
 use crate::gpu::GpuLimits;
 use crate::graph_inputs::{
@@ -287,6 +288,11 @@ fn desktop_overlay_graph_frame<'a>(frame: &GraphPassFrame<'a>) -> GraphPassFrame
             history_color_texture: frame.view.history_color_texture,
             seed_published_color: frame.view.seed_published_color,
             persistent_depth_target: frame.view.persistent_depth_target,
+            clear_load_inputs: ClearLoadDecisionInputs {
+                sample_count: 1,
+                scene_color_format: frame.view.surface_format,
+                ..frame.view.clear_load_inputs
+            },
             post_processing: frame.view.post_processing,
         },
     }

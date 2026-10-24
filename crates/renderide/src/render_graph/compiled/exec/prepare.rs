@@ -15,7 +15,9 @@ use crate::render_graph::execution_backend::GraphViewBlackboardPreparer;
 use super::super::super::error::GraphExecuteError;
 use super::super::{CompiledRenderGraph, FrameView, FrameViewTarget, MultiViewExecutionContext};
 use super::elapsed_ms;
-use super::types::{PerViewWorkItem, PreparedPerViewFrameInput, PreparedPerViewFrameParams};
+use super::types::{
+    PerViewWorkItem, PreparedPerViewFrameInput, PreparedPerViewFrameParams, ViewTargetResolveInputs,
+};
 
 /// Per-view pre-record work items assigned to one blackboard-preparation worker.
 const PRE_RECORD_VIEW_PREP_PARALLEL_CHUNK_VIEWS: usize = 1;
@@ -183,11 +185,15 @@ impl CompiledRenderGraph {
             let frame_time_seconds = view.frame_time_seconds;
             let post_processing = view.post_processing();
             let target_is_swapchain = matches!(view.target, FrameViewTarget::Swapchain);
+            let scene_color_format = mv_ctx.backend.scene_color_format_wgpu();
             let resolved = Self::resolve_owned_view_metadata_from_target(
-                view_id,
-                view.view_winding,
-                view.profile,
-                &view.host_camera,
+                ViewTargetResolveInputs {
+                    view_id,
+                    view_winding: view.view_winding,
+                    profile: view.profile,
+                    host_camera: &view.host_camera,
+                    scene_color_format,
+                },
                 &view.target,
                 mv_ctx.gpu,
             )?;

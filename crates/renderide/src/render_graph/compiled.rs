@@ -161,6 +161,8 @@ pub(super) struct ResolvedView<'a> {
     pub(super) seed_published_color: bool,
     /// `true` when `depth_texture` is the persistent camera depth target.
     pub(super) persistent_depth_target: bool,
+    /// Camera-clear inputs built by the view-target mapping for this target.
+    pub(super) clear_load_inputs: ClearLoadDecisionInputs,
     // MSAA views are now in the per-view blackboard (MsaaViewsSlot), resolved from graph
     // transient textures by the executor via resolve_forward_msaa_views_from_graph_resources.
 }

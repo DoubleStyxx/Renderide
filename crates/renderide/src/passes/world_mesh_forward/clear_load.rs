@@ -9,7 +9,9 @@
 //! clear both attachments. The first writer of a swapped texture seeds its history image. Every
 //! later writer of that texture seeds the published image.
 
-use crate::frame_contract::{FrameViewClear, RenderTextureSelfSampling};
+#[cfg(any(test, feature = "bench-api"))]
+use crate::frame_contract::FrameViewClear;
+use crate::frame_contract::RenderTextureSelfSampling;
 use crate::graph_inputs::GraphPassFrameView;
 use crate::render_graph::compiled::ClearLoadDecisionInputs;
 use crate::shared::CameraClearMode;
@@ -106,6 +108,10 @@ fn history_image_ready(query: ScenePreserveQuery) -> bool {
 ///
 /// Depth loads only when color is actually seeded and the depth image is the persistent target.
 /// Every unseeded view clears both, including Nothing on a window or OpenXR view.
+///
+/// The view entry point is [`forward_clear_loads_for_view`]. This function is the query-only
+/// policy used by the camera-clear bench and the load-op tests.
+#[cfg(any(test, feature = "bench-api"))]
 #[inline]
 pub(crate) fn forward_clear_loads(
     clear: FrameViewClear,
@@ -174,26 +180,10 @@ struct ClearLoadSeedBits {
     seed_published_color: bool,
 }
 
-/// Copies one pass view onto [`ClearLoadDecisionInputs`].
-///
-/// Attachment presence is already resolved. A missing color texture cannot seed, and
-/// [`GraphPassFrameView::persistent_depth_target`] is the depth image this view owns.
-#[inline]
-#[must_use]
-fn clear_load_inputs_from_frame_view(view: &GraphPassFrameView<'_>) -> ClearLoadDecisionInputs {
-    ClearLoadDecisionInputs {
-        sample_count: view.sample_count,
-        has_color_texture: view.color_texture.is_some(),
-        surface_format: view.surface_format,
-        scene_color_format: view.scene_color_format,
-        self_sampling: view.offscreen_write_target.render_texture_self_sampling(),
-        persistent_depth_target: view.persistent_depth_target,
-    }
-}
-
 /// Builds the preserve query from clear-load inputs and the execution-order seed bits.
 ///
-/// This is the only inputs-to-query mapping. [`scene_preserve_query`] is the view entry.
+/// This is the only inputs-to-query step. The inputs themselves are the stored view-target
+/// mapping.
 #[inline]
 #[must_use]
 fn scene_preserve_query_from_inputs(
@@ -212,12 +202,16 @@ fn scene_preserve_query_from_inputs(
     }
 }
 
-/// View-to-inputs-to-query mapping for one pass view.
+/// Preserve query for one pass view.
+///
+/// Geometry, formats, sample count, and self-sampling come from
+/// [`GraphPassFrameView::clear_load_inputs`]. History and the published-image bit stay beside
+/// that stored mapping output.
 #[inline]
 #[must_use]
 fn scene_preserve_query(view: &GraphPassFrameView<'_>) -> ScenePreserveQuery {
     scene_preserve_query_from_inputs(
-        clear_load_inputs_from_frame_view(view),
+        view.clear_load_inputs,
         ClearLoadSeedBits {
             has_history_color: view.history_color_texture.is_some(),
             seed_published_color: view.seed_published_color,
