@@ -34,8 +34,7 @@ use crate::materials::{
 use super::pipeline_build_error::PipelineBuildError;
 use super::pipeline_compile::{
     PipelineBuildOutcome, PipelineBuildRequest, PipelineBuildResources,
-    drain_render_thread_pipeline_builds, render_thread_inline_compile_enabled,
-    spawn_pipeline_build,
+    drain_render_thread_pipeline_builds, spawn_pipeline_build,
 };
 use super::raster_pipeline::MaterialPipelineDesc;
 
@@ -441,7 +440,7 @@ impl MaterialPipelineCache {
         self.compile_on_render_thread
     }
 
-    /// Headless drains and inline-compiles the whole render-thread queue.
+    /// Headless compiles the whole queued set at the frame-start drain, not during lookup.
     pub(super) fn compiles_full_render_thread_queue(&self) -> bool {
         self.compile_on_render_thread && self.render_thread_compiles_per_frame == usize::MAX
     }
@@ -522,21 +521,7 @@ impl MaterialPipelineCache {
             }
         }
 
-        self.queue_pipeline_build(key.clone(), kind.clone(), *desc, variant, wgsl_override);
-        // Inline compile is off for headless: the PBS pipeline is built on the next
-        // frame-start drain, not in the middle of this frame. Windowed software
-        // keeps the per-frame budget and does not set the flag.
-        if self.compiles_full_render_thread_queue() && render_thread_inline_compile_enabled() {
-            drain_render_thread_pipeline_builds(usize::MAX);
-            self.drain_completed_pipeline_builds();
-            let mut shard = self.shard_for(&key).lock();
-            if let Some(hit) = shard.pipelines.get(&key).cloned() {
-                return MaterialPipelineLookup::Ready(hit);
-            }
-            if let Some(err) = shard.failed.get(&key).cloned() {
-                return MaterialPipelineLookup::Failed(err);
-            }
-        }
+        self.queue_pipeline_build(key, kind.clone(), *desc, variant, wgsl_override);
         MaterialPipelineLookup::Pending
     }
 

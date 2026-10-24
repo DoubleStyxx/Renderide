@@ -202,15 +202,11 @@ impl Drop for CpuRenderPhaseScope {
 
 /// Runs global asset/material preparation for a schedule-backed render submission.
 ///
-/// Headless compiles every pipeline already queued for this thread and does not
-/// flush or poll the device first. On DX12 WARP that wait caches a PBS pipeline
-/// whose spheres are only the lower hemisphere (1119 colors, 5.9% non-background).
-/// Compiling the queued set here, with no flush and no poll, is the path that drew
-/// the full spheres (3780 colors, 8.8%). A lookup during this frame stays pending
-/// and is compiled on the next drain, before that frame submits. A windowed
-/// software adapter still compiles at most one and bounds its idle wait to a
-/// single short budget. Real GPUs read the attach-time flag and skip the
-/// build-queue lock.
+/// Headless compiles every pipeline already queued for this thread at frame
+/// start. It does not flush or poll first, and a lookup during this frame stays
+/// pending until the next drain. A windowed software adapter still compiles at
+/// most one pipeline and bounds its idle wait to a single short budget. Real
+/// GPUs read the attach-time flag and skip the build-queue lock.
 pub(in crate::runtime) fn prepare_assets_for_schedule(
     backend: &mut RenderBackend,
     gpu: &GpuContext,
@@ -220,7 +216,6 @@ pub(in crate::runtime) fn prepare_assets_for_schedule(
         backend.drain_pipeline_build_completions();
         return;
     }
-    crate::materials::set_render_thread_inline_compile(false);
     if backend.compiles_full_render_thread_queue() {
         backend.drain_pipeline_build_completions();
         return;
@@ -324,7 +319,6 @@ fn execute_prepared_views_with_cleanup<'a>(
     let result = schedule.run_phase(CpuRenderPhase::CommandRecord, || {
         submit_frame.execute_after_resource_prepare(gpu, scene, backend)
     });
-    crate::materials::set_render_thread_inline_compile(false);
     schedule.run_phase(CpuRenderPhase::Cleanup, || cleanup(backend));
     result
 }

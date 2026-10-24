@@ -150,11 +150,12 @@ impl PngStabilityState {
 /// Keyword of the PNG `tEXt` chunk written by the headless PNG encoder.
 const PIPELINE_PENDING_TEXT_KEYWORD: &str = "renderide_pipeline_pending";
 
-/// Whether this PNG's own `tEXt` chunk says every requested material pipeline was ready.
+/// Whether this PNG's own `tEXt` chunk says the frame had no compiling or skipped draws.
 ///
 /// The count is inside the PNG, so a later frame cannot publish `0` next to an older image.
 /// A missing chunk, a non-numeric chunk, or a non-zero count is not ready. A Null fallback
-/// drawn while the requested shader is still compiling is a positive count.
+/// drawn while the requested shader is still compiling is a positive count. A draw skipped
+/// because no pipeline was available is a positive count too.
 fn pipeline_frame_is_ready(path: &Path) -> bool {
     pipeline_pending_text(path).is_some_and(|text| text.trim() == "0")
 }
@@ -226,9 +227,9 @@ pub(super) fn run_lockstep_until_png_stable(
             state.observe(now, read_png_observation(output_path)),
             PngStabilityVerdict::Stable
         ) {
-            // Pipelines compile asynchronously; draws whose pipeline is still pending are
-            // skipped (materials/registry.rs), so an early frame can be clear-only. Keep
-            // pumping for a later write instead of capturing it.
+            // Pipelines compile asynchronously. A draw whose pipeline is still pending,
+            // or that was skipped because no pipeline was available, is stamped on the
+            // PNG (materials/registry.rs). Keep pumping for a later write.
             if png_is_flat(output_path) {
                 if !flat_candidate_seen {
                     logger::info!(
@@ -244,7 +245,7 @@ pub(super) fn run_lockstep_until_png_stable(
             if !pipeline_frame_is_ready(output_path) {
                 if !pending_pipeline_seen {
                     logger::info!(
-                        "Session: stable PNG was drawn while a material pipeline was still compiling; waiting for a ready frame"
+                        "Session: stable PNG still has compiling or skipped material draws; waiting for a ready frame"
                     );
                 }
                 pending_pipeline_seen = true;

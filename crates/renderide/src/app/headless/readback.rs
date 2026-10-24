@@ -261,9 +261,10 @@ fn align_atlas_pass_sidecar_mtime(output_path: &Path) -> Result<(), HeadlessRead
 
 /// Writes one RGBA PNG whose `tEXt` chunk carries `pending_pipeline_draws`.
 ///
-/// `0` means every requested material pipeline used by that frame was ready.
-/// A positive count means at least one draw observed a pipeline that was still compiling,
-/// including draws that fell back to Null while the requested program was pending.
+/// `0` means no draw was still compiling and no draw was skipped for lack of a pipeline.
+/// A positive count means a pipeline was still compiling, or a draw was skipped because
+/// no pipeline was available and that skip was not already counted as pending. A failed
+/// lookup that still draws through a ready Null pipeline stays at zero.
 fn encode_png_with_pending_count(
     tmp_path: &Path,
     rgba_bytes: &[u8],

@@ -33,9 +33,9 @@ pub enum HarnessError {
         /// Maximum wall-clock wait before giving up.
         wait: Duration,
     },
-    /// A stable PNG arrived, but every candidate frame still had a compiling material pipeline.
+    /// A stable PNG arrived, but every candidate frame still had a compiling or skipped material draw.
     #[error(
-        "headless PNG at {path} stayed pipeline-pending for {wait:?}; capture refused frames drawn before the requested shaders finished compiling"
+        "headless PNG at {path} stayed pipeline-pending for {wait:?}; capture refused frames whose material draws were still compiling or were skipped because no pipeline was available"
     )]
     PipelineNotReady {
         /// Output PNG path the renderer was instructed to write.

@@ -3,18 +3,15 @@
 //! Real GPUs keep the background pool. Headless captures and software adapters
 //! (WARP, lavapipe, llvmpipe) compile on the render thread instead: a background
 //! `create_render_pipeline` deadlocks DX12 WARP while the render thread is inside
-//! a frame. Headless compiles the whole queued set at the start of the frame and
-//! does not flush or poll first. Doing that wait on DX12 WARP cached a PBS
-//! pipeline that drew only the lower hemisphere of each sphere (1119 unique
-//! colors, 5.9% non-background). The same queue compiled here with no flush and
-//! no poll drew the full spheres (3780 colors, 8.8%).
+//! a frame. Headless compiles the whole queued set at the start of the frame.
+//! It does not flush or poll the device first, and it does not compile during a
+//! draw lookup. A lookup in that frame stays pending until the next drain.
 //!
 //! A windowed software adapter compiles at most
 //! [`RENDER_THREAD_PIPELINE_COMPILES_PER_FRAME`] pipelines per drain so one frame
 //! cannot absorb a whole scene, and its idle wait is one short budget. Queued
 //! builds that do not fit in this drain stay pending.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use parking_lot::Mutex;
@@ -26,27 +23,12 @@ use super::cache::{
 use super::pipeline_kind::RasterPipelineKind;
 use super::raster_pipeline::MaterialPipelineDesc;
 
-/// Set after this frame's idle wait succeeds on a headless capture.
-///
-/// Draw lookup then compiles the pipeline before returning, so the frame is not
-/// counted pending and the build does not move into command recording. Cleared
-/// before a pass is opened and again after the frame submits.
-static RENDER_THREAD_INLINE_COMPILE: AtomicBool = AtomicBool::new(false);
-
-/// Allows headless draw lookup to compile a queued pipeline on this thread.
-pub(crate) fn set_render_thread_inline_compile(enabled: bool) {
-    RENDER_THREAD_INLINE_COMPILE.store(enabled, Ordering::Relaxed);
-}
-
-pub(crate) fn render_thread_inline_compile_enabled() -> bool {
-    RENDER_THREAD_INLINE_COMPILE.load(Ordering::Relaxed)
-}
-
 /// Pipelines compiled on the render thread during one
-/// [`MaterialPipelineCache::drain_pipeline_build_completions`] call.
+/// [`MaterialPipelineCache::drain_pipeline_build_completions`] call on a
+/// windowed software adapter.
 ///
-/// One compile per frame is the budget for headless and software adapters.
-/// Real GPUs do not use this path.
+/// Headless captures ignore this cap and compile every pipeline already queued
+/// for the render thread. Real GPUs do not use this path.
 pub(in crate::materials) const RENDER_THREAD_PIPELINE_COMPILES_PER_FRAME: usize = 1;
 
 /// Maximum number of background workers dedicated to material pipeline compilation.

@@ -207,7 +207,8 @@ impl RendererRuntime {
         self.backend.frame_resources().shadow_atlas_pass_counts()
     }
 
-    /// Pending material draws since the previous headless PNG write.
+    /// Draws still compiling, or skipped because no pipeline was available,
+    /// since the previous headless PNG write.
     pub(crate) fn take_pending_pipeline_draws(&self) -> u64 {
         self.backend.take_pending_pipeline_draws()
     }

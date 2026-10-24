@@ -449,7 +449,8 @@ impl RenderBackend {
         self.materials.compiles_full_render_thread_queue()
     }
 
-    /// Pending material draws since the previous headless PNG write.
+    /// Draws still compiling, or skipped because no pipeline was available,
+    /// since the previous headless PNG write.
     pub fn take_pending_pipeline_draws(&self) -> u64 {
         self.materials.take_pending_pipeline_draws()
     }
