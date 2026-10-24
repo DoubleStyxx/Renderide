@@ -12,6 +12,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -270,6 +271,82 @@ class GateTests(unittest.TestCase):
         fallback = self.write_raw("hf.json", {"schema": 1, "scenarios": [
             {"name": "s", "cpu_frame_ms": {"p50": 0.0, "p95": float("nan"), "p99": 0.0}}]})
         self.assertEqual(self.run_gate("--base", str(base), "--head", str(fallback)), 2)
+
+    def test_infinite_value_is_an_input_error(self) -> None:
+        # json writes float("inf") as `Infinity`, which json.loads reads back as inf.
+        base = self.write("b.json", {"s": flat(1.0)})
+        head = self.write("h.json", {"s": flat(1.0)})
+        inf_head = self.write("hi.json", {"s": [1.0] * 8 + [float("inf")]})
+        neg_inf_base = self.write("bi.json", {"s": [float("-inf")] + [1.0] * 8})
+        for args, shown in (
+            (("--base", str(base), "--head", str(inf_head)), "inf"),
+            (("--base", str(neg_inf_base), "--head", str(head)), "-inf"),
+            (("--mode", "confirm", "--base", str(base), "--head", str(head),
+              "--confirm-base", str(base), "--confirm-head", str(inf_head)), "inf"),
+        ):
+            code, _, err = self.run_gate_capture(*args)
+            self.assertEqual(code, 2, args)
+            self.assertIn(f"non-finite value ({shown})", err)
+        fallback = self.write_raw("hf.json", {"schema": 1, "scenarios": [
+            {"name": "s", "cpu_frame_ms": {"p50": 0.0, "p95": float("inf"), "p99": 0.0}}]})
+        self.assertEqual(self.run_gate("--base", str(base), "--head", str(fallback)), 2)
+
+    def test_negative_base_median_is_an_input_error(self) -> None:
+        head = self.write("h.json", {"s": flat(1.0)})
+        negative = self.write("b.json", {"s": [-1.0] * 5 + [1.0] * 4})  # median -1.0
+        code, _, err = self.run_gate_capture("--base", str(negative), "--head", str(head))
+        self.assertEqual(code, 2)
+        self.assertIn("first-pass base median for 's' is -1.0; must be > 0", err)
+        # Confirm rounds alone with a negative base median (first pass fine).
+        good = self.write("b2.json", {"s": flat(1.0)})
+        cb = self.write("cb.json", {"s": flat(-0.5)})
+        code, _, err = self.run_gate_capture(
+            "--mode", "confirm", "--base", str(good), "--head", str(head),
+            "--confirm-base", str(cb), "--confirm-head", str(head),
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("confirm-round base median for 's' is -0.5", err)
+        # A single negative run under a positive median is not an input error.
+        some_negative = self.write("b3.json", {"s": [-1.0] + [1.0] * 8})
+        self.assertEqual(self.run_gate("--base", str(some_negative), "--head", str(head)), 0)
+
+    def test_pooled_base_median_check(self) -> None:
+        # The pooled check runs after the first-pass and confirm-round checks. A pooled median sits
+        # between the two parts' medians, so real reports cannot reach it with both parts > 0
+        # (asserted on a seeded search below). The CLI wiring is still tested: with the two earlier
+        # checks stubbed out, a pooled base median <= 0 exits 2 with the "pooled" message.
+        rng = random.Random(7)
+        choices = [-100.0, -10.0, -1.0, 0.0, 0.5, 1.0, 2.0, 50.0, 101.0]
+        for _ in range(20000):
+            a = [rng.choice(choices) for _ in range(rng.randint(1, 6))]
+            b = [rng.choice(choices) for _ in range(rng.randint(1, 6))]
+            if statistics.median(a) > 0 and statistics.median(b) > 0:
+                self.assertGreater(statistics.median(a + b), 0, (a, b))
+
+        head = self.write("h.json", {"s": flat(1.0)})
+        first_base = self.write("b.json", {"s": [-1.0] * 5 + [1.0] * 4})  # median -1
+        confirm_base = self.write("cb.json", {"s": [-1.0] * 5 + [1.0] * 4})  # median -1
+        real_check = gate.check_base_medians
+        seen: list[str] = []
+
+        def only_pooled(label: str, base: dict[str, list[float]]) -> None:
+            seen.append(label)
+            if label == "pooled":
+                real_check(label, base)
+
+        args = ("--mode", "confirm", "--base", str(first_base), "--head", str(head),
+                "--confirm-base", str(confirm_base), "--confirm-head", str(head))
+        with mock.patch.object(gate, "check_base_medians", side_effect=only_pooled):
+            code, _, err = self.run_gate_capture(*args)
+        self.assertEqual(seen, ["first-pass", "confirm-round", "pooled"])
+        self.assertEqual(code, 2)
+        self.assertIn("pooled base median for 's' is -1.0; must be > 0", err)
+        # The pooled check itself, for 0 and for a negative median.
+        for values, shown in (([0.0] * 10 + [1.0] * 8, "0.0"), ([-2.0] * 10 + [1.0] * 8, "-2.0")):
+            with self.assertRaises(gate.InputError) as caught:
+                gate.check_base_medians("pooled", {"s": values})
+            self.assertIn(f"pooled base median for 's' is {shown}", str(caught.exception))
+        gate.check_base_medians("pooled", {"s": [0.0] * 8 + [1.0] * 10})  # median 1.0: fine
 
     # --- confirm paths --------------------------------------------------------------------
 
