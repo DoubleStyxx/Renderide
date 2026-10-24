@@ -80,6 +80,8 @@ pollster = "1.0"
 rayon = "1.12"
 crossbeam-channel = "0.5"
 lru = "0.19"
+# 0.13 drops the eventual fairness that GpuQueueAccessGate and the Condvar in
+# concurrency.rs rely on. Stay on 0.12 until that gate uses fair unlock.
 parking_lot = "0.12"
 thiserror = "2.0"
 ## Portable SIMD wrappers (u32x4/etc.) used in mip downsample inner accumulators. Pulled in via

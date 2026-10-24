@@ -7,11 +7,15 @@ mod graphics_api;
 mod msaa;
 mod presentation_mode;
 mod scene_color;
+mod vr_swapchain_gpu_wait;
 
 pub use graphics_api::GraphicsApiSetting;
 pub use msaa::MsaaSampleCount;
 pub use presentation_mode::PresentationModeSetting;
 pub use scene_color::SceneColorFormat;
+pub use vr_swapchain_gpu_wait::{
+    ResolvedVrSwapchainGpuWait, VrSwapchainGpuWait, VrSwapchainGpuWaitQuery,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -28,6 +32,12 @@ pub struct RenderingSettings {
     /// so changes require a renderer restart.
     #[serde(rename = "graphics_api", default)]
     pub graphics_api: GraphicsApiSetting,
+    /// Whether the OpenXR driver waits for the eye copy before releasing the swapchain image.
+    ///
+    /// Resolved once at OpenXR session start. `always` is the default because the WiVRn/Monado
+    /// on RADV flash is a seizure risk. Changes require a renderer restart.
+    #[serde(default)]
+    pub vr_swapchain_gpu_wait: VrSwapchainGpuWait,
     /// Wall-clock budget per frame for cooperative mesh/texture integration
     /// ([`crate::runtime::RendererRuntime::run_asset_integration`]), in milliseconds.
     #[serde(rename = "asset_integration_budget_ms")]
@@ -53,6 +63,7 @@ impl Default for RenderingSettings {
         Self {
             presentation_mode: PresentationModeSetting::default(),
             graphics_api: GraphicsApiSetting::default(),
+            vr_swapchain_gpu_wait: VrSwapchainGpuWait::default(),
             asset_integration_budget_ms: 2,
             asset_particle_integration_budget_ms: 4,
             msaa: MsaaSampleCount::default(),

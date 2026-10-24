@@ -191,10 +191,13 @@ pub trait GraphPerDrawSlabResources {
     ) -> Option<wgpu::Buffer>;
 
     /// Gives callers mutable access to the per-view CPU slab-packing scratch.
+    ///
+    /// The second buffer is the retained canvas depth-step list. Callers clear and refill it
+    /// instead of allocating a new `Vec` for every view every frame.
     fn with_per_view_per_draw_scratch(
         &self,
         view_id: ViewId,
-        f: &mut dyn FnMut(&mut Vec<PaddedPerDrawUniforms>),
+        f: &mut dyn FnMut(&mut Vec<PaddedPerDrawUniforms>, &mut Vec<u32>),
     ) -> bool;
 
     /// Gives callers mutable access to the per-view material-batch boundary scratch so it can be
@@ -764,6 +767,17 @@ pub struct GraphPassFrameView<'a> {
     pub msaa_depth_resolve: Option<Arc<MsaaDepthResolveResources>>,
     /// Background clear/skybox behavior for this view.
     pub clear: FrameViewClear,
+    /// Full-target offscreen color texture when this view can copy it into HDR scene color.
+    ///
+    /// `None` for the swapchain, multiview, and partial-viewport scratch targets. Those paths
+    /// cannot preserve the previous color by loading the HDR transient.
+    pub color_texture: Option<&'a wgpu::Texture>,
+    /// `true` when [`Self::depth_texture`] is the persistent camera depth target.
+    ///
+    /// Window, OpenXR, and full render-texture views own that image. A partial viewport renders
+    /// into a scratch depth image that is not copied back. Clear-none loads the image only when
+    /// this view also seeds color. Every unseeded view still clears depth.
+    pub persistent_depth_target: bool,
     /// Post-processing permissions requested by this view.
     pub post_processing: ViewPostProcessing,
 }
