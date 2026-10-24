@@ -16,8 +16,9 @@ use super::super::bitset::DenseBitSet;
 use super::super::prepared_renderables::{FramePreparedLodEntry, FramePreparedLodGroup};
 use super::DrawCollectionInputs;
 use super::lod_fade::{
-    LodFadeTable, biased_relative_height, commit_prepared_decision, commit_resolved_decision,
-    fade_decision_for_rows, prepared_group_stipples, prepared_scene_lods, sanitize_unit_height,
+    LodFadeDecision, LodFadeTable, biased_relative_height, commit_prepared_decision,
+    commit_resolved_decision, fade_decision_for_prepared_group, fade_decision_for_rows,
+    prepared_group_stipples, sanitize_unit_height,
 };
 
 /// Conservative relative screen height used when bounds cross the camera plane.
@@ -29,10 +30,17 @@ const CLIP_W_EPS: f32 = 1e-6;
 pub(super) struct LodVisibility {
     /// Per-space LOD bitsets and instance-id ordinal lookups.
     spaces: HashMap<RenderSpaceId, LodVisibilitySpace>,
+    /// Set when this view stored a non-zero stipple weight.
+    ///
+    /// Draw collection branches on this flag and skips the per-run space map when it is false,
+    /// which is the whole view whenever no group is cross-fading.
+    fade_active: bool,
 }
 
 impl LodVisibility {
     /// Creates a visibility map with stable renderer ordinals for the queried spaces.
+    ///
+    /// Weight tables stay empty. The first non-zero stipple weight allocates that space's buffer.
     fn for_spaces(ctx: &DrawCollectionInputs<'_>, space_ids: &[RenderSpaceId]) -> Self {
         let mut spaces = HashMap::with_capacity(space_ids.len());
         for &space_id in space_ids {
@@ -67,11 +75,22 @@ impl LodVisibility {
                     instance_to_ordinal,
                     grouped,
                     selected,
-                    fades: LodFadeTable::acquire(renderer_count),
+                    renderer_count,
+                    fades: LodFadeTable::default(),
                 },
             );
         }
-        Self { spaces }
+        Self {
+            spaces,
+            fade_active: false,
+        }
+    }
+
+    /// Whether any renderer in this view has a non-zero stipple weight.
+    #[cfg(test)]
+    #[inline]
+    pub(super) fn fade_active(&self) -> bool {
+        self.fade_active
     }
 
     /// Returns whether `instance_id` may emit draws in this view.
@@ -115,8 +134,14 @@ impl LodVisibility {
     }
 
     /// Signed stipple weight for a renderer ordinal. `0` leaves the shader unchanged.
+    ///
+    /// When [`Self::fade_active`] is false this returns immediately. Callers do not hash the
+    /// space map on a view where every group is outside a fade.
     #[inline]
     pub(super) fn lod_fade(&self, space_id: RenderSpaceId, renderer_ordinal: usize) -> f32 {
+        if !self.fade_active {
+            return 0.0;
+        }
         self.spaces
             .get(&space_id)
             .map(|space| space.fades.weight(renderer_ordinal))
@@ -133,6 +158,9 @@ impl LodVisibility {
         space_id: RenderSpaceId,
         instance_id: MeshRendererInstanceId,
     ) -> f32 {
+        if !self.fade_active {
+            return 0.0;
+        }
         let Some(space) = self.spaces.get(&space_id) else {
             return 0.0;
         };
@@ -184,10 +212,22 @@ impl LodVisibility {
         renderer_ordinal: usize,
         weight: f32,
     ) {
-        let Some(space) = self.spaces.get_mut(&space_id) else {
+        if weight == 0.0 || !weight.is_finite() {
             return;
+        }
+        let stored = {
+            let Some(space) = self.spaces.get_mut(&space_id) else {
+                return;
+            };
+            if space.fades.is_empty() {
+                let renderer_count = space.renderer_count;
+                space.fades = LodFadeTable::acquire(renderer_count);
+            }
+            space.fades.record(renderer_ordinal, weight)
         };
-        space.fades.record(renderer_ordinal, weight);
+        if stored {
+            self.fade_active = true;
+        }
     }
 
     /// Marks a stable renderer ordinal as selected by the active LOD row.
@@ -230,7 +270,9 @@ struct LodVisibilitySpace {
     grouped: DenseBitSet,
     /// Renderers selected by their owning group's chosen LOD.
     selected: DenseBitSet,
-    /// Stipple weights for renderers inside a cross-fade. Empty unless a group is fading.
+    /// Renderer count used to size [`Self::fades`] on the first non-zero weight.
+    renderer_count: usize,
+    /// Stipple weights. Empty, and not zero-filled, until a renderer in this view fades.
     fades: LodFadeTable,
 }
 
@@ -365,16 +407,19 @@ fn select_prepared_group_lod(
     let Some(selected_index) = selected_index else {
         return;
     };
-    let scene_lods = prepared_scene_lods(ctx, group);
-    let allow_fade =
-        scene_lods.is_some_and(|scene| scene.cross_fade) && prepared_group_stipples(ctx, group);
-    let decision = fade_decision_for_rows(
-        selected_index,
-        group.lods.len(),
-        scene_lods.map(|scene| scene.lods),
-        measured_height,
-        allow_fade,
-    );
+    // `cross_fade` was copied onto the prepared group. The off path does not touch the scene
+    // space map. The stipple index is read only after the height is inside the fade band.
+    let decision = if group.cross_fade {
+        let geometric =
+            fade_decision_for_prepared_group(group, selected_index, measured_height, true);
+        if geometric.partner.is_none() || prepared_group_stipples(ctx, group) {
+            geometric
+        } else {
+            LodFadeDecision::single(selected_index)
+        }
+    } else {
+        LodFadeDecision::single(selected_index)
+    };
     commit_prepared_decision(visibility, group, &decision);
 }
 
@@ -507,15 +552,20 @@ fn select_group_lod(
     let Some(selected_index) = selected_index else {
         return;
     };
-    let allow_fade =
-        cross_fade && super::lod_fade::scene_group_can_cross_fade(ctx, space_id, space, lods);
-    let decision = fade_decision_for_rows(
+    let geometric = fade_decision_for_rows(
         selected_index,
         resolved_lods.len(),
         Some(lods),
         measured_height,
-        allow_fade,
+        cross_fade,
     );
+    let decision = if geometric.partner.is_none()
+        || super::lod_fade::scene_group_can_cross_fade(ctx, space_id, space, lods)
+    {
+        geometric
+    } else {
+        LodFadeDecision::single(selected_index)
+    };
     commit_resolved_decision(visibility, space_id, &resolved_lods, &decision);
 }
 
@@ -757,6 +807,13 @@ mod tests {
     }
 
     #[test]
+    fn inactive_fade_lookup_returns_zero_without_a_space_map_hit() {
+        let visibility = LodVisibility::default();
+        assert!(!visibility.fade_active());
+        assert_eq!(visibility.lod_fade(RenderSpaceId(7), 3), 0.0);
+    }
+
+    #[test]
     fn select_lod_index_uses_first_matching_threshold() {
         let lods = [lod(0.6, 1), lod(0.2, 2)];
 
@@ -844,6 +901,7 @@ mod tests {
             instance_to_ordinal,
             grouped: DenseBitSet::default(),
             selected: DenseBitSet::default(),
+            renderer_count: 2,
             fades: LodFadeTable::default(),
         };
         space.grouped.insert(0);

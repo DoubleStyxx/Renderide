@@ -1,6 +1,7 @@
 //! Screen-door LOD cross-fade.
 //!
-//! The signed weight lives in `PerDrawUniforms.particle_padding[0].x` (CPU `_pad2[0][0]`).
+//! The signed weight lives in `PerDrawUniforms.particle_padding[5].x` (CPU `_pad2[5][0]`).
+//! Rows `[0..4]` and `[4].x` are reserved for the object-velocity previous model.
 //! `0` keeps every fragment. A positive weight `t` keeps fragments whose Bayer threshold is
 //! below `t`. A negative weight keeps the complementary fragments, so two coplanar LOD draws
 //! partition the pixels.

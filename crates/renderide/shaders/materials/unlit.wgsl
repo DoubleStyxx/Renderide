@@ -29,7 +29,6 @@
 #import renderide::mesh::vertex as mv
 #import renderide::core::normal_decode as nd
 #import renderide::draw::per_draw as pd
-#import renderide::draw::lod_fade as lf
 #import renderide::core::uv as uvu
 
 struct UnlitMaterial {
@@ -75,7 +74,6 @@ struct VertexOutput {
     @location(0) uv: vec2<f32>,
     @location(1) color: vec4<f32>,
     @location(2) @interpolate(flat) view_layer: u32,
-    @location(3) @interpolate(flat) lod_fade: f32,
 }
 
 @vertex
@@ -103,7 +101,6 @@ fn vs_main(
     out.uv = uv;
     out.color = color;
     out.view_layer = view_layer;
-    out.lod_fade = d.particle_padding[0].x;
     return out;
 }
 
@@ -180,9 +177,6 @@ fn vertex_color_to_linear(color: vec4<f32>) -> vec4<f32> {
 //#pass type=forward name=forward_filter blend=material_filter zwrite=material(on) ztest=material_froox(main) cull=material(back) color_mask=rgba offset=material(0,0) a2c=cutout
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    if (lf::lod_fade_discards(in.clip_pos.xy, in.lod_fade)) {
-        discard;
-    }
     let use_texture = kw_TEXTURE() || kw_TEXTURE_NORMALMAP();
     let use_color = kw_COLOR();
     let use_polar_uv = use_texture && kw_POLARUV();

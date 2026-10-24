@@ -105,6 +105,7 @@ pub(crate) use cache::MaterialPipelineCache;
 /// Pipeline cache keyed by shader route / layout fingerprint.
 pub(crate) use cache::{
     MaterialPipelineCacheDiagnosticSnapshot, MaterialPipelineSet, MaterialPipelineVariantSpec,
+    take_draw_pipeline_pending,
 };
 
 #[cfg(feature = "bench-api")]

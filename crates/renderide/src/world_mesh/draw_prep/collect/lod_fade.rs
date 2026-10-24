@@ -1,17 +1,23 @@
 //! Screen-space LOD cross-fade decisions.
 //!
 //! The result is a [`LodFadeDecision`] stored by value on each draw item. Per-renderer weights
-//! live in a dense ordinal array that is recycled across views, so a steady scene does not
-//! allocate a fade buffer per frame and [`LodFadeTable::weight`] is an index.
+//! live in a dense ordinal array owned by the view. The array is allocated only when a renderer
+//! in that view records a non-zero weight, and it is dropped with the view. There is no
+//! thread-local pool, so a buffer acquired on one worker cannot migrate onto another.
 
-use std::cell::RefCell;
+use std::sync::Arc;
 
+use hashbrown::{HashMap, HashSet};
+
+use crate::materials::RasterPipelineKind;
 use crate::scene::{
     LodEntry, LodRendererKind, LodRendererRef, RenderSpaceId, RenderSpaceView, StaticMeshRenderer,
 };
 use crate::shared::ShadowCastMode;
 
-use super::super::prepared_renderables::{FramePreparedLodGroup, FramePreparedRenderables};
+use super::super::prepared_renderables::{
+    FramePreparedDraw, FramePreparedLodGroup, FramePreparedRenderables, LodStippleIndex,
+};
 use super::DrawCollectionInputs;
 use super::lod::{
     LodVisibility, ResolvedLodEntry, skinned_renderer_for_lod_ref, static_renderer_for_lod_ref,
@@ -28,15 +34,15 @@ pub(super) const LOD_FADE_DISABLED: f32 = 0.0;
 /// PBS and the other unlit-family stems still draw solid fragments. Fading those groups would
 /// overdraw and punch depth holes, so they keep the single-LOD swap.
 const LOD_STIPPLE_STEM: &str = "unlit_default";
+/// Forward stem selected when an unlit draw's fade weight is non-zero.
+const LOD_STIPPLE_FADE_STEM: &str = "unlit_fade_default";
+/// Multiview form of [`LOD_STIPPLE_FADE_STEM`].
+const LOD_STIPPLE_FADE_MULTIVIEW_STEM: &str = "unlit_fade_multiview";
 
 /// Coverage at or above this value is treated as fully the current LOD.
 const FULLY_CURRENT: f32 = 1.0;
 /// Band and coverage values inside this epsilon collapse to a hard LOD switch.
 const FADE_EDGE_EPS: f32 = 1.0e-4;
-
-thread_local! {
-    static LOD_FADE_WEIGHT_POOL: RefCell<Vec<Vec<f32>>> = const { RefCell::new(Vec::new()) };
-}
 
 /// Which LOD rows to draw, and the signed stipple weight for each.
 ///
@@ -74,46 +80,51 @@ impl LodFadeDecision {
     }
 }
 
-/// Dense per-ordinal stipple weights for one render space.
+/// Dense per-ordinal stipple weights for one render space in one view.
 ///
-/// The buffer is taken from a thread-local pool and returned on drop. `weight` indexes the
-/// array. Recording does not allocate; growth happens only when a later view needs a longer
-/// ordinal span than any recycled buffer.
+/// The buffer is owned by the view. [`LodVisibility`] allocates it only when a renderer records
+/// a non-zero weight, so a view with no group in a fade band does not fill or allocate. Dropping
+/// the view frees the buffer on whichever thread owns the view; nothing is returned to a
+/// thread-local pool.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct LodFadeTable {
     /// `weights[ordinal]` is the signed stipple weight. `0` means the shader is unchanged.
     weights: Vec<f32>,
-    /// `true` when this view's buffer had to grow past every recycled scratch buffer.
-    allocated_on_acquire: bool,
-}
-
-impl Drop for LodFadeTable {
-    fn drop(&mut self) {
-        recycle_weight_buffer(std::mem::take(&mut self.weights));
-    }
 }
 
 impl LodFadeTable {
-    /// Takes a zeroed scratch buffer that can address `len` renderer ordinals.
+    /// Zero-fills a scratch buffer that can address `len` renderer ordinals.
+    ///
+    /// Callers must not call this for a view that has no fading renderer.
     pub(super) fn acquire(len: usize) -> Self {
         if len == 0 {
             return Self::default();
         }
-        let (weights, allocated_on_acquire) = take_weight_buffer(len);
-        Self {
-            weights,
-            allocated_on_acquire,
-        }
+        let mut weights = Vec::with_capacity(len);
+        weights.resize(len, 0.0);
+        Self { weights }
+    }
+
+    /// `true` when this view has not allocated a weight buffer.
+    #[inline]
+    pub(super) fn is_empty(&self) -> bool {
+        self.weights.is_empty()
     }
 
     /// Records `weight` for `ordinal`. A zero weight is left as the cleared default.
-    pub(super) fn record(&mut self, ordinal: usize, weight: f32) {
+    ///
+    /// Returns whether a non-zero weight was stored. Callers use that to mark the view as fading
+    /// without a second scan of the table. An empty table does not grow: the caller allocates
+    /// once, before the first non-zero record.
+    pub(super) fn record(&mut self, ordinal: usize, weight: f32) -> bool {
         if weight == LOD_FADE_DISABLED || !weight.is_finite() {
-            return;
+            return false;
         }
         if let Some(slot) = self.weights.get_mut(ordinal) {
             *slot = weight;
+            return true;
         }
+        false
     }
 
     /// Signed stipple weight for `ordinal`, or [`LOD_FADE_DISABLED`] when it is not fading.
@@ -125,46 +136,27 @@ impl LodFadeTable {
             .unwrap_or(LOD_FADE_DISABLED)
     }
 
-    /// Scratch capacity after this acquire. Stable across a reused view of the same size.
+    /// Scratch capacity. Zero until [`Self::acquire`] runs for this view.
     #[cfg(test)]
     pub(super) fn capacity(&self) -> usize {
         self.weights.capacity()
     }
-
-    /// `true` when [`Self::acquire`] had to allocate because no recycled buffer was long enough.
-    #[cfg(test)]
-    pub(super) fn allocated_on_acquire(&self) -> bool {
-        self.allocated_on_acquire
-    }
 }
 
-fn take_weight_buffer(len: usize) -> (Vec<f32>, bool) {
-    let mut buffer = LOD_FADE_WEIGHT_POOL.with(|pool| {
-        let Ok(mut pool) = pool.try_borrow_mut() else {
-            return Vec::new();
-        };
-        let fitting = pool.iter().position(|buf| buf.capacity() >= len);
-        if let Some(index) = fitting {
-            pool.swap_remove(index)
-        } else {
-            pool.pop().unwrap_or_default()
-        }
-    });
-    let allocated = buffer.capacity() < len;
-    buffer.clear();
-    buffer.resize(len, 0.0);
-    (buffer, allocated)
-}
-
-fn recycle_weight_buffer(buffer: Vec<f32>) {
-    if buffer.capacity() == 0 {
+/// Points a non-zero unlit fade at the stippling shader. A zero weight keeps the historical stem.
+pub(super) fn select_unlit_fade_pipeline(pipeline: &mut RasterPipelineKind, lod_fade: f32) {
+    if lod_fade == 0.0 || !lod_fade.is_finite() {
         return;
     }
-    LOD_FADE_WEIGHT_POOL.with(|pool| {
-        if let Ok(mut pool) = pool.try_borrow_mut() {
-            pool.push(buffer);
-        }
-    });
+    let RasterPipelineKind::EmbeddedStem(stem) = pipeline else {
+        return;
+    };
+    let next = match stem.as_ref() {
+        LOD_STIPPLE_STEM => LOD_STIPPLE_FADE_STEM,
+        "unlit_multiview" => LOD_STIPPLE_FADE_MULTIVIEW_STEM,
+        _ => return,
+    };
+    *pipeline = RasterPipelineKind::EmbeddedStem(Arc::from(next));
 }
 
 /// Unity-style mesh LOD bias. Non-finite and non-positive values fall back to `1`.
@@ -275,7 +267,8 @@ pub(super) fn material_id_stipples(ctx: &DrawCollectionInputs<'_>, material_asse
 
 /// `true` when every prepared draw in `group` is a color unlit material.
 ///
-/// A shadow-only member, a missing draw, or any other stem keeps the single-LOD swap.
+/// The answer is an O(1) lookup in an index built once per prepared snapshot, from one pass over
+/// the draws. Callers must invoke this only for a group already inside a fade band.
 pub(super) fn prepared_group_stipples(
     ctx: &DrawCollectionInputs<'_>,
     group: &FramePreparedLodGroup,
@@ -283,32 +276,83 @@ pub(super) fn prepared_group_stipples(
     let Some(prepared) = ctx.caches.prepared else {
         return false;
     };
-    group_draws_stipple(ctx, prepared, group)
+    if let Some(index) = prepared.lod_stipple().get() {
+        return index.group_stipples(group.space_id, group.scene_group_index);
+    }
+    let built = build_lod_stipple_index(ctx, prepared);
+    prepared
+        .lod_stipple()
+        .get_or_init(|| built)
+        .group_stipples(group.space_id, group.scene_group_index)
 }
 
-fn group_draws_stipple(
+/// One draw pass over cross-fade members, then one bool per cross-fade group.
+///
+/// Ordinals that are not in a cross-fade group are skipped, so the material-stem lookup does not
+/// walk the whole prepared list once per renderer. The resulting bool is what view selection
+/// reads, and only for a group whose height is inside the fade band.
+fn build_lod_stipple_index(
     ctx: &DrawCollectionInputs<'_>,
     prepared: &FramePreparedRenderables,
+) -> LodStippleIndex {
+    let mut members = HashSet::new();
+    for group in prepared.lod_groups() {
+        if !group.cross_fade {
+            continue;
+        }
+        for lod in &group.lods {
+            for renderer in &lod.renderers {
+                members.insert((group.space_id, renderer.renderer_ordinal));
+            }
+        }
+    }
+    // `1` means every draw seen so far is color unlit. `2` means one draw cannot stipple.
+    let mut ordinal_state: HashMap<(RenderSpaceId, usize), u8> = HashMap::new();
+    if !members.is_empty() {
+        for draw in prepared.draws() {
+            let key = (draw.space_id, draw.renderer_ordinal);
+            if !members.contains(&key) {
+                continue;
+            }
+            let ok = draw_stipples(ctx, draw);
+            match ordinal_state.get_mut(&key) {
+                Some(state) if !ok => *state = 2,
+                Some(_) => {}
+                None => {
+                    ordinal_state.insert(key, if ok { 1 } else { 2 });
+                }
+            }
+        }
+    }
+    let mut by_group = HashMap::new();
+    for group in prepared.lod_groups() {
+        if !group.cross_fade {
+            continue;
+        }
+        let stipples = group_ordinals_stipple(&ordinal_state, group);
+        by_group.insert((group.space_id, group.scene_group_index), stipples);
+    }
+    LodStippleIndex::new(by_group)
+}
+
+fn draw_stipples(ctx: &DrawCollectionInputs<'_>, draw: &FramePreparedDraw) -> bool {
+    draw.shadow_cast_mode != ShadowCastMode::ShadowOnly
+        && material_id_stipples(ctx, draw.material_asset_id)
+}
+
+fn group_ordinals_stipple(
+    ordinal_state: &HashMap<(RenderSpaceId, usize), u8>,
     group: &FramePreparedLodGroup,
 ) -> bool {
-    let draws = prepared.draws();
     let mut saw = false;
     for lod in &group.lods {
         for renderer in &lod.renderers {
-            let mut matched = false;
-            for draw in draws.iter().filter(|draw| {
-                draw.space_id == group.space_id
-                    && draw.renderer_ordinal == renderer.renderer_ordinal
-            }) {
-                matched = true;
-                saw = true;
-                if draw.shadow_cast_mode == ShadowCastMode::ShadowOnly
-                    || !material_id_stipples(ctx, draw.material_asset_id)
-                {
-                    return false;
-                }
-            }
-            if !matched {
+            saw = true;
+            if ordinal_state
+                .get(&(group.space_id, renderer.renderer_ordinal))
+                .copied()
+                != Some(1)
+            {
                 return false;
             }
         }
@@ -353,26 +397,41 @@ pub(super) fn fade_decision_for_rows(
     lod_fade_decision(selected_index, has_next, coverage)
 }
 
-/// Scene LOD rows aligned with a prepared group, when the scene group is still present.
-pub(super) fn prepared_scene_lods<'a>(
-    ctx: &'a DrawCollectionInputs<'_>,
+/// Fade choice for a prepared group, using widths copied at prepare time.
+///
+/// This does not look up the scene space. The caller passes `allow_fade` only after the group's
+/// stored `cross_fade` flag is set, so a view with cross-fade off never reaches here.
+pub(super) fn fade_decision_for_prepared_group(
     group: &FramePreparedLodGroup,
-) -> Option<PreparedSceneLods<'a>> {
-    let space = ctx.scene_assets.scene.space(group.space_id)?;
-    let scene_group = space.lod_groups().get(group.scene_group_index)?;
-    Some(PreparedSceneLods {
-        cross_fade: scene_group.cross_fade,
-        lods: scene_group.lods.as_slice(),
-    })
-}
-
-/// Borrowed scene LOD rows used to read fade widths for one prepared group.
-#[derive(Clone, Copy)]
-pub(super) struct PreparedSceneLods<'a> {
-    /// Host cross-fade flag for the group.
-    pub(super) cross_fade: bool,
-    /// Scene rows aligned with the prepared LOD entries.
-    pub(super) lods: &'a [LodEntry],
+    selected_index: usize,
+    measured_height: Option<f32>,
+    allow_fade: bool,
+) -> LodFadeDecision {
+    let Some(effective_height) = measured_height else {
+        return LodFadeDecision::single(selected_index);
+    };
+    let Some(selected) = group.lods.get(selected_index) else {
+        return LodFadeDecision::single(selected_index);
+    };
+    let previous_height = if selected_index == 0 {
+        1.0
+    } else {
+        group
+            .lods
+            .get(selected_index - 1)
+            .map(|lod| lod.screen_relative_transition_height)
+            .unwrap_or(1.0)
+    };
+    let has_next = selected_index.saturating_add(1) < group.lods.len();
+    let coverage = lod_cross_fade_coverage(
+        selected.screen_relative_transition_height,
+        previous_height,
+        selected.fade_transition_width,
+        has_next,
+        effective_height,
+        allow_fade,
+    );
+    lod_fade_decision(selected_index, has_next, coverage)
 }
 
 /// Marks the prepared renderers chosen by `decision` and stores non-zero stipple weights.
@@ -643,40 +702,72 @@ mod tests {
     }
 
     #[test]
-    fn dense_fade_weights_are_reused_without_allocating() {
-        let mut warm_a = LodFadeTable::acquire(64);
-        let mut warm_b = LodFadeTable::acquire(64);
-        let capacity = warm_a.capacity();
+    fn fade_weight_scratch_stays_empty_until_a_view_allocates_it() {
+        let idle = LodFadeTable::default();
+        assert!(idle.is_empty());
+        assert_eq!(idle.capacity(), 0);
+        let mut untouched = LodFadeTable::default();
+        assert!(!untouched.record(0, 0.4));
+        assert_eq!(untouched.capacity(), 0);
+
+        let mut view = LodFadeTable::acquire(64);
+        let capacity = view.capacity();
+        assert!(!view.record(0, 0.0));
+        assert!(!view.record(99, 0.4));
         for ordinal in 0..64 {
-            warm_a.record(ordinal, if ordinal % 2 == 0 { 0.35 } else { -0.35 });
+            assert!(view.record(ordinal, if ordinal % 2 == 0 { 0.35 } else { -0.35 }));
         }
         assert_eq!(
-            warm_a.capacity(),
+            view.capacity(),
             capacity,
             "recording must not grow the buffer"
         );
-        assert_eq!(warm_a.weight(63), -0.35);
-        assert_eq!(warm_a.weight(64), LOD_FADE_DISABLED);
-        warm_b.record(1, 0.2);
-        drop(warm_a);
-        drop(warm_b);
+        assert_eq!(view.weight(63), -0.35);
+        assert_eq!(view.weight(64), LOD_FADE_DISABLED);
 
-        let mut next_a = LodFadeTable::acquire(64);
-        let next_b = LodFadeTable::acquire(64);
-        assert!(
-            !next_a.allocated_on_acquire(),
-            "the next view must reuse the recycled scratch buffer"
+        rayon::scope(|scope| {
+            scope.spawn(move |_| drop(view));
+        });
+        let after_other_thread = LodFadeTable::default();
+        assert_eq!(
+            after_other_thread.capacity(),
+            0,
+            "dropping a view buffer on another thread must not allocate scratch for the next view"
         );
-        assert!(
-            !next_b.allocated_on_acquire(),
-            "a second live space must reuse its own recycled buffer"
-        );
-        assert!(next_a.capacity() >= capacity);
-        assert_eq!(next_a.weight(63), LOD_FADE_DISABLED);
-        assert_eq!(next_b.weight(1), LOD_FADE_DISABLED);
-        let reused_capacity = next_a.capacity();
-        next_a.record(7, 0.2);
-        assert_eq!(next_a.weight(7), 0.2);
-        assert_eq!(next_a.capacity(), reused_capacity);
+    }
+
+    #[test]
+    fn nonzero_fade_selects_the_unlit_fade_pipeline() {
+        use crate::world_mesh::test_fixtures::{DummyDrawItemSpec, dummy_world_mesh_draw_item};
+
+        let mut item = dummy_world_mesh_draw_item(DummyDrawItemSpec {
+            material_asset_id: 1,
+            property_block: None,
+            skinned: false,
+            sorting_order: 0,
+            mesh_asset_id: 1,
+            node_id: 1,
+            slot_index: 0,
+            collect_order: 0,
+            alpha_blended: false,
+        });
+        item.batch_key.pipeline = RasterPipelineKind::EmbeddedStem(Arc::from(LOD_STIPPLE_STEM));
+        select_unlit_fade_pipeline(&mut item.batch_key.pipeline, 0.0);
+        assert!(matches!(
+            &item.batch_key.pipeline,
+            RasterPipelineKind::EmbeddedStem(stem) if stem.as_ref() == LOD_STIPPLE_STEM
+        ));
+        select_unlit_fade_pipeline(&mut item.batch_key.pipeline, -0.4);
+        assert!(matches!(
+            &item.batch_key.pipeline,
+            RasterPipelineKind::EmbeddedStem(stem) if stem.as_ref() == LOD_STIPPLE_FADE_STEM
+        ));
+        item.batch_key.pipeline =
+            RasterPipelineKind::EmbeddedStem(Arc::from("pbsmetallic_default"));
+        select_unlit_fade_pipeline(&mut item.batch_key.pipeline, 0.4);
+        assert!(matches!(
+            &item.batch_key.pipeline,
+            RasterPipelineKind::EmbeddedStem(stem) if stem.as_ref() == "pbsmetallic_default"
+        ));
     }
 }

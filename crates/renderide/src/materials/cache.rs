@@ -9,7 +9,7 @@
 
 use std::hash::{Hash, Hasher};
 use std::num::{NonZeroU32, NonZeroUsize};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use ahash::{AHasher, RandomState};
@@ -33,6 +33,22 @@ use crate::materials::{
 
 use super::pipeline_build_error::PipelineBuildError;
 use super::raster_pipeline::MaterialPipelineDesc;
+
+/// Set when a draw-path lookup queues or observes a pipeline that is not ready yet.
+///
+/// Headless capture reads this once per frame and withholds the PNG. A frame drawn through the
+/// null fallback, or with the batch skipped, must not become the golden.
+static DRAW_PIPELINE_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// Records that this frame cannot be captured yet because a draw pipeline is still compiling.
+pub(crate) fn note_draw_pipeline_pending() {
+    DRAW_PIPELINE_PENDING.store(true, Ordering::Release);
+}
+
+/// Returns and clears the pending-pipeline capture block for the frame that just finished.
+pub(crate) fn take_draw_pipeline_pending() -> bool {
+    DRAW_PIPELINE_PENDING.swap(false, Ordering::Acquire)
+}
 
 /// Maximum raster pipelines retained (LRU eviction).
 const MAX_CACHED_PIPELINES: usize = 512;
@@ -503,11 +519,14 @@ impl MaterialPipelineCache {
                 return MaterialPipelineLookup::Failed(err);
             }
             if !shard.pending.insert(key.clone()) {
+                drop(shard);
+                note_draw_pipeline_pending();
                 return MaterialPipelineLookup::Pending;
             }
         }
 
         self.queue_pipeline_build(key, kind.clone(), *desc, variant, wgsl_override);
+        note_draw_pipeline_pending();
         MaterialPipelineLookup::Pending
     }
 

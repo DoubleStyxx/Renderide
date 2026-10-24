@@ -33,7 +33,7 @@ fn vs_main(
 
     var out: VertexOutput;
     out.clip_pos = vp * world_p;
-    out.lod_fade = draw.particle_padding[0].x;
+    out.lod_fade = draw.particle_padding[5].x;
     return out;
 }
 

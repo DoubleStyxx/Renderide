@@ -70,7 +70,11 @@ pub struct PaddedPerDrawUniforms {
     pub particle: [[f32; 4]; 4],
     /// Padding to keep every dynamic storage offset aligned across supported adapters.
     ///
-    /// `_pad2[0][0]` is the signed LOD cross-fade weight. `0` disables stippling.
+    /// Layout shared with other passes (WGSL `particle_padding`):
+    /// - rows `[0..4]` — previous rigid model matrix written by the object-velocity pass
+    /// - row `4`, column `0` — `1.0` when that previous model is valid
+    /// - row `5`, column `0` — signed LOD cross-fade weight. `0` disables stippling. This slot
+    ///   stays outside rows `[0..5]` so it does not overlap the velocity matrix or its validity flag.
     pub _pad2: [[f32; 4]; 12],
 }
 
@@ -111,10 +115,17 @@ impl PaddedPerDrawUniforms {
     }
 }
 
-/// Slot of the signed LOD cross-fade weight inside [`PaddedPerDrawUniforms::_pad2`].
-const PER_DRAW_LOD_FADE_PAD_ROW: usize = 0;
+/// Row of the signed LOD cross-fade weight inside [`PaddedPerDrawUniforms::_pad2`].
+///
+/// Rows `0..5` are reserved for the object-velocity previous model (`[0..4]` plus the validity
+/// flag at `[4][0]`). The weight must stay at or after row 5.
+const PER_DRAW_LOD_FADE_PAD_ROW: usize = 5;
 /// Column of the signed LOD cross-fade weight inside that row.
 const PER_DRAW_LOD_FADE_PAD_COLUMN: usize = 0;
+
+/// Rows `[0..5]` belong to the object-velocity previous model. The fade weight stays outside them.
+const _: () = assert!(PER_DRAW_LOD_FADE_PAD_ROW >= 5);
+const _: () = assert!(PER_DRAW_LOD_FADE_PAD_COLUMN == 0);
 
 impl PaddedPerDrawUniforms {
     /// Returns a copy with the signed LOD cross-fade weight stored for WGSL.
@@ -270,10 +281,35 @@ mod tests {
     fn lod_fade_zero_keeps_the_padding_slot_clear() {
         let cleared =
             PaddedPerDrawUniforms::new_single(Mat4::IDENTITY, Mat4::IDENTITY).with_lod_fade(0.0);
-        assert_eq!(cleared._pad2[0][0], 0.0);
+        assert_eq!(
+            cleared._pad2[PER_DRAW_LOD_FADE_PAD_ROW][PER_DRAW_LOD_FADE_PAD_COLUMN],
+            0.0
+        );
         let faded = cleared.with_lod_fade(0.35);
-        assert_eq!(faded._pad2[0][0], 0.35);
-        assert_eq!(faded._pad2[0][1], 0.0);
+        assert_eq!(
+            faded._pad2[PER_DRAW_LOD_FADE_PAD_ROW][PER_DRAW_LOD_FADE_PAD_COLUMN],
+            0.35
+        );
+        assert_eq!(faded._pad2[PER_DRAW_LOD_FADE_PAD_ROW][1], 0.0);
+    }
+
+    #[test]
+    fn lod_fade_weight_does_not_overlap_previous_model_padding() {
+        let mut seeded = PaddedPerDrawUniforms::new_single(Mat4::IDENTITY, Mat4::IDENTITY);
+        for row in 0..PER_DRAW_LOD_FADE_PAD_ROW {
+            seeded._pad2[row] = [row as f32 + 1.0, 2.0, 3.0, 4.0];
+        }
+        let faded = seeded.with_lod_fade(0.35);
+        for row in 0..PER_DRAW_LOD_FADE_PAD_ROW {
+            assert_eq!(
+                faded._pad2[row], seeded._pad2[row],
+                "LOD weight wrote _pad2[{row}], which object velocity owns"
+            );
+        }
+        assert_eq!(
+            faded._pad2[PER_DRAW_LOD_FADE_PAD_ROW][PER_DRAW_LOD_FADE_PAD_COLUMN],
+            0.35
+        );
     }
 
     /// Forward pass WGSL uses `clip = view_proj * (model * local)`. Packing PVxmodel into

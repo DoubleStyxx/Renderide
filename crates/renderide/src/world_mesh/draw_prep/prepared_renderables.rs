@@ -33,6 +33,7 @@ use crate::shared::{RenderingContext, ShadowCastMode};
 use crate::world_mesh::culling::{MeshCullGeometry, WorldMeshCullInput};
 
 use expand::{empty_material_key_signature, populate_runs_and_material_keys};
+pub(in crate::world_mesh::draw_prep) use lod::LodStippleIndex;
 pub(super) use lod::{FramePreparedLodEntry, FramePreparedLodGroup};
 use spatial::{PreparedSpatialIndex, PreparedSpatialRunCandidates};
 
@@ -238,6 +239,8 @@ pub struct FramePreparedRenderables {
     spatial: PreparedSpatialIndex,
     /// Prepared LOD groups resolved against the current draw snapshot.
     lod_groups: Vec<FramePreparedLodGroup>,
+    /// Stipple eligibility for cross-fade groups. Empty until a view enters a fade band.
+    lod_stipple: std::sync::OnceLock<LodStippleIndex>,
     /// Render context used when resolving material overrides; must match the per-view context.
     render_context: RenderingContext,
     /// Whether this snapshot was built for a context with no draw-prep overrides and can be used by any such context.
@@ -281,6 +284,7 @@ impl FramePreparedRenderables {
             material_property_key_signature: empty_material_key_signature(),
             spatial: PreparedSpatialIndex::default(),
             lod_groups: Vec::new(),
+            lod_stipple: std::sync::OnceLock::new(),
             render_context,
             context_invariant,
             previous_draws: Vec::new(),
@@ -482,6 +486,14 @@ impl FramePreparedRenderables {
     ) -> PreparedSpatialRunCandidates {
         self.spatial
             .query_runs(&self.runs, space_ids, scene, culling)
+    }
+
+    /// Slot filled the first time a view needs stipple eligibility.
+    #[inline]
+    pub(in crate::world_mesh::draw_prep) fn lod_stipple(
+        &self,
+    ) -> &std::sync::OnceLock<LodStippleIndex> {
+        &self.lod_stipple
     }
 
     /// Prepared LOD groups for per-view selection.

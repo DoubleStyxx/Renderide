@@ -132,6 +132,7 @@ pub(super) fn evaluate_draw_candidate(
     } else {
         0.0
     };
+    super::lod_fade::select_unlit_fade_pipeline(&mut batch_key.pipeline, candidate.lod_fade);
     let batch_key_hash = compute_batch_key_hash(&batch_key);
     // Precompute the opaque depth bucket here so the sort comparator does not redo `sqrt + log2`
     // on every pairwise compare. The argument matches the previous comparator-side computation

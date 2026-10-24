@@ -264,6 +264,15 @@ impl<'a> HeadlessDriver<'a> {
         if self.gpu.headless_color_texture().is_none() {
             return;
         }
+        // Draws whose material pipeline is still compiling are skipped or replaced with the null
+        // shader. That frame can be a single solid mesh, which is not flat, so the harness would
+        // accept it. Wait for a later frame that used the real pipelines.
+        if crate::materials::take_draw_pipeline_pending() {
+            logger::debug!(
+                "Headless PNG skipped: a material pipeline for this frame is still compiling"
+            );
+            return;
+        }
         let atlas_passes =
             shadow_atlas_pass_log_enabled().then(|| self.runtime.shadow_atlas_pass_counts());
         if let Err(e) = readback::readback_and_write_png_atomically(
