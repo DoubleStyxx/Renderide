@@ -10,9 +10,10 @@ of those per-run p95s, and `delta = (head - base) / base * 100`.
 
 Two thresholds, both percent, `--flag-threshold <= --fail-threshold`:
 
-- `--flag-threshold` (workflow default 6): only decides which scenarios get re-measured.
-- `--fail-threshold` (workflow default 10): the policy bar. Nothing fails at or below it.
-  `--threshold` is a deprecated alias of `--fail-threshold`.
+- `--flag-threshold` (default 5): only decides which scenarios get re-measured.
+- `--fail-threshold` (default 10): the policy bar. Nothing fails at or below it.
+  `--threshold` is a deprecated alias of `--fail-threshold`, like the workflow input: it sets the
+  fail threshold and, with a warning, lowers `--flag-threshold` to it when the flag is larger.
 
 Decision rule:
 
@@ -37,6 +38,11 @@ Decision rule:
    policy bar, and the flag threshold only exists to choose what to re-measure. `decide()`
    implements the same rule.
 
+Measured at the workflow defaults (`runs=9`, flag 5, fail 10, `confirm_rounds=3`; seeded noise
+model below, 4000 trials per point): a true 0% passes 99.925%; a true +10% fails 47.65% (10% is
+the bar itself, so about 50% is expected); +12% fails 69.725%; +15% fails 90.0%. Flag 5 was
+chosen over 6 (+15% failed 87.875%) to reach the 90% target at the same 0% pass rate.
+
 Known limit (tested, see test_frame_bench_gate.py): if confirm rounds add no new information
 (they repeat the first-pass runs exactly), slow base runs at or above the head median plus heavy
 overlap can keep both Mann-Whitney tests above alpha and clear a first-pass delta above the bar
@@ -60,6 +66,10 @@ Rows:
   confirmed regression and the path(s) that failed it.
 - `base N/A`: scenario measured on head, not defined on base. Never fails.
 - `head N/A, skipped`: scenario requested but not defined on head (`--head-missing`). Never fails.
+
+Input errors (exit 2, message on stderr): bad arguments; a report that is unreadable, has the
+wrong schema or a missing field; a head report with zero scenarios; a NaN or infinite value; a
+base median that is 0 or negative (first pass, confirm rounds alone, or pooled).
 
 Exit status: 0 pass, 1 flagged (first) or regression (confirm), 2 usage or input error.
 """
@@ -98,17 +108,39 @@ class Row:
     confirm_n_head: int = 0
 
 
-def load(paths: list[Path]) -> dict[str, list[float]]:
-    """Scenario name -> pooled per-run cpu p95 samples across all `paths`."""
+class InputError(ValueError):
+    """Bad report contents; the CLI exits 2."""
+
+
+def load(paths: list[Path], require_scenarios: bool = False) -> dict[str, list[float]]:
+    """Scenario name -> pooled per-run cpu p95 samples across all `paths`.
+
+    Raises `InputError` for a wrong schema, a NaN or infinite value, or (with
+    `require_scenarios`, used for head reports) a report with zero scenarios.
+    """
     pooled: dict[str, list[float]] = {}
     for path in paths:
         report = json.loads(path.read_text(encoding="utf-8"))
         if report.get("schema") != SCHEMA:
-            raise ValueError(f"{path}: schema {report.get('schema')!r}, expected {SCHEMA}")
-        for scenario in report.get("scenarios", []):
+            raise InputError(f"{path}: schema {report.get('schema')!r}, expected {SCHEMA}")
+        scenarios = report.get("scenarios") or []
+        if require_scenarios and not scenarios:
+            raise InputError(f"{path}: head report has zero scenarios")
+        for scenario in scenarios:
             samples = scenario.get("per_run_cpu_frame_ms_p95") or [scenario["cpu_frame_ms"]["p95"]]
-            pooled.setdefault(scenario["name"], []).extend(float(v) for v in samples)
+            values = [float(v) for v in samples]
+            bad = [v for v in values if not math.isfinite(v)]
+            if bad:
+                raise InputError(f"{path}: scenario {scenario['name']!r} has a non-finite value ({bad[0]!r})")
+            pooled.setdefault(scenario["name"], []).extend(values)
     return pooled
+
+
+def check_base_medians(label: str, base: dict[str, list[float]]) -> None:
+    """Raise `InputError` when any base median is 0 or negative (delta is undefined)."""
+    for name in sorted(base):
+        if base[name] and statistics.median(base[name]) <= 0:
+            raise InputError(f"{label} base median for {name!r} is {statistics.median(base[name])!r}; must be > 0")
 
 
 def delta_percent(base: list[float], head: list[float]) -> float | None:
@@ -350,9 +382,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--head", type=Path, action="append", default=[], help="first-pass head report; repeatable")
     parser.add_argument("--confirm-base", type=Path, action="append", default=[], help="confirm-round base report")
     parser.add_argument("--confirm-head", type=Path, action="append", default=[], help="confirm-round head report")
-    parser.add_argument("--flag-threshold", type=float, default=6.0, help="percent; first pass flags when delta > this")
+    parser.add_argument("--flag-threshold", type=float, default=5.0, help="percent; first pass flags when delta > this")
     parser.add_argument("--fail-threshold", type=float, default=10.0, help="percent; the policy bar")
-    parser.add_argument("--threshold", type=float, dest="legacy_threshold", help="deprecated alias of --fail-threshold")
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        dest="legacy_threshold",
+        help="deprecated alias of --fail-threshold; lowers --flag-threshold to it if larger",
+    )
     parser.add_argument("--mode", choices=("first", "confirm"), default="first", help="first pass or confirm")
     parser.add_argument("--alpha", type=float, default=DEFAULT_ALPHA, help="confirm: Mann-Whitney one-sided level")
     parser.add_argument("--head-missing", action="append", default=[], help="requested scenario head does not define")
@@ -360,8 +397,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--suspects-out", type=Path, help="first mode: write flagged scenario names, one per line")
     args = parser.parse_args(argv)
     if args.legacy_threshold is not None:
-        print("frame_bench_gate: --threshold is deprecated; using it as --fail-threshold", file=sys.stderr)
+        # Same as the workflow's deprecated `threshold` input.
+        print(f"frame_bench_gate: warning: --threshold is deprecated; using it as --fail-threshold "
+              f"{args.legacy_threshold:g}", file=sys.stderr)
         args.fail_threshold = args.legacy_threshold
+        if args.flag_threshold > args.fail_threshold:
+            print(f"frame_bench_gate: warning: --flag-threshold {args.flag_threshold:g} > --fail-threshold "
+                  f"{args.fail_threshold:g}; lowering --flag-threshold", file=sys.stderr)
+            args.flag_threshold = args.fail_threshold
     if not args.head:
         print("frame_bench_gate: at least one --head report is required", file=sys.stderr)
         return 2
@@ -376,9 +419,16 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         base = load(args.base)
-        head = load(args.head)
+        head = load(args.head, require_scenarios=True)
         confirm_base = load(args.confirm_base)
-        confirm_head = load(args.confirm_head)
+        confirm_head = load(args.confirm_head, require_scenarios=True)
+        check_base_medians("first-pass", base)
+        if args.mode == "confirm":
+            check_base_medians("confirm-round", confirm_base)
+            pooled_base = {k: list(v) for k, v in base.items()}
+            for k, v in confirm_base.items():
+                pooled_base.setdefault(k, []).extend(v)
+            check_base_medians("pooled", pooled_base)
     except (OSError, ValueError, KeyError, TypeError) as err:
         print(f"frame_bench_gate: {err}", file=sys.stderr)
         return 2

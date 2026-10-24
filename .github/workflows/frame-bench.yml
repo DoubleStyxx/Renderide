@@ -5,7 +5,7 @@
 # Gate (scripts/ci/frame_bench_gate.py, taken from the ref that dispatched this workflow;
 # its docstring is the full rule). delta = (median head per-run p95 - median base per-run p95)
 # / median base per-run p95, in percent.
-# Two thresholds (percent): `flag_threshold` (default 6) picks what to re-measure,
+# Two thresholds (percent): `flag_threshold` (default 5) picks what to re-measure,
 # `fail_threshold` (default 10) is the policy bar.
 # 1. First pass: a scenario is flagged when delta > `flag_threshold`. Nothing else: the base's
 #    run-to-run spread (15-30% per run on lavapipe) is not a threshold.
@@ -41,7 +41,7 @@ name: Frame bench
         type: string
       flag_threshold:
         description: Percent. The first pass flags a scenario for re-measurement when its cpu p95 delta (median of per-run p95s) is strictly greater than this; no spread condition. A flag alone never fails. Must be <= fail_threshold.
-        default: "6"
+        default: "5"
         required: false
         type: string
       fail_threshold:

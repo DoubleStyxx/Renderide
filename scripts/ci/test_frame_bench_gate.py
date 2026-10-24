@@ -20,7 +20,7 @@ import frame_bench_gate as gate  # noqa: E402
 # Workflow defaults (.github/workflows/frame-bench.yml).
 RUNS = 9
 CONFIRM_ROUNDS = 3
-FLAG = 6.0
+FLAG = 5.0
 FAIL = 10.0
 
 # Noise model shaped like docs/perf-parity-plan.md section 5.1 (lavapipe, 5 runs x 300 frames):
@@ -122,7 +122,7 @@ class GateTests(unittest.TestCase):
     def test_flag_threshold_decides_what_is_flagged(self) -> None:
         base, head = flat(1.0), flat(1.08)
         self.assertEqual(gate.evaluate_first({"s": base}, {"s": head}, FLAG, [])[0].status, "FLAG")
-        self.assertEqual(gate.evaluate_first({"s": base}, {"s": flat(1.05)}, FLAG, [])[0].status, "ok")
+        self.assertEqual(gate.evaluate_first({"s": base}, {"s": flat(1.04)}, FLAG, [])[0].status, "ok")
 
     def test_delta_beyond_threshold_is_flagged_via_cli(self) -> None:
         base = self.write("b.json", {"s": [1.0, 1.01, 0.99, 1.0, 1.0], "t": flat(1.0)})
@@ -164,15 +164,112 @@ class GateTests(unittest.TestCase):
         base = self.write("b.json", {"s": flat(1.0)})
         head = self.write("h.json", {"s": flat(1.08)})
         common = ["--base", str(base), "--head", str(head)]
-        self.assertEqual(self.run_gate(*common), 1)  # default flag 6
+        self.assertEqual(self.run_gate(*common), 1)  # default flag 5
         self.assertEqual(self.run_gate(*common, "--flag-threshold", "9"), 0)
         self.assertEqual(self.run_gate(*common, "--flag-threshold", "11", "--fail-threshold", "10"), 2)
         self.assertEqual(self.run_gate(*common, "--flag-threshold", "-1"), 2)
-        # Deprecated --threshold maps to --fail-threshold (here 5 < default flag 6: error).
-        with redirect_stderr(io.StringIO()):
-            self.assertEqual(self.run_gate(*common, "--threshold", "5"), 2)
-            self.assertEqual(self.run_gate(*common, "--threshold", "7", "--flag-threshold", "7"), 1)
+        # Deprecated --threshold maps to --fail-threshold; 4 < default flag 5 lowers the flag to 4
+        # (test_legacy_threshold_alias_lowers_flag) instead of erroring.
+        self.assertEqual(self.run_gate(*common, "--threshold", "4"), 1)
+        self.assertEqual(self.run_gate(*common, "--threshold", "7", "--flag-threshold", "7"), 1)
+        self.assertEqual(self.run_gate(*common, "--threshold", "9", "--flag-threshold", "9"), 0)
         self.assertEqual(self.run_gate(*common, "--confirm-base", str(base)), 2)  # confirm data needs --mode confirm
+
+    def run_gate_capture(self, *args: str) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = gate.main(list(args))
+        return code, out.getvalue(), err.getvalue()
+
+    def test_legacy_threshold_alias_lowers_flag(self) -> None:
+        # Like the workflow's deprecated `threshold` input: sets fail, lowers flag with a warning.
+        base = self.write("b.json", {"s": flat(1.0)})
+        head = self.write("h.json", {"s": flat(1.045)})  # +4.5%: under default flag 5
+        common = ["--base", str(base), "--head", str(head)]
+        self.assertEqual(self.run_gate(*common), 0)
+        code, out, err = self.run_gate_capture(*common, "--threshold", "4")
+        self.assertEqual(code, 1)  # flag lowered 5 -> 4, so +4.5% is flagged
+        self.assertIn("--threshold is deprecated", err)
+        self.assertIn("lowering --flag-threshold", err)
+        self.assertIn("FLAG when delta > 4%", out)
+        self.assertIn("fail only above 4%", out)
+        # Not larger: the flag is kept and no lowering warning is printed.
+        code, out, err = self.run_gate_capture(*common, "--threshold", "8", "--flag-threshold", "3")
+        self.assertEqual(code, 1)
+        self.assertNotIn("lowering", err)
+        self.assertIn("FLAG when delta > 3%", out)
+        self.assertIn("fail only above 8%", out)
+        # Confirm mode: the alias is the fail bar there too (+4.5% > 4, all runs slower).
+        cb = self.write("cb.json", {"s": flat(1.0)})
+        ch = self.write("ch.json", {"s": flat(1.045)})
+        code, out, _ = self.run_gate_capture(
+            "--mode", "confirm", *common, "--confirm-base", str(cb), "--confirm-head", str(ch), "--threshold", "4"
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("FAIL (pooled, confirm-only)", out)
+
+    # --- input errors (exit 2) ---------------------------------------------------------------
+
+    def write_raw(self, name: str, report_obj: dict) -> Path:
+        path = self.dir / name
+        path.write_text(json.dumps(report_obj), encoding="utf-8")  # NaN is written as `NaN`
+        return path
+
+    def test_head_report_with_zero_scenarios_is_an_input_error(self) -> None:
+        base = self.write("b.json", {"s": flat(1.0)})
+        empty = self.write_raw("h.json", {"schema": 1, "scenarios": []})
+        code, _, err = self.run_gate_capture("--base", str(base), "--head", str(empty))
+        self.assertEqual(code, 2)
+        self.assertIn("head report has zero scenarios", err)
+        missing_key = self.write_raw("h2.json", {"schema": 1})
+        self.assertEqual(self.run_gate("--base", str(base), "--head", str(missing_key)), 2)
+        # A confirm-round head report with zero scenarios is an error too.
+        head = self.write("h3.json", {"s": flat(1.2)})
+        code, _, err = self.run_gate_capture(
+            "--mode", "confirm", "--base", str(base), "--head", str(head),
+            "--confirm-base", str(base), "--confirm-head", str(empty),
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("zero scenarios", err)
+
+    def test_zero_base_median_is_an_input_error(self) -> None:
+        head = self.write("h.json", {"s": flat(1.0), "t": flat(1.0)})
+        zero = self.write("b.json", {"s": [0.0] * 5 + [1.0] * 4, "t": flat(1.0)})  # median 0
+        code, _, err = self.run_gate_capture("--base", str(zero), "--head", str(head))
+        self.assertEqual(code, 2)
+        self.assertIn("base median for 's' is 0.0", err)
+        # Confirm rounds alone with a zero base median (first pass fine).
+        good = self.write("b2.json", {"s": flat(1.0), "t": flat(1.0)})
+        cb = self.write("cb.json", {"s": flat(0.0)})
+        ch = self.write("ch.json", {"s": flat(1.2)})
+        code, _, err = self.run_gate_capture(
+            "--mode", "confirm", "--base", str(good), "--head", str(head),
+            "--confirm-base", str(cb), "--confirm-head", str(ch),
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("confirm-round base median", err)
+        # A non-zero median with a single 0 run is fine.
+        some_zero = self.write("b3.json", {"s": [0.0] + [1.0] * 8, "t": flat(1.0)})
+        self.assertEqual(self.run_gate("--base", str(some_zero), "--head", str(head)), 0)
+
+    def test_nan_value_is_an_input_error(self) -> None:
+        base = self.write("b.json", {"s": flat(1.0)})
+        head = self.write("h.json", {"s": flat(1.0)})
+        nan_head = self.write("hn.json", {"s": [1.0] * 8 + [float("nan")]})
+        nan_base = self.write("bn.json", {"s": [float("nan")] + [1.0] * 8})
+        for args in (
+            ("--base", str(base), "--head", str(nan_head)),
+            ("--base", str(nan_base), "--head", str(head)),
+            ("--mode", "confirm", "--base", str(base), "--head", str(head),
+             "--confirm-base", str(nan_base), "--confirm-head", str(head)),
+        ):
+            code, _, err = self.run_gate_capture(*args)
+            self.assertEqual(code, 2, args)
+            self.assertIn("non-finite value (nan)", err)
+        # The single-p95 fallback (no per-run list) is checked as well.
+        fallback = self.write_raw("hf.json", {"schema": 1, "scenarios": [
+            {"name": "s", "cpu_frame_ms": {"p50": 0.0, "p95": float("nan"), "p99": 0.0}}]})
+        self.assertEqual(self.run_gate("--base", str(base), "--head", str(fallback)), 2)
 
     # --- confirm paths --------------------------------------------------------------------
 
@@ -226,7 +323,7 @@ class GateTests(unittest.TestCase):
         self.assertEqual(row.status, "ok")
 
     def test_delta_between_flag_and_fail_is_flagged_then_cleared(self) -> None:
-        fb, fh = flat(1.0), flat(1.08)  # +8%: above flag 6, below fail 10
+        fb, fh = flat(1.0), flat(1.08)  # +8%: above flag 5, below fail 10
         self.assertEqual(gate.evaluate_first({"s": fb}, {"s": fh}, FLAG, [])[0].status, "FLAG")
         # Even when the confirm reproduces +8% exactly, nothing is above the bar.
         self.assertEqual(self.decide(fb, fh, [fb] * CONFIRM_ROUNDS, [fh] * CONFIRM_ROUNDS), "pass")
@@ -383,18 +480,18 @@ class GateTests(unittest.TestCase):
         self.assertTrue(15.0 <= median_spread <= 30.0, median_spread)
 
     def test_simulation_at_workflow_defaults(self) -> None:
-        # runs=9, flag=6, fail=10, confirm_rounds=3; 4000 trials each, seeded (0%: seed 2,
-        # regressions: seed 1). Measured: 0% passes 99.9%; +10% fails 45.2% (10% is the bar
-        # itself, so ~50% is expected); +12% fails 67.1%; +15% fails 87.9%.
+        # runs=9, flag=5, fail=10, confirm_rounds=3; 4000 trials each, seeded (0%: seed 2,
+        # regressions: seed 1). Measured: 0% passes 99.925%; +10% fails 47.65% (10% is the bar
+        # itself, so ~50% is expected); +12% fails 69.725%; +15% fails 90.0%.
         rates = {pct: simulate(pct, RUNS, CONFIRM_ROUNDS, FLAG, FAIL, trials=4000, seed=1) for pct in (10, 12, 15)}
         pass_0 = 1.0 - simulate(0.0, RUNS, CONFIRM_ROUNDS, FLAG, FAIL, trials=4000, seed=2)
         print(f"\n[sim runs={RUNS} rounds={CONFIRM_ROUNDS} flag={FLAG:g} fail={FAIL:g}] pass@0%={pass_0:.4f} "
               + " ".join(f"fail@+{k}%={v:.4f}" for k, v in rates.items()), file=sys.stderr)
         self.assertGreaterEqual(pass_0, 0.95)
         self.assertAlmostEqual(pass_0, 0.99925, places=5)
-        self.assertAlmostEqual(rates[10], 0.4515, places=4)
-        self.assertAlmostEqual(rates[12], 0.6710, places=4)
-        self.assertAlmostEqual(rates[15], 0.87875, places=5)
+        self.assertAlmostEqual(rates[10], 0.4765, places=5)
+        self.assertAlmostEqual(rates[12], 0.69725, places=5)
+        self.assertAlmostEqual(rates[15], 0.9000, places=5)
         self.assertTrue(0.35 <= rates[10] <= 0.65)  # around the bar: a coin flip
 
 
