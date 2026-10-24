@@ -1,7 +1,24 @@
 # Manual lavapipe frame benchmark. Does not run on push or pull_request.
 # The job builds master and the selected head on one runner and gates only on
-# relative regression of cpu_frame_ms.p95 (default: fail when delta > 10%).
-# Absolute milliseconds are not a gate.
+# relative regression of cpu_frame_ms.p95. Absolute milliseconds are not a gate.
+#
+# Gate (scripts/ci/frame_bench_gate.py, taken from the ref that dispatched this workflow;
+# its docstring is the full rule). delta = (median head per-run p95 - median base per-run p95)
+# / median base per-run p95, in percent.
+# Two thresholds (percent): `flag_threshold` (default 5) picks what to re-measure,
+# `fail_threshold` (default 10) is the policy bar.
+# 1. First pass: a scenario is flagged when delta > `flag_threshold`. Nothing else: the base's
+#    run-to-run spread (15-30% per run on lavapipe) is not a threshold.
+# 2. Confirm: flagged scenarios are re-measured for `confirm_rounds` interleaved rounds. A
+#    scenario fails when EITHER (a) on all runs pooled (first pass + confirm), delta >
+#    `fail_threshold` AND a one-sided Mann-Whitney U test gives p < 0.05 (head slower), OR
+#    (b) on the confirm rounds alone, delta > `fail_threshold` AND Mann-Whitney p < 0.05.
+# 3. `confirm_rounds` = 0: the first pass flags at `fail_threshold` and every flag fails; a
+#    delta between the two thresholds passes (it is under the policy bar).
+# `threshold` is a deprecated alias of `fail_threshold` (it wins when set, and lowers
+# `flag_threshold` to it if needed).
+# Scenarios missing on base are `base N/A`; scenarios missing on head are `head N/A, skipped`.
+# The job fails when no requested scenario exists on head.
 name: Frame bench
 
 "on":
@@ -18,13 +35,23 @@ name: Frame bench
         required: false
         type: string
       runs:
-        description: Measured runs per scenario. The gate uses the median of each run's percentile.
+        description: Measured runs per scenario, per pass and per confirm round. The gate uses the median of each run's percentile.
+        default: "9"
+        required: false
+        type: string
+      flag_threshold:
+        description: Percent. The first pass flags a scenario for re-measurement when its cpu p95 delta (median of per-run p95s) is strictly greater than this; no spread condition. A flag alone never fails. Must be <= fail_threshold.
         default: "5"
         required: false
         type: string
-      threshold:
-        description: Fail when gated relative delta is strictly greater than this percent.
+      fail_threshold:
+        description: Percent, the policy bar. A flagged scenario fails when, after the confirm, either all pooled runs or the confirm rounds alone show a delta strictly greater than this AND one-sided Mann-Whitney p < 0.05 (head slower).
         default: "10"
+        required: false
+        type: string
+      threshold:
+        description: Deprecated alias of fail_threshold. Empty (default) means unused. When set it overrides fail_threshold and lowers flag_threshold to it if flag_threshold is larger.
+        default: ""
         required: false
         type: string
       warmup:
@@ -43,8 +70,13 @@ name: Frame bench
         required: false
         type: string
       scenarios:
-        description: Comma-separated framebench scenario names ([a-z0-9_]). Empty uses the built-in defaults. Each tree runs with its own framebench binary; scenarios missing on base run on head only (base N/A).
+        description: Comma-separated framebench scenario names ([a-z0-9_]). Empty uses the built-in defaults. Each tree runs with its own framebench binary; scenarios missing on base run on head only (base N/A); scenarios missing on head are skipped (head N/A). Fails only when no requested scenario exists on head.
         default: ""
+        required: false
+        type: string
+      confirm_rounds:
+        description: When the first pass flags a scenario, re-measure base and head this many interleaved rounds (base/head, then head/base, ...) for the flagged scenarios only, each round with `runs` runs. Fail if (a) all runs pooled, or (b) the confirm rounds alone, show delta > fail_threshold AND one-sided Mann-Whitney p < 0.05. 0 skips the confirm and fails only first-pass deltas > fail_threshold.
+        default: "3"
         required: false
         type: string
       threads:
@@ -66,17 +98,31 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
+      - name: Checkout gate script (dispatching ref)
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: tools
+          persist-credentials: false
+          sparse-checkout: scripts/ci
+
+      # Runs before any base/head tree is checked out.
+      - name: Self-test gate script
+        run: python3 -m unittest discover -s tools/scripts/ci -p 'test_frame_bench_gate.py' -v
+
       - name: Checkout candidate
         uses: actions/checkout@v7
         with:
           ref: ${{ inputs.head_ref != '' && inputs.head_ref || github.ref }}
           path: head
+          persist-credentials: false
 
       - name: Checkout baseline
         uses: actions/checkout@v7
         with:
           ref: ${{ inputs.base_ref }}
           path: base
+          persist-credentials: false
 
       - name: Install mesa Vulkan (lavapipe)
         run: |
@@ -86,8 +132,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Pin lavapipe and thread count
+        env:
+          INPUT_THREADS: ${{ inputs.threads }}
         run: |
           set -euo pipefail
+          if ! [[ "$INPUT_THREADS" =~ ^[1-9][0-9]*$ ]]; then
+            echo "threads must be a positive integer" >&2
+            exit 1
+          fi
           icd=""
           shopt -s nullglob
           for candidate in /usr/share/vulkan/icd.d/lvp_icd*.json /etc/vulkan/icd.d/lvp_icd*.json; do
@@ -104,7 +156,7 @@ jobs:
           echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
           echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
           echo "WGPU_BACKEND=vulkan" >> "$GITHUB_ENV"
-          echo "RAYON_NUM_THREADS=${{ inputs.threads }}" >> "$GITHUB_ENV"
+          echo "RAYON_NUM_THREADS=$INPUT_THREADS" >> "$GITHUB_ENV"
           echo "RENDERIDE_LOG_TEE_TERMINAL=0" >> "$GITHUB_ENV"
           VK_ICD_FILENAMES="$icd" VK_DRIVER_FILES="$icd" vulkaninfo --summary | tee /tmp/vulkaninfo.txt
           if ! grep -Eq 'llvmpipe|lavapipe' /tmp/vulkaninfo.txt; then
@@ -117,14 +169,28 @@ jobs:
           # Passed through the environment (never interpolated into the script text) and
           # validated below.
           INPUT_SCENARIOS: ${{ inputs.scenarios }}
+          INPUT_THREADS: ${{ inputs.threads }}
+          INPUT_RUNS: ${{ inputs.runs }}
+          INPUT_FLAG_THRESHOLD: ${{ inputs.flag_threshold }}
+          INPUT_FAIL_THRESHOLD: ${{ inputs.fail_threshold }}
+          INPUT_THRESHOLD: ${{ inputs.threshold }}
+          INPUT_WARMUP: ${{ inputs.warmup }}
+          INPUT_FRAMES: ${{ inputs.frames }}
+          INPUT_RESOLUTION: ${{ inputs.resolution }}
+          INPUT_CONFIRM_ROUNDS: ${{ inputs.confirm_rounds }}
+          BASE_REF: ${{ inputs.base_ref }}
         run: |
           set -euo pipefail
-          threads="${{ inputs.threads }}"
-          runs="${{ inputs.runs }}"
-          threshold="${{ inputs.threshold }}"
-          warmup="${{ inputs.warmup }}"
-          frames="${{ inputs.frames }}"
-          resolution="${{ inputs.resolution }}"
+          threads="$INPUT_THREADS"
+          runs="$INPUT_RUNS"
+          flag_threshold="$INPUT_FLAG_THRESHOLD"
+          fail_threshold="$INPUT_FAIL_THRESHOLD"
+          legacy_threshold="$INPUT_THRESHOLD"
+          warmup="$INPUT_WARMUP"
+          frames="$INPUT_FRAMES"
+          resolution="$INPUT_RESOLUTION"
+          confirm_rounds="$INPUT_CONFIRM_ROUNDS"
+          gate_py="$GITHUB_WORKSPACE/tools/scripts/ci/frame_bench_gate.py"
           scenarios="${INPUT_SCENARIOS// /}"
           scenario_list=()
           if [[ -n "$scenarios" ]]; then
@@ -138,6 +204,56 @@ jobs:
             echo "threads must be a positive integer" >&2
             exit 1
           fi
+          if ! [[ "$runs" =~ ^[1-9][0-9]*$ ]]; then
+            echo "runs must be a positive integer" >&2
+            exit 1
+          fi
+          if ! [[ "$warmup" =~ ^[0-9]+$ ]]; then
+            echo "warmup must be a non-negative integer" >&2
+            exit 1
+          fi
+          if ! [[ "$frames" =~ ^[1-9][0-9]*$ ]]; then
+            echo "frames must be a positive integer" >&2
+            exit 1
+          fi
+          if ! [[ "$resolution" =~ ^[1-9][0-9]*x[1-9][0-9]*$ ]]; then
+            echo "resolution must be WIDTHxHEIGHT, e.g. 256x256" >&2
+            exit 1
+          fi
+          if ! [[ "$confirm_rounds" =~ ^[0-9]+$ ]]; then
+            echo "confirm_rounds must be a non-negative integer" >&2
+            exit 1
+          fi
+          number_re='^[0-9]+([.][0-9]+)?$'
+          for pair in "flag_threshold=$flag_threshold" "fail_threshold=$fail_threshold"; do
+            if ! [[ "${pair#*=}" =~ $number_re ]]; then
+              echo "${pair%%=*} must be a non-negative number" >&2
+              exit 1
+            fi
+          done
+          if [[ -n "$legacy_threshold" ]]; then
+            if ! [[ "$legacy_threshold" =~ $number_re ]]; then
+              echo "threshold must be a non-negative number" >&2
+              exit 1
+            fi
+            echo "::warning::input 'threshold' is deprecated; using it as fail_threshold=$legacy_threshold"
+            fail_threshold="$legacy_threshold"
+            if awk -v a="$flag_threshold" -v b="$fail_threshold" 'BEGIN { exit !(a > b) }'; then
+              echo "::warning::flag_threshold $flag_threshold > fail_threshold $fail_threshold; lowering flag_threshold"
+              flag_threshold="$fail_threshold"
+            fi
+          fi
+          if awk -v a="$flag_threshold" -v b="$fail_threshold" 'BEGIN { exit !(a > b) }'; then
+            echo "flag_threshold ($flag_threshold) must be <= fail_threshold ($fail_threshold)" >&2
+            exit 1
+          fi
+          # confirm_rounds=0: no re-measurement, so the first pass flags at the fail bar and every
+          # flag fails. A delta between the two thresholds passes.
+          first_flag="$flag_threshold"
+          if [[ "$confirm_rounds" -eq 0 ]]; then
+            first_flag="$fail_threshold"
+          fi
+          thresholds=(--flag-threshold "$first_flag" --fail-threshold "$fail_threshold")
           last=$((threads - 1))
           if [[ "$threads" -eq 1 ]]; then
             cpuset="0"
@@ -145,8 +261,14 @@ jobs:
             cpuset="0-${last}"
           fi
 
-          mkdir -p "$RUNNER_TEMP/framebench"
-          summary="$RUNNER_TEMP/framebench/compare.md"
+          out="$RUNNER_TEMP/framebench"
+          mkdir -p "$out"
+          summary="$out/summary.md"
+
+          finish() {
+            cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+            exit "$1"
+          }
 
           build_tree() {
             local tree="$1"
@@ -160,11 +282,11 @@ jobs:
           }
 
           # Each tree is measured with ITS OWN renderide-framebench binary. Reports from different
-          # trees are only ever compared through the JSON schema (checked by `compare`).
+          # trees are only ever compared through the schema-1 JSON.
           # usage: run_tree <target dir> <out json> [scenario ...]
           run_tree() {
             local target="$1"
-            local out="$2"
+            local report="$2"
             shift 2
             local args=()
             local scenario
@@ -180,19 +302,66 @@ jobs:
               --frames "$frames" \
               --runs "$runs" \
               --timeout-seconds 600 \
-              --output "$out"
+              --output "$report"
           }
 
           # A scenario exists in a tree when its framebench scenario table defines it.
-          tree_has_scenario() {
-            grep -Eq "^[[:space:]]*name: \"$2\"," "$1/crates/renderide-framebench/src/scenario.rs" 2>/dev/null
+          scenario_rs() {
+            echo "$1/crates/renderide-framebench/src/scenario.rs"
           }
+          tree_has_scenario() {
+            grep -Eq "^[[:space:]]*name: \"$2\"," "$(scenario_rs "$1")" 2>/dev/null
+          }
+          # Fail loudly when the scenario table cannot be parsed: zero matches means the file moved
+          # or its format changed, and every scenario would silently become N/A.
+          require_scenarios() {
+            local file count
+            file="$(scenario_rs "$1")"
+            count="$(grep -cE '^[[:space:]]*name: "[a-z0-9_]+",' "$file" 2>/dev/null || true)"
+            if [[ -z "$count" || "$count" -eq 0 ]]; then
+              {
+                echo "Scenario detection failed: parsed 0 scenarios from \`$file\` ($1 tree)."
+                echo "Expected lines like \`name: \"unlit_sphere\",\`; update tree_has_scenario in frame-bench.yml."
+                echo
+                echo "result: error"
+              } | tee -a "$summary" >&2
+              finish 2
+            fi
+            echo "$1 tree defines $count framebench scenarios" >&2
+          }
+
+          {
+            echo "# frame-bench-lavapipe"
+            echo
+          } > "$summary"
 
           if ! build_tree "head" "$RUNNER_TEMP/target-head"; then
             echo "candidate tree failed to build" >&2
             exit 1
           fi
-          run_tree "$RUNNER_TEMP/target-head" "$RUNNER_TEMP/framebench/head.json" "${scenario_list[@]}"
+          require_scenarios "head"
+
+          # Requested scenarios the head tree does not define are skipped (head N/A). Fail only
+          # when none of the requested scenarios exist on head.
+          head_scenarios=()
+          head_missing_args=()
+          for scenario in "${scenario_list[@]}"; do
+            if tree_has_scenario "head" "$scenario"; then
+              head_scenarios+=("$scenario")
+            else
+              echo "head has no scenario \`$scenario\`: head N/A, skipped" >&2
+              head_missing_args+=(--head-missing "$scenario")
+            fi
+          done
+          if [[ "${#scenario_list[@]}" -gt 0 && "${#head_scenarios[@]}" -eq 0 ]]; then
+            {
+              echo "None of the requested scenarios (\`$scenarios\`) exist on head."
+              echo
+              echo "result: fail"
+            } | tee -a "$summary"
+            finish 1
+          fi
+          run_tree "$RUNNER_TEMP/target-head" "$out/head.json" "${head_scenarios[@]}"
 
           set +e
           build_tree "base" "$RUNNER_TEMP/target-base"
@@ -200,61 +369,116 @@ jobs:
           set -e
           if [[ "$base_status" -eq 2 ]]; then
             {
-              echo "# frame-bench-lavapipe"
-              echo
-              echo "Base ref \`${{ inputs.base_ref }}\` has no \`crates/renderide-framebench\` crate."
+              echo "Base ref \`$BASE_REF\` has no \`crates/renderide-framebench\` crate."
               echo "Relative gate skipped. Absolute milliseconds are not a gate."
               echo
               echo "result: pass"
-            } | tee "$summary"
-            cat "$summary" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
+            } | tee -a "$summary"
+            finish 0
           fi
           if [[ "$base_status" -ne 0 ]]; then
             echo "baseline tree failed to build" >&2
             exit 1
           fi
+          require_scenarios "base"
 
           # Base runs on base's own binary. Scenarios the base tree does not define are measured
-          # on head only and show as `missing` (N/A) in the comparison, which never fails.
+          # on head only and show as `base N/A`, which never fails.
           base_scenarios=()
-          for scenario in "${scenario_list[@]}"; do
+          for scenario in "${head_scenarios[@]}"; do
             if tree_has_scenario "base" "$scenario"; then
               base_scenarios+=("$scenario")
             else
               echo "base has no scenario \`$scenario\`: head only, base N/A" >&2
             fi
           done
-          if [[ "${#scenario_list[@]}" -gt 0 && "${#base_scenarios[@]}" -eq 0 ]]; then
+          if [[ "${#head_scenarios[@]}" -gt 0 && "${#base_scenarios[@]}" -eq 0 ]]; then
             {
-              echo "# frame-bench-lavapipe"
-              echo
-              echo "None of the requested scenarios exist on base ref \`${{ inputs.base_ref }}\`."
+              echo "None of the requested scenarios exist on base ref \`$BASE_REF\`."
               echo "Head was measured; relative gate skipped (base N/A)."
               echo
-              echo "result: pass"
-            } | tee "$summary"
-            cat "$summary" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
+              python3 "$gate_py" --head "$out/head.json" "${head_missing_args[@]}" \
+                "${thresholds[@]}" --title "First pass (head only)" || true
+            } | tee -a "$summary"
+            finish 0
           fi
-          run_tree "$RUNNER_TEMP/target-base" "$RUNNER_TEMP/framebench/base.json" "${base_scenarios[@]}"
+          run_tree "$RUNNER_TEMP/target-base" "$out/base.json" "${base_scenarios[@]}"
 
-          set +e
-          taskset -c "$cpuset" \
-            "$RUNNER_TEMP/target-head/release/renderide-framebench" compare \
-            --baseline "$RUNNER_TEMP/framebench/base.json" \
-            --candidate "$RUNNER_TEMP/framebench/head.json" \
-            --threshold "$threshold" \
-            | tee "$summary"
-          compare_status=${PIPESTATUS[0]}
-          set -e
           {
-            echo "# frame-bench-lavapipe"
-            echo
             echo "lavapipe via VK_ICD_FILENAMES=$VK_ICD_FILENAMES"
-            echo "resolution=$resolution threads=$threads runs=$runs (median of per-run percentiles)"
+            echo "resolution=$resolution threads=$threads runs=$runs flag_threshold=$flag_threshold% fail_threshold=$fail_threshold% confirm_rounds=$confirm_rounds"
             echo "GPU timestamps are optional under lavapipe; null pass times are accepted."
             echo
-            cat "$summary"
-          } >> "$GITHUB_STEP_SUMMARY"
-          exit "$compare_status"
+          } >> "$summary"
+
+          if [[ "$confirm_rounds" -eq 0 ]]; then
+            first_title="First pass (confirm_rounds=0: flags at fail_threshold $fail_threshold% and fails)"
+          else
+            first_title="First pass"
+          fi
+          set +e
+          python3 "$gate_py" --base "$out/base.json" --head "$out/head.json" \
+            "${head_missing_args[@]}" "${thresholds[@]}" \
+            --title "$first_title" --suspects-out "$out/suspects.txt" | tee "$out/first.md"
+          first_status=${PIPESTATUS[0]}
+          set -e
+          cat "$out/first.md" >> "$summary"
+          if [[ "$first_status" -ge 2 ]]; then
+            echo "gate script error" >&2
+            finish 1
+          fi
+
+          gate_status="$first_status"
+          if [[ "$first_status" -eq 1 && "$confirm_rounds" -gt 0 ]]; then
+            mapfile -t suspects < "$out/suspects.txt"
+            echo "first pass flagged: ${suspects[*]}; confirming with $confirm_rounds interleaved rounds" >&2
+            # First-pass reports plus each confirm round: the gate pools them for path (a) and uses
+            # the confirm rounds alone for path (b).
+            confirm_args=(--base "$out/base.json" --head "$out/head.json")
+            for ((round = 1; round <= confirm_rounds; round++)); do
+              # Alternate the order (base/head, head/base, ...) so slow drift on the runner
+              # does not always land on the same side.
+              if ((round % 2 == 1)); then
+                run_tree "$RUNNER_TEMP/target-base" "$out/confirm-base-$round.json" "${suspects[@]}"
+                run_tree "$RUNNER_TEMP/target-head" "$out/confirm-head-$round.json" "${suspects[@]}"
+              else
+                run_tree "$RUNNER_TEMP/target-head" "$out/confirm-head-$round.json" "${suspects[@]}"
+                run_tree "$RUNNER_TEMP/target-base" "$out/confirm-base-$round.json" "${suspects[@]}"
+              fi
+              confirm_args+=(--confirm-base "$out/confirm-base-$round.json" --confirm-head "$out/confirm-head-$round.json")
+            done
+            set +e
+            python3 "$gate_py" --mode confirm "${confirm_args[@]}" "${head_missing_args[@]}" \
+              "${thresholds[@]}" \
+              --title "Confirm ($confirm_rounds interleaved rounds x $runs runs; only flagged scenarios were re-run)" \
+              | tee "$out/confirm.md"
+            gate_status=${PIPESTATUS[0]}
+            set -e
+            cat "$out/confirm.md" >> "$summary"
+            if [[ "$gate_status" -ge 2 ]]; then
+              echo "gate script error" >&2
+              finish 1
+            fi
+          fi
+
+          # Per-metric detail from head's own `renderide-framebench compare` (first pass, raw
+          # fail_threshold, no spread check). Informational: its exit status is not the gate.
+          {
+            echo
+            echo "<details><summary>Raw per-metric compare (first pass; informational, not the gate)</summary>"
+            echo
+            taskset -c "$cpuset" \
+              "$RUNNER_TEMP/target-head/release/renderide-framebench" compare \
+              --baseline "$out/base.json" \
+              --candidate "$out/head.json" \
+              --threshold "$fail_threshold" || true
+            echo
+            echo "</details>"
+            echo
+            if [[ "$gate_status" -eq 0 ]]; then
+              echo "gate: pass"
+            else
+              echo "gate: fail"
+            fi
+          } >> "$summary"
+          finish "$gate_status"

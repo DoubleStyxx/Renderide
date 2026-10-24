@@ -62,7 +62,9 @@ jobs:
           # via the system package manager, so it's the only OS that exercises the
           # `video-textures` feature (which pulls in gstreamer-sys / glib-sys).
           # `--all-features` here also enables `tracy`, giving us lint coverage of that path.
-          - os: ubuntu-latest
+          # ubuntu-24.04, not ubuntu-latest: the lavapipe debs below are noble builds.
+          # ubuntu-latest is scheduled to move off 24.04.
+          - os: ubuntu-24.04
             clippy_features: "--all-features"
           - os: windows-latest
             clippy_features: ""
@@ -72,32 +74,116 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # mesa-vulkan-drivers provides lavapipe so `renderide-test check-suite` can open a
-      # headless Vulkan adapter. There is no `materials::registry` GPU smoke test.
-      # GStreamer dev packages are required only when the `video-textures` feature is enabled
-      # (Linux clippy does this via `--all-features`); pkg-config resolves the headers/libs at build time.
+      # Linux goldens run on lavapipe. Windows CI has no Vulkan ICD and wgpu uses
+      # DX12 WARP. macOS CI uses Metal. Those captures are adapter comparisons.
+      # Lavapipe is the behavior gate.
       #
-      # On master 0104fee7 the install fetched 96.2 MB in 20 min 31 s (78.1 kB/s) and
-      # the Rust ubuntu job ran ~32 minutes. The suite step itself was ~19 seconds.
-      # plugins-good, flite, and the soundfont are Depends of gstreamer1.0-plugins-bad,
-      # not recommends. The MPEG-TS test only loads the tsdemux element, whose .so needs
-      # libgstreamer-plugins-bad1.0-0 plus the base plugins. Install that library and
-      # copy the one plugin instead of the plugins-bad package. `--no-install-recommends`
-      # still skips VA-API drivers. pkg-config is named so the -dev packages resolve.
-      - name: Install Linux system dependencies (Vulkan + GStreamer)
+      # noble-updates only lists the newest mesa-vulkan-drivers, so
+      # `apt-get install mesa-vulkan-drivers=<version>` breaks when a newer Mesa
+      # is published. Ubuntu 24.04's apt 2.7 also has no `--snapshot`. Fetch the
+      # debs from one snapshot.ubuntu.com timestamp and check sha256. libllvm20
+      # is pinned the same way: the Mesa deb depends on it with no version, and
+      # lavapipe's shader compiler is that LLVM. Snapshot 20261003T000000Z is the
+      # daily snapshot after 25.2.8-0ubuntu0.24.04.4 was published to noble-updates
+      # (2026-10-02 13:47:56 UTC). Hashes are from that snapshot's Packages index
+      # and were checked against the downloaded debs.
+      #
+      # GStreamer stays on the trimmed #190 install. plugins-good, flite, and the
+      # soundfont are Depends of gstreamer1.0-plugins-bad, not recommends. The
+      # MPEG-TS test only loads tsdemux, whose .so needs libgstreamer-plugins-bad1.0-0
+      # plus the base plugins. `--no-install-recommends` still skips VA-API.
+      # On master 0104fee7 the full plugins-bad install fetched 96.2 MB in 20 min 31 s.
+      # 10 minutes bounds this apt step. A healthy fetch is a few seconds.
+      - name: Install Linux system dependencies (pinned lavapipe + GStreamer)
         if: runner.os == 'Linux'
+        timeout-minutes: 10
         run: |
+          set -euo pipefail
+          snapshot="https://snapshot.ubuntu.com/ubuntu/20261003T000000Z"
+          mesa_version="25.2.8-0ubuntu0.24.04.4"
+          llvm_version="1:20.1.2-0ubuntu1~24.04.3"
+          mesa_deb="mesa-vulkan-drivers_25.2.8-0ubuntu0.24.04.4_amd64.deb"
+          llvm_deb='libllvm20_20.1.2-0ubuntu1~24.04.3_amd64.deb'
+          mesa_sha="a4ec58cb952b4e2a8b7c7a9b4ea80fa3d2914e347ad13b11dfb67518b409fb57"
+          llvm_sha="f018e71c72c7a4742fb1aff9dc98b45586f42e6ea464d4918af7e3772b7f0658"
+          . /etc/os-release
+          if [ "${VERSION_ID}" != "24.04" ]; then
+            echo "lavapipe debs are for Ubuntu 24.04; this runner is ${VERSION_ID}" >&2
+            exit 1
+          fi
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
+            -o "${work}/${mesa_deb}" \
+            "${snapshot}/pool/main/m/mesa/${mesa_deb}"
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
+            -o "${work}/${llvm_deb}" \
+            "${snapshot}/pool/main/l/llvm-toolchain-20/${llvm_deb}"
+          (
+            cd "$work"
+            printf '%s  %s\n' "$mesa_sha" "$mesa_deb" "$llvm_sha" "$llvm_deb" | sha256sum -c -
+          )
           sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --allow-downgrades \
+            "${work}/${llvm_deb}" \
+            "${work}/${mesa_deb}"
+          sudo apt-mark hold libllvm20 mesa-vulkan-drivers
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            mesa-vulkan-drivers vulkan-tools pkg-config \
+            vulkan-tools pkg-config \
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             gstreamer1.0-plugins-base libgstreamer-plugins-bad1.0-0
           plugindir="$(pkg-config --variable=pluginsdir gstreamer-1.0)"
-          tmp="$(mktemp -d)"
-          ( cd "$tmp" && apt-get download gstreamer1.0-plugins-bad )
-          dpkg-deb -x "$tmp"/gstreamer1.0-plugins-bad_*.deb "$tmp/root"
-          sudo cp "$tmp"/root/usr/lib/*/gstreamer-1.0/libgstmpegtsdemux.so "$plugindir/"
-          rm -rf "$tmp"
+          if [[ -z "${plugindir}" || ! -d "${plugindir}" || -z "$(ls -A "${plugindir}")" ]]; then
+            echo "GStreamer plugin directory is missing or empty: '${plugindir}'" >&2
+            exit 1
+          fi
+          gsttmp="$(mktemp -d)"
+          ( cd "$gsttmp" && apt-get download gstreamer1.0-plugins-bad )
+          dpkg-deb -x "$gsttmp"/gstreamer1.0-plugins-bad_*.deb "$gsttmp/root"
+          test -f "$gsttmp"/root/usr/lib/*/gstreamer-1.0/libgstmpegtsdemux.so
+          sudo cp "$gsttmp"/root/usr/lib/*/gstreamer-1.0/libgstmpegtsdemux.so "$plugindir/"
+          rm -rf "$gsttmp"
+          installed_mesa="$(dpkg-query -W -f='${Version}' mesa-vulkan-drivers)"
+          installed_llvm="$(dpkg-query -W -f='${Version}' libllvm20)"
+          if [ "${installed_mesa}" != "${mesa_version}" ]; then
+            echo "mesa-vulkan-drivers ${installed_mesa} != pin ${mesa_version}" >&2
+            exit 1
+          fi
+          if [ "${installed_llvm}" != "${llvm_version}" ]; then
+            echo "libllvm20 ${installed_llvm} != pin ${llvm_version}" >&2
+            exit 1
+          fi
+          icd=""
+          shopt -s nullglob
+          for candidate in /usr/share/vulkan/icd.d/lvp_icd*.json /etc/vulkan/icd.d/lvp_icd*.json; do
+            if [[ -f "${candidate}" ]]; then
+              icd="${candidate}"
+              break
+            fi
+          done
+          if [[ -z "${icd}" ]]; then
+            echo "lvp_icd json not found after installing mesa-vulkan-drivers" >&2
+            find /usr /etc -name 'lvp_icd*.json' >&2 || true
+            exit 1
+          fi
+          echo "VK_ICD_FILENAMES=${icd}" >> "${GITHUB_ENV}"
+          echo "VK_DRIVER_FILES=${icd}" >> "${GITHUB_ENV}"
+          echo "WGPU_BACKEND=vulkan" >> "${GITHUB_ENV}"
+          {
+            echo "### Lavapipe"
+            echo "Ubuntu ${VERSION_ID}"
+            echo "snapshot 20261003T000000Z"
+            echo "mesa-vulkan-drivers ${installed_mesa}"
+            echo "mesa sha256 ${mesa_sha}"
+            echo "libllvm20 ${installed_llvm}"
+            echo "libllvm20 sha256 ${llvm_sha}"
+            echo "ICD ${icd}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          VK_ICD_FILENAMES="${icd}" VK_DRIVER_FILES="${icd}" vulkaninfo --summary | tee /tmp/vulkaninfo.txt
+          if ! grep -Eq 'llvmpipe|lavapipe' /tmp/vulkaninfo.txt; then
+            echo "Vulkan loader did not select lavapipe/llvmpipe" >&2
+            exit 1
+          fi
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -161,19 +247,28 @@ jobs:
 
       # Happy path is about 20 seconds (ubuntu on 0104fee, and on the #142 PR head).
       # Each scene already fails itself after DEFAULT_CASE_TIMEOUT (180s) in
-      # crates/renderide-test. 20 minutes is about twice a 4-wide wave of those
-      # per-scene caps, so a stuck scene ends the step instead of holding the
-      # default six-hour job. Two times the happy path would be under a minute
-      # and would kill a scene that is still inside its own timeout.
+      # crates/renderide-test. --jobs 1 runs scenes one at a time. 20 minutes
+      # covers that happy path plus several full per-scene timeouts, so a stuck
+      # scene ends the step instead of holding the default six-hour job. A cap
+      # of twice the happy path would kill a scene still inside its own timeout.
+      # The previous parallel suite sized this step as twice a 4-wide wave of
+      # those 180s caps. With one job the wave width is 1, and the same 20
+      # minute cap still bounds a stuck scene.
+      # RAYON_NUM_THREADS=1 keeps this job on the one-thread pool. Draw arrangement
+      # can still follow a wider pool (https://github.com/DoubleStyxx/Renderide/issues/194).
+      # #186's pending-count gate waits until shader pipelines are ready. It does
+      # not make draw order independent of that pool.
       - name: Run headless renderer suite
         timeout-minutes: 20
         shell: bash
+        env:
+          RAYON_NUM_THREADS: "1"
         run: |
           set -euo pipefail
           if [[ "${RUNNER_OS}" == "Windows" ]]; then
-            ./target/debug/renderide-test.exe check-suite
+            ./target/debug/renderide-test.exe check-suite --jobs 1
           else
-            ./target/debug/renderide-test check-suite
+            ./target/debug/renderide-test check-suite --jobs 1
           fi
 
       - name: Upload headless suite artifacts
