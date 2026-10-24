@@ -95,6 +95,7 @@ pub(crate) mod shader_permutation;
 mod shader_specialization;
 mod shadow_caster;
 mod system;
+mod test_pipeline_stall;
 #[cfg(test)]
 mod wgsl;
 mod wgsl_reflect;
