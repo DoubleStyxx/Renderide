@@ -318,6 +318,7 @@ The current workflows are:
 - `codeql.yml` runs CodeQL analysis for GitHub Actions, C#, and Rust on pushes and pull requests that target `master`, plus a weekly schedule.
 - `release.yml` builds nightly or manually requested release artifacts from the newest green CI run on `master`.
 - `static.yml` deploys the static site to GitHub Pages when the site files change on `master` or when manually dispatched.
+- `windows-heap-repro.yml` is diagnostic-only and starts only on `workflow_dispatch`. It reruns the bootstrapper library tests on `windows-latest` under full page heap (default 50 iterations, `--test-threads` 16, no debugger). A crash writes a full WER dump (`DumpType=2`) for the hashed test exe. Dispatch it with `gh workflow run windows-heap-repro.yml --ref <branch-or-full-sha>` (a branch name or a full 40-character SHA).
 
 The CI workflow triggers on push to `master`, on pull requests, and on manual dispatch, but push and pull-request runs are path-filtered to files that affect builds, tests, or generated artifacts.
 
