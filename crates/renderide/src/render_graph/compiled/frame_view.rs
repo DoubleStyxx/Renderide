@@ -22,6 +22,13 @@ pub struct ExternalOffscreenTargets<'a> {
     pub write_target: OffscreenWriteTarget,
     /// Color texture backing `color_view`.
     pub color_texture: &'a wgpu::Texture,
+    /// History image when this view is the first writer of a swapped texture.
+    ///
+    /// Nothing and Depth copy this into HDR scene color. Later writers leave it empty.
+    /// `color_texture` is the image this frame writes.
+    pub history_color_texture: Option<&'a wgpu::Texture>,
+    /// `true` when this view writes a swapped texture after another view already did this frame.
+    pub seed_published_color: bool,
     /// Color attachment (`Rgba16Float` for Unity `ARGBHalf` parity).
     pub color_view: &'a wgpu::TextureView,
     /// Depth texture backing `depth_view`.
