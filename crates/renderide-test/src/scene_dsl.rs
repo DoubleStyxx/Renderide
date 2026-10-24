@@ -10,8 +10,10 @@
 //! report emission all flow through this module. The intent is to grow the suite by adding
 //! cases and templates rather than copy-pasting end-to-end orchestration.
 
+pub mod band_count;
 pub mod cases;
 pub mod output;
+pub mod region_color;
 pub mod runner;
 pub mod suite;
 pub mod tolerance;
