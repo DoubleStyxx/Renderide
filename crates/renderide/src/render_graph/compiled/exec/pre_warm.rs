@@ -9,7 +9,7 @@ use super::super::super::error::GraphExecuteError;
 use super::super::super::history::{HistoryResourceScope, TextureHistorySpec};
 use super::super::helpers;
 use super::super::{CompiledRenderGraph, FrameView, MultiViewExecutionContext};
-use super::{GraphResolveKey, TransientTextureResolveSurfaceParams};
+use super::{GraphResolveKey, TransientTextureResolveSurfaceParams, ViewTargetResolveInputs};
 use crate::frame_upload_batch::{FrameUploadBatch, GraphUploadSink};
 use crate::gpu::OutputDepthMode;
 use crate::graph_inputs::PreRecordViewResourceLayout;
@@ -185,12 +185,16 @@ impl CompiledRenderGraph {
         transient_by_key: &mut HashMap<GraphResolveKey, GraphResolvedResources>,
     ) -> Result<(), GraphExecuteError> {
         profiling::scope!("render::pre_resolve_transients");
+        let scene_color_format = mv_ctx.backend.scene_color_format_wgpu();
         for view in views {
             let resolved = Self::resolve_owned_view_metadata_from_target(
-                view.view_id(),
-                view.view_winding,
-                view.profile,
-                &view.host_camera,
+                ViewTargetResolveInputs {
+                    view_id: view.view_id(),
+                    view_winding: view.view_winding,
+                    profile: view.profile,
+                    host_camera: &view.host_camera,
+                    scene_color_format,
+                },
                 &view.target,
                 mv_ctx.gpu,
             )?;
@@ -208,7 +212,6 @@ impl CompiledRenderGraph {
                     resolved.viewport_px,
                     mv_ctx.gpu_limits.max_texture_dimension_2d(),
                 );
-                let scene_color_format = mv_ctx.backend.scene_color_format_wgpu();
                 self.resolve_transient_textures(
                     mv_ctx.device,
                     mv_ctx.gpu_limits,

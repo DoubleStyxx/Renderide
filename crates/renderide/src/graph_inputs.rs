@@ -18,8 +18,8 @@ use parking_lot::Mutex;
 use crate::blackboard_contract::blackboard_slot;
 use crate::camera::{HostCameraFrame, ViewId};
 pub(crate) use crate::frame_contract::{
-    FrameViewClear, OffscreenWriteTarget, RenderTextureSelfSampling, ViewPostProcessing,
-    ViewWinding,
+    ClearLoadDecisionInputs, FrameViewClear, OffscreenWriteTarget, RenderTextureSelfSampling,
+    ViewPostProcessing, ViewWinding,
 };
 use crate::frame_upload_batch::GraphUploadSink;
 use crate::gpu::frame_globals::SkyboxSpecularUniformParams;
@@ -787,12 +787,13 @@ pub struct GraphPassFrameView<'a> {
     /// The preserve pass then copies [`Self::color_texture`], which holds that earlier output.
     /// Copying history again would replace it and pair last frame's color with this frame's depth.
     pub seed_published_color: bool,
-    /// `true` when [`Self::depth_texture`] is the persistent camera depth target.
+    /// Camera-clear inputs from the view-target mapping.
     ///
-    /// Window, OpenXR, and full render-texture views own that image. A partial viewport renders
-    /// into a scratch depth image that is not copied back. Clear-none loads the image only when
-    /// this view also seeds color. Every unseeded view still clears depth.
-    pub persistent_depth_target: bool,
+    /// Resolve builds this once per view. The forward pass reads it directly, including whether
+    /// depth is the persistent camera image, and does not rebuild those facts from the other
+    /// fields. The desktop overlay copies the parent value, then sets `sample_count` to 1 and
+    /// `scene_color_format` to [`Self::surface_format`].
+    pub clear_load_inputs: ClearLoadDecisionInputs,
     /// Post-processing permissions requested by this view.
     pub post_processing: ViewPostProcessing,
 }

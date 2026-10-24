@@ -181,7 +181,11 @@ fn view_from_plan<'a>(plan: &'a FrameViewPlan<'_>) -> GraphPassFrameView<'a> {
         color_texture: Some(&handles.color_texture),
         history_color_texture: handles.history_color_texture.as_ref(),
         seed_published_color: handles.seed_published_color,
-        persistent_depth_target: true,
+        clear_load_inputs: crate::render_graph::compiled::full_offscreen_clear_load_inputs(
+            plan.viewport_px,
+            handles.color_format,
+            handles.write_target,
+        ),
         post_processing: ViewPostProcessing::disabled(),
     }
 }

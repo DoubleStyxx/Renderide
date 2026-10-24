@@ -23,7 +23,7 @@ use super::super::super::{
 };
 use super::super::{
     FrameGlobalPassRecordInputs, GraphResolveKey, TimedCommandBuffer,
-    TransientTextureResolveSurfaceParams, elapsed_ms,
+    TransientTextureResolveSurfaceParams, ViewTargetResolveInputs, elapsed_ms,
 };
 use super::{PassGpuInputs, PassRecordTargets, PassViewInputs, PhaseRecordingScope};
 
@@ -315,10 +315,13 @@ impl CompiledRenderGraph {
         let resolved = {
             profiling::scope!("graph::frame_global::resolve_target");
             Self::resolve_view_from_target(
-                anchor.view_id(),
-                anchor.view_winding,
-                anchor.profile,
-                &anchor.host_camera,
+                ViewTargetResolveInputs {
+                    view_id: anchor.view_id(),
+                    view_winding: anchor.view_winding,
+                    profile: anchor.profile,
+                    host_camera: &anchor.host_camera,
+                    scene_color_format: backend.scene_color_format_wgpu(),
+                },
                 &anchor.target,
                 gpu,
                 backbuffer_view_holder.as_ref(),
@@ -408,10 +411,13 @@ impl CompiledRenderGraph {
         let resolved = {
             profiling::scope!("graph::frame_global::split::resolve_target");
             Self::resolve_view_from_target(
-                anchor.view_id(),
-                anchor.view_winding,
-                anchor.profile,
-                &anchor.host_camera,
+                ViewTargetResolveInputs {
+                    view_id: anchor.view_id(),
+                    view_winding: anchor.view_winding,
+                    profile: anchor.profile,
+                    host_camera: &anchor.host_camera,
+                    scene_color_format: backend.scene_color_format_wgpu(),
+                },
                 &anchor.target,
                 gpu,
                 backbuffer_view_holder.as_ref(),

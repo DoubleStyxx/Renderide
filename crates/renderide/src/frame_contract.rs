@@ -263,6 +263,28 @@ impl Default for ViewPostProcessing {
     }
 }
 
+/// Load-op inputs for one view target.
+///
+/// Resolve builds one value per view through the view-target mapping and stores it on the frame
+/// view. The forward pass reads that stored value. Attachment selection reads
+/// [`Self::has_color_texture`] when it chooses the offscreen color image. Depth persistence is
+/// only this stored [`Self::persistent_depth_target`], which the pass reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClearLoadDecisionInputs {
+    /// Raster sample count, copied from the view.
+    pub sample_count: u32,
+    /// `true` when a full-target offscreen color texture can be copied into HDR scene color.
+    pub has_color_texture: bool,
+    /// Camera color-target format, copied from the view.
+    pub surface_format: wgpu::TextureFormat,
+    /// HDR scene-color format, copied from the view.
+    pub scene_color_format: wgpu::TextureFormat,
+    /// Host render-texture self-sampling policy. `None` for window and OpenXR.
+    pub self_sampling: Option<RenderTextureSelfSampling>,
+    /// `true` when depth is the persistent camera image rather than a partial-viewport scratch.
+    pub persistent_depth_target: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{FrameViewClear, OffscreenWriteTarget, RenderTextureSelfSampling, ViewWinding};
