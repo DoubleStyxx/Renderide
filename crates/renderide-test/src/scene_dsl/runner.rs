@@ -140,8 +140,8 @@ pub fn run_integration_case(
     match drive_template(harness_cfg) {
         Ok(()) => evaluate_and_finalize(case, layout),
         Err(err) => {
-            let report = report_from_error(case, format!("harness error: {err}"));
-            let _ = write_report(&layout, &report);
+            let mut report = report_from_error(case, format!("harness error: {err}"));
+            let _ = write_report(&layout, &mut report);
             Err(err)
         }
     }
@@ -269,8 +269,8 @@ fn evaluate_and_finalize(
     layout: CaseOutputLayout,
 ) -> Result<CaseRunOutcome, HarnessError> {
     if !layout.actual_png.exists() {
-        let report = report_from_error(case, "renderer produced no PNG at actual.png");
-        let _ = write_report(&layout, &report);
+        let mut report = report_from_error(case, "renderer produced no PNG at actual.png");
+        let _ = write_report(&layout, &mut report);
         return Ok(CaseRunOutcome { layout, report });
     }
     if !case.golden_path.exists() {
@@ -279,8 +279,8 @@ fn evaluate_and_finalize(
             case.golden_path.display(),
             case.name
         );
-        let report = report_from_error(case, msg);
-        let _ = write_report(&layout, &report);
+        let mut report = report_from_error(case, msg);
+        let _ = write_report(&layout, &mut report);
         return Ok(CaseRunOutcome { layout, report });
     }
 
@@ -291,13 +291,13 @@ fn evaluate_and_finalize(
     let actual = load_rgba(&layout.actual_png)?;
     let golden = load_rgba(&case.golden_path)?;
     if let Err(e) = crate::golden::reject_flat_image(&actual, &layout.actual_png) {
-        let report = report_from_error(case, e.to_string());
-        let _ = write_report(&layout, &report);
+        let mut report = report_from_error(case, e.to_string());
+        let _ = write_report(&layout, &mut report);
         return Ok(CaseRunOutcome { layout, report });
     }
     if let Err(e) = crate::golden::reject_flat_image(&golden, &case.golden_path) {
-        let report = report_from_error(case, e.to_string());
-        let _ = write_report(&layout, &report);
+        let mut report = report_from_error(case, e.to_string());
+        let _ = write_report(&layout, &mut report);
         return Ok(CaseRunOutcome { layout, report });
     }
 
@@ -319,13 +319,13 @@ fn evaluate_and_finalize(
                     None => message,
                 });
             }
-            write_report(&layout, &report)
+            write_report(&layout, &mut report)
                 .map_err(|e| HarnessError::QueueOptions(format!("write report: {e}")))?;
             Ok(CaseRunOutcome { layout, report })
         }
         Err(msg) => {
-            let report = report_from_error(case, format!("tolerance evaluate: {msg}"));
-            let _ = write_report(&layout, &report);
+            let mut report = report_from_error(case, format!("tolerance evaluate: {msg}"));
+            let _ = write_report(&layout, &mut report);
             Ok(CaseRunOutcome { layout, report })
         }
     }
