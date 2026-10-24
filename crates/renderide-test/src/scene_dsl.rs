@@ -11,6 +11,7 @@
 //! cases and templates rather than copy-pasting end-to-end orchestration.
 
 pub mod cases;
+pub mod host_info;
 pub mod output;
 pub mod runner;
 pub mod suite;
