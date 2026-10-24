@@ -1,7 +1,6 @@
-use super::{
-    SessionTemplate, asset_ids, build_scene_setup, material_property_names, scene_material_id,
-    shader_variants,
-};
+use super::consts::{asset_ids, shader_variants};
+use super::scene_setup::material_property_names;
+use super::{SessionTemplate, build_scene_setup, scene_material_id};
 
 #[test]
 fn torus_unlit_perlin_requests_texture_variant() {

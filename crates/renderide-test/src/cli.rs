@@ -231,6 +231,7 @@ fn print_suite_outcome(
             outcome.report.passed, outcome.report.total, result_label
         );
     }
+    println!("{}", crate::scene_dsl::suite::SUITE_READINESS_SUMMARY);
 }
 
 /// Cargo build profile selecting which `target/<profile>/renderide-renderer` binary to spawn.
