@@ -19,7 +19,4 @@ mod image_io;
 
 pub use error::HarnessError;
 
-/// CI canary. The unused binding must fail `cargo clippy -- -D warnings`.
-pub fn ci_canary_unused() {
-    let canary_unused = 1;
-}
+pub fn ci_canary_fmt(){let x=1+2;}
