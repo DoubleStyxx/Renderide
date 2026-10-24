@@ -33,34 +33,37 @@ pub(super) enum CachedCull {
 /// Frames without a culling pass return `None`. Skinned draws use the posed bone-bounds AABB
 /// and share one [`CachedCull`] across every material slot. A skinned draw with no posed box
 /// stays visible. The caster is recorded in the view's visibility history when hysteresis is on.
-pub(super) fn compute_cached_cull(
-    ctx: &DrawCollectionInputs<'_>,
+pub(super) fn compute_cached_cull<'a>(
+    ctx: &DrawCollectionInputs<'a>,
     draw: &StaticMeshDrawSource<'_>,
     is_overlay: bool,
+    cull_cache: &mut SpaceCullCache<'a>,
 ) -> Option<CachedCull> {
-    cull_outcome_for_draw(ctx, draw, is_overlay).map(cache_from_outcome)
+    cull_outcome_for_draw(ctx, draw, is_overlay, cull_cache).map(cache_from_outcome)
 }
 
 /// Returns the cull outcome for a single slot, falling back to an inline cull for single-slot
 /// renderers that bypassed the cache hoist.
-pub(super) fn cull_result_for_slot(
-    ctx: &DrawCollectionInputs<'_>,
+pub(super) fn cull_result_for_slot<'a>(
+    ctx: &DrawCollectionInputs<'a>,
     draw: &StaticMeshDrawSource<'_>,
     is_overlay: bool,
     cached_cull: Option<&CachedCull>,
+    cull_cache: &mut SpaceCullCache<'a>,
 ) -> Option<Result<Option<Mat4>, CpuCullFailure>> {
     match cached_cull {
         Some(cached) => Some(result_from_cached(cached)),
         // Single-slot renderer bypassed the hoist: cull inline so per-slot work matches the
         // cached path. Skinned and rigid draws both take this branch.
-        None => cull_outcome_for_draw(ctx, draw, is_overlay),
+        None => cull_outcome_for_draw(ctx, draw, is_overlay, cull_cache),
     }
 }
 
-fn cull_outcome_for_draw(
-    ctx: &DrawCollectionInputs<'_>,
+fn cull_outcome_for_draw<'a>(
+    ctx: &DrawCollectionInputs<'a>,
     draw: &StaticMeshDrawSource<'_>,
     is_overlay: bool,
+    cull_cache: &mut SpaceCullCache<'a>,
 ) -> Option<Result<Option<Mat4>, CpuCullFailure>> {
     cull_mesh_target(
         &MeshCullTarget {
@@ -75,20 +78,24 @@ fn cull_outcome_for_draw(
         ctx.view.culling,
         ctx.view.render_context,
         Some(caster_key(draw)),
+        cull_cache,
     )
 }
 
 /// Frustum and Hi-Z decision for one mesh target.
 ///
-/// `None` means the caller did not ask for culling. Skinned targets read
-/// [`crate::scene::SkinnedMeshRenderer::posed_object_bounds`]. `caster` is recorded when a
-/// hysteresis plan is active; `None` keeps the occlusion test but does not update history.
-pub(super) fn cull_mesh_target<S>(
+/// Returns `None` when the caller did not ask for culling. Skinned targets read
+/// [`crate::scene::SkinnedMeshRenderer::posed_object_bounds`]. Without a hysteresis plan the
+/// previous-frame Hi-Z test still runs. With a plan, `Some` caster is recorded and a missing
+/// caster keeps the draw without that occlusion test. `cull_cache` is the chunk cache, so a
+/// `(space, overlay)` plan is built once.
+pub(super) fn cull_mesh_target<'a, S>(
     target: &MeshCullTarget<'_, S>,
     is_overlay: bool,
-    culling: Option<&WorldMeshCullInput<'_>>,
+    culling: Option<&'a WorldMeshCullInput<'a>>,
     render_context: RenderingContext,
     caster: Option<CasterRef>,
+    cull_cache: &mut SpaceCullCache<'a>,
 ) -> Option<Result<Option<Mat4>, CpuCullFailure>>
 where
     S: SceneTransformRead + ?Sized,
@@ -99,8 +106,7 @@ where
         culling.host_camera.head_output_transform,
         render_context,
     );
-    let mut cache = SpaceCullCache::new();
-    Some(cache.cull_geometry_for_caster(
+    Some(cull_cache.cull_geometry_for_caster(
         geom,
         target.scene,
         target.space_id,

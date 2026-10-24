@@ -468,10 +468,12 @@ pub(crate) enum CpuCullFailure {
     UiRectMask,
 }
 
-/// Frustum and Hi-Z test for a [`MeshCullGeometry`] the caller already built.
+/// One-shot frustum and Hi-Z test for a [`MeshCullGeometry`] the caller already built.
 ///
-/// Production collection reuses one [`PreparedSpaceCull`] per space through [`SpaceCullCache`].
-/// This wrapper stays for tests that compare the one-shot path with that cache.
+/// Builds a fresh [`PreparedSpaceCull`] for this call. Prepared collection and the scene-walk
+/// chunk pass one [`SpaceCullCache`] through the chunk, so each `(space, overlay)` pair is
+/// prepared once. Tests use this helper for the one-shot result, including the comparison with
+/// that cache.
 #[cfg(test)]
 pub(crate) fn mesh_cpu_cull_with_geometry<S>(
     geom: MeshCullGeometry,

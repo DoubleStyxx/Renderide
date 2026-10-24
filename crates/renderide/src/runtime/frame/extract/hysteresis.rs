@@ -7,8 +7,6 @@
 //! survive the frustum. After the count crosses the cap, the pass stays off until it falls to
 //! [`crate::occlusion::hysteresis::HISTORY_CASTER_RESUME`].
 
-use std::cell::RefCell;
-
 use glam::{Mat4, Vec3};
 
 use crate::camera::{CameraProjectionKind, HostCameraFrame, view_matrix_for_host_world_mesh_space};
@@ -25,19 +23,7 @@ use crate::world_mesh::{FramePreparedRenderables, ViewRenderSpaceScope, WorldMes
 
 use super::super::view_plan::FrameViewPlan;
 
-/// One view's hysteresis plan, retained until that view's cull has committed its history.
-pub(super) struct ViewHysteresisPlan {
-    /// Logical view whose history this plan updates.
-    pub view_id: crate::camera::ViewId,
-    /// Plan shared with the view's [`crate::world_mesh::WorldMeshCullInput`] when [`Self::apply`]
-    /// is set.
-    pub frame: VisibilityHysteresis,
-    /// `false` when the prepared caster count is above [`HISTORY_CASTER_BUDGET`], or still inside
-    /// the resume band after a previous over-cap frame. Cull then uses the legacy Hi-Z test.
-    /// [`Self::frame`] is still finished so the spare map is recycled and the published history
-    /// is empty.
-    pub apply: bool,
-}
+pub(super) use crate::occlusion::hysteresis::ViewHysteresisPlan;
 
 /// Fills a reused plan list and hands it to `finish` for the view cull.
 ///
@@ -53,12 +39,7 @@ pub(super) fn with_view_hysteresis_plans<R>(
     temporals: &[Option<HiZTemporalState>],
     finish: impl FnOnce(&mut Vec<Option<ViewHysteresisPlan>>) -> R,
 ) -> R {
-    thread_local! {
-        static VIEW_HYSTERESIS_PLANS: RefCell<Vec<Option<ViewHysteresisPlan>>> =
-            const { RefCell::new(Vec::new()) };
-    }
-    VIEW_HYSTERESIS_PLANS.with(|plans| {
-        let mut plans = plans.borrow_mut();
+    occlusion.with_hysteresis_plans(|plans| {
         plans.clear();
         for (index, view) in prepared_views.iter().enumerate() {
             plans.push(view_hysteresis_plan(
@@ -70,7 +51,7 @@ pub(super) fn with_view_hysteresis_plans<R>(
                 temporals.get(index).and_then(|temporal| temporal.as_ref()),
             ));
         }
-        finish(&mut plans)
+        finish(plans)
     })
 }
 
@@ -765,5 +746,21 @@ mod tests {
             assert_eq!(self.space_motion, filled.space_motion);
             assert!(self.space_motion_cap >= filled.space_motion_cap);
         }
+    }
+
+    #[test]
+    fn nested_plan_list_keeps_the_outer_buffer() {
+        let scene = SceneCoordinator::new();
+        let occlusion = OcclusionSystem::new();
+        super::with_view_hysteresis_plans(&scene, &occlusion, &[], &[], &[], &[], |outer| {
+            outer.push(None);
+            let outer_ptr = outer.as_ptr();
+            super::with_view_hysteresis_plans(&scene, &occlusion, &[], &[], &[], &[], |inner| {
+                assert!(inner.is_empty());
+                assert_ne!(inner.as_ptr(), outer_ptr);
+            });
+            assert_eq!(outer.len(), 1);
+            assert_eq!(outer.as_ptr(), outer_ptr);
+        });
     }
 }

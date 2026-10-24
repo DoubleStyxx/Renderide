@@ -56,8 +56,9 @@ pub(super) struct PreparedSpatialIndex {
     spaces: HashMap<RenderSpaceId, PreparedSpatialSpace>,
     /// Casters grouped by render space, each list sorted by run index.
     ///
-    /// A refit rewrites only the spaces that changed. Linear and BVH runs are both included, so
-    /// an indexed run whose world AABB disappears and comes back is removed and inserted again.
+    /// A refit rewrites only that space's linear and indexed runs. It does not scan the stored
+    /// casters of other spaces. An indexed run whose world AABB disappears and comes back is
+    /// removed and inserted again. Run order is republished once when membership changes.
     casters_by_space: HashMap<RenderSpaceId, Vec<StoredWorldCaster>>,
     /// World casters in global run order, published from [`Self::casters_by_space`].
     stored_world_casters: Vec<StoredWorldCaster>,

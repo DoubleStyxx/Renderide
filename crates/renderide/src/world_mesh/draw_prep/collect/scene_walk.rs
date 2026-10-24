@@ -7,6 +7,7 @@ mod per_slot;
 mod skinned_cull_tests;
 
 use crate::scene::{RenderSpaceId, SkinnedMeshRenderer, StaticMeshRenderer};
+use crate::world_mesh::culling::SpaceCullCache;
 
 use super::super::item::{MaterialStackOrder, WorldMeshDrawItem, resolved_material_slot_count};
 use super::{CollectState, DrawCollectionInputs, transform_chain_has_degenerate_scale};
@@ -67,7 +68,7 @@ struct StaticMeshDrawSource<'a> {
 }
 
 /// Mutable expansion state while expanding one chunk into draw items.
-struct DrawCollectionAccumulator<'a> {
+struct DrawCollectionAccumulator<'a, 'cache> {
     /// Draw output buffer for the current chunk.
     pub out: &'a mut Vec<WorldMeshDrawItem>,
     /// Pre-cull, frustum-cull, and Hi-Z-cull counters.
@@ -77,6 +78,8 @@ struct DrawCollectionAccumulator<'a> {
     pub filter_pass_mask: Option<&'a [bool]>,
     /// Set when a pushed draw carries a previous rigid matrix.
     pub has_rigid_object_motion: &'a mut bool,
+    /// Frustum and Hi-Z plans for this chunk. One slot per `(space, overlay)` pair.
+    pub cull_cache: SpaceCullCache<'cache>,
 }
 
 /// Whether a chunk covers the static or skinned renderer list of a render space.
@@ -161,6 +164,7 @@ pub(super) fn collect_chunk(
         cull_stats: &mut cull_stats,
         filter_pass_mask,
         has_rigid_object_motion: &mut has_rigid_object_motion,
+        cull_cache: SpaceCullCache::new(),
     };
 
     match spec.kind {

@@ -44,6 +44,7 @@ use glam::{Mat4, Vec3};
 use hashbrown::{HashMap, HashSet};
 use parking_lot::Mutex;
 
+use crate::camera::ViewId;
 use crate::scene::RenderSpaceId;
 
 /// Minimum view-space gap, in meters, before a covering surface counts as a different occluder.
@@ -451,6 +452,18 @@ pub(crate) struct PresentCaster {
     pub aabb_max: Vec3,
     /// Render space that owns the caster.
     pub space_id: RenderSpaceId,
+}
+
+/// One view's hysteresis plan, retained until that view's cull has committed its history.
+pub(crate) struct ViewHysteresisPlan {
+    /// Logical view whose history this plan updates.
+    pub view_id: ViewId,
+    /// Plan shared with the view's cull input when [`Self::apply`] is set.
+    pub frame: VisibilityHysteresis,
+    /// `false` when the prepared caster count is above the budget, or still inside the resume
+    /// band. Cull then uses the legacy Hi-Z test. [`Self::frame`] is still finished so the spare
+    /// map is recycled and the published history is empty.
+    pub apply: bool,
 }
 
 /// Read-only history plus this frame's motion bounds, disocclusion regions, and update shards.

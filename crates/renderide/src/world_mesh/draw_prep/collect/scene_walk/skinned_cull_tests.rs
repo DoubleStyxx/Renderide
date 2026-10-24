@@ -26,7 +26,7 @@ use crate::materials::{MaterialPipelinePropertyIds, MaterialRouter, RasterPipeli
 use crate::scene::{RenderSpaceId, SceneCoordinator, SkinnedMeshRenderer, StaticMeshRenderer};
 use crate::shared::{RenderBoundingBox, RenderTransform, RenderingContext};
 use crate::world_mesh::culling::{
-    CpuCullFailure, MeshCullTarget, WorldMeshCullInput, WorldMeshCullProjParams,
+    CpuCullFailure, MeshCullTarget, SpaceCullCache, WorldMeshCullInput, WorldMeshCullProjParams,
     mesh_world_geometry_for_cull_with_head,
 };
 
@@ -91,6 +91,7 @@ fn decide(
     culling: Option<&WorldMeshCullInput<'_>>,
     is_overlay: bool,
 ) -> Option<Result<Option<Mat4>, CpuCullFailure>> {
+    let mut cull_cache = SpaceCullCache::new();
     cull_mesh_target(
         &MeshCullTarget {
             scene,
@@ -104,6 +105,7 @@ fn decide(
         culling,
         RenderingContext::UserView,
         None,
+        &mut cull_cache,
     )
 }
 

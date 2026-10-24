@@ -32,9 +32,9 @@ enum SlotCullDecision {
 }
 
 /// One material slot mapped to a submesh range: optional CPU cull, batch key, and [`WorldMeshDrawItem`] push.
-pub(super) fn push_one_slot_draw(
-    ctx: &DrawCollectionInputs<'_>,
-    acc: &mut DrawCollectionAccumulator<'_>,
+pub(super) fn push_one_slot_draw<'a>(
+    ctx: &DrawCollectionInputs<'a>,
+    acc: &mut DrawCollectionAccumulator<'_, 'a>,
     draw: &StaticMeshDrawSource<'_>,
     slot: &MeshMaterialSlot,
     indices: SubmeshSlotIndices,
@@ -152,14 +152,16 @@ fn resolve_material_slot(
 
 /// Reads the cached per-renderer cull outcome (or runs an inline cull for single-slot renderers)
 /// and folds it into a [`SlotCullDecision`], updating the running pre-cull / culled counters.
-fn resolve_cull_decision(
-    ctx: &DrawCollectionInputs<'_>,
-    acc: &mut DrawCollectionAccumulator<'_>,
+fn resolve_cull_decision<'a>(
+    ctx: &DrawCollectionInputs<'a>,
+    acc: &mut DrawCollectionAccumulator<'_, 'a>,
     draw: &StaticMeshDrawSource<'_>,
     is_overlay: bool,
     cached_cull: Option<&super::cull_cache::CachedCull>,
 ) -> SlotCullDecision {
-    let Some(outcome) = cull_result_for_slot(ctx, draw, is_overlay, cached_cull) else {
+    let Some(outcome) =
+        cull_result_for_slot(ctx, draw, is_overlay, cached_cull, &mut acc.cull_cache)
+    else {
         return SlotCullDecision::NotApplicable;
     };
     acc.cull_stats.0 += 1;

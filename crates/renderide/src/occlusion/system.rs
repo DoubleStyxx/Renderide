@@ -16,8 +16,8 @@ use crate::hi_z_cpu::HiZCullData;
 use crate::history_texture::HistoryTextureMipViews;
 use crate::occlusion::gpu::{HiZBuildRecord, HiZGpuState, HiZHistoryTarget, encode_hi_z_build};
 use crate::occlusion::hysteresis::{
-    CasterKey, CasterRecord, VisibilityCullBuffers, VisibilityFrameScratch, VisibilityHistory,
-    VisibilityRecycle, VisibilityScratch,
+    CasterKey, CasterRecord, ViewHysteresisPlan, VisibilityCullBuffers, VisibilityFrameScratch,
+    VisibilityHistory, VisibilityRecycle, VisibilityScratch,
 };
 
 /// Depth source, layout, and logical view for [`OcclusionSystem::encode_hi_z_build_pass`].
@@ -42,6 +42,8 @@ pub struct OcclusionSystem {
     offscreen: Mutex<HashMap<ViewId, Arc<Mutex<HiZGpuState>>>>,
     /// Per-view classification from the previous tested frame, plus a spare map.
     visibility: Mutex<HashMap<ViewId, VisibilitySlot>>,
+    /// Plan list reused across frames. A nested call uses a fresh list instead of waiting.
+    hysteresis_plans: Mutex<Vec<Option<ViewHysteresisPlan>>>,
 }
 
 /// Published history, the spare map, and the pooled cull buffers for one view.
@@ -79,7 +81,24 @@ impl OcclusionSystem {
             main: Arc::new(Mutex::new(HiZGpuState::default())),
             offscreen: Mutex::new(HashMap::new()),
             visibility: Mutex::new(HashMap::new()),
+            hysteresis_plans: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Lends the reused per-frame plan list.
+    ///
+    /// The list is cleared by the caller at the start of the next frame. A nested call, or a
+    /// second caller that already holds the list, gets a fresh vector so this does not panic or
+    /// deadlock.
+    pub(crate) fn with_hysteresis_plans<R>(
+        &self,
+        use_plans: impl FnOnce(&mut Vec<Option<ViewHysteresisPlan>>) -> R,
+    ) -> R {
+        if let Some(mut plans) = self.hysteresis_plans.try_lock() {
+            return use_plans(&mut plans);
+        }
+        let mut plans = Vec::new();
+        use_plans(&mut plans)
     }
 
     /// Returns the mutex-wrapped Hi-Z slot for `view`, creating it when needed.
