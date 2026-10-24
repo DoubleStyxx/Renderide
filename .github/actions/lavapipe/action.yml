@@ -5,7 +5,9 @@
 # noble-updates only lists the newest mesa-vulkan-drivers, so
 # `apt-get install mesa-vulkan-drivers=<version>` breaks when a newer Mesa
 # is published. Ubuntu 24.04's apt 2.7 also has no `--snapshot`. Fetch the
-# debs from one snapshot.ubuntu.com timestamp and check sha256. libllvm20
+# debs from one snapshot.ubuntu.com timestamp, check sha256, and install those
+# exact files with `dpkg -i` (apt would take a same-version mirror copy instead
+# of a local ./deb). Dependencies come from the archive via `apt-get satisfy`. libllvm20
 # is pinned the same way: the Mesa deb depends on it with no version, and
 # lavapipe's shader compiler is that LLVM. Snapshot 20261003T000000Z is the
 # daily snapshot after 25.2.8-0ubuntu0.24.04.4 was published to noble-updates
@@ -60,9 +62,24 @@ runs:
           printf '%s  %s\n' "$mesa_sha" "$mesa_deb" "$llvm_sha" "$llvm_deb" | sha256sum -c -
         )
         sudo apt-get update
-        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --allow-downgrades \
-          "${work}/${llvm_deb}" \
-          "${work}/${mesa_deb}"
+        # What the runner image ships, for the log. libllvm20 is usually preinstalled
+        # at the pinned version; it is reinstalled from the hashed deb regardless.
+        for pkg in libllvm20 mesa-vulkan-drivers; do
+          echo "before: ${pkg} $(dpkg-query -W -f='${Version} (${Status})' "${pkg}" 2>/dev/null || echo 'not installed')"
+        done
+        # Install the dependencies of the two debs from the archive, but never the two
+        # pinned packages themselves, so apt cannot substitute a mirror copy for them.
+        deps="$(
+          {
+            dpkg-deb -f "${work}/${llvm_deb}" Pre-Depends Depends
+            dpkg-deb -f "${work}/${mesa_deb}" Pre-Depends Depends
+          } | sed -E 's/^(Pre-)?Depends: //' | tr ',' '\n' | sed -E 's/^ +//; s/ +$//' \
+            | grep -Ev '^(libllvm20|mesa-vulkan-drivers)( |$)' | sort -u | paste -sd, -
+        )"
+        echo "dependencies: ${deps}"
+        sudo DEBIAN_FRONTEND=noninteractive apt-get satisfy -y --no-install-recommends "${deps}"
+        # dpkg installs exactly the sha256-checked files (no repository involved).
+        sudo DEBIAN_FRONTEND=noninteractive dpkg -i "${work}/${llvm_deb}" "${work}/${mesa_deb}"
         sudo apt-mark hold libllvm20 mesa-vulkan-drivers
         sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends vulkan-tools
         installed_mesa="$(dpkg-query -W -f='${Version}' mesa-vulkan-drivers)"
@@ -75,7 +92,22 @@ runs:
           echo "libllvm20 ${installed_llvm} != pin ${llvm_version}" >&2
           exit 1
         fi
-        echo "lavapipe pin OK: snapshot 20261003T000000Z, mesa-vulkan-drivers ${installed_mesa}, libllvm20 ${installed_llvm}"
+        for pkg in libllvm20 mesa-vulkan-drivers; do
+          status="$(dpkg-query -W -f='${Status}' "${pkg}")"
+          if [[ "${status}" != *" ok installed" ]]; then
+            echo "${pkg} status is '${status}', not fully installed" >&2
+            exit 1
+          fi
+          # Any archive copy in apt's cache means apt fetched the package from a mirror.
+          cached=(/var/cache/apt/archives/"${pkg}"_*.deb)
+          if [[ -e "${cached[0]}" ]]; then
+            echo "apt fetched ${pkg} from a mirror: ${cached[*]}" >&2
+            exit 1
+          fi
+        done
+        # Installed files match the md5sums of the debs dpkg just installed.
+        sudo dpkg --verify libllvm20 mesa-vulkan-drivers
+        echo "lavapipe pin OK: snapshot 20261003T000000Z, mesa-vulkan-drivers ${installed_mesa}, libllvm20 ${installed_llvm}, installed by dpkg -i from the sha256-checked debs"
         icd=""
         shopt -s nullglob
         for candidate in /usr/share/vulkan/icd.d/lvp_icd*.json /etc/vulkan/icd.d/lvp_icd*.json; do
