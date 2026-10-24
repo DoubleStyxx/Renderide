@@ -26,6 +26,12 @@ pub struct PngStabilityWaitTiming {
     pub overall_timeout: Duration,
     /// Renderer's configured PNG write interval.
     pub interval: Duration,
+    /// How many non-flat stable PNGs to ignore before accepting one.
+    ///
+    /// Async pipeline compiles can present one shader while the next is still building.
+    /// A clear frame is already rejected. This count rejects that many later colored
+    /// frames so the capture waits for the following write.
+    pub non_flat_skips: u32,
 }
 
 /// Filesystem snapshot of the renderer's PNG output, supplied to [`PngStabilityState::observe`].
@@ -221,6 +227,7 @@ pub(super) fn run_lockstep_until_png_stable(
     // render interval. The first non-flat write is sometimes a pre-warmup image (one LOD, or the
     // null shader while the real pipeline compiles). Accept only once two successive writes match.
     let mut repeated_png: Option<Vec<u8>> = None;
+    let mut non_flat_skips = wait_timing.non_flat_skips;
 
     while Instant::now() < deadline {
         let _ = lockstep.tick(queues);
@@ -246,6 +253,18 @@ pub(super) fn run_lockstep_until_png_stable(
             // just because its mtime sat still for 200ms between 500ms writes.
             match consider_stable_png(output_path, &mut repeated_png, &mut flat_candidate_seen) {
                 StablePng::Accept => {
+                    if non_flat_skips > 0 {
+                        non_flat_skips -= 1;
+                        logger::info!(
+                            "Session: stable PNG is only a partial compile; waiting for a newer frame"
+                        );
+                        // The next write must match a new pair. Leaving the skipped bytes in
+                        // `repeated_png` would accept the following identical partial immediately.
+                        repeated_png = None;
+                        state.reject_candidate();
+                        std::thread::sleep(timing::POLL_INTERVAL);
+                        continue;
+                    }
                     logger::info!(
                         "Session: fresh PNG stabilized at {} after {:?}",
                         output_path.display(),
@@ -307,6 +326,7 @@ mod tests {
             scene_submit_instant,
             overall_timeout: Duration::from_secs(10),
             interval: Duration::from_secs(1),
+            non_flat_skips: 0,
         }
     }
 

@@ -72,7 +72,6 @@ pub enum TextureAccess {
     /// Copy source.
     CopySrc,
     /// Copy destination.
-    #[cfg(test)]
     CopyDst,
     /// Imported texture is finalized for presentation.
     Present,
@@ -88,7 +87,6 @@ impl TextureAccess {
             Self::Sampled { .. } => wgpu::TextureUsages::TEXTURE_BINDING,
             Self::Storage { .. } => wgpu::TextureUsages::STORAGE_BINDING,
             Self::CopySrc => wgpu::TextureUsages::COPY_SRC,
-            #[cfg(test)]
             Self::CopyDst => wgpu::TextureUsages::COPY_DST,
         }
     }
@@ -105,9 +103,7 @@ impl TextureAccess {
                         .is_some_and(|ops| matches!(ops.load, wgpu::LoadOp::Load))
             }
             Self::ColorAttachment { load, .. } => matches!(load, wgpu::LoadOp::Load),
-            Self::Present => false,
-            #[cfg(test)]
-            Self::CopyDst => false,
+            Self::Present | Self::CopyDst => false,
         }
     }
 
@@ -116,9 +112,10 @@ impl TextureAccess {
         match self {
             Self::Sampled { .. } | Self::CopySrc => false,
             Self::Storage { access, .. } => access.writes(),
-            Self::ColorAttachment { .. } | Self::DepthAttachment { .. } | Self::Present => true,
-            #[cfg(test)]
-            Self::CopyDst => true,
+            Self::ColorAttachment { .. }
+            | Self::DepthAttachment { .. }
+            | Self::Present
+            | Self::CopyDst => true,
         }
     }
 
