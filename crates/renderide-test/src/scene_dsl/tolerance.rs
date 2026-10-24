@@ -40,8 +40,66 @@ pub struct Tolerance {
     /// Minimum fraction of pixels that must differ from the dominant RGB color in the actual
     /// image. This catches mostly-clear captures with a small amount of noise.
     pub min_non_background_pixel_fraction: Option<f64>,
+    /// Per-rectangle color gates. Each one compares the mean of pixels that are not that
+    /// image's dominant color. These are required, like coverage, and are not part of
+    /// [`Self::combine`].
+    #[serde(default)]
+    pub region_colors: Vec<RegionColor>,
     /// Operator combining the specified image-comparison criteria.
     pub combine: Combine,
+}
+
+/// One rectangle whose non-dominant pixels must stay close to the golden's mean color.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct RegionColor {
+    /// Left edge, in pixels.
+    pub x: u32,
+    /// Top edge, in pixels.
+    pub y: u32,
+    /// Width, in pixels.
+    pub width: u32,
+    /// Height, in pixels.
+    pub height: u32,
+    /// Maximum allowed absolute per-channel difference of the two means.
+    pub max_mean_channel_delta: f64,
+}
+
+/// Sphere bands for `pbs_lit_material_matrix` on its 320×320 capture.
+///
+/// `y` ends are exclusive: 77..150 and 162..234. A channel error of 24 passes the golden
+/// against itself and rejects a flat `(63,63,63)` disk.
+pub fn pbs_lit_region_colors() -> Vec<RegionColor> {
+    const MAX_DELTA: f64 = 24.0;
+    vec![
+        RegionColor {
+            x: 0,
+            y: 77,
+            width: 160,
+            height: 73,
+            max_mean_channel_delta: MAX_DELTA,
+        },
+        RegionColor {
+            x: 160,
+            y: 77,
+            width: 160,
+            height: 73,
+            max_mean_channel_delta: MAX_DELTA,
+        },
+        RegionColor {
+            x: 0,
+            y: 162,
+            width: 160,
+            height: 72,
+            max_mean_channel_delta: MAX_DELTA,
+        },
+        RegionColor {
+            x: 160,
+            y: 162,
+            width: 160,
+            height: 72,
+            max_mean_channel_delta: MAX_DELTA,
+        },
+    ]
 }
 
 impl Tolerance {
@@ -132,32 +190,22 @@ impl Tolerance {
 
         let actual_coverage = compute_image_coverage_stats(actual);
         let golden_coverage = compute_image_coverage_stats(golden);
-        if coverage_requested(self) {
-            let min_luma_range = self.min_luma_range;
-            let min_unique_colors = self.min_unique_colors;
-            let min_non_background_pixel_fraction = self.min_non_background_pixel_fraction;
-            let passed = min_luma_range.is_none_or(|min| actual_coverage.luma_range >= min)
-                && min_unique_colors.is_none_or(|min| actual_coverage.unique_rgb_colors >= min)
-                && min_non_background_pixel_fraction
-                    .is_none_or(|min| actual_coverage.non_background_pixel_fraction >= min);
-            let criterion = CriterionResult::ImageCoverage {
-                luma_range: actual_coverage.luma_range,
-                min_luma_range,
-                unique_rgb_colors: actual_coverage.unique_rgb_colors,
-                min_unique_colors,
-                non_background_pixel_fraction: actual_coverage.non_background_pixel_fraction,
-                min_non_background_pixel_fraction,
-                passed,
-            };
+        if let Some(criterion) = coverage_criterion(self, &actual_coverage) {
             coverage_criteria.push(criterion.clone());
             criteria.push(criterion);
         }
 
+        let color_criteria = evaluate_region_colors(&self.region_colors, actual, golden)?;
+        criteria.extend(color_criteria.iter().cloned());
+
         let coverage_passed = coverage_criteria.iter().all(CriterionResult::passed);
+        let colors_passed = color_criteria.iter().all(CriterionResult::passed);
+        let gates_passed = coverage_passed && colors_passed;
+        let gates_present = !coverage_criteria.is_empty() || !color_criteria.is_empty();
         let passed = if comparison_criteria.is_empty() {
-            !coverage_criteria.is_empty() && coverage_passed
+            gates_present && gates_passed
         } else {
-            aggregate(&comparison_criteria, self.combine) && coverage_passed
+            aggregate(&comparison_criteria, self.combine) && gates_passed
         };
 
         Ok(ToleranceEvaluation {
@@ -214,6 +262,35 @@ pub enum CriterionResult {
         /// Whether the criterion passed.
         passed: bool,
     },
+    /// Mean color of non-dominant pixels in one rectangle, compared with the golden.
+    RegionColor {
+        /// Left edge, in pixels.
+        x: u32,
+        /// Top edge, in pixels.
+        y: u32,
+        /// Width, in pixels.
+        width: u32,
+        /// Height, in pixels.
+        height: u32,
+        /// Actual mean red channel.
+        mean_r: f64,
+        /// Actual mean green channel.
+        mean_g: f64,
+        /// Actual mean blue channel.
+        mean_b: f64,
+        /// Golden mean red channel.
+        golden_mean_r: f64,
+        /// Golden mean green channel.
+        golden_mean_g: f64,
+        /// Golden mean blue channel.
+        golden_mean_b: f64,
+        /// Largest absolute per-channel mean difference.
+        max_channel_delta: f64,
+        /// Allowed per-channel mean difference.
+        max_mean_channel_delta: f64,
+        /// Whether the criterion passed.
+        passed: bool,
+    },
 }
 
 impl CriterionResult {
@@ -222,7 +299,8 @@ impl CriterionResult {
         match self {
             CriterionResult::Ssim { passed, .. }
             | CriterionResult::PixelDiff { passed, .. }
-            | CriterionResult::ImageCoverage { passed, .. } => *passed,
+            | CriterionResult::ImageCoverage { passed, .. }
+            | CriterionResult::RegionColor { passed, .. } => *passed,
         }
     }
 }
@@ -381,6 +459,158 @@ fn rgb_key(r: u8, g: u8, b: u8) -> u32 {
     ((r as u32) << 16) | ((g as u32) << 8) | b as u32
 }
 
+fn coverage_criterion(
+    tolerance: &Tolerance,
+    stats: &ImageCoverageStats,
+) -> Option<CriterionResult> {
+    if !coverage_requested(tolerance) {
+        return None;
+    }
+    let min_luma_range = tolerance.min_luma_range;
+    let min_unique_colors = tolerance.min_unique_colors;
+    let min_non_background_pixel_fraction = tolerance.min_non_background_pixel_fraction;
+    let passed = min_luma_range.is_none_or(|min| stats.luma_range >= min)
+        && min_unique_colors.is_none_or(|min| stats.unique_rgb_colors >= min)
+        && min_non_background_pixel_fraction
+            .is_none_or(|min| stats.non_background_pixel_fraction >= min);
+    Some(CriterionResult::ImageCoverage {
+        luma_range: stats.luma_range,
+        min_luma_range,
+        unique_rgb_colors: stats.unique_rgb_colors,
+        min_unique_colors,
+        non_background_pixel_fraction: stats.non_background_pixel_fraction,
+        min_non_background_pixel_fraction,
+        passed,
+    })
+}
+
+fn evaluate_region_colors(
+    regions: &[RegionColor],
+    actual: &RgbaImage,
+    golden: &RgbaImage,
+) -> Result<Vec<CriterionResult>, String> {
+    let actual_dominant = dominant_rgb_key(actual);
+    let golden_dominant = dominant_rgb_key(golden);
+    let mut color_criteria = Vec::with_capacity(regions.len());
+    for region in regions {
+        let actual_mean = non_dominant_mean(actual, actual_dominant, *region)?;
+        let golden_mean = non_dominant_mean(golden, golden_dominant, *region)?;
+        let (mean, golden_mean_value, delta, passed) = match (actual_mean, golden_mean) {
+            (Some(mean), Some(golden_mean_value)) => {
+                let delta = max_channel_delta(mean, golden_mean_value);
+                (
+                    mean,
+                    golden_mean_value,
+                    delta,
+                    delta <= region.max_mean_channel_delta,
+                )
+            }
+            (mean, golden_mean_value) => (
+                mean.unwrap_or([0.0, 0.0, 0.0]),
+                golden_mean_value.unwrap_or([0.0, 0.0, 0.0]),
+                region.max_mean_channel_delta + 1.0,
+                false,
+            ),
+        };
+        color_criteria.push(CriterionResult::RegionColor {
+            x: region.x,
+            y: region.y,
+            width: region.width,
+            height: region.height,
+            mean_r: mean[0],
+            mean_g: mean[1],
+            mean_b: mean[2],
+            golden_mean_r: golden_mean_value[0],
+            golden_mean_g: golden_mean_value[1],
+            golden_mean_b: golden_mean_value[2],
+            max_channel_delta: delta,
+            max_mean_channel_delta: region.max_mean_channel_delta,
+            passed,
+        });
+    }
+    Ok(color_criteria)
+}
+
+fn dominant_rgb_key(image: &RgbaImage) -> u32 {
+    let mut colors = Vec::with_capacity(image.width() as usize * image.height() as usize);
+    for pixel in image.as_raw().as_chunks::<4>().0 {
+        colors.push(rgb_key(pixel[0], pixel[1], pixel[2]));
+    }
+    colors.sort_unstable();
+    let mut dominant_key = 0u32;
+    let mut dominant = 0usize;
+    let mut run = 0usize;
+    let mut previous = None;
+    for color in colors {
+        if Some(color) == previous {
+            run += 1;
+        } else {
+            if run > dominant {
+                dominant = run;
+                dominant_key = previous.unwrap_or(color);
+            }
+            previous = Some(color);
+            run = 1;
+        }
+    }
+    if run > dominant {
+        dominant_key = previous.unwrap_or(0);
+    }
+    dominant_key
+}
+
+fn non_dominant_mean(
+    image: &RgbaImage,
+    dominant: u32,
+    region: RegionColor,
+) -> Result<Option<[f64; 3]>, String> {
+    let (width, height) = image.dimensions();
+    let x1 = region
+        .x
+        .checked_add(region.width)
+        .ok_or_else(|| format!("region x {} + width {} overflows", region.x, region.width))?;
+    let y1 = region
+        .y
+        .checked_add(region.height)
+        .ok_or_else(|| format!("region y {} + height {} overflows", region.y, region.height))?;
+    if x1 > width || y1 > height {
+        return Err(format!(
+            "region {},{} {}x{} is outside {}x{}",
+            region.x, region.y, region.width, region.height, width, height
+        ));
+    }
+    let mut count = 0u64;
+    let mut sum = [0u64; 3];
+    for y in region.y..y1 {
+        for x in region.x..x1 {
+            let pixel = image.get_pixel(x, y);
+            if rgb_key(pixel[0], pixel[1], pixel[2]) != dominant {
+                sum[0] += u64::from(pixel[0]);
+                sum[1] += u64::from(pixel[1]);
+                sum[2] += u64::from(pixel[2]);
+                count += 1;
+            }
+        }
+    }
+    if count == 0 {
+        return Ok(None);
+    }
+    let n = count as f64;
+    Ok(Some([
+        sum[0] as f64 / n,
+        sum[1] as f64 / n,
+        sum[2] as f64 / n,
+    ]))
+}
+
+fn max_channel_delta(actual: [f64; 3], golden: [f64; 3]) -> f64 {
+    actual
+        .iter()
+        .zip(golden)
+        .map(|(actual, golden)| (actual - golden).abs())
+        .fold(0.0, f64::max)
+}
+
 fn coverage_requested(tolerance: &Tolerance) -> bool {
     tolerance.min_luma_range.is_some()
         || tolerance.min_unique_colors.is_some()
@@ -501,5 +731,107 @@ mod tests {
         };
         let err = tol.evaluate(&img, &img).unwrap_err();
         assert!(err.contains("max_failing_pixel_fraction"));
+    }
+
+    fn pbs_color_tolerance() -> Tolerance {
+        Tolerance {
+            ssim_min: Some(0.78),
+            max_abs_diff: Some(56),
+            max_failing_pixel_fraction: Some(0.22),
+            min_luma_range: Some(18),
+            min_unique_colors: Some(24),
+            min_non_background_pixel_fraction: Some(0.06),
+            region_colors: pbs_lit_region_colors(),
+            combine: Combine::Or,
+        }
+    }
+
+    fn load_pbs_golden() -> RgbaImage {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("goldens/pbs_lit_material_matrix.png");
+        image::open(path).expect("pbs golden").to_rgba8()
+    }
+
+    /// Same disk mask as the golden, collapsed to `(63,63,63)` plus a short gray fringe.
+    fn flat_gray_with_fringe(golden: &RgbaImage) -> RgbaImage {
+        let dominant = dominant_rgb_key(golden);
+        let mut image = golden.clone();
+        let mut extras = 0u8;
+        for pixel in image.pixels_mut() {
+            if rgb_key(pixel[0], pixel[1], pixel[2]) == dominant {
+                continue;
+            }
+            if extras < 30 {
+                let value = 30 + extras;
+                *pixel = Rgba([value, value, value, 255]);
+                extras += 1;
+            } else {
+                *pixel = Rgba([63, 63, 63, 255]);
+            }
+        }
+        image
+    }
+
+    fn region_color(eval: &ToleranceEvaluation, x: u32, y: u32) -> (f64, f64, f64, f64, bool) {
+        eval.criteria
+            .iter()
+            .find_map(|criterion| match criterion {
+                CriterionResult::RegionColor {
+                    x: cx,
+                    y: cy,
+                    mean_r,
+                    mean_g,
+                    mean_b,
+                    max_channel_delta,
+                    passed,
+                    ..
+                } if *cx == x && *cy == y => {
+                    Some((*mean_r, *mean_g, *mean_b, *max_channel_delta, *passed))
+                }
+                _ => None,
+            })
+            .expect("region color criterion")
+    }
+
+    #[test]
+    fn region_color_passes_the_pbs_golden() {
+        let golden = load_pbs_golden();
+        let eval = pbs_color_tolerance()
+            .evaluate(&golden, &golden)
+            .expect("evaluate golden");
+        assert!(eval.passed);
+        let (_, _, _, max_channel_delta, passed) = region_color(&eval, 0, 77);
+        assert!(passed);
+        assert_eq!(max_channel_delta, 0.0);
+    }
+
+    #[test]
+    fn region_color_rejects_flat_gray_when_or_and_coverage_pass() {
+        let golden = load_pbs_golden();
+        let gray = flat_gray_with_fringe(&golden);
+        let eval = pbs_color_tolerance()
+            .evaluate(&gray, &golden)
+            .expect("evaluate gray");
+        let comparison_passed = eval.criteria.iter().any(|criterion| {
+            matches!(
+                criterion,
+                CriterionResult::Ssim { passed: true, .. }
+                    | CriterionResult::PixelDiff { passed: true, .. }
+            )
+        });
+        let coverage_passed = eval.criteria.iter().any(|criterion| {
+            matches!(
+                criterion,
+                CriterionResult::ImageCoverage { passed: true, .. }
+            )
+        });
+        assert!(comparison_passed);
+        assert!(coverage_passed);
+        assert!(!eval.passed);
+        let (mean_r, mean_g, mean_b, _, passed) = region_color(&eval, 0, 77);
+        assert!(!passed);
+        assert!((mean_r - 63.0).abs() < 2.0);
+        assert!((mean_g - 63.0).abs() < 2.0);
+        assert!((mean_b - 63.0).abs() < 2.0);
     }
 }

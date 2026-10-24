@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::scene::gltf_fixture::default_fixture_path;
 use crate::scene::perlin::PerlinTextureSpec;
 
-use super::tolerance::{Combine, Tolerance};
+use super::tolerance::{Combine, Tolerance, pbs_lit_region_colors};
 
 /// A single named integration test case.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -154,7 +154,11 @@ pub fn pbs_lit_material_matrix() -> IntegrationCase {
                 .to_string(),
         golden_path: default_goldens_dir().join("pbs_lit_material_matrix.png"),
         resolution: (320, 320),
-        tolerance: visual_tolerance(0.78, 56, 0.22, 18, 24, 0.06),
+        tolerance: {
+            let mut tolerance = visual_tolerance(0.78, 56, 0.22, 18, 24, 0.06);
+            tolerance.region_colors = pbs_lit_region_colors();
+            tolerance
+        },
         template: CaseTemplate::PbsLitMaterialMatrix,
     }
 }
@@ -191,6 +195,7 @@ pub fn custom_shader_property_update() -> IntegrationCase {
             min_luma_range: Some(20),
             min_unique_colors: Some(8),
             min_non_background_pixel_fraction: Some(0.12),
+            region_colors: Vec::new(),
             combine: Combine::And,
         },
         template: CaseTemplate::CustomShaderPropertyUpdate,
@@ -232,6 +237,7 @@ pub fn exotic_shader_pair() -> IntegrationCase {
             min_luma_range: Some(24),
             min_unique_colors: Some(16),
             min_non_background_pixel_fraction: Some(0.15),
+            region_colors: Vec::new(),
             combine: Combine::Or,
         },
         template: CaseTemplate::ExoticShaderPair,
@@ -278,6 +284,7 @@ pub fn tilted_canvas_ui_quads() -> IntegrationCase {
             min_luma_range: Some(16),
             min_unique_colors: Some(3),
             min_non_background_pixel_fraction: Some(0.04),
+            region_colors: Vec::new(),
             combine: Combine::And,
         },
         template: CaseTemplate::TiltedCanvasUiQuads,
@@ -420,6 +427,7 @@ fn visual_tolerance(
         min_luma_range: Some(min_luma_range),
         min_unique_colors: Some(min_unique_colors),
         min_non_background_pixel_fraction: Some(min_non_background_pixel_fraction),
+        region_colors: Vec::new(),
         combine: Combine::Or,
     }
 }
@@ -509,6 +517,30 @@ mod tests {
                     plain.display()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn pbs_lit_checks_sphere_band_color_against_the_golden() {
+        let case = lookup("pbs_lit_material_matrix").expect("registered");
+        let expected = [
+            (0, 77, 160, 73),
+            (160, 77, 160, 73),
+            (0, 162, 160, 72),
+            (160, 162, 160, 72),
+        ];
+        assert_eq!(case.tolerance.region_colors.len(), expected.len());
+        for (region, (x, y, width, height)) in case.tolerance.region_colors.iter().zip(expected) {
+            assert_eq!(
+                (
+                    region.x,
+                    region.y,
+                    region.width,
+                    region.height,
+                    region.max_mean_channel_delta
+                ),
+                (x, y, width, height, 24.0)
+            );
         }
     }
 
