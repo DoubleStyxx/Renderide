@@ -110,9 +110,9 @@ fn gtao_enabled_post() -> PostProcessingSettings {
 fn default_main_needs_surface_and_skips_single_sample_depth_resolve() {
     let g = build_main_graph(smoke_key(), &no_post()).expect("default graph");
     assert!(g.needs_surface_acquire());
-    assert_eq!(g.pass_count(), 12);
+    assert_eq!(g.pass_count(), 13);
     assert_eq!(g.compile_stats.topo_levels, 11);
-    assert_eq!(g.compile_stats.registered_pass_count, 12);
+    assert_eq!(g.compile_stats.registered_pass_count, 13);
     assert!(g.compile_stats.compile_skipped_pass_count >= 1);
     assert_eq!(g.compile_stats.transient_texture_count, 1);
     assert!(
@@ -135,6 +135,10 @@ fn default_main_needs_surface_and_skips_single_sample_depth_resolve() {
         .iter()
         .position(|name| *name == "WorldMeshForwardDepthPrepass")
         .expect("depth prepass");
+    let preserve_pos = pass_names
+        .iter()
+        .position(|name| *name == "WorldMeshForwardColorPreserve")
+        .expect("color preserve");
     let opaque_pos = pass_names
         .iter()
         .position(|name| *name == "WorldMeshForwardOpaque")
@@ -176,6 +180,7 @@ fn default_main_needs_surface_and_skips_single_sample_depth_resolve() {
         .position(|name| *name == "WorldMeshDesktopOverlay")
         .expect("desktop overlay pass");
     assert!(depth_prepass_pos < opaque_pos);
+    assert!(preserve_pos < opaque_pos);
     assert!(light_cookie_pos < shadow_pos);
     assert!(deform_pos < shadow_pos);
     assert!(shadow_pos < clustered_pos);
@@ -229,10 +234,11 @@ fn msaa_main_graph_uses_transparent_sequence_for_grab_resolves() {
         .position(|name| *name == "WorldMeshDesktopOverlay")
         .expect("desktop overlay pass");
 
-    assert_eq!(g.pass_count(), 14);
+    assert_eq!(g.pass_count(), 15);
     assert_eq!(g.compile_stats.topo_levels, 13);
-    assert_eq!(g.compile_stats.registered_pass_count, 14);
+    assert_eq!(g.compile_stats.registered_pass_count, 15);
     assert!(!pass_names.contains(&"WorldMeshForwardGtaoDepthResolve"));
+    assert!(pass_names.contains(&"WorldMeshForwardColorPreserve"));
     assert!(compose_pos < overlay_pos);
 }
 

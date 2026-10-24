@@ -157,7 +157,8 @@ pub struct DrawCollectionViewInputs<'a> {
     pub head_output_transform: Mat4,
     /// Camera world position for back-to-front distance sorting of transparent draws.
     ///
-    /// Populate from `HostCameraFrame::view_origin_world()`.
+    /// Populate from `HostCameraFrame::view_origin_world()`. Canvas plane distance uses this
+    /// origin and the draw matrix. It does not use a camera forward.
     pub view_origin_world: Vec3,
     /// Optional CPU frustum + Hi-Z cull inputs.
     pub culling: Option<&'a WorldMeshCullInput<'a>>,
@@ -426,10 +427,11 @@ impl QueuedWorldMeshDraws {
 
     /// Sorts and arranges queued draws, reusing a retained command-list cache when provided.
     pub(crate) fn sort_and_arrange_with_cache(
-        self,
+        mut self,
         parallelism: WorldMeshDrawArrangeParallelism,
         command_cache: Option<&WorldMeshCommandCache>,
     ) -> WorldMeshDrawCollection {
+        super::canvas_depth::snap_canvas_sibling_plane_depths(&mut self.chunks);
         let allow_parallel_sort = parallelism == WorldMeshDrawArrangeParallelism::Full;
         let (items, arrangement) = {
             profiling::scope!("mesh::arrange");

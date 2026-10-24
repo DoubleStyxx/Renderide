@@ -34,6 +34,7 @@ pub(super) fn add_main_graph_edges(
     builder.add_edge(passes.shadows, passes.clustered);
     builder.add_edge(passes.clustered, passes.depth_prepass);
     builder.add_edge(passes.depth_prepass, passes.forward_opaque);
+    builder.add_edge(passes.color_preserve, passes.forward_opaque);
     if let Some(gtao) = passes.gtao.as_ref() {
         let gtao_input = if let Some(pre_depth_resolve) = gtao.pre_depth_resolve {
             builder.add_edge(passes.forward_opaque, pre_depth_resolve);

@@ -8,9 +8,9 @@
 //! - [`spawn`] -- renderer process spawn + RAII guard.
 //! - `scene_state` -- scene-state SHM construction and first-submit pump.
 //! - [`png_readback`] -- PNG stability state machine + readback driver loop.
+//! - `capture` -- first PNG wait plus property-update and shadow-move recaptures.
+//! - `canvas_ui` -- coplanar and tilted UI quad scenes.
 //! - `shutdown` -- graceful shutdown sequence.
-
-use std::time::{Duration, Instant, SystemTime};
 
 use glam::{Quat, Vec3};
 use renderide_shared::shared::{ColorProfile, RenderBoundingBox, RenderTransform, ShadowCastMode};
@@ -33,6 +33,8 @@ use super::ipc_setup::{DEFAULT_QUEUE_CAPACITY_BYTES, connect_session};
 use super::lockstep::{FrameSubmitScalars, LockstepDriver};
 
 mod bench_drive;
+mod canvas_ui;
+mod capture;
 mod config;
 mod consts;
 mod custom_property;
@@ -49,10 +51,9 @@ pub use config::SceneSessionConfig;
 
 use config::SceneSessionOutcome;
 use consts::{asset_ids, shader_variants, sphere_tessellation, torus_geometry};
-use png_readback::{PngStabilityWaitTiming, run_lockstep_until_png_stable};
 use scene_state::{
-    SceneLight, SceneRenderable, SceneSubmission, build_scene_state, default_camera_world_pose,
-    directional_light, ensure_scene_submitted, identity_transform, point_light,
+    SceneLight, SceneRenderable, SceneSubmission, default_camera_world_pose, directional_light,
+    identity_transform, point_light,
 };
 use shutdown::request_shutdown_and_wait;
 use spawn::spawn_renderer;
@@ -101,6 +102,15 @@ pub enum SessionTemplate {
     CustomShaderPropertyUpdate,
     /// Poincare disk on the left quad and a gyroid on the right. Both materials set `_Speed` to 0.
     ExoticShaderPair,
+    /// Two coplanar `UI/Unlit` quads. The later, larger quad must cover the earlier smaller one.
+    CoplanarCanvasUiQuads,
+    /// Two tilted canvases, each a parent plus an in-plane child, at two yaws.
+    TiltedCanvasUiQuads,
+    /// Opaque quad with a slightly farther UI quad whose Offset units must win the depth test.
+    CanvasOffsetBiasQuad,
+    /// Tilted canvas at 18 m. The later sibling is 0.15 mm behind on the plane and must win
+    /// by the sibling-step NDC bias.
+    TiltedCanvasDistanceBias,
     /// PBS floor and cube under a hard spot shadow, captured static and then moved.
     ShadowedCasterMove,
     /// Thirty hard-shadow point lights over a small caster grid. Opt-in frame bench only.
@@ -163,7 +173,7 @@ pub(super) fn run_session(
         exotic_pair::install_and_assign(&mut session.queues, &mut lockstep, &setup)?;
     }
 
-    let png_outcome = capture_submitted_scene(
+    let png_outcome = capture::capture_submitted_scene(
         &mut session.queues,
         &mut lockstep,
         &prefix,
@@ -246,106 +256,6 @@ struct UnlitTexturedMaterialParams {
     floats: Vec<FloatBinding>,
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the capture keeps the same session handles the PNG wait already threads through"
-)]
-fn capture_submitted_scene(
-    queues: &mut renderide_shared::ipc::HostDualQueueIpc,
-    lockstep: &mut LockstepDriver,
-    prefix: &str,
-    backing_dir: &std::path::Path,
-    setup: &SceneSetup,
-    spawned: &mut spawn::SpawnedRenderer,
-    cfg: &SceneSessionConfig,
-    property_recapture: bool,
-    shadow_move: bool,
-) -> Result<SceneSessionOutcome, HarnessError> {
-    let mut scene = build_scene_state(prefix, backing_dir, &setup.scene, lockstep)?;
-    let scene_submit_index = ensure_scene_submitted(queues, lockstep, cfg.timeout)?;
-    let scene_submitted_at = SystemTime::now();
-    let scene_submit_instant = Instant::now();
-    logger::info!(
-        "Session: scene submitted at frame_index={scene_submit_index}, mtime_baseline={scene_submitted_at:?}; waiting for fresh PNG"
-    );
-    #[expect(
-        clippy::expect_used,
-        reason = "child set immediately above by spawn_renderer"
-    )]
-    let renderer = spawned.child.as_mut().expect("child set");
-    let png_outcome = run_lockstep_until_png_stable(
-        queues,
-        lockstep,
-        &cfg.output_path,
-        PngStabilityWaitTiming {
-            scene_submitted_at,
-            scene_submit_instant,
-            overall_timeout: cfg.timeout,
-            interval: Duration::from_millis(cfg.interval_ms.max(1)),
-        },
-        renderer,
-    )?;
-    finish_extra_captures(
-        ExtraCaptures {
-            queues,
-            lockstep,
-            prefix,
-            backing_dir,
-            setup,
-            scene: &mut scene,
-            cfg,
-            renderer,
-        },
-        property_recapture,
-        shadow_move,
-    )?;
-    drop(scene);
-    Ok(png_outcome)
-}
-
-struct ExtraCaptures<'a> {
-    queues: &'a mut renderide_shared::ipc::HostDualQueueIpc,
-    lockstep: &'a mut LockstepDriver,
-    prefix: &'a str,
-    backing_dir: &'a std::path::Path,
-    setup: &'a SceneSetup,
-    scene: &'a mut scene_state::SceneState,
-    cfg: &'a SceneSessionConfig,
-    renderer: &'a mut std::process::Child,
-}
-
-fn finish_extra_captures(
-    capture: ExtraCaptures<'_>,
-    property_recapture: bool,
-    shadow_move: bool,
-) -> Result<(), HarnessError> {
-    if property_recapture {
-        custom_property::recapture_after_property_update(custom_property::PropertyRecapture {
-            queues: capture.queues,
-            lockstep: capture.lockstep,
-            prefix: capture.prefix,
-            backing_dir: capture.backing_dir,
-            setup: capture.setup,
-            output_path: &capture.cfg.output_path,
-            timeout: capture.cfg.timeout,
-            renderer: capture.renderer,
-        })?;
-    }
-    if shadow_move {
-        shadowed_caster::recapture_after_move(shadowed_caster::ShadowMoveRecapture {
-            queues: capture.queues,
-            lockstep: capture.lockstep,
-            scene: capture.scene,
-            setup: capture.setup,
-            output_path: &capture.cfg.output_path,
-            timeout: capture.cfg.timeout,
-            interval: Duration::from_millis(capture.cfg.interval_ms.max(1)),
-            renderer: capture.renderer,
-        })?;
-    }
-    Ok(())
-}
-
 fn template_label(template: &SessionTemplate) -> &'static str {
     match template {
         SessionTemplate::Sphere => "Sphere",
@@ -356,6 +266,10 @@ fn template_label(template: &SessionTemplate) -> &'static str {
         SessionTemplate::GltfTexturedStaticMesh { .. } => "GltfTexturedStaticMesh",
         SessionTemplate::CustomShaderPropertyUpdate => "CustomShaderPropertyUpdate",
         SessionTemplate::ExoticShaderPair => "ExoticShaderPair",
+        SessionTemplate::CoplanarCanvasUiQuads => "CoplanarCanvasUiQuads",
+        SessionTemplate::TiltedCanvasUiQuads => "TiltedCanvasUiQuads",
+        SessionTemplate::CanvasOffsetBiasQuad => "CanvasOffsetBiasQuad",
+        SessionTemplate::TiltedCanvasDistanceBias => "TiltedCanvasDistanceBias",
         SessionTemplate::ShadowedCasterMove => "ShadowedCasterMove",
         SessionTemplate::ManyShadowedPointLights => "ManyShadowedPointLights",
     }
@@ -385,6 +299,10 @@ fn build_scene_setup(template: SessionTemplate) -> SceneSetup {
         } => gltf_textured_static_mesh_setup(mesh, texture_rgba, texture_size),
         SessionTemplate::CustomShaderPropertyUpdate => custom_property::scene_setup(),
         SessionTemplate::ExoticShaderPair => exotic_pair::scene_setup(),
+        SessionTemplate::CoplanarCanvasUiQuads => canvas_ui::coplanar_canvas_ui_quads_setup(),
+        SessionTemplate::TiltedCanvasUiQuads => canvas_ui::tilted_canvas_ui_quads_setup(),
+        SessionTemplate::CanvasOffsetBiasQuad => canvas_ui::canvas_offset_bias_quad_setup(),
+        SessionTemplate::TiltedCanvasDistanceBias => canvas_ui::tilted_canvas_distance_bias_setup(),
         SessionTemplate::ShadowedCasterMove => shadowed_caster::scene_setup(),
         SessionTemplate::ManyShadowedPointLights => shadowed_caster::many_point_lights_setup(),
     }
@@ -1047,61 +965,4 @@ const fn scene_property_request_id(index: i32) -> i32 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        SessionTemplate, asset_ids, build_scene_setup, material_property_names, scene_material_id,
-        shader_variants,
-    };
-
-    #[test]
-    fn torus_unlit_perlin_requests_texture_variant() {
-        let setup = build_scene_setup(SessionTemplate::Torus {
-            texture_rgba: vec![255, 255, 255, 255],
-            texture_size: (1, 1),
-        });
-        let binding = setup.materials[0]
-            .binding
-            .as_ref()
-            .expect("torus case must upload an unlit material");
-
-        assert_eq!(binding.shader_name, "Unlit.shader");
-        assert_eq!(
-            binding.shader_variant_bits,
-            Some(shader_variants::UNLIT_TEXTURE)
-        );
-    }
-
-    #[test]
-    fn material_property_names_follow_payload_order() {
-        let setup = build_scene_setup(SessionTemplate::Torus {
-            texture_rgba: vec![255, 255, 255, 255],
-            texture_size: (1, 1),
-        });
-        let binding = setup.materials[0].binding.as_ref().expect("binding");
-        assert_eq!(
-            material_property_names(binding),
-            vec!["_Tex", "_Tex_ST", "_Color"]
-        );
-    }
-
-    #[test]
-    fn torus_material_update_buffers_do_not_overlap_texture_buffer() {
-        let material_buffers =
-            asset_ids::MATERIAL_UPDATE_BASE_BUFFER..=asset_ids::MATERIAL_UPDATE_BASE_BUFFER + 3;
-
-        assert!(!material_buffers.contains(&asset_ids::TEXTURE_DATA_BUFFER));
-    }
-
-    #[test]
-    fn pbs_matrix_builds_four_materials_against_one_mesh() {
-        let setup = build_scene_setup(SessionTemplate::PbsLitMaterialMatrix);
-        assert_eq!(setup.meshes.len(), 1);
-        assert_eq!(setup.materials.len(), 4);
-        assert_eq!(setup.scene.renderables.len(), 4);
-        assert_eq!(setup.scene.lights.len(), 2);
-        assert_eq!(
-            setup.scene.renderables[3].material_asset_id,
-            scene_material_id(3)
-        );
-    }
-}
+mod tests;

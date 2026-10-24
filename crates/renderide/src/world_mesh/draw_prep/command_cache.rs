@@ -328,6 +328,13 @@ fn hash_world_mesh_draw_order_item<H: Hasher>(item: &WorldMeshDrawItem, hasher: 
 fn hash_camera_distance_if_ordered<H: Hasher>(item: &WorldMeshDrawItem, hasher: &mut H) {
     if item.batch_key.requires_strict_order() {
         item.camera_distance_sq.to_bits().hash(hasher);
+        match item.canvas_plane_depth {
+            Some(depth) => {
+                true.hash(hasher);
+                depth.to_bits().hash(hasher);
+            }
+            None => false.hash(hasher),
+        }
     }
 }
 

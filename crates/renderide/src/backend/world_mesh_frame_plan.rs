@@ -283,6 +283,8 @@ fn desktop_overlay_graph_frame<'a>(frame: &GraphPassFrame<'a>) -> GraphPassFrame
             gpu_limits: frame.view.gpu_limits.clone(),
             msaa_depth_resolve: frame.view.msaa_depth_resolve.clone(),
             clear: frame.view.clear,
+            color_texture: frame.view.color_texture,
+            persistent_depth_target: frame.view.persistent_depth_target,
             post_processing: frame.view.post_processing,
         },
     }
