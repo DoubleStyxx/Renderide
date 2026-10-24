@@ -1,5 +1,7 @@
 //! Prepared LOD-group snapshots derived from frame-prepared renderer runs.
 
+use std::sync::OnceLock;
+
 use hashbrown::HashMap;
 
 use crate::scene::{MeshRendererInstanceId, RenderSpaceId, WorldMeshSceneRead};
@@ -18,8 +20,41 @@ pub(in crate::world_mesh::draw_prep) struct FramePreparedLodRenderer {
 pub(in crate::world_mesh::draw_prep) struct FramePreparedLodEntry {
     /// Threshold copied from scene LOD state.
     pub(in crate::world_mesh::draw_prep) screen_relative_transition_height: f32,
+    /// Host fade width copied from scene LOD state. Read per view without a scene-space lookup.
+    pub(in crate::world_mesh::draw_prep) fade_transition_width: f32,
     /// Live renderer ordinals selected by this LOD row.
     pub(in crate::world_mesh::draw_prep) renderers: Vec<FramePreparedLodRenderer>,
+}
+
+/// Whether each cross-fade group can stipple, keyed by `(space, scene group index)`.
+///
+/// Built once per prepared snapshot, from one pass over the draws, and only when a view finds a
+/// group inside a fade band. [`FramePreparedRenderables::rebuild_lod_groups`] drops it.
+#[derive(Clone, Debug, Default)]
+pub(in crate::world_mesh::draw_prep) struct LodStippleIndex {
+    by_group: HashMap<(RenderSpaceId, usize), bool>,
+}
+
+impl LodStippleIndex {
+    /// Stores the precomputed per-group answers.
+    pub(in crate::world_mesh::draw_prep) fn new(
+        by_group: HashMap<(RenderSpaceId, usize), bool>,
+    ) -> Self {
+        Self { by_group }
+    }
+
+    /// `true` when every member of this group was color unlit when the index was built.
+    #[inline]
+    pub(in crate::world_mesh::draw_prep) fn group_stipples(
+        &self,
+        space_id: RenderSpaceId,
+        scene_group_index: usize,
+    ) -> bool {
+        self.by_group
+            .get(&(space_id, scene_group_index))
+            .copied()
+            .unwrap_or(false)
+    }
 }
 
 /// One prepared LOD group with membership and view-invariant bounds pre-resolved.
@@ -29,6 +64,11 @@ pub(in crate::world_mesh::draw_prep) struct FramePreparedLodGroup {
     pub(in crate::world_mesh::draw_prep) space_id: RenderSpaceId,
     /// Index into the scene render space's LOD group table.
     pub(in crate::world_mesh::draw_prep) scene_group_index: usize,
+    /// Host cross-fade flag copied when the group was prepared.
+    ///
+    /// View selection branches on this bool. A false flag skips the scene-space lookup and the
+    /// unlit stipple scan for that group.
+    pub(in crate::world_mesh::draw_prep) cross_fade: bool,
     /// Whether any referenced renderer is in the overlay layer.
     pub(in crate::world_mesh::draw_prep) any_overlay: bool,
     /// Cached group bounds when every referenced renderer has view-invariant geometry.
@@ -44,6 +84,7 @@ impl FramePreparedRenderables {
         S: WorldMeshSceneRead + ?Sized,
     {
         self.lod_groups.clear();
+        self.lod_stipple = OnceLock::new();
         let Some(scene) = scene else {
             return;
         };
@@ -58,6 +99,7 @@ impl FramePreparedRenderables {
                 let mut prepared_group = FramePreparedLodGroup {
                     space_id,
                     scene_group_index,
+                    cross_fade: group.cross_fade,
                     any_overlay: false,
                     world_aabb: None,
                     lods: Vec::new(),
@@ -65,6 +107,7 @@ impl FramePreparedRenderables {
                 for lod in &group.lods {
                     let mut prepared_lod = FramePreparedLodEntry {
                         screen_relative_transition_height: lod.screen_relative_transition_height,
+                        fade_transition_width: lod.fade_transition_width,
                         renderers: Vec::with_capacity(lod.renderers.len()),
                     };
                     for renderer_ref in &lod.renderers {

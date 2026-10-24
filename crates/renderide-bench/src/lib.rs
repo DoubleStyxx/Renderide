@@ -11,10 +11,11 @@ pub use renderide::bench_api::SkinnedGeometryWorkload;
 pub use renderide::bench_api::{
     BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload,
     CAMERA_CLEAR_LOAD_OP_CAMERAS, CULL_BATCH, CullWorkload, KeywordVariantCacheWorkload,
-    MATERIAL_UNIFORM_BATCH, MaterialUniformUpdateWorkload, SHADOW_CHURN_CASTERS,
-    SHADOW_CHURN_LIGHTS, ShadowChurnWorkload, TRANSFORM_BATCH, TRANSPARENT_SORT_1K,
-    TRANSPARENT_SORT_10K, TransformWorkload, TransparentSortWorkload, WORLD_MATRIX_NODES,
-    WorldMatrixWorkload, camera_clear_load_op_checksum, camera_clear_load_op_inputs,
+    LOD_FADE_BATCH, LodFadeWorkload, MATERIAL_UNIFORM_BATCH, MaterialUniformUpdateWorkload,
+    SHADOW_CHURN_CASTERS, SHADOW_CHURN_LIGHTS, ShadowChurnWorkload, TRANSFORM_BATCH,
+    TRANSPARENT_SORT_1K, TRANSPARENT_SORT_10K, TransformWorkload, TransparentSortWorkload,
+    WORLD_MATRIX_NODES, WorldMatrixWorkload, camera_clear_load_op_checksum,
+    camera_clear_load_op_inputs,
 };
 
 #[cfg(test)]
@@ -79,6 +80,16 @@ mod tests {
         let second = workload.pack_changed_properties();
         assert!(first > 0);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn lod_fade_disabled_stays_on_one_lod_and_mid_fade_counts_partners() {
+        let workload = super::LodFadeWorkload::standard();
+        let disabled = workload.fold_disabled();
+        let fading = workload.fold_mid_fade();
+        assert_eq!(disabled, 0.0);
+        assert!(fading > disabled);
+        assert!(fading > super::LOD_FADE_BATCH as f32 * 0.5);
     }
 
     #[test]

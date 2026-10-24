@@ -67,6 +67,12 @@ const RAW_SAMPLE_EXCEPTIONS: &[RawSampleException] = &[
         reason: "polar UV remapping supplies repaired gradients",
     },
     RawSampleException {
+        label: "shaders/materials/unlit_fade.wgsl",
+        builtin: "textureSampleGrad",
+        texture: "_Tex",
+        reason: "polar UV remapping supplies repaired gradients",
+    },
+    RawSampleException {
         label: "shaders/materials/unlitpolarmapping.wgsl",
         builtin: "textureSampleGrad",
         texture: "_MainTex",

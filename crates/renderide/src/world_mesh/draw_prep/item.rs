@@ -218,6 +218,11 @@ pub struct WorldMeshDrawItem {
     pub ui_rect_clip_local: Option<glam::Vec4>,
     /// Particle renderer metadata consumed by draw shaders and diagnostics.
     pub particle_draw: ParticleDrawParams,
+    /// Signed LOD cross-fade weight. `0` disables stippling and matches a non-fading draw.
+    ///
+    /// A positive weight `t` keeps fragments below the screen-space Bayer threshold `t`.
+    /// A negative weight `-t` keeps the complementary fragments of the neighboring LOD.
+    pub lod_fade: f32,
 }
 
 /// Returns the submesh index range that should be drawn for one renderer material slot.

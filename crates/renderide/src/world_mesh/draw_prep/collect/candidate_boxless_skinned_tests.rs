@@ -82,6 +82,7 @@ fn skinned_candidate(world_aabb: Option<(Vec3, Vec3)>) -> DrawCandidate {
         property_block_id: None,
         world_aabb,
         particle_draw: ParticleDrawParams::default(),
+        lod_fade: 0.0,
     }
 }
 

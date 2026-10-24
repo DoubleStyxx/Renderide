@@ -24,6 +24,7 @@ pub(super) fn push_draws_for_renderer(
     acc: &mut DrawCollectionAccumulator<'_>,
     draw: StaticMeshDrawSource<'_>,
     cache: &FrameMaterialBatchCache,
+    lod_fade: f32,
 ) {
     if !renderer_passes_view_filters(ctx, acc, &draw) {
         return;
@@ -111,6 +112,7 @@ pub(super) fn push_draws_for_renderer(
                 blendshape_deformed,
                 tangent_blendshape_deform_active,
                 cached_cull: cached_cull.as_ref(),
+                lod_fade,
             },
             cache,
         );

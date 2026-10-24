@@ -155,6 +155,45 @@ fn png_is_flat(path: &Path) -> bool {
     crate::image_io::load_rgba(path).is_ok_and(|img| crate::golden::is_flat_image(&img))
 }
 
+/// What to do with one mtime-stable PNG.
+enum StablePng {
+    /// Two successive writes matched. Safe to compare against the golden.
+    Accept,
+    /// Flat, partial, or not yet repeated. Wait for a newer write.
+    KeepWaiting,
+}
+
+/// Rejects a flat or one-off frame. A repeated non-flat image is the steady capture.
+fn consider_stable_png(
+    path: &Path,
+    repeated: &mut Option<Vec<u8>>,
+    flat_seen: &mut bool,
+) -> StablePng {
+    if png_is_flat(path) {
+        if !*flat_seen {
+            logger::info!(
+                "Session: stable PNG is flat; waiting for a later frame (pipelines may still be compiling)"
+            );
+        }
+        *flat_seen = true;
+        *repeated = None;
+        return StablePng::KeepWaiting;
+    }
+    let bytes = std::fs::read(path).unwrap_or_default();
+    if bytes.is_empty() {
+        return StablePng::KeepWaiting;
+    }
+    if repeated.as_ref().is_some_and(|previous| previous == &bytes) {
+        return StablePng::Accept;
+    }
+    logger::info!(
+        "Session: PNG not yet repeated; waiting for the next write at {}",
+        path.display()
+    );
+    *repeated = Some(bytes);
+    StablePng::KeepWaiting
+}
+
 /// Reads the current observation of `output_path`. Maps any I/O failure to
 /// [`PngObservation::Missing`].
 fn read_png_observation(output_path: &Path) -> PngObservation {
@@ -184,6 +223,10 @@ pub(super) fn run_lockstep_until_png_stable(
     let deadline = Instant::now() + wait_timing.overall_timeout.max(deadline_floor);
     let mut last_log_at = Instant::now();
     let mut flat_candidate_seen = false;
+    // A frame can sit unchanged for the 200ms mtime window and still be replaced at the next
+    // render interval. The first non-flat write is sometimes a pre-warmup image (one LOD, or the
+    // null shader while the real pipeline compiles). Accept only once two successive writes match.
+    let mut repeated_png: Option<Vec<u8>> = None;
     let mut non_flat_skips = wait_timing.non_flat_skips;
 
     while Instant::now() < deadline {
@@ -205,37 +248,38 @@ pub(super) fn run_lockstep_until_png_stable(
             state.observe(now, read_png_observation(output_path)),
             PngStabilityVerdict::Stable
         ) {
-            // Pipelines compile asynchronously; draws whose pipeline is still pending are
-            // skipped (materials/registry.rs), so an early frame can be clear-only. Keep
-            // pumping for a later write instead of capturing it.
-            if png_is_flat(output_path) {
-                if !flat_candidate_seen {
+            // The renderer also withholds a PNG while a draw pipeline is still compiling.
+            // A remaining one-off frame (single LOD before the fade weights land) must not win
+            // just because its mtime sat still for 200ms between 500ms writes.
+            match consider_stable_png(output_path, &mut repeated_png, &mut flat_candidate_seen) {
+                StablePng::Accept => {
+                    if non_flat_skips > 0 {
+                        non_flat_skips -= 1;
+                        logger::info!(
+                            "Session: stable PNG is only a partial compile; waiting for a newer frame"
+                        );
+                        // The next write must match a new pair. Leaving the skipped bytes in
+                        // `repeated_png` would accept the following identical partial immediately.
+                        repeated_png = None;
+                        state.reject_candidate();
+                        std::thread::sleep(timing::POLL_INTERVAL);
+                        continue;
+                    }
                     logger::info!(
-                        "Session: stable PNG is flat; waiting for a later frame (pipelines may still be compiling)"
+                        "Session: fresh PNG stabilized at {} after {:?}",
+                        output_path.display(),
+                        wait_timing.scene_submit_instant.elapsed()
                     );
+                    return Ok(SceneSessionOutcome {
+                        png_path: output_path.to_path_buf(),
+                    });
                 }
-                flat_candidate_seen = true;
-                state.reject_candidate();
-                std::thread::sleep(timing::POLL_INTERVAL);
-                continue;
+                StablePng::KeepWaiting => {
+                    state.reject_candidate();
+                    std::thread::sleep(timing::POLL_INTERVAL);
+                    continue;
+                }
             }
-            if non_flat_skips > 0 {
-                non_flat_skips -= 1;
-                logger::info!(
-                    "Session: stable PNG is only a partial compile; waiting for a newer frame"
-                );
-                state.reject_candidate();
-                std::thread::sleep(timing::POLL_INTERVAL);
-                continue;
-            }
-            logger::info!(
-                "Session: fresh PNG stabilized at {} after {:?}",
-                output_path.display(),
-                wait_timing.scene_submit_instant.elapsed()
-            );
-            return Ok(SceneSessionOutcome {
-                png_path: output_path.to_path_buf(),
-            });
         }
 
         if last_log_at.elapsed() >= timing::LOG_INTERVAL {

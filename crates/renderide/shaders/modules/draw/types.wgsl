@@ -19,6 +19,11 @@ struct PerDrawUniforms {
     /// Particle draw metadata: texture-sheet frame grid width/height.
     particle_frame_grid: vec4<f32>,
     /// Padding so each dynamic storage row remains aligned to 512 bytes.
+    ///
+    /// Reserved rows, matching CPU `_pad2`:
+    /// - `[0..4]` previous rigid model matrix (object velocity)
+    /// - `[4].x` previous-model validity flag (`1` when that matrix was written)
+    /// - `[5].x` signed LOD cross-fade weight (`0` disables stippling)
     particle_padding: array<vec4<f32>, 12>,
 }
 

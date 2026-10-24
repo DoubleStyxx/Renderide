@@ -10,6 +10,7 @@ use crate::world_mesh::materials::{FrameMaterialBatchCache, normalized_material_
 use super::super::super::item::stacked_material_submesh_topology;
 use super::super::DrawCollectionInputs;
 use super::super::candidate::{DrawCandidate, evaluate_draw_candidate};
+use super::super::lod_fade::shadow_cast_mode_for_lod_fade;
 use super::super::world_matrix::{
     front_face_for_draw_matrices, skinned_front_face_world_matrix,
     world_matrix_for_local_vertex_stream,
@@ -53,6 +54,7 @@ pub(super) fn push_one_slot_draw(
         blendshape_deformed,
         tangent_blendshape_deform_active,
         cached_cull,
+        lod_fade,
     } = flags;
 
     let Some((material_asset_id, property_block_id)) =
@@ -107,7 +109,7 @@ pub(super) fn push_one_slot_draw(
         index_count,
         is_overlay,
         sorting_order: draw.renderer.sorting_order,
-        shadow_cast_mode: draw.renderer.shadow_cast_mode,
+        shadow_cast_mode: shadow_cast_mode_for_lod_fade(draw.renderer.shadow_cast_mode, lod_fade),
         skinned: draw.skinned,
         world_space_deformed,
         blendshape_deformed,
@@ -116,6 +118,7 @@ pub(super) fn push_one_slot_draw(
         property_block_id,
         world_aabb,
         particle_draw: ParticleDrawParams::default(),
+        lod_fade,
     };
     if let Some(item) = evaluate_draw_candidate(
         ctx,

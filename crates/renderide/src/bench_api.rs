@@ -311,6 +311,62 @@ impl BufferPoolWorkload {
     }
 }
 
+/// LOD height samples folded by one [`LodFadeWorkload`] bench iteration.
+pub const LOD_FADE_BATCH: usize = 4_096;
+
+/// Screen-height samples for the LOD cross-fade decision.
+///
+/// The measured functions are pure and allocate nothing. The disabled fold is the
+/// cross-fade-off path; the mid-fade fold is the same heights with the band open.
+#[derive(Debug)]
+pub struct LodFadeWorkload {
+    /// Biased relative screen heights in the unit interval.
+    heights: Vec<f32>,
+}
+
+impl LodFadeWorkload {
+    /// Builds [`LOD_FADE_BATCH`] heights spread across a wide transition band.
+    #[must_use]
+    pub fn standard() -> Self {
+        let mut heights = Vec::with_capacity(LOD_FADE_BATCH);
+        for index in 0..LOD_FADE_BATCH {
+            let t = index as f32 / LOD_FADE_BATCH as f32;
+            heights.push(0.02 + t * 0.90);
+        }
+        Self { heights }
+    }
+
+    /// Folds the cross-fade-off decision. Every sample stays on one LOD with weight 0.
+    #[must_use]
+    pub fn fold_disabled(&self) -> f32 {
+        self.fold(false)
+    }
+
+    /// Folds the mid-band decision. Samples inside the band count a partner draw.
+    #[must_use]
+    pub fn fold_mid_fade(&self) -> f32 {
+        self.fold(true)
+    }
+
+    fn fold(&self, cross_fade: bool) -> f32 {
+        let mut acc = 0.0_f32;
+        for &height in &self.heights {
+            let height = std::hint::black_box(height);
+            let cross_fade = std::hint::black_box(cross_fade);
+            let coverage = crate::world_mesh::draw_prep::lod_cross_fade_coverage(
+                0.02, 1.0, 1.0, true, height, cross_fade,
+            );
+            let decision = crate::world_mesh::draw_prep::lod_fade_decision(0, true, coverage);
+            acc += decision.primary as f32;
+            acc += decision.primary_weight;
+            if decision.draws_partner() {
+                acc += 1.0;
+            }
+        }
+        acc
+    }
+}
+
 /// Mixed transparent draws sorted by one [`TransparentSortWorkload`] sample at about a thousand rows.
 pub const TRANSPARENT_SORT_1K: usize = 1_024;
 

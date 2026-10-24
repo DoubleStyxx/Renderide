@@ -124,6 +124,7 @@ pub(super) fn scene_setup() -> SceneSetup {
                 },
             ],
             lights: Vec::new(),
+            lod_group: None,
         },
     }
 }

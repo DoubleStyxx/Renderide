@@ -40,6 +40,8 @@ pub use collect::{
     ViewRenderSpaceScope, WorldMeshDrawArrangeParallelism, WorldMeshDrawCollectParallelism,
     queue_draws_with_parallelism,
 };
+#[cfg(feature = "bench-api")]
+pub(crate) use collect::{lod_cross_fade_coverage, lod_fade_decision};
 pub use command_cache::WorldMeshCommandCacheStats;
 pub(crate) use command_cache::{WorldMeshCommandCache, fingerprint_world_mesh_draws};
 pub use filter::{CameraTransformDrawFilter, draw_filter_from_camera_entry};

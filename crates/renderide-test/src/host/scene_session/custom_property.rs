@@ -106,6 +106,7 @@ pub(super) fn scene_setup() -> SceneSetup {
                 shadow_cast_mode: ShadowCastMode::Off,
             }],
             lights: Vec::new(),
+            lod_group: None,
         },
     }
 }

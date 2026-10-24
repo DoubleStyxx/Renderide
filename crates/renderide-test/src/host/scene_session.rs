@@ -39,6 +39,7 @@ mod config;
 mod consts;
 mod custom_property;
 mod exotic_pair;
+mod lod_cross_fade;
 mod shadowed_caster;
 
 pub use bench_drive::{BenchDriveConfig, drive_bench};
@@ -115,6 +116,8 @@ pub enum SessionTemplate {
     ShadowedCasterMove,
     /// Thirty hard-shadow point lights over a small caster grid. Opt-in frame bench only.
     ManyShadowedPointLights,
+    /// Two coplanar unlit quads cross-fading between LOD levels.
+    LodCrossFade,
 }
 
 /// Drives the full session end-to-end. The renderer process is killed on `Err` via [`Drop`] of
@@ -273,6 +276,7 @@ fn template_label(template: &SessionTemplate) -> &'static str {
         SessionTemplate::TiltedCanvasDistanceBias => "TiltedCanvasDistanceBias",
         SessionTemplate::ShadowedCasterMove => "ShadowedCasterMove",
         SessionTemplate::ManyShadowedPointLights => "ManyShadowedPointLights",
+        SessionTemplate::LodCrossFade => "LodCrossFade",
     }
 }
 
@@ -306,6 +310,7 @@ fn build_scene_setup(template: SessionTemplate) -> SceneSetup {
         SessionTemplate::TiltedCanvasDistanceBias => canvas_ui::tilted_canvas_distance_bias_setup(),
         SessionTemplate::ShadowedCasterMove => shadowed_caster::scene_setup(),
         SessionTemplate::ManyShadowedPointLights => shadowed_caster::many_point_lights_setup(),
+        SessionTemplate::LodCrossFade => lod_cross_fade::scene_setup(),
     }
 }
 
@@ -499,6 +504,7 @@ fn multi_primitive_unlit_grid_setup(
             camera_world_pose: transform(Vec3::new(0.0, 0.0, -4.2), Vec3::ONE, Quat::IDENTITY),
             renderables,
             lights: Vec::new(),
+            lod_group: None,
         },
     }
 }
@@ -562,6 +568,7 @@ fn pbs_lit_material_matrix_setup() -> SceneSetup {
             camera_world_pose: transform(Vec3::new(0.0, 0.0, -4.0), Vec3::ONE, Quat::IDENTITY),
             renderables,
             lights,
+            lod_group: None,
         },
     }
 }
@@ -615,6 +622,7 @@ fn alpha_cutout_masked_quads_setup(mask_rgba: Vec<u8>, texture_size: (u32, u32))
             camera_world_pose: default_camera_world_pose(),
             renderables,
             lights: Vec::new(),
+            lod_group: None,
         },
     }
 }
@@ -650,6 +658,7 @@ fn gltf_textured_static_mesh_setup(
                 shadow_cast_mode: ShadowCastMode::Off,
             }],
             lights: Vec::new(),
+            lod_group: None,
         },
     }
 }

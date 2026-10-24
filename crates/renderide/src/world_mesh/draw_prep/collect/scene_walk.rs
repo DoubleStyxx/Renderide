@@ -44,6 +44,8 @@ struct OverlayDeformCullFlags<'a> {
     pub tangent_blendshape_deform_active: bool,
     /// Cached cull outcome for this renderer; `None` when no culling pass is active.
     pub cached_cull: Option<&'a CachedCull>,
+    /// Signed LOD stipple weight. `0` disables stippling.
+    pub lod_fade: f32,
 }
 
 /// One static or skinned mesh renderer with its resolved [`crate::assets::mesh::GpuMesh`] and submesh index ranges.
@@ -173,7 +175,10 @@ pub(super) fn collect_chunk(
                 {
                     continue;
                 }
-                push_draws_for_renderer(ctx, &mut acc, source, state.cache);
+                let lod_fade = state
+                    .lod_visibility
+                    .lod_fade_by_instance(source.space_id, source.instance_id);
+                push_draws_for_renderer(ctx, &mut acc, source, state.cache, lod_fade);
             }
         }
         ChunkKind::Skinned => {
@@ -190,7 +195,10 @@ pub(super) fn collect_chunk(
                 {
                     continue;
                 }
-                push_draws_for_renderer(ctx, &mut acc, source, state.cache);
+                let lod_fade = state
+                    .lod_visibility
+                    .lod_fade_by_instance(source.space_id, source.instance_id);
+                push_draws_for_renderer(ctx, &mut acc, source, state.cache, lod_fade);
             }
         }
     }

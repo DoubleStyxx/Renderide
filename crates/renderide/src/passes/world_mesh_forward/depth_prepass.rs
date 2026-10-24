@@ -83,6 +83,12 @@ pub(crate) struct WorldMeshForwardDepthPrepassPipelineKey {
     pub primitive_topology: RasterPrimitiveTopology,
     /// Depth compare function baked into the render pipeline.
     pub depth_compare: wgpu::CompareFunction,
+    /// Selects the LOD stipple depth shader.
+    ///
+    /// Clear for every draw whose fade weight is zero, and always clear for shadow casters.
+    /// The clear path is the historical depth prepass: no fragment discard, no fade varying,
+    /// and no per-draw fade load.
+    pub lod_stipple: bool,
 }
 
 /// Cached render pipelines and bind layout for the generic depth prepass.
@@ -129,21 +135,33 @@ impl WorldMeshForwardDepthPrepassPipelineCache {
     ) -> wgpu::RenderPipeline {
         profiling::scope!("world_mesh_forward::depth_prepass_pipeline");
         let multiview = key.multiview_mask.is_some();
-        let (label, source) = if multiview {
-            (
-                "world_mesh_depth_prepass_multiview",
-                embedded_wgsl!("world_mesh_depth_prepass_multiview"),
-            )
-        } else {
-            (
+        let (label, source, fragment_entry_point) = match (multiview, key.lod_stipple) {
+            (false, false) => (
                 "world_mesh_depth_prepass_default",
                 embedded_wgsl!("world_mesh_depth_prepass_default"),
-            )
+                None,
+            ),
+            (true, false) => (
+                "world_mesh_depth_prepass_multiview",
+                embedded_wgsl!("world_mesh_depth_prepass_multiview"),
+                None,
+            ),
+            (false, true) => (
+                "world_mesh_depth_prepass_fade_default",
+                embedded_wgsl!("world_mesh_depth_prepass_fade_default"),
+                Some("fs_main"),
+            ),
+            (true, true) => (
+                "world_mesh_depth_prepass_fade_multiview",
+                embedded_wgsl!("world_mesh_depth_prepass_fade_multiview"),
+                Some("fs_main"),
+            ),
         };
         logger::debug!(
-            "world mesh depth prepass: building pipeline sample_count={} multiview={} topology={:?}",
+            "world mesh depth prepass: building pipeline sample_count={} multiview={} lod_stipple={} topology={:?}",
             key.sample_count,
             multiview,
+            key.lod_stipple,
             key.primitive_topology
         );
         let per_draw_layout = self.per_draw_layout(device);
@@ -156,7 +174,7 @@ impl WorldMeshForwardDepthPrepassPipelineCache {
                 shader_source: source,
                 bind_group_layouts: &bind_group_layouts,
                 vertex_buffers: &vertex_buffers,
-                fragment_entry_point: None,
+                fragment_entry_point,
                 color_targets: &[],
                 primitive_topology: key.primitive_topology,
                 front_face: key.front_face,
@@ -358,6 +376,7 @@ impl WorldMeshForwardDepthPrepassPipelineKey {
             cull_mode: cull_for_topology(cull_mode.0, item.batch_key.primitive_topology),
             primitive_topology: item.batch_key.primitive_topology,
             depth_compare,
+            lod_stipple: item.lod_fade != 0.0,
         })
     }
 
@@ -381,6 +400,7 @@ impl WorldMeshForwardDepthPrepassPipelineKey {
             cull_mode,
             primitive_topology: item.batch_key.primitive_topology,
             depth_compare: wgpu::CompareFunction::LessEqual,
+            lod_stipple: false,
         })
     }
 }
@@ -644,6 +664,37 @@ mod tests {
         assert_eq!(
             key.primitive_topology,
             RasterPrimitiveTopology::TriangleList
+        );
+        assert!(!key.lod_stipple);
+    }
+
+    #[test]
+    fn depth_prepass_stipple_pipeline_follows_the_fade_weight() {
+        let mut item = dummy_world_mesh_draw_item(DummyDrawItemSpec {
+            material_asset_id: 1,
+            property_block: None,
+            skinned: false,
+            sorting_order: 0,
+            mesh_asset_id: 1,
+            node_id: 1,
+            slot_index: 0,
+            collect_order: 0,
+            alpha_blended: false,
+        });
+        item.lod_fade = 0.4;
+        let key = WorldMeshForwardDepthPrepassPipelineKey::for_draw(&item, &pipeline_state())
+            .expect("fading depth key");
+        assert!(key.lod_stipple);
+
+        item.lod_fade = -0.4;
+        item.batch_key.pipeline =
+            RasterPipelineKind::EmbeddedStem(Arc::from("pbsmetallic_default"));
+        let shadow =
+            WorldMeshForwardDepthPrepassPipelineKey::for_shadow_draw(&item, &pipeline_state())
+                .expect("shadow key");
+        assert!(
+            !shadow.lod_stipple,
+            "shadow casters stay on the single-LOD depth shader"
         );
     }
 

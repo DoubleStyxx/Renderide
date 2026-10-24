@@ -6,12 +6,13 @@ use std::time::{Duration, Instant};
 use glam::{Quat, Vec3, Vec4};
 use renderide_shared::buffer::SharedMemoryBufferDescriptor;
 use renderide_shared::ipc::HostDualQueueIpc;
+use renderide_shared::packing::extras::LOD_GROUP_STATE_HOST_ROW_BYTES;
 use renderide_shared::packing::memory_packable::MemoryPackable;
 use renderide_shared::packing::memory_packer::MemoryPacker;
 use renderide_shared::shared::{
-    LIGHT_STATE_HOST_ROW_BYTES, LightRenderablesUpdate, LightState, LightType,
-    MeshRenderablesUpdate, MeshRendererState, MotionVectorMode, RenderSH2, RenderSpaceUpdate,
-    RenderTransform, ShadowCastMode, ShadowType, TransformsUpdate,
+    LIGHT_STATE_HOST_ROW_BYTES, LODGroupRenderablesUpdate, LODGroupState, LightRenderablesUpdate,
+    LightState, LightType, MeshRenderablesUpdate, MeshRendererState, MotionVectorMode, RenderSH2,
+    RenderSpaceUpdate, RenderTransform, ShadowCastMode, ShadowType, TransformsUpdate,
 };
 use renderide_shared::wire_writer::mesh_renderers::{
     encode_additions, encode_mesh_states, encode_packed_material_ids,
@@ -52,6 +53,30 @@ pub(super) struct SceneLight {
     pub state: LightState,
 }
 
+/// One LOD row inside a test [`SceneLodGroup`].
+#[derive(Clone, Debug)]
+pub(super) struct SceneLodLevel {
+    /// Relative screen-height threshold for this row.
+    pub screen_relative_transition_height: f32,
+    /// Fraction of the span down to the previous threshold that cross-fades.
+    pub fade_transition_width: f32,
+    /// Dense static renderer indices shown by this row.
+    pub renderer_indices: Vec<i32>,
+}
+
+/// One LOD group attached to a transform in a test scene.
+#[derive(Clone, Debug)]
+pub(super) struct SceneLodGroup {
+    /// Dense transform index that owns the group.
+    pub node_id: i32,
+    /// Draws both neighboring LODs inside the transition band.
+    pub cross_fade: bool,
+    /// Stored host flag. The renderer does not animate this yet.
+    pub animate_cross_fading: bool,
+    /// Highest-detail row first.
+    pub levels: Vec<SceneLodLevel>,
+}
+
 /// Full scene payload written into one render-space update.
 #[derive(Clone, Debug)]
 pub(super) struct SceneSubmission {
@@ -61,6 +86,8 @@ pub(super) struct SceneSubmission {
     pub renderables: Vec<SceneRenderable>,
     /// Regular lights to add and update.
     pub lights: Vec<SceneLight>,
+    /// Optional LOD group. Absent scenes omit the LOD shared-memory regions.
+    pub lod_group: Option<SceneLodGroup>,
 }
 
 impl SceneSubmission {
@@ -77,6 +104,7 @@ impl SceneSubmission {
                 shadow_cast_mode: ShadowCastMode::Off,
             }],
             lights: Vec::new(),
+            lod_group: None,
         }
     }
 }
@@ -101,6 +129,10 @@ struct SceneSharedMemoryRegions {
     packed_material_ids_bytes: Vec<u8>,
     light_additions_bytes: Vec<u8>,
     light_states_bytes: Vec<u8>,
+    lod_additions_bytes: Vec<u8>,
+    lod_states_bytes: Vec<u8>,
+    lod_level_bytes: Vec<u8>,
+    lod_renderer_ids_bytes: Vec<u8>,
 }
 
 impl SceneSharedMemoryRegions {
@@ -129,6 +161,7 @@ impl SceneSharedMemoryRegions {
                 .collect::<Vec<_>>(),
         );
         let light_states_bytes = encode_light_states(&light_state_rows(scene));
+        let lod = encode_lod_group(scene.lod_group.as_ref());
         Self {
             pose_updates_bytes,
             mesh_additions_bytes,
@@ -136,6 +169,10 @@ impl SceneSharedMemoryRegions {
             packed_material_ids_bytes,
             light_additions_bytes,
             light_states_bytes,
+            lod_additions_bytes: lod.additions,
+            lod_states_bytes: lod.states,
+            lod_level_bytes: lod.levels,
+            lod_renderer_ids_bytes: lod.renderer_ids,
         }
     }
 
@@ -146,6 +183,10 @@ impl SceneSharedMemoryRegions {
             + self.packed_material_ids_bytes.len()
             + self.light_additions_bytes.len()
             + self.light_states_bytes.len()
+            + self.lod_additions_bytes.len()
+            + self.lod_states_bytes.len()
+            + self.lod_level_bytes.len()
+            + self.lod_renderer_ids_bytes.len()
     }
 }
 
@@ -157,6 +198,15 @@ struct SceneSharedMemoryLayout {
     packed_material_ids: SharedMemoryBufferDescriptor,
     light_additions: SharedMemoryBufferDescriptor,
     light_states: SharedMemoryBufferDescriptor,
+    lod: Option<LodSharedMemoryLayout>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LodSharedMemoryLayout {
+    additions: SharedMemoryBufferDescriptor,
+    states: SharedMemoryBufferDescriptor,
+    levels: SharedMemoryBufferDescriptor,
+    renderer_ids: SharedMemoryBufferDescriptor,
 }
 
 impl SceneSharedMemoryLayout {
@@ -199,6 +249,32 @@ impl SceneSharedMemoryLayout {
             &mut offset,
             regions.light_states_bytes.len(),
         );
+        let lod = (!regions.lod_states_bytes.is_empty()).then(|| LodSharedMemoryLayout {
+            additions: descriptor_for_region(
+                buffer_id,
+                capacity,
+                &mut offset,
+                regions.lod_additions_bytes.len(),
+            ),
+            states: descriptor_for_region(
+                buffer_id,
+                capacity,
+                &mut offset,
+                regions.lod_states_bytes.len(),
+            ),
+            levels: descriptor_for_region(
+                buffer_id,
+                capacity,
+                &mut offset,
+                regions.lod_level_bytes.len(),
+            ),
+            renderer_ids: descriptor_for_region(
+                buffer_id,
+                capacity,
+                &mut offset,
+                regions.lod_renderer_ids_bytes.len(),
+            ),
+        });
         Self {
             pose_updates,
             mesh_additions,
@@ -206,6 +282,7 @@ impl SceneSharedMemoryLayout {
             packed_material_ids,
             light_additions,
             light_states,
+            lod,
         }
     }
 }
@@ -483,7 +560,24 @@ fn write_scene_regions(
         layout.light_states,
         &regions.light_states_bytes,
         "light_states",
-    )
+    )?;
+    if let Some(lod) = layout.lod {
+        write_region(
+            writer,
+            lod.additions,
+            &regions.lod_additions_bytes,
+            "lod additions",
+        )?;
+        write_region(writer, lod.states, &regions.lod_states_bytes, "lod states")?;
+        write_region(writer, lod.levels, &regions.lod_level_bytes, "lod levels")?;
+        write_region(
+            writer,
+            lod.renderer_ids,
+            &regions.lod_renderer_ids_bytes,
+            "lod renderer ids",
+        )?;
+    }
+    Ok(())
 }
 
 fn write_region(
@@ -552,7 +646,13 @@ fn build_render_space_update(
         render_transform_overrides_update: None,
         render_material_overrides_update: None,
         blit_to_displays_update: None,
-        lod_group_update: None,
+        lod_group_update: layout.lod.map(|lod| LODGroupRenderablesUpdate {
+            lod_states: lod.levels,
+            packed_mesh_renderer_ids: lod.renderer_ids,
+            states: lod.states,
+            removals: SharedMemoryBufferDescriptor::default(),
+            additions: lod.additions,
+        }),
         gaussian_splat_renderers_update: None,
         reflection_probe_render_tasks: Vec::new(),
     }
@@ -564,6 +664,63 @@ fn target_transform_count(scene: &SceneSubmission) -> i32 {
         .map(|row| row.transform_id)
         .max()
         .map_or(0, |max_id| max_id + 1)
+}
+
+struct EncodedLodGroup {
+    additions: Vec<u8>,
+    states: Vec<u8>,
+    levels: Vec<u8>,
+    renderer_ids: Vec<u8>,
+}
+
+fn encode_lod_group(group: Option<&SceneLodGroup>) -> EncodedLodGroup {
+    let Some(group) = group else {
+        return EncodedLodGroup {
+            additions: Vec::new(),
+            states: Vec::new(),
+            levels: Vec::new(),
+            renderer_ids: Vec::new(),
+        };
+    };
+    let mut states = vec![0u8; LOD_GROUP_STATE_HOST_ROW_BYTES * 2];
+    pack_lod_group_state(
+        &mut states[..LOD_GROUP_STATE_HOST_ROW_BYTES],
+        LODGroupState {
+            renderable_index: 0,
+            lod_count: i32::try_from(group.levels.len()).unwrap_or(0),
+            cross_fade: group.cross_fade,
+            animate_cross_fading: group.animate_cross_fading,
+        },
+    );
+    pack_lod_group_state(
+        &mut states[LOD_GROUP_STATE_HOST_ROW_BYTES..],
+        LODGroupState {
+            renderable_index: -1,
+            ..LODGroupState::default()
+        },
+    );
+    let mut levels = Vec::with_capacity(group.levels.len() * 12);
+    let mut renderer_ids = Vec::new();
+    for level in &group.levels {
+        levels.extend_from_slice(&level.screen_relative_transition_height.to_le_bytes());
+        levels.extend_from_slice(&level.fade_transition_width.to_le_bytes());
+        let renderer_count = i32::try_from(level.renderer_indices.len()).unwrap_or(0);
+        levels.extend_from_slice(&renderer_count.to_le_bytes());
+        for renderer_index in &level.renderer_indices {
+            renderer_ids.extend_from_slice(&renderer_index.to_le_bytes());
+        }
+    }
+    EncodedLodGroup {
+        additions: encode_additions(&[group.node_id]),
+        states,
+        levels,
+        renderer_ids,
+    }
+}
+
+fn pack_lod_group_state(dest: &mut [u8], mut row: LODGroupState) {
+    let mut packer = MemoryPacker::new(dest);
+    row.pack(&mut packer);
 }
 
 fn encode_light_states(rows: &[LightState]) -> Vec<u8> {
@@ -625,6 +782,7 @@ mod tests {
                 },
             ],
             lights: Vec::new(),
+            lod_group: None,
         };
         let regions = SceneSharedMemoryRegions::build(&scene);
         assert_eq!(regions.mesh_additions_bytes.len(), 12);
@@ -650,6 +808,7 @@ mod tests {
                     state: directional_light([0.5, 0.5, 1.0], 1.0),
                 },
             ],
+            lod_group: None,
         };
         let bytes = encode_light_states(&light_state_rows(&scene));
         assert_eq!(bytes.len(), 3 * LIGHT_STATE_HOST_ROW_BYTES);

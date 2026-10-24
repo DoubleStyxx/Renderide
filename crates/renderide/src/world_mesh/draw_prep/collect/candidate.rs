@@ -60,6 +60,8 @@ pub(super) struct DrawCandidate {
     pub(super) world_aabb: Option<(Vec3, Vec3)>,
     /// Particle renderer metadata for generated render-buffer draws.
     pub(super) particle_draw: ParticleDrawParams,
+    /// Signed LOD cross-fade weight copied onto the draw item. `0` disables stippling.
+    pub(super) lod_fade: f32,
 }
 
 /// Builds a draw item from a cull-surviving material-slot candidate without allocating.
@@ -122,6 +124,7 @@ pub(super) fn evaluate_draw_candidate(
     }
     let blendshape_deformed = candidate.blendshape_deformed
         || (candidate.tangent_blendshape_deform_active && batch_key.embedded_needs_tangent);
+    super::lod_fade::select_unlit_fade_pipeline(&mut batch_key.pipeline, candidate.lod_fade);
     let sort_metrics = candidate_sort_metrics(
         ctx,
         &candidate,
@@ -165,6 +168,7 @@ pub(super) fn evaluate_draw_candidate(
         reflection_probes,
         ui_rect_clip_local,
         particle_draw: candidate.particle_draw,
+        lod_fade: candidate.lod_fade,
     })
 }
 
@@ -377,6 +381,7 @@ mod tests {
             property_block_id: None,
             world_aabb: None,
             particle_draw: ParticleDrawParams::default(),
+            lod_fade: 0.0,
         };
 
         let item = evaluate_draw_candidate(
@@ -427,6 +432,7 @@ mod tests {
             property_block_id: Some(100),
             world_aabb: None,
             particle_draw: ParticleDrawParams::default(),
+            lod_fade: 0.0,
         };
 
         let item = evaluate_draw_candidate(
@@ -480,6 +486,7 @@ mod tests {
             property_block_id: None,
             world_aabb: None,
             particle_draw: ParticleDrawParams::default(),
+            lod_fade: 0.0,
         };
 
         assert!(
@@ -528,6 +535,7 @@ mod tests {
             property_block_id: None,
             world_aabb: None,
             particle_draw: ParticleDrawParams::default(),
+            lod_fade: 0.0,
         };
 
         let item = evaluate_draw_candidate(
@@ -589,6 +597,7 @@ mod tests {
             property_block_id: None,
             world_aabb: Some((Vec3::new(9.0, -2.0, 0.0), Vec3::new(11.0, 2.0, 0.0))),
             particle_draw: ParticleDrawParams::default(),
+            lod_fade: 0.0,
         };
 
         let item = evaluate_draw_candidate(
@@ -679,6 +688,7 @@ mod tests {
             property_block_id: None,
             world_aabb: None,
             particle_draw: ParticleDrawParams::default(),
+            lod_fade: 0.0,
         };
 
         let item = evaluate_draw_candidate(

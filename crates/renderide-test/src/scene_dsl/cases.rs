@@ -76,6 +76,8 @@ pub enum CaseTemplate {
     TiltedCanvasDistanceBias,
     /// Hard-shadowed cube on a PBS floor, static then moved.
     ShadowedCasterMove,
+    /// Mid-transition LOD cross-fade of two coplanar unlit quads.
+    LodCrossFade,
 }
 
 /// Default golden directory, relative to the workspace root: `crates/renderide-test/goldens/`.
@@ -332,6 +334,20 @@ pub fn gltf_textured_static_mesh(path: PathBuf) -> IntegrationCase {
     }
 }
 
+/// Red and blue unlit quads sharing a mesh, captured inside an LOD cross-fade band.
+pub fn lod_cross_fade() -> IntegrationCase {
+    IntegrationCase {
+        name: "lod_cross_fade".to_string(),
+        description:
+            "Two coplanar unlit quads in one LOD group. Cross-fade is on and the camera sits inside the transition, so the frame is a red/blue screen-door mix."
+                .to_string(),
+        golden_path: default_goldens_dir().join("lod_cross_fade.png"),
+        resolution: (256, 256),
+        tolerance: visual_tolerance(0.72, 80, 0.35, 24, 3, 0.03),
+        template: CaseTemplate::LodCrossFade,
+    }
+}
+
 /// Returns every case in the suite. The order is stable; CLI listings and reports rely on it.
 pub fn registry() -> Vec<IntegrationCase> {
     let mut cases = vec![
@@ -346,6 +362,7 @@ pub fn registry() -> Vec<IntegrationCase> {
         tilted_canvas_ui_quads(),
         canvas_offset_bias_quad(),
         tilted_canvas_distance_bias(),
+        lod_cross_fade(),
     ];
     // WARP limitation, not a shadow-cache diff. Windows CI is DX12 Microsoft Basic Render Driver
     // (Vulkan reports ERROR_INCOMPATIBLE_DRIVER). On that adapter the static frame was a 48-color

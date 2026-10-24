@@ -227,6 +227,7 @@ fn boxless_skinned_lod_keeps_the_renderer_until_a_posed_box_arrives() {
         SPACE,
         space,
         &space.lod_groups()[0].lods,
+        space.lod_groups()[0].cross_fade,
         &mut scene_visibility,
     );
     assert!(scene_visibility.renderer_visible_by_instance(SPACE, INSTANCE));

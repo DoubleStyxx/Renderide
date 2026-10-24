@@ -234,6 +234,9 @@ fn prepare_template(
         CaseTemplate::ShadowedCasterMove => Ok(PreparedTemplate {
             session_template: SessionTemplate::ShadowedCasterMove,
         }),
+        CaseTemplate::LodCrossFade => Ok(PreparedTemplate {
+            session_template: SessionTemplate::LodCrossFade,
+        }),
         CaseTemplate::GltfTexturedStaticMesh { path } => {
             let imported = load_static_textured_mesh(path)?;
             let texture_size = imported.texture_size;
