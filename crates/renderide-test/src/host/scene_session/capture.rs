@@ -26,7 +26,6 @@ pub(super) fn capture_submitted_scene(
     cfg: &SceneSessionConfig,
     property_recapture: bool,
     shadow_move: bool,
-    exotic_pair: bool,
 ) -> Result<SceneSessionOutcome, HarnessError> {
     let mut scene = build_scene_state(prefix, backing_dir, &setup.scene, lockstep)?;
     let scene_submit_index = ensure_scene_submitted(queues, lockstep, cfg.timeout)?;
@@ -49,10 +48,6 @@ pub(super) fn capture_submitted_scene(
             scene_submit_instant,
             overall_timeout: cfg.timeout,
             interval: Duration::from_millis(cfg.interval_ms.max(1)),
-            // Two custom shaders compile back to back. The first colored PNG can land while
-            // the second pipeline is still building, which leaves one quad clear. Skip that
-            // frame and the following one so the draw after the compile is what gets compared.
-            non_flat_skips: if exotic_pair { 2 } else { 0 },
         },
         renderer,
     )?;

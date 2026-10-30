@@ -266,10 +266,12 @@ impl<'a> HeadlessDriver<'a> {
         }
         let atlas_passes =
             shadow_atlas_pass_log_enabled().then(|| self.runtime.shadow_atlas_pass_counts());
+        let pending_pipeline_draws = self.runtime.take_pending_pipeline_draws();
         if let Err(e) = readback::readback_and_write_png_atomically(
             &self.gpu,
             &self.params.output_path,
             atlas_passes,
+            pending_pipeline_draws,
         ) {
             logger::warn!("Headless PNG write failed: {e}");
         } else {

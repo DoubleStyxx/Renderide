@@ -1,33 +1,64 @@
-//! CPU microbenchmarks for Renderide helpers that do not need Resonite or a GPU.
+//! CPU microbenchmarks for Renderide helpers that do not need Resonite or a GPU, plus the
+//! `renderide-bench` front-door binary (`run` / `compare` / `list`).
 //!
 //! ```text
 //! cargo bench -p renderide-bench
+//! cargo run -p renderide-bench -- list --json
+//! cargo run -p renderide-bench -- run --suite cpu --json
+//! cargo run -p renderide-bench -- compare --base A.json --head B.json --json
 //! ```
+//!
+//! Decision rule for compare: [`renderide_framebench::relative_status`], shared with
+//! `renderide-framebench compare` and (for percent / abs-floor semantics)
+//! `scripts/ci/frame_bench_gate.py`. Default absolute floor is 0 while O8 is open.
 //!
 //! GPU-device benches, when they exist, compile only with `--features gpu` and are not part of
 //! the default command.
 
+#![forbid(unsafe_code)]
+
+mod catalog;
+mod cli;
+mod compare_front;
+mod criterion_read;
+mod error;
+mod report;
+mod run_suite;
+
+pub use catalog::{CPU_BENCH_IDS, CpuBenchId, FRAME_SCENARIOS};
+pub use cli::cli_main;
+pub use compare_front::{
+    DEFAULT_FLAG_THRESHOLD_PERCENT, FrontCompareOptions, compare_paths, decision_rule_doc,
+};
+pub use error::{BenchError, exit_code};
+pub use report::{
+    BenchCompareReport, BenchListReport, BenchRunReport, COMPARE_SCHEMA, CompareRow, CpuSample,
+    LIST_SCHEMA, RUN_SCHEMA, Verdict,
+};
+pub use run_suite::{RunOptions, Suite, cpu_catalog_complete, run_suites};
+
 pub use renderide::bench_api::SkinnedGeometryWorkload;
 pub use renderide::bench_api::{
     BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload,
-    CAMERA_CLEAR_LOAD_OP_CAMERAS, CULL_BATCH, CullWorkload, DOUBLE_BUFFER_CAMERAS,
-    DoubleBufferWorkload, HYSTERESIS_BATCH, HYSTERESIS_HISTORY_COUNTS, HysteresisCullWorkload,
-    HysteresisHistoryWorkload, KeywordVariantCacheWorkload, MATERIAL_UNIFORM_BATCH,
-    MaterialUniformUpdateWorkload, SHADOW_CHURN_CASTERS, SHADOW_CHURN_LIGHTS, ShadowChurnWorkload,
-    TRANSFORM_BATCH, TRANSPARENT_SORT_1K, TRANSPARENT_SORT_10K, TransformWorkload,
-    TransparentSortWorkload, WORLD_MATRIX_NODES, WorldMatrixWorkload,
-    camera_clear_load_op_checksum, camera_clear_load_op_inputs,
+    CAMERA_CLEAR_LOAD_OP_CAMERAS, CULL_BATCH, CullWorkload, CustomStemLookupWorkload,
+    DOUBLE_BUFFER_CAMERAS, DoubleBufferWorkload, HYSTERESIS_BATCH, HYSTERESIS_HISTORY_COUNTS,
+    HysteresisCullWorkload, HysteresisHistoryWorkload, KeywordVariantCacheWorkload,
+    MATERIAL_UNIFORM_BATCH, MaterialUniformUpdateWorkload, SHADOW_CHURN_CASTERS,
+    SHADOW_CHURN_LIGHTS, ShadowChurnWorkload, TRANSFORM_BATCH, TRANSPARENT_SORT_1K,
+    TRANSPARENT_SORT_10K, TransformWorkload, TransparentSortWorkload, WORLD_MATRIX_NODES,
+    WorldMatrixWorkload, camera_clear_load_op_checksum, camera_clear_load_op_inputs,
 };
 
 #[cfg(test)]
 mod tests {
     use super::{
         BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload,
-        CAMERA_CLEAR_LOAD_OP_CAMERAS, CULL_BATCH, CullWorkload, DOUBLE_BUFFER_CAMERAS,
-        DoubleBufferWorkload, HYSTERESIS_BATCH, HYSTERESIS_HISTORY_COUNTS, HysteresisCullWorkload,
-        HysteresisHistoryWorkload, KeywordVariantCacheWorkload, MaterialUniformUpdateWorkload,
-        SkinnedGeometryWorkload, TransformWorkload, TransparentSortWorkload, WORLD_MATRIX_NODES,
-        WorldMatrixWorkload, camera_clear_load_op_checksum, camera_clear_load_op_inputs,
+        CAMERA_CLEAR_LOAD_OP_CAMERAS, CULL_BATCH, CullWorkload, CustomStemLookupWorkload,
+        DOUBLE_BUFFER_CAMERAS, DoubleBufferWorkload, HYSTERESIS_BATCH, HYSTERESIS_HISTORY_COUNTS,
+        HysteresisCullWorkload, HysteresisHistoryWorkload, KeywordVariantCacheWorkload,
+        MaterialUniformUpdateWorkload, SkinnedGeometryWorkload, TransformWorkload,
+        TransparentSortWorkload, WORLD_MATRIX_NODES, WorldMatrixWorkload,
+        camera_clear_load_op_checksum, camera_clear_load_op_inputs,
     };
 
     #[test]
@@ -110,6 +141,16 @@ mod tests {
     }
 
     #[test]
+    fn custom_stem_lookup_frame_reads_are_stable() {
+        let workload = CustomStemLookupWorkload::standard();
+        let error = workload.setup_error().unwrap_or("");
+        assert!(error.is_empty(), "{error}");
+        let first = workload.frame_reads();
+        assert!(first > 0);
+        assert_eq!(workload.frame_reads(), first);
+    }
+
+    #[test]
     fn keyword_variant_cache_hit_miss_and_compose() {
         let mut workload = KeywordVariantCacheWorkload::standard();
         let error = workload.setup_error().unwrap_or("");
@@ -143,6 +184,26 @@ mod tests {
         let mut moving = HysteresisHistoryWorkload::new(count, true);
         let moving_kept = moving.step();
         assert_eq!(moving_kept, u32::try_from(count).unwrap_or(0));
+        assert!(!stable.fast_path_engaged());
+        assert!(!moving.fast_path_engaged());
+        assert_eq!(moving.step(), u32::try_from(count).unwrap_or(0));
+        assert!(moving.fast_path_engaged());
+        let mut visible = HysteresisHistoryWorkload::all_visible(count);
+        assert_eq!(visible.step(), u32::try_from(count).unwrap_or(0));
+        assert!(visible.fast_path_engaged());
+        assert_eq!(visible.step(), u32::try_from(count).unwrap_or(0));
+        assert!(visible.fast_path_engaged());
+        let mut over_cap = HysteresisHistoryWorkload::all_visible(10_000);
+        let _ = over_cap.step();
+        assert!(
+            !over_cap.fast_path_engaged(),
+            "10_000 visible casters are over the budget and stay on the full update"
+        );
+        let mut subset = HysteresisHistoryWorkload::visible_grid_subset();
+        assert_eq!(subset.step(), 676);
+        assert!(subset.fast_path_engaged());
+        assert_eq!(subset.step(), 676);
+        assert!(subset.fast_path_engaged());
         assert_eq!(HYSTERESIS_HISTORY_COUNTS[0], 8_192);
         assert!(HYSTERESIS_HISTORY_COUNTS.contains(&10_000));
         assert!(HYSTERESIS_HISTORY_COUNTS.contains(&100_000));
@@ -165,8 +226,6 @@ mod tests {
     fn skinned_geometry_fold_uses_the_posed_box() {
         let folded = SkinnedGeometryWorkload::standard().fold();
         assert!(folded.is_finite());
-        // Rest boxes sit near x=400. Posed boxes are a unit box at the root translation, so the
-        // folded minima stay well below a rest-box sum.
         assert!(folded > 0.0);
         assert!(folded < 1.0e6);
     }

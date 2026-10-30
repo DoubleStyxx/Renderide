@@ -33,6 +33,39 @@ pub enum HarnessError {
         /// Maximum wall-clock wait before giving up.
         wait: Duration,
     },
+    /// A stable PNG arrived, but every candidate frame still had a compiling or skipped material draw.
+    #[error(
+        "headless PNG at {path} stayed pipeline-pending for {wait:?}; capture refused frames whose material draws were still compiling or were skipped because no pipeline was available"
+    )]
+    PipelineNotReady {
+        /// Output PNG path the renderer was instructed to write.
+        path: PathBuf,
+        /// Maximum wall-clock wait before giving up.
+        wait: Duration,
+    },
+    /// The capture timed out on a frame whose pending count was already zero.
+    ///
+    /// The image was flat or still changing, so this is not a pipeline that never
+    /// became ready. `last_pending` is the last `renderide_pipeline_pending` value.
+    #[error(
+        "headless PNG at {path} timed out after {wait:?} on a flat or unstable frame; last pending={last_pending}; chunk stats: ready={ready_chunks} pending={pending_chunks} missing={missing_chunks}; frames={frame_count}"
+    )]
+    FlatOrUnstableFrame {
+        /// Output PNG path the renderer was instructed to write.
+        path: PathBuf,
+        /// Maximum wall-clock wait before giving up.
+        wait: Duration,
+        /// Last pending-pipeline count read from the PNG chunk.
+        last_pending: u64,
+        /// Stable frames whose chunk was `0`.
+        ready_chunks: u64,
+        /// Stable frames whose chunk was greater than zero.
+        pending_chunks: u64,
+        /// Stable frames with no numeric pending chunk.
+        missing_chunks: u64,
+        /// Stable frames observed before the deadline.
+        frame_count: u64,
+    },
     /// Reading or decoding the PNG output failed.
     #[error("read png {path}: {source}")]
     PngRead {
@@ -155,6 +188,40 @@ mod tests {
         assert!(s.contains("SSIM=0.5000"));
         assert!(s.contains("0.9500"));
         assert!(s.contains("diff.png"));
+    }
+
+    #[test]
+    fn display_flat_or_unstable_includes_pending_chunk_stats_and_frames() {
+        let e = HarnessError::FlatOrUnstableFrame {
+            path: PathBuf::from("target/headless.png"),
+            wait: Duration::from_secs(180),
+            last_pending: 0,
+            ready_chunks: 4,
+            pending_chunks: 1,
+            missing_chunks: 0,
+            frame_count: 5,
+        };
+        let s = e.to_string();
+        assert!(s.contains("flat or unstable"));
+        assert!(s.contains("last pending=0"));
+        assert!(s.contains("ready=4"));
+        assert!(s.contains("pending=1"));
+        assert!(s.contains("missing=0"));
+        assert!(s.contains("frames=5"));
+        assert!(s.contains("headless.png"));
+        assert!(!s.contains("pipeline-pending"));
+    }
+
+    #[test]
+    fn display_pipeline_not_ready_includes_path_and_wait() {
+        let e = HarnessError::PipelineNotReady {
+            path: PathBuf::from("target/headless.png"),
+            wait: Duration::from_secs(9),
+        };
+        let s = e.to_string();
+        assert!(s.contains("headless.png"));
+        assert!(s.contains("pipeline-pending"));
+        assert!(s.contains('9'));
     }
 
     #[test]

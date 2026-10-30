@@ -143,6 +143,8 @@ impl MaterialSystem {
         device: Arc<wgpu::Device>,
         queue: &Arc<wgpu::Queue>,
         limits: Arc<crate::gpu::GpuLimits>,
+        compile_on_render_thread: bool,
+        render_thread_compiles_per_frame: usize,
     ) -> Result<(), EmbeddedMaterialBindError> {
         let embedded = EmbeddedMaterialBindResources::new(
             device.clone(),
@@ -150,7 +152,10 @@ impl MaterialSystem {
             limits.clone(),
         )?;
         self.material_registry = Some(crate::materials::MaterialRegistry::with_default_families(
-            device, limits,
+            device,
+            limits,
+            compile_on_render_thread,
+            render_thread_compiles_per_frame,
         ));
         if let Some(reg) = self.material_registry.as_mut() {
             for (asset_id, (pipeline, shader_asset_name, shader_variant_bits)) in
@@ -184,6 +189,23 @@ impl MaterialSystem {
     /// Registered material families and pipeline cache (after GPU attach).
     pub fn material_registry(&self) -> Option<&crate::materials::MaterialRegistry> {
         self.material_registry.as_ref()
+    }
+
+    /// Attach-time flag. True only when this process read back capture frames.
+    ///
+    /// False before GPU attach, in windowed mode, and while the frame bench is running.
+    pub fn compiles_pipelines_on_render_thread(&self) -> bool {
+        self.material_registry
+            .as_ref()
+            .is_some_and(|registry| registry.compiles_on_render_thread())
+    }
+
+    /// Takes this material system's pending-draw count. Zero before GPU attach.
+    pub fn take_pending_pipeline_draws(&self) -> u64 {
+        self.material_registry
+            .as_ref()
+            .map(crate::materials::MaterialRegistry::take_pending_pipeline_draws)
+            .unwrap_or(0)
     }
 
     /// Drains finished background pipeline builds into the cache (no-op before GPU attach).

@@ -437,6 +437,12 @@ impl RenderBackend {
         self.materials.material_registry()
     }
 
+    /// Draws still compiling, or skipped because no pipeline was available,
+    /// since the previous headless PNG write.
+    pub fn take_pending_pipeline_draws(&self) -> u64 {
+        self.materials.take_pending_pipeline_draws()
+    }
+
     /// Drains finished background pipeline builds into the cache (no-op before GPU attach).
     ///
     /// The renderer's per-tick render entry calls this before per-view recording starts so

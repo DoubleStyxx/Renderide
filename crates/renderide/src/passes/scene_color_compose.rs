@@ -52,6 +52,18 @@ impl SceneColorComposePass {
     }
 }
 
+/// Compiles the scene-color compose pipeline before the compose pass records it.
+///
+/// Headless and software adapters call this so `create_render_pipeline` does not
+/// run inside the open compose render pass. Real GPUs keep the lazy path.
+pub(crate) fn precompile_scene_color_compose_pipeline(
+    device: &wgpu::Device,
+    output_format: wgpu::TextureFormat,
+    multiview_stereo: bool,
+) {
+    let _ = compose_pipelines().pipeline(device, output_format, multiview_stereo);
+}
+
 fn compose_pipelines() -> &'static SceneColorComposePipelineCache {
     static CACHE: LazyLock<SceneColorComposePipelineCache> =
         LazyLock::new(SceneColorComposePipelineCache::default);

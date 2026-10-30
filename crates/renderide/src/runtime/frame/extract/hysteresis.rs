@@ -5,7 +5,11 @@
 //! than [`HISTORY_CASTER_BUDGET`] publish an empty history and leave the legacy Hi-Z test in
 //! place. The count is prepared casters in the view's render-space scope, not casters that
 //! survive the frustum. After the count crosses the cap, the pass stays off until it falls to
-//! [`crate::occlusion::hysteresis::HISTORY_CASTER_RESUME`].
+//! [`crate::occlusion::hysteresis::HISTORY_CASTER_RESUME`]. When the previous frame had no
+//! occluded caster and every remembered caster is still prepared with the same mesh and bounds,
+//! disocclusion rectangles stay empty and publishing the history skips the retain scan.
+//! Prepared casters the frustum skips can sit outside that remembered set. The cull still
+//! records a class change when the pyramid occludes a caster.
 
 use glam::{Mat4, Vec3};
 
@@ -15,7 +19,7 @@ use crate::hi_z_cpu::project_world_aabb_uv;
 use crate::occlusion::hysteresis::{
     CasterKey, DepthClip, HISTORY_CASTER_BUDGET, PresentCaster, ScreenRect, SpaceMotion,
     VisibilityFrameScratch, VisibilityHysteresis, VisibilityScratch, append_disocclusion_rects,
-    history_confirmation_applies, plan_disocclusion,
+    history_confirmation_applies, plan_disocclusion, prepare_fast_visible,
 };
 use crate::scene::{RenderSpaceId, SceneCoordinator};
 use crate::world_mesh::draw_prep::PreparedCasterBounds;
@@ -47,6 +51,7 @@ pub(super) fn view_hysteresis_plan(
         proj,
         temporal,
         scratch,
+        true,
     );
     occlusion.restore_frame_scratch(view.view_id, frame_scratch);
     Some(ViewHysteresisPlan {
@@ -66,6 +71,10 @@ pub(super) fn attached_hysteresis(
     plan.filter(|plan| plan.apply).map(|plan| &plan.frame)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the last argument lets tests run this same planner with the fast path off"
+)]
 fn build_frame(
     scene: &SceneCoordinator,
     prepared: Option<&FramePreparedRenderables>,
@@ -74,6 +83,7 @@ fn build_frame(
     proj: &WorldMeshCullProjParams,
     temporal: Option<&HiZTemporalState>,
     scratch: VisibilityScratch,
+    enable_fast: bool,
 ) -> (VisibilityHysteresis, VisibilityFrameScratch, bool) {
     let VisibilityScratch {
         history,
@@ -119,7 +129,12 @@ fn build_frame(
             );
         }
     }
-    if track_presence {
+    let fast_layout = if enable_fast && track_presence && history.no_occluded_casters() {
+        prepare_fast_visible(&history, &frame_scratch.present, &mut cull_buffers)
+    } else {
+        None
+    };
+    if fast_layout.is_none() && track_presence {
         plan_disocclusion(
             &history,
             &frame_scratch.present,
@@ -141,11 +156,9 @@ fn build_frame(
             cull_buffers.motions.insert(*space_id, *motion);
         }
     }
-    (
-        VisibilityHysteresis::from_parts(history, spare, cull_buffers),
-        frame_scratch,
-        true,
-    )
+    let mut frame = VisibilityHysteresis::from_parts(history, spare, cull_buffers);
+    frame.install_fast(fast_layout);
+    (frame, frame_scratch, true)
 }
 
 fn present_caster(caster: PreparedCasterBounds) -> PresentCaster {
@@ -412,6 +425,7 @@ mod tests {
             &proj,
             None,
             scratch,
+            true,
         );
         let plan = super::ViewHysteresisPlan {
             view_id: ViewId::Main,
@@ -531,6 +545,7 @@ mod tests {
                 self.proj,
                 Some(self.temporal),
                 scratch,
+                true,
             );
             assert!(apply);
             assert_eq!(!frame_scratch.present.is_empty(), expect_present);
@@ -736,4 +751,6 @@ mod tests {
             assert_eq!(outer.as_ptr(), outer_ptr);
         });
     }
+
+    include!("hysteresis_build_frame_tests.rs");
 }

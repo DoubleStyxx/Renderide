@@ -10,11 +10,31 @@
 //! report emission all flow through this module. The intent is to grow the suite by adding
 //! cases and templates rather than copy-pasting end-to-end orchestration.
 
+pub mod band_count;
 pub mod cases;
+pub mod host_info;
 pub mod output;
+mod quarantine_216;
+pub mod region_color;
 pub mod runner;
 pub mod suite;
 pub mod tolerance;
+mod warp_pbs;
+
+/// Whether a suite case is the time-limited #216 quarantine and not a pass.
+pub(crate) use quarantine_216::case_is_quarantined as case_is_quarantined_216;
+/// Loud `QUARANTINED` line for one quarantined case.
+pub(crate) use quarantine_216::quarantined_line;
+/// Loud `WARN` line while the #216 quarantine is inside its last 48 hours.
+pub(crate) use quarantine_216::warn_line;
+/// Summary text for the known WARP `pbs_lit` image mismatch.
+pub(crate) use warp_pbs::EXPECTED_FAILURE_LABEL as WARP_EXPECTED_FAILURE_LABEL;
+/// Vendor `0x1414` and device `0x008c`, including a log that prints `0x8c`.
+pub(crate) use warp_pbs::adapter_is_warp;
+/// Whether a suite case is that expected failure and not a pass.
+pub(crate) use warp_pbs::case_is_expected_failure as warp_pbs_is_expected;
+/// `None` until the renderer log for this PNG has a selected-adapter line.
+pub(crate) use warp_pbs::output_warp_decision;
 
 pub use cases::{CaseTemplate, IntegrationCase};
 pub use output::CaseOutputLayout;

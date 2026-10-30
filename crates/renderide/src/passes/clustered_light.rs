@@ -328,3 +328,11 @@ impl ComputePass for ClusteredLightPass {
         Ok(())
     }
 }
+
+/// Compiles the clustered-light compute pipeline before a pass records it.
+///
+/// Headless and software adapters call this so `create_compute_pipeline` does not
+/// run inside render-views with an open encoder. Real GPUs keep the lazy path.
+pub(crate) fn precompile_clustered_light_pipeline(device: &wgpu::Device) {
+    let _ = clustered_light_pipelines().pipeline(device);
+}

@@ -66,11 +66,10 @@ impl ObservedAdapter {
     }
 
     fn is_warp(&self) -> bool {
-        self.name.contains("Microsoft Basic Render Driver")
-            && self.device_type == "Cpu"
-            && self.backend == "Dx12"
-            && self.vendor == Some(0x1414)
-            && self.device == Some(0x008c)
+        match (self.vendor, self.device) {
+            (Some(vendor), Some(device)) => crate::scene_dsl::adapter_is_warp(vendor, device),
+            _ => false,
+        }
     }
 
     fn is_metal(&self) -> bool {

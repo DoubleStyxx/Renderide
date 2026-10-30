@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Desktop frame benchmark for a real GPU (for example an RTX 5080).
+# Thin wrapper around `renderide-bench run --suite frame` (B2 front door).
 # Builds release binaries and writes JSON under results/framebench by default.
 # Does not force lavapipe. CI pins lavapipe in .github/workflows/frame-bench.yml.
 set -euo pipefail
@@ -13,10 +14,11 @@ frames="${FRAMES:-120}"
 runs="${RUNS:-3}"
 resolution="${RESOLUTION:-1920x1080}"
 
-cargo build --release -p renderide -p renderide-framebench
+cargo build --release -p renderide -p renderide-bench -p renderide-framebench
 
 cmd=(
-  cargo run --release -p renderide-framebench -- run
+  cargo run --release -p renderide-bench -- run
+  --suite frame
   --release
   --output "$out"
   --resolution "$resolution"

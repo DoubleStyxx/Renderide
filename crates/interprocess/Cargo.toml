@@ -5,6 +5,11 @@ edition = "2024"
 description = "Cloudtoid-compatible shared-memory queue for host/renderer IPC"
 license = "MIT OR Apache-2.0"
 
+[features]
+# Off by default. Other crates enable this from dev-dependencies so tests can
+# share `test_env`. Release builds of those crates do not.
+test-env = []
+
 [dependencies]
 logger = { path = "../logger" }
 memmap2 = "0.9"

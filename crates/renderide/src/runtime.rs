@@ -119,7 +119,9 @@ use state::{
     RuntimeConfigState, RuntimeDiagnosticsState, RuntimeIpcState, RuntimeTickState, RuntimeXrStats,
 };
 
-pub(crate) use frame_bench_capture::{frame_bench_draw_stats, set_frame_bench_draw_stats};
+pub(crate) use frame_bench_capture::{
+    frame_bench_active, frame_bench_draw_stats, set_frame_bench_active, set_frame_bench_draw_stats,
+};
 pub(crate) use state::DesktopFramePacingCaps;
 
 /// Result of one [`RendererRuntime::tick_one_frame`] call.
@@ -205,6 +207,12 @@ impl RendererRuntime {
     /// The first value is 0 when this frame skipped the atlas and 1 when the atlas was submitted.
     pub(crate) fn shadow_atlas_pass_counts(&self) -> (u32, u64) {
         self.backend.frame_resources().shadow_atlas_pass_counts()
+    }
+
+    /// Draws still compiling, or skipped because no pipeline was available,
+    /// since the previous headless PNG write.
+    pub(crate) fn take_pending_pipeline_draws(&self) -> u64 {
+        self.backend.take_pending_pipeline_draws()
     }
 }
 

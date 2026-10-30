@@ -196,3 +196,19 @@ impl BackendDiagnostics {
             .encode_overlay(device, queue, encoder, backbuffer, extent, profiler)
     }
 }
+
+#[cfg(test)]
+impl super::RenderBackend {
+    /// Mounts a CPU fixture HUD so the hidden-frame test hits the visibility check.
+    pub(crate) fn mount_measure_hud(&mut self, ui: crate::diagnostics::hud_measure::HudUi) {
+        self.diagnostics.debug_hud.mount_measure_ui(ui);
+    }
+
+    /// Merges one view's HUD payload. The hidden-frame test calls this once with empty outputs.
+    pub(crate) fn apply_debug_hud_per_view_outputs(
+        &mut self,
+        outputs: &crate::hud_contract::PerViewHudOutputs,
+    ) {
+        self.diagnostics.debug_hud.apply_per_view_outputs(outputs);
+    }
+}

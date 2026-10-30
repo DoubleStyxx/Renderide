@@ -1,5 +1,6 @@
 //! Criterion batches for transform math, frustum culling, world matrices, buffer-pool reuse,
-//! custom-material uniform packing, bind-group cache churn, and keyword variant cache lookup.
+//! custom-material uniform packing, bind-group cache churn, keyword variant cache lookup, and
+//! per-frame custom-stem registry reads.
 //!
 //! `cargo bench -p renderide-bench` runs this file. Pass `--features gpu` to compile the GPU
 //! group as well. That group does not open a device; add adapter benches there when they exist.
@@ -9,12 +10,13 @@ use std::hint::black_box;
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use renderide_bench::{
     BIND_GROUP_BATCH, BUFFER_POOL_SLOTS, BindGroupChurnWorkload, BufferPoolWorkload,
-    CAMERA_CLEAR_LOAD_OP_CAMERAS, CULL_BATCH, CullWorkload, DOUBLE_BUFFER_CAMERAS,
-    DoubleBufferWorkload, HYSTERESIS_BATCH, HYSTERESIS_HISTORY_COUNTS, HysteresisCullWorkload,
-    HysteresisHistoryWorkload, KeywordVariantCacheWorkload, MATERIAL_UNIFORM_BATCH,
-    MaterialUniformUpdateWorkload, SHADOW_CHURN_CASTERS, SHADOW_CHURN_LIGHTS, ShadowChurnWorkload,
-    SkinnedGeometryWorkload, TRANSFORM_BATCH, TransformWorkload, WORLD_MATRIX_NODES,
-    WorldMatrixWorkload, camera_clear_load_op_checksum, camera_clear_load_op_inputs,
+    CAMERA_CLEAR_LOAD_OP_CAMERAS, CULL_BATCH, CullWorkload, CustomStemLookupWorkload,
+    DOUBLE_BUFFER_CAMERAS, DoubleBufferWorkload, HYSTERESIS_BATCH, HYSTERESIS_HISTORY_COUNTS,
+    HysteresisCullWorkload, HysteresisHistoryWorkload, KeywordVariantCacheWorkload,
+    MATERIAL_UNIFORM_BATCH, MaterialUniformUpdateWorkload, SHADOW_CHURN_CASTERS,
+    SHADOW_CHURN_LIGHTS, ShadowChurnWorkload, SkinnedGeometryWorkload, TRANSFORM_BATCH,
+    TransformWorkload, WORLD_MATRIX_NODES, WorldMatrixWorkload, camera_clear_load_op_checksum,
+    camera_clear_load_op_inputs,
 };
 
 fn transforms(c: &mut Criterion) {
@@ -59,12 +61,43 @@ fn hysteresis_classification(c: &mut Criterion) {
         for moving in [false, true] {
             let mut workload = HysteresisHistoryWorkload::new(count, moving);
             let _ = workload.step();
-            let label = if moving { "moving" } else { "stable" };
+            // Camera motion fails open, so the warm-up step leaves every caster visible and the
+            // measured loop takes the fast path (`8192_after_motion_all_visible`). The unmoving
+            // set keeps its occluded quarter and stays on the full update (`8192_quarter_occluded`).
+            let at_budget = count == HYSTERESIS_HISTORY_COUNTS[0];
+            let label = match (at_budget, moving) {
+                (true, true) => "after_motion_all_visible",
+                (true, false) => "quarter_occluded",
+                (false, true) => "moving",
+                (false, false) => "stable",
+            };
             history.throughput(Throughput::Elements(u64::try_from(count).unwrap_or(0)));
             history.bench_function(format!("{count}_{label}"), |b| {
                 b.iter(|| black_box(workload.step()));
             });
         }
+    }
+    for count in HYSTERESIS_HISTORY_COUNTS {
+        let mut workload = HysteresisHistoryWorkload::all_visible(count);
+        let _ = workload.step();
+        let over_cap = count > HYSTERESIS_HISTORY_COUNTS[0];
+        let name = if over_cap {
+            format!("{count}_all_visible_over_cap")
+        } else {
+            format!("{count}_all_visible")
+        };
+        history.throughput(Throughput::Elements(u64::try_from(count).unwrap_or(0)));
+        history.bench_function(name, |b| {
+            b.iter(|| black_box(workload.step()));
+        });
+    }
+    {
+        let mut workload = HysteresisHistoryWorkload::visible_grid_subset();
+        let _ = workload.step();
+        history.throughput(Throughput::Elements(676));
+        history.bench_function("676_of_1600_superset", |b| {
+            b.iter(|| black_box(workload.step()));
+        });
     }
     history.finish();
 }
@@ -148,6 +181,16 @@ fn keyword_variants(c: &mut Criterion) {
     group.finish();
 }
 
+fn custom_stem_lookup(c: &mut Criterion) {
+    let workload = CustomStemLookupWorkload::standard();
+    let mut group = c.benchmark_group("custom_stem_lookup");
+    group.throughput(Throughput::Elements(1));
+    group.bench_function("frame_reads", |b| {
+        b.iter(|| black_box(workload.frame_reads()));
+    });
+    group.finish();
+}
+
 fn shadow_churn(c: &mut Criterion) {
     let mut workload = ShadowChurnWorkload::standard();
     // The first plan fills the caches. Measured iterations are the steady repaint.
@@ -226,6 +269,7 @@ criterion_group!(
     material_uniforms,
     bind_groups,
     keyword_variants,
+    custom_stem_lookup,
     shadow_churn,
     camera_clear_load_ops
 );
