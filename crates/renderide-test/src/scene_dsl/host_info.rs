@@ -32,7 +32,9 @@ pub fn capture(output_png: &Path) -> HostInfo {
     HostInfo { cpu_model, adapter }
 }
 
-fn cpu_model() -> String {
+/// Runner CPU model, read once per process: `/proc/cpuinfo` `model name`, the macOS/Windows
+/// brand string, or `unavailable`. `renderide-framebench` records it in its schema-2 report.
+pub fn cpu_model() -> String {
     static CPU: OnceLock<String> = OnceLock::new();
     CPU.get_or_init(read_cpu_model).clone()
 }

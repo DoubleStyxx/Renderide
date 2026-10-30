@@ -7,7 +7,8 @@
 mod event_transition;
 mod key_map;
 
-use std::path::Path;
+use std::io::{self, ErrorKind};
+use std::path::{Path, PathBuf};
 
 use winit::data_transfer::{DataTransferId, TypeHint};
 use winit::dpi::LogicalSize;
@@ -112,7 +113,7 @@ pub fn apply_window_event(
         }
         WindowEvent::DataTransferReceived { id, value, .. } => {
             profiling::scope!("frontend::window_event", "data_transfer");
-            match value.try_as_file_paths() {
+            match value.try_as_uris().and_then(file_paths_from_uris) {
                 Ok(paths) => {
                     let paths = paths
                         .iter()
@@ -120,7 +121,7 @@ pub fn apply_window_event(
                         .collect();
                     acc.store_file_drop_paths(id.into_raw(), paths);
                 }
-                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(err) if err.kind() == ErrorKind::WouldBlock => {}
                 Err(err) => logger::debug!("dropped data is not a file list: {err}"),
             }
         }
@@ -210,7 +211,7 @@ fn apply_mouse_pointer_left(
 fn apply_drag_dropped_paths(
     acc: &mut WindowInputAccumulator,
     scale_factor: f64,
-    paths: &[std::path::PathBuf],
+    paths: &[PathBuf],
     position: winit::dpi::PhysicalPosition<f64>,
 ) {
     acc.set_cursor_from_physical(position, scale_factor);
@@ -277,6 +278,22 @@ fn apply_keyboard_transition(
 
 fn path_to_string_lossy(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+/// Converts a `text/uri-list` into file paths.
+///
+/// winit 0.31.0-beta.4 removed `TypedData::try_as_file_paths`. This is that helper: parse each
+/// URI with [`url::Url`] and accept it only when [`url::Url::to_file_path`] does. One rejected
+/// URI fails the whole list.
+fn file_paths_from_uris(uris: Vec<String>) -> io::Result<Vec<PathBuf>> {
+    uris.into_iter()
+        .map(|uri_string| {
+            url::Url::parse(&uri_string)
+                .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?
+                .to_file_path()
+                .map_err(|()| io::Error::from(ErrorKind::InvalidData))
+        })
+        .collect()
 }
 
 /// Applies relative pointer motion when the cursor is captured (locked / confined).
@@ -439,5 +456,21 @@ mod tests {
             input.mouse.expect("mouse state").window_position,
             Vec2::new(10.5, 21.5)
         );
+    }
+
+    #[test]
+    fn file_uri_list_roundtrips_through_url_file_path() {
+        let path = std::env::temp_dir().join("renderide-drop.txt");
+        let uri = url::Url::from_file_path(&path)
+            .expect("temp path is absolute")
+            .to_string();
+        let paths = super::file_paths_from_uris(vec![uri.clone()]).expect("file uri");
+        assert_eq!(paths, vec![path]);
+
+        let err = super::file_paths_from_uris(vec![uri, "https://example.com/a".to_string()])
+            .expect_err("one non-file uri rejects the list");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        let err = super::file_paths_from_uris(vec!["not a uri".to_string()]).expect_err("parse");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 }

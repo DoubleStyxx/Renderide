@@ -104,7 +104,7 @@ naga_oil = { version = "0.23", default-features = false }
 unity-asset = "0.2"
 unity-asset-binary = "0.2"
 wgpu = "30.0"
-winit = "0.31.0-beta.3"
+winit = "0.31.0-beta.4"
 ash = "0.38"
 openxr = { version = "0.22", default-features = false, features = ["loaded"] }
 imgui = { version = "0.12", features = ["tables-api"] }

@@ -222,24 +222,24 @@ impl QueueOptions {
 #[cfg(test)]
 #[expect(
     unsafe_code,
-    reason = "edition 2024 env mutation in tests; serialized by ENV_MUTEX"
+    reason = "tests call the unsafe test_env setters while holding EnvLockGuard"
+)]
+#[expect(
+    clippy::significant_drop_tightening,
+    reason = "default_memory_dir reads the environment, and the snapshot restores it, only while the process env lock is still held"
 )]
 mod tests {
-    use std::sync::Mutex;
-
     use super::*;
-
-    /// Serializes tests that mutate the process environment.
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     const MM_SUBDIR: &str = ".cloudtoid/interprocess/mmf";
 
     #[test]
     fn default_memory_dir_linux_matches_shm_path() {
-        let _g = ENV_MUTEX.lock().unwrap();
-        // SAFETY: env mutation in test; serialized via ENV_LOCK / cargo test single-thread.
+        let guard = crate::test_env::lock();
+        let _snap = guard.capture(&[RENDERIDE_INTERPROCESS_DIR_ENV]);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            std::env::remove_var(RENDERIDE_INTERPROCESS_DIR_ENV);
+            guard.remove_var(RENDERIDE_INTERPROCESS_DIR_ENV);
         }
         if !cfg!(target_os = "linux") {
             return;
@@ -249,10 +249,11 @@ mod tests {
 
     #[test]
     fn default_memory_dir_non_linux_unix_uses_temp_dir() {
-        let _g = ENV_MUTEX.lock().unwrap();
-        // SAFETY: env mutation in test; serialized via ENV_LOCK / cargo test single-thread.
+        let guard = crate::test_env::lock();
+        let _snap = guard.capture(&[RENDERIDE_INTERPROCESS_DIR_ENV]);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            std::env::remove_var(RENDERIDE_INTERPROCESS_DIR_ENV);
+            guard.remove_var(RENDERIDE_INTERPROCESS_DIR_ENV);
         }
         if !cfg!(unix) || cfg!(target_os = "linux") {
             return;
@@ -263,10 +264,11 @@ mod tests {
 
     #[test]
     fn default_memory_dir_windows_uses_temp_subdir() {
-        let _g = ENV_MUTEX.lock().unwrap();
-        // SAFETY: env mutation in test; serialized via ENV_LOCK / cargo test single-thread.
+        let guard = crate::test_env::lock();
+        let _snap = guard.capture(&[RENDERIDE_INTERPROCESS_DIR_ENV]);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            std::env::remove_var(RENDERIDE_INTERPROCESS_DIR_ENV);
+            guard.remove_var(RENDERIDE_INTERPROCESS_DIR_ENV);
         }
         if !cfg!(windows) {
             return;
@@ -281,25 +283,23 @@ mod tests {
 
     #[test]
     fn default_memory_dir_respects_env_override() {
-        let _g = ENV_MUTEX.lock().unwrap();
+        let guard = crate::test_env::lock();
+        let _snap = guard.capture(&[RENDERIDE_INTERPROCESS_DIR_ENV]);
         let tmp = tempfile::tempdir().expect("tempdir");
-        // SAFETY: env mutation in test; serialized via ENV_LOCK / cargo test single-thread.
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            std::env::set_var(RENDERIDE_INTERPROCESS_DIR_ENV, tmp.path());
+            guard.set_var(RENDERIDE_INTERPROCESS_DIR_ENV, tmp.path());
         }
         assert_eq!(default_memory_dir(), tmp.path());
-        // SAFETY: env mutation in test; serialized via ENV_LOCK / cargo test single-thread.
-        unsafe {
-            std::env::remove_var(RENDERIDE_INTERPROCESS_DIR_ENV);
-        }
     }
 
     #[test]
     fn queue_options_new_paths_default_memory_dir() {
-        let _g = ENV_MUTEX.lock().unwrap();
-        // SAFETY: env mutation in test; serialized via ENV_LOCK / cargo test single-thread.
+        let guard = crate::test_env::lock();
+        let _snap = guard.capture(&[RENDERIDE_INTERPROCESS_DIR_ENV]);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            std::env::remove_var(RENDERIDE_INTERPROCESS_DIR_ENV);
+            guard.remove_var(RENDERIDE_INTERPROCESS_DIR_ENV);
         }
         let o = QueueOptions::new("q", 4096).expect("valid");
         assert_eq!(o.path, default_memory_dir());

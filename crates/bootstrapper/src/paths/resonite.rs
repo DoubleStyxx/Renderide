@@ -95,6 +95,10 @@ pub fn resolve_resonite_dir(explicit_dir: Option<&Path>) -> io::Result<PathBuf> 
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::significant_drop_tightening,
+    reason = "install discovery reads RESONITE_DIR, and the snapshot restores it, only while the process env lock is still held"
+)]
 mod tests {
     use super::*;
     use std::fs;
@@ -112,15 +116,15 @@ mod tests {
 
     #[test]
     fn resolve_resonite_dir_env_override() {
-        let _g = crate::test_env::lock_process_env();
-        let _snap = crate::test_env::EnvSnapshot::capture(&["RESONITE_DIR"]);
+        let guard = crate::test_env::lock();
+        let _snap = guard.capture(&["RESONITE_DIR"]);
         let tmp = env::temp_dir().join(format!("bootstrapper_resonite_env_{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();
         fs::write(tmp.join(RENDERITE_HOST_DLL), b"").unwrap();
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::set_var("RESONITE_DIR", &tmp);
+            guard.set_var("RESONITE_DIR", &tmp);
         }
         let got = resolve_resonite_dir(None).expect("env path should resolve");
         assert_eq!(got, tmp);
@@ -129,8 +133,8 @@ mod tests {
 
     #[test]
     fn resolve_resonite_dir_cli_override_wins_over_env() {
-        let _g = crate::test_env::lock_process_env();
-        let _snap = crate::test_env::EnvSnapshot::capture(&["RESONITE_DIR"]);
+        let guard = crate::test_env::lock();
+        let _snap = guard.capture(&["RESONITE_DIR"]);
         let base =
             env::temp_dir().join(format!("bootstrapper_resonite_cli_{}", std::process::id()));
         let cli = base.join("cli");
@@ -140,9 +144,9 @@ mod tests {
         fs::create_dir_all(&env_dir).unwrap();
         fs::write(cli.join(RENDERITE_HOST_DLL), b"").unwrap();
         fs::write(env_dir.join(RENDERITE_HOST_DLL), b"").unwrap();
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::set_var("RESONITE_DIR", &env_dir);
+            guard.set_var("RESONITE_DIR", &env_dir);
         }
 
         let got = resolve_resonite_dir(Some(&cli)).expect("cli path should resolve");
@@ -170,17 +174,17 @@ mod tests {
 
     #[test]
     fn resolve_resonite_dir_rejects_invalid_env_override() {
-        let _g = crate::test_env::lock_process_env();
-        let _snap = crate::test_env::EnvSnapshot::capture(&["RESONITE_DIR"]);
+        let guard = crate::test_env::lock();
+        let _snap = guard.capture(&["RESONITE_DIR"]);
         let tmp = env::temp_dir().join(format!(
             "bootstrapper_resonite_bad_env_{}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::set_var("RESONITE_DIR", &tmp);
+            guard.set_var("RESONITE_DIR", &tmp);
         }
 
         let err = resolve_resonite_dir(None).expect_err("invalid env path");
