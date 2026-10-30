@@ -82,6 +82,8 @@ fn harness_exit_code(err: &HarnessError) -> u8 {
         | HarnessError::HandshakeTimeout(_)
         | HarnessError::AssetAckTimeout(..)
         | HarnessError::PngOutputMissing { .. }
+        | HarnessError::PipelineNotReady { .. }
+        | HarnessError::FlatOrUnstableFrame { .. }
         | HarnessError::PngRead { .. }
         | HarnessError::PngWrite { .. }
         | HarnessError::FlatImage { .. }
@@ -120,6 +122,19 @@ mod tests {
     fn run_failures_exit_3() {
         for err in [
             BenchError::Harness(HarnessError::HandshakeTimeout(Duration::from_secs(1))),
+            BenchError::Harness(HarnessError::PipelineNotReady {
+                path: PathBuf::from("capture.png"),
+                wait: Duration::from_secs(1),
+            }),
+            BenchError::Harness(HarnessError::FlatOrUnstableFrame {
+                path: PathBuf::from("capture.png"),
+                wait: Duration::from_secs(1),
+                last_pending: 0,
+                ready_chunks: 1,
+                pending_chunks: 0,
+                missing_chunks: 0,
+                frame_count: 1,
+            }),
             BenchError::Harness(HarnessError::BenchReportMissing {
                 path: PathBuf::from("r.json"),
                 wait: Duration::from_secs(1),
