@@ -33,6 +33,59 @@ pub const DEFAULT_ABS_FLOOR_MS: f64 = 0.0;
 /// Slack for floating-point noise at the floor boundary (`1.05 - 1.0` is `0.0500000…04`).
 const ABS_FLOOR_EPSILON_MS: f64 = 1e-9;
 
+/// Outcome of the shared relative gate (percent threshold plus optional absolute floor).
+///
+/// Used by `renderide-framebench compare`, `renderide-bench compare`, and documented as the
+/// same percent/floor semantics as `scripts/ci/frame_bench_gate.py` (the Python gate also
+/// runs Mann-Whitney on multi-run samples; that path stays in the script until B3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RelativeStatus {
+    /// Delta is at or below the threshold, or the metric is not gated.
+    Ok,
+    /// Delta is above the threshold in percent, but at or below the absolute floor.
+    OkAbsFloor,
+    /// Gated regression: above the threshold and (if set) above the absolute floor.
+    Fail,
+    /// Baseline is zero/non-finite, so percent is undefined.
+    Undefined,
+}
+
+/// Shared relative decision used by framebench compare and the renderide-bench front door.
+///
+/// `abs_floor` is in the same units as `base`/`cand`. Pass `None` (or `Some(0.0)`) to disable
+/// the floor. When `gated` is false, the status is always [`RelativeStatus::Ok`] or
+/// [`RelativeStatus::Undefined`].
+#[must_use]
+pub fn relative_status(
+    base: f64,
+    cand: f64,
+    gated: bool,
+    threshold_percent: f64,
+    abs_floor: Option<f64>,
+) -> (Option<f64>, RelativeStatus) {
+    let Some(delta) = relative_delta(base, cand) else {
+        return (
+            None,
+            if gated {
+                RelativeStatus::Undefined
+            } else {
+                RelativeStatus::Ok
+            },
+        );
+    };
+    if !gated {
+        return (Some(delta), RelativeStatus::Ok);
+    }
+    if delta <= threshold_percent {
+        return (Some(delta), RelativeStatus::Ok);
+    }
+    let floor = abs_floor.filter(|f| *f > 0.0);
+    if floor.is_some_and(|f| below_abs_floor(base, cand, f)) {
+        return (Some(delta), RelativeStatus::OkAbsFloor);
+    }
+    (Some(delta), RelativeStatus::Fail)
+}
+
 const INFO_METRICS: &[&str] = &[
     "cpu_frame_ms.p50",
     "cpu_frame_ms.p95",
@@ -258,29 +311,16 @@ fn status_for_values(
     threshold: f64,
     floor_ms: Option<f64>,
 ) -> (String, String, String, &'static str) {
-    let Some(delta) = relative_delta(base, cand) else {
-        return (
-            format_ms(base),
-            format_ms(cand),
-            "n/a".to_string(),
-            if gated { "n/a" } else { "info" },
-        );
+    let (delta, status) = relative_status(base, cand, gated, threshold, floor_ms);
+    let status = match (gated, status) {
+        (false, RelativeStatus::Ok | RelativeStatus::Undefined) => "info",
+        (_, RelativeStatus::Ok) => "ok",
+        (_, RelativeStatus::OkAbsFloor) => "ok (abs floor)",
+        (_, RelativeStatus::Fail) => "FAIL",
+        (_, RelativeStatus::Undefined) => "n/a",
     };
-    let status = if !gated {
-        "info"
-    } else if delta <= threshold {
-        "ok"
-    } else if floor_ms.is_some_and(|floor| below_abs_floor(base, cand, floor)) {
-        "ok (abs floor)"
-    } else {
-        "FAIL"
-    };
-    (
-        format_ms(base),
-        format_ms(cand),
-        format!("{delta:+.2}%"),
-        status,
-    )
+    let delta = delta.map_or_else(|| "n/a".to_string(), |d| format!("{d:+.2}%"));
+    (format_ms(base), format_ms(cand), delta, status)
 }
 
 fn gpu_info_rows(
@@ -721,6 +761,33 @@ mod tests {
         assert!(outcome.failed, "{}", outcome.markdown);
         assert!(compare_loaded(&report(0.2), &report(0.24), &floor(-0.01)).is_err());
         assert!(compare_loaded(&report(0.2), &report(0.24), &floor(f64::NAN)).is_err());
+    }
+
+    #[test]
+    fn relative_status_matches_threshold_and_floor_vectors() {
+        use crate::compare::{RelativeStatus, relative_status};
+        // Equality with the threshold passes.
+        assert_eq!(
+            relative_status(100.0, 110.0, true, 10.0, None).1,
+            RelativeStatus::Ok
+        );
+        assert_eq!(
+            relative_status(100.0, 111.0, true, 10.0, None).1,
+            RelativeStatus::Fail
+        );
+        // Abs floor off by default: +20% at 0.04 ms fails.
+        assert_eq!(
+            relative_status(0.2, 0.24, true, 10.0, Some(0.0)).1,
+            RelativeStatus::Fail
+        );
+        assert_eq!(
+            relative_status(0.2, 0.24, true, 10.0, Some(0.05)).1,
+            RelativeStatus::OkAbsFloor
+        );
+        assert_eq!(
+            relative_status(0.0, 5.0, true, 10.0, None).1,
+            RelativeStatus::Undefined
+        );
     }
 
     #[test]
