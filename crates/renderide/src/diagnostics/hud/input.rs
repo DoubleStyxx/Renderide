@@ -184,11 +184,26 @@ impl DebugHudInput {
     ///
     /// Cursor is **`WindowInputAccumulator::window_position` (logical) x scale factor**, matching the
     /// swapchain / ImGui framebuffer in **physical** pixels.
+    ///
+    /// The app driver calls [`frame_hud_input`] so H7 can skip this build when the HUD is hidden
+    /// without growing `app/driver/frame.rs`. This window entry stays for that visible path.
+    #[expect(
+        dead_code,
+        reason = "H7 calls this when the HUD is visible; the driver currently goes through frame_hud_input"
+    )]
     pub fn from_winit(
         window: &dyn winit::window::Window,
         acc: &mut crate::frontend::input::WindowInputAccumulator,
     ) -> Self {
-        let sf = window.scale_factor() as f32;
+        Self::from_scale_factor(window.scale_factor(), acc)
+    }
+
+    pub(crate) fn from_scale_factor(
+        scale_factor: f64,
+        acc: &mut crate::frontend::input::WindowInputAccumulator,
+    ) -> Self {
+        super::work_counters::note_input_build();
+        let sf = scale_factor as f32;
         let cursor_px = if acc.mouse_active && acc.window_focused {
             [acc.window_position.x * sf, acc.window_position.y * sf]
         } else {
@@ -209,6 +224,20 @@ impl DebugHudInput {
             text: acc.take_hud_text(),
         }
     }
+}
+
+/// Builds the per-frame HUD input snapshot used by `app/driver/frame.rs`.
+///
+/// `hud_visible` is ignored until H7. This always builds input, including when the HUD is
+/// hidden, matching [`DebugHudInput::from_winit`]. The driver passes `true` and does not read
+/// visibility, so a hidden frame still pays the same input build it does on master. H7 will
+/// honor `hud_visible` and pass the real flag from the driver.
+pub(crate) fn frame_hud_input(
+    _hud_visible: bool,
+    scale_factor: f64,
+    acc: &mut crate::frontend::input::WindowInputAccumulator,
+) -> DebugHudInput {
+    DebugHudInput::from_scale_factor(scale_factor, acc)
 }
 
 /// Feeds winit-derived [`DebugHudInput`] into ImGui `io` before each frame.

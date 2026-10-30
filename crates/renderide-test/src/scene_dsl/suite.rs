@@ -66,16 +66,23 @@ pub struct SuiteReport {
     pub total: usize,
     /// Number of passing cases.
     pub passed: usize,
-    /// Number of failing cases. An expected WARP failure is not counted here.
+    /// Number of failing cases. An expected WARP failure or a #216 quarantine is not counted here.
     pub failed: usize,
     /// Cases reported as `expected failure (WARP, #212)`. These are not passes.
     #[serde(default)]
     pub expected_failures: usize,
+    /// Cases recorded as `quarantined` with reason `quarantined:#216`.
+    /// Not a pass and not an expected failure.
+    #[serde(default)]
+    pub quarantined: usize,
     /// Per-case results, in registry or CLI selection order.
     pub cases: Vec<SuiteCaseReport>,
     /// Points at the bounded WARP stall (#214) and the black clear captured during it (#216).
     #[serde(default = "default_summary")]
     pub summary: String,
+    /// Set inside the last 48 hours before the #216 quarantine expires. Omitted from JSON.
+    #[serde(skip)]
+    pub quarantine_warning: Option<String>,
 }
 
 impl SuiteReport {
@@ -86,14 +93,16 @@ impl SuiteReport {
             passed: 0,
             failed: 0,
             expected_failures: 0,
+            quarantined: 0,
             cases,
             summary: SUITE_READINESS_SUMMARY.to_string(),
+            quarantine_warning: None,
         };
         report.recompute();
         report
     }
 
-    /// Recounts pass, failure, and expected-failure totals from `cases`.
+    /// Recounts pass, failure, expected-failure, and quarantine totals from `cases`.
     pub fn recompute(&mut self) {
         self.total = self.cases.len();
         self.passed = self.cases.iter().filter(|case| case.passed).count();
@@ -102,14 +111,25 @@ impl SuiteReport {
             .iter()
             .filter(|case| super::warp_pbs::case_is_expected_failure(case))
             .count();
-        self.failed = self
-            .total
-            .saturating_sub(self.passed + self.expected_failures);
+        self.quarantined = self
+            .cases
+            .iter()
+            .filter(|case| {
+                super::quarantine_216::case_is_quarantined(case)
+                    && !super::warp_pbs::case_is_expected_failure(case)
+            })
+            .count();
+        self.failed = self.total.saturating_sub(
+            self.passed
+                .saturating_add(self.expected_failures)
+                .saturating_add(self.quarantined),
+        );
     }
 
-    /// Returns whether every case passed or was an expected WARP failure.
+    /// Returns whether every case passed, was an expected WARP failure, or was quarantined.
     ///
-    /// An expected failure keeps `passed == false` on that case. It does not fail the suite.
+    /// An expected failure and a quarantine keep `passed == false` on that case.
+    /// Neither fails the suite.
     pub const fn passed(&self) -> bool {
         self.failed == 0
     }
@@ -132,6 +152,12 @@ pub struct SuiteCaseReport {
     /// Absent on a pass and on a hard failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<String>,
+    /// `quarantined` when the #216 rule covers this case. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// `quarantined:#216` while that quarantine applies. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Resolves requested case names against the registry.
@@ -202,6 +228,7 @@ fn run_suite_with(
 
     let mut report = SuiteReport::from_cases(case_reports);
     super::warp_pbs::apply_expected_failure(&mut report);
+    super::quarantine_216::apply_quarantine_now(&mut report);
     let report_path = write_suite_report(&config.runner.output_root, &report)?;
     Ok(SuiteRunOutcome {
         report,
@@ -220,6 +247,8 @@ fn run_case_for_suite(case: &IntegrationCase, runner: &RunnerConfig) -> SuiteCas
             report_json: fallback_layout.report_json,
             error: Some(err.to_string()),
             result: None,
+            status: None,
+            reason: None,
         },
     }
 }
@@ -235,6 +264,8 @@ fn run_case_for_update(case: &IntegrationCase, runner: &RunnerConfig) -> SuiteCa
             report_json: fallback_layout.report_json,
             error: Some(err.to_string()),
             result: None,
+            status: None,
+            reason: None,
         },
     }
 }
@@ -249,6 +280,8 @@ fn report_from_update_outcome(case: &IntegrationCase, outcome: CaseRunOutcome) -
             report_json: outcome.layout.report_json,
             error: Some(format!("golden update: {err}")),
             result: None,
+            status: None,
+            reason: None,
         },
     }
 }
@@ -299,6 +332,8 @@ fn promote_case_golden(
         report_json: outcome.layout.report_json.clone(),
         error: None,
         result: None,
+        status: None,
+        reason: None,
     })
 }
 
@@ -319,6 +354,8 @@ fn report_from_outcome(outcome: CaseRunOutcome) -> SuiteCaseReport {
         report_json: outcome.layout.report_json,
         error,
         result: None,
+        status: None,
+        reason: None,
     }
 }
 
@@ -344,6 +381,8 @@ mod tests {
                 .join("report.json"),
             error: (!passed).then(|| "failed".to_string()),
             result: None,
+            status: None,
+            reason: None,
         }
     }
 
@@ -400,9 +439,35 @@ mod tests {
         assert_eq!(json["total"], 1);
         assert_eq!(json["passed"], 1);
         assert_eq!(json["failed"], 0);
+        assert_eq!(json["quarantined"], 0);
         assert_eq!(json["cases"][0]["name"], "a");
         let summary = json["summary"].as_str().unwrap_or("");
         assert!(summary.contains("#216"), "{summary}");
         assert!(summary.contains("#214"), "{summary}");
+        assert!(json.get("quarantine_warning").is_none());
+    }
+
+    #[test]
+    fn older_suite_json_without_quarantine_fields_still_parses() {
+        let raw = r#"{
+            "total": 1,
+            "passed": 0,
+            "failed": 1,
+            "cases": [{
+                "name": "a",
+                "passed": false,
+                "artifacts_dir": "out/a",
+                "report_json": "out/a/report.json",
+                "error": "failed"
+            }],
+            "summary": "s"
+        }"#;
+        let report: SuiteReport = serde_json::from_str(raw).expect("parse old suite report");
+        assert_eq!(report.quarantined, 0);
+        assert_eq!(report.expected_failures, 0);
+        assert!(report.quarantine_warning.is_none());
+        assert!(report.cases[0].status.is_none());
+        assert!(report.cases[0].reason.is_none());
+        assert!(report.cases[0].result.is_none());
     }
 }

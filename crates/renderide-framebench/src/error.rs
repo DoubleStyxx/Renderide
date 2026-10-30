@@ -123,11 +123,11 @@ mod tests {
         for err in [
             BenchError::Harness(HarnessError::HandshakeTimeout(Duration::from_secs(1))),
             BenchError::Harness(HarnessError::PipelineNotReady {
-                path: PathBuf::from("capture.png"),
+                path: PathBuf::from("actual.png"),
                 wait: Duration::from_secs(1),
             }),
             BenchError::Harness(HarnessError::FlatOrUnstableFrame {
-                path: PathBuf::from("capture.png"),
+                path: PathBuf::from("actual.png"),
                 wait: Duration::from_secs(1),
                 last_pending: 0,
                 ready_chunks: 1,

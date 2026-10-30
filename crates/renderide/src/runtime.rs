@@ -119,7 +119,9 @@ use state::{
     RuntimeConfigState, RuntimeDiagnosticsState, RuntimeIpcState, RuntimeTickState, RuntimeXrStats,
 };
 
-pub(crate) use frame_bench_capture::{frame_bench_draw_stats, set_frame_bench_draw_stats};
+pub(crate) use frame_bench_capture::{
+    frame_bench_active, frame_bench_draw_stats, set_frame_bench_active, set_frame_bench_draw_stats,
+};
 pub(crate) use state::DesktopFramePacingCaps;
 
 /// Result of one [`RendererRuntime::tick_one_frame`] call.

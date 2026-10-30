@@ -13,9 +13,24 @@ mod snapshots;
 mod watchdog;
 
 pub(crate) use hud::DebugHudOverlayContext;
+pub(crate) use hud::input::frame_hud_input;
+#[cfg(test)]
+pub(crate) use hud::work_counters::{
+    HudWorkCounts, reset as reset_hud_work_counters, snapshot as snapshot_hud_work_counters,
+};
+pub(crate) use hud::work_counters::{note_settings_lock, note_snapshot_clone};
 pub use hud::{
     DebugHud, DebugHudInput, DebugHudMetricInterest, sanitize_input_state_for_imgui_host,
 };
+
+/// CPU HUD entry points for the steady-state allocation test.
+///
+/// Not part of the renderer process API. The integration test drives [`HudUi`] with fixed
+/// fixtures and no wgpu device.
+#[doc(hidden)]
+pub mod hud_measure {
+    pub use super::hud::{HudMeasureView, HudUi};
+}
 pub use snapshots::{
     AssetDiagnosticsSnapshot, BackendDiagSnapshot, FrameDiagnosticsIpcQueues,
     FrameDiagnosticsSnapshot, FrameDiagnosticsSnapshotCapture, FrameTimeHistory, FrameTimingEma,

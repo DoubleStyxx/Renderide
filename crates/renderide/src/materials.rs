@@ -172,7 +172,7 @@ pub(crate) use pipeline_property_resolver::PipelinePropertyResolver;
 
 /// Shader route table, optional material asset registry, and WGSL composition patches.
 pub(crate) use pipeline_compile::{
-    compile_on_render_thread, render_thread_builds_queued, render_thread_compiles_per_frame,
+    material_compile_blocks_frame, render_thread_compiles_per_frame,
 };
 pub(crate) use registry::{MaterialPipelineResolution, MaterialRegistry};
 pub(crate) use render_buffer_shader::{

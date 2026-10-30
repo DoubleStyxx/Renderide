@@ -551,6 +551,8 @@ wgpu adapter selected (headless): Microsoft Basic Render Driver type=Cpu backend
             report_json: report_path.clone(),
             error: Some("case failed tolerance".to_string()),
             result: Some(EXPECTED_FAILURE_LABEL.to_string()),
+            status: None,
+            reason: None,
         }]);
         suite.cases[0].passed = false;
         suite.recompute();

@@ -7,6 +7,7 @@ use crate::config::RendererSettingsHandle;
 use crate::diagnostics::{
     DebugHud, DebugHudInput, DebugHudOverlayContext, FrameDiagnosticsSnapshot,
     FrameTimingHudSnapshot, RendererInfoSnapshot, SceneTransformsSnapshot, TextureDebugSnapshot,
+    note_snapshot_clone,
 };
 use crate::hud_contract::WorldMeshViewHudStats;
 use crate::hud_contract::{DebugHudEncodeError, PerViewHudConfig, PerViewHudOutputs};
@@ -15,6 +16,9 @@ use crate::world_mesh::{WorldMeshDrawStateRow, WorldMeshDrawStats};
 /// ImGui overlay, input/timing state, and mesh-draw stats for the diagnostics HUD.
 pub struct DebugHudBundle {
     hud: Option<DebugHud>,
+    /// CPU fixture the hidden-HUD counter test mounts in place of a GPU overlay.
+    #[cfg(test)]
+    measure_ui: Option<crate::diagnostics::hud_measure::HudUi>,
     input: DebugHudInput,
     frame_time_ms: f64,
     want_capture_mouse: bool,
@@ -38,6 +42,8 @@ impl DebugHudBundle {
     pub fn new() -> Self {
         Self {
             hud: None,
+            #[cfg(test)]
+            measure_ui: None,
             input: DebugHudInput::default(),
             frame_time_ms: 0.0,
             want_capture_mouse: false,
@@ -69,6 +75,12 @@ impl DebugHudBundle {
             config_save_path,
             suppress_renderer_config_disk_writes,
         ));
+    }
+
+    /// Mounts a CPU fixture so tests can exercise HUD visibility without a device.
+    #[cfg(test)]
+    pub(crate) fn mount_measure_ui(&mut self, ui: crate::diagnostics::hud_measure::HudUi) {
+        self.measure_ui = Some(ui);
     }
 
     /// Updates per-view HUD diagnostics capture interests for the next graph recording.
@@ -123,9 +135,11 @@ impl DebugHudBundle {
             self.set_last_world_mesh_draw_stats(stats);
         }
         if let Some(view_stats) = outputs.world_mesh_view_stats.as_ref() {
+            note_snapshot_clone();
             self.set_last_world_mesh_view_stats(view_stats.clone());
         }
         if let Some(rows) = outputs.world_mesh_draw_state_rows.clone() {
+            note_snapshot_clone();
             self.set_last_world_mesh_draw_state_rows(rows);
         }
         if !outputs.current_view_texture_2d_asset_ids.is_empty() {
@@ -239,6 +253,7 @@ impl DebugHudBundle {
     }
 
     pub(crate) fn last_world_mesh_view_stats(&self) -> Vec<WorldMeshViewHudStats> {
+        note_snapshot_clone();
         self.last_world_mesh_view_stats.clone()
     }
 
@@ -247,6 +262,7 @@ impl DebugHudBundle {
     }
 
     pub(crate) fn last_world_mesh_draw_state_rows(&self) -> Vec<WorldMeshDrawStateRow> {
+        note_snapshot_clone();
         self.last_world_mesh_draw_state_rows.clone()
     }
 
@@ -283,6 +299,10 @@ impl DebugHudBundle {
     /// would render. When this returns `false`, callers must clear input-capture state so stale
     /// `want_capture_*` flags from a previously visible HUD do not leak into input dispatch.
     pub(crate) fn has_visible_content(&self) -> bool {
+        #[cfg(test)]
+        if let Some(ui) = self.measure_ui.as_ref() {
+            return ui.has_visible_content();
+        }
         self.hud
             .as_ref()
             .is_some_and(|hud| hud.has_visible_content())
@@ -326,5 +346,37 @@ impl DebugHudBundle {
             }
             Err(e) => Err(e),
         }
+    }
+}
+
+#[cfg(test)]
+mod snapshot_clone_counter_tests {
+    use super::DebugHudBundle;
+    use crate::diagnostics::{reset_hud_work_counters, snapshot_hud_work_counters};
+    use crate::hud_contract::PerViewHudOutputs;
+
+    #[test]
+    fn per_view_and_getter_clones_are_counted() {
+        reset_hud_work_counters();
+        let mut bundle = DebugHudBundle::new();
+        bundle.apply_per_view_outputs(&PerViewHudOutputs::default());
+        assert_eq!(
+            snapshot_hud_work_counters().snapshot_clones,
+            0,
+            "absent per-view rows and view stats are not clones"
+        );
+        bundle.apply_per_view_outputs(&PerViewHudOutputs {
+            world_mesh_draw_stats: None,
+            world_mesh_view_stats: None,
+            world_mesh_draw_state_rows: Some(Vec::new()),
+            current_view_texture_2d_asset_ids: Vec::new(),
+        });
+        let _stats = bundle.last_world_mesh_view_stats();
+        let _rows = bundle.last_world_mesh_draw_state_rows();
+        let clones = snapshot_hud_work_counters().snapshot_clones;
+        assert!(
+            clones >= 3,
+            "apply_per_view_outputs and the getters should count their clones, got {clones}"
+        );
     }
 }

@@ -191,18 +191,13 @@ impl MaterialSystem {
         self.material_registry.as_ref()
     }
 
-    /// Attach-time flag. False before GPU attach and on real GPUs.
+    /// Attach-time flag. True only when this process read back capture frames.
+    ///
+    /// False before GPU attach, in windowed mode, and while the frame bench is running.
     pub fn compiles_pipelines_on_render_thread(&self) -> bool {
         self.material_registry
             .as_ref()
             .is_some_and(|registry| registry.compiles_on_render_thread())
-    }
-
-    /// Headless captures compile the whole render-thread queue before submit.
-    pub fn compiles_full_render_thread_queue(&self) -> bool {
-        self.material_registry
-            .as_ref()
-            .is_some_and(|registry| registry.compiles_full_render_thread_queue())
     }
 
     /// Takes this material system's pending-draw count. Zero before GPU attach.
@@ -220,13 +215,6 @@ impl MaterialSystem {
     pub fn drain_pipeline_build_completions(&self) {
         if let Some(reg) = self.material_registry.as_ref() {
             reg.drain_pipeline_build_completions();
-        }
-    }
-
-    /// Drains finished pipeline builds without starting a render-thread compile.
-    pub fn drain_finished_pipeline_builds(&self) {
-        if let Some(reg) = self.material_registry.as_ref() {
-            reg.drain_finished_pipeline_builds();
         }
     }
 

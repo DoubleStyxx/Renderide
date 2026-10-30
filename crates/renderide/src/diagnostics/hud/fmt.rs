@@ -2,6 +2,7 @@
 
 /// Formats `value` as a right-aligned decimal with `decimals` places and total width `width`.
 pub fn f64_field(width: usize, decimals: usize, value: f64) -> String {
+    super::work_counters::note_fmt_call();
     format!("{value:>width$.decimals$}")
 }
 
@@ -13,6 +14,7 @@ pub fn gib_value(width: usize, decimals: usize, bytes: u64) -> String {
 
 /// Formats byte counts for dense allocator tables (B / KiB / MiB / GiB / TiB).
 pub fn bytes_compact(bytes: u64) -> String {
+    super::work_counters::note_fmt_call();
     const SUFFIX: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut idx = 0usize;
     let mut amount = bytes as f64;
