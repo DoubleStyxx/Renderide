@@ -79,6 +79,10 @@ mod xr;
 pub use app::RunExit;
 pub use run_error::RunError;
 
+/// CPU-only HUD measurement fixtures. Not part of the supported process API.
+#[doc(hidden)]
+pub use diagnostics::hud_measure;
+
 /// Forwards native stdout/stderr into the active file logger after [`logger`] initialization.
 ///
 /// Idempotent. The main [`run`] path installs this after logging starts; entry points that skip
