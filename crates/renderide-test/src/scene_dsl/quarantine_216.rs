@@ -30,8 +30,21 @@ pub(crate) const QUARANTINE_STATUS: &str = "quarantined";
 /// Reason recorded next to [`QUARANTINE_STATUS`].
 pub(crate) const QUARANTINE_REASON: &str = "quarantined:#216";
 
-/// Case the quarantine is allowed to cover.
+/// `pbs_lit_material_matrix`, the original case this quarantine covers.
 const PBS_LIT: &str = "pbs_lit_material_matrix";
+
+/// Negative-light cases covered by the same rule, by exact name.
+const NEGATIVE_LIGHT_PARITY: &str = "negative_light_parity";
+const NEGATIVE_LIGHT_PHYSICALLY_BASED: &str = "negative_light_physically_based";
+const NEGATIVE_COLOR_PHYSICALLY_BASED: &str = "negative_color_physically_based";
+
+/// Exact case names. A prefix or a different scene does not match.
+const QUARANTINE_CASES: &[&str] = &[
+    PBS_LIT,
+    NEGATIVE_LIGHT_PARITY,
+    NEGATIVE_LIGHT_PHYSICALLY_BASED,
+    NEGATIVE_COLOR_PHYSICALLY_BASED,
+];
 
 /// PNG `tEXt` keyword. Tests write it to prove the quarantine does not read it.
 #[cfg(test)]
@@ -121,13 +134,14 @@ fn label_case(
     true
 }
 
-/// WARP `pbs_lit` only, and only the frame the harness timed out on.
+/// A named case only, and only the frame the harness timed out on.
 ///
-/// `actual.png` is not read. `None` pending or dropped draws is not zero.
+/// The name must be one of [`QUARANTINE_CASES`]. `actual.png` is not read.
+/// `None` pending or dropped draws is not zero.
 fn quarantine_matches(is_warp: bool, case: &SuiteCaseReport, now: SystemTime) -> bool {
     now < expires_at()
         && is_warp
-        && case.name == PBS_LIT
+        && QUARANTINE_CASES.contains(&case.name.as_str())
         && case.failure_kind == Some(SuiteFailureKind::FlatOrUnstableFrame)
         && case.frame_pending == Some(0)
         && case.dropped_draws == Some(0)
@@ -755,6 +769,91 @@ mod tests {
         assert_eq!(report.quarantined, 0);
         assert_eq!(report.failed, 0);
         assert!(report.passed());
+    }
+
+    #[test]
+    fn negative_light_cases_match_only_the_warp_flat_signature() {
+        const COVERED: &[&str] = &[
+            NEGATIVE_LIGHT_PARITY,
+            NEGATIVE_LIGHT_PHYSICALLY_BASED,
+            NEGATIVE_COLOR_PHYSICALLY_BASED,
+        ];
+        for name in COVERED {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let mut covered = SuiteReport::from_cases(vec![suite_case(
+                dir.path(),
+                name,
+                Some(&flat_message()),
+                "0",
+                "1",
+            )]);
+            apply(&mut covered, before_expiry(), true);
+            assert_eq!(covered.quarantined, 1, "{name}");
+            assert_eq!(covered.failed, 0, "{name}");
+            assert!(covered.passed(), "{name}");
+            assert!(case_is_quarantined(&covered.cases[0]), "{name}");
+
+            let mut other_adapter = SuiteReport::from_cases(vec![suite_case(
+                dir.path(),
+                name,
+                Some(&flat_message()),
+                "0",
+                "1",
+            )]);
+            apply(&mut other_adapter, before_expiry(), false);
+            assert_eq!(other_adapter.quarantined, 0, "{name}");
+            assert_eq!(other_adapter.failed, 1, "{name}");
+            assert!(!other_adapter.passed(), "{name}");
+
+            let mut pending = SuiteReport::from_cases(vec![suite_case(
+                dir.path(),
+                name,
+                Some(&flat_message()),
+                "4",
+                "1",
+            )]);
+            apply(&mut pending, before_expiry(), true);
+            assert_eq!(pending.quarantined, 0, "{name}");
+            assert_eq!(pending.failed, 1, "{name}");
+
+            let mut not_done = SuiteReport::from_cases(vec![suite_case(
+                dir.path(),
+                name,
+                Some(&flat_message()),
+                "0",
+                "0",
+            )]);
+            apply(&mut not_done, before_expiry(), true);
+            assert_eq!(not_done.quarantined, 0, "{name}");
+            assert_eq!(not_done.failed, 1, "{name}");
+
+            let mut mismatch = SuiteReport::from_cases(vec![suite_case(
+                dir.path(),
+                name,
+                Some("case failed tolerance"),
+                "0",
+                "1",
+            )]);
+            apply(&mut mismatch, before_expiry(), true);
+            assert_eq!(mismatch.quarantined, 0, "{name}");
+            assert_eq!(mismatch.failed, 1, "{name}");
+            assert!(mismatch.cases[0].status.is_none(), "{name}");
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        for name in ["unlit_sphere", "negative_light_parity_extra"] {
+            let mut unrelated = SuiteReport::from_cases(vec![suite_case(
+                dir.path(),
+                name,
+                Some(&flat_message()),
+                "0",
+                "1",
+            )]);
+            apply(&mut unrelated, before_expiry(), true);
+            assert_eq!(unrelated.quarantined, 0, "{name}");
+            assert_eq!(unrelated.failed, 1, "{name}");
+            assert!(unrelated.cases[0].reason.is_none(), "{name}");
+        }
     }
 
     #[test]

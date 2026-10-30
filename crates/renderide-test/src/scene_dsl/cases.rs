@@ -446,6 +446,9 @@ pub fn registry() -> Vec<IntegrationCase> {
         torus_unlit_perlin(),
         multi_primitive_unlit_grid(),
         pbs_lit_material_matrix(),
+        negative_light_parity(),
+        negative_light_physically_based(),
+        negative_color_physically_based(),
         alpha_cutout_masked_quads(),
         custom_shader_property_update(),
         exotic_shader_pair(),
@@ -455,16 +458,6 @@ pub fn registry() -> Vec<IntegrationCase> {
         tilted_canvas_distance_bias(),
         double_buffer_nothing_on_skybox(),
     ];
-    // A cold PBS capture on WARP times out on a flat frame for the whole readiness budget,
-    // the same signature as `pbs_lit_material_matrix` (#216). The physically based cases also
-    // spawn a second renderer for the omitted-light comparison, and that spawn hits the same
-    // timeout. Lavapipe and Metal still run the goldens and that comparison.
-    #[cfg(not(windows))]
-    {
-        cases.insert(4, negative_light_parity());
-        cases.insert(5, negative_light_physically_based());
-        cases.insert(6, negative_color_physically_based());
-    }
     // WARP limitation, not a shadow-cache diff. Windows CI is DX12 Microsoft Basic Render Driver
     // (Vulkan reports ERROR_INCOMPATIBLE_DRIVER). On that adapter the static frame was a 48-color
     // gray slab and the post-move frame stayed clear-black for the case timeout, while unshadowed
@@ -546,23 +539,9 @@ mod tests {
 
     #[test]
     fn negative_light_cases_are_registered() {
-        let parity_present = lookup("negative_light_parity").is_some();
-        let physically_based_present = lookup("negative_light_physically_based").is_some();
-        let negative_color_present = lookup("negative_color_physically_based").is_some();
-        #[cfg(windows)]
-        {
-            assert!(!parity_present);
-            assert!(!physically_based_present);
-            assert!(!negative_color_present);
-        }
-        #[cfg(not(windows))]
-        {
-            assert!(parity_present);
-            assert!(physically_based_present);
-            assert!(negative_color_present);
-        }
-        let parity = negative_light_parity();
-        let physically_based = negative_light_physically_based();
+        let parity = lookup("negative_light_parity").expect("parity case");
+        let physically_based = lookup("negative_light_physically_based").expect("pb case");
+        let negative_color = lookup("negative_color_physically_based").expect("negative color");
         assert!(matches!(
             parity.template,
             CaseTemplate::NegativeLightPair {
@@ -579,7 +558,6 @@ mod tests {
                 negative_color: false,
             }
         ));
-        let negative_color = negative_color_physically_based();
         assert!(matches!(
             negative_color.template,
             CaseTemplate::NegativeLightPair {
