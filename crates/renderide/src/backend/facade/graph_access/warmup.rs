@@ -15,8 +15,11 @@ use crate::passes::{
     WorldMeshForwardDepthPrepassPipelineKey, WorldMeshForwardNormalPipelineKey,
     WorldMeshForwardPipelineState, depth_prepass_pipeline_key_for_draw,
     normal_pipeline_key_for_draw, pre_warm_depth_prepass_pipeline, pre_warm_normal_pipeline,
+    pre_warm_shadow_pipeline, precompile_clustered_light_pipeline,
+    precompile_scene_color_compose_pipeline,
 };
 use crate::render_graph::compiled::{FrameView, FrameViewTarget};
+use crate::shared::ShadowCastMode;
 use crate::world_mesh::{WorldMeshDrawItem, WorldMeshPhase};
 
 use super::super::super::{WorldMeshDrawPlanSlot, WorldMeshOverlayDrawPlanSlot};
@@ -300,10 +303,18 @@ struct MaterialPipelineWarmupKey {
 struct WorldMeshPrepassPipelineWarmupKeys {
     depth: HashSet<WorldMeshForwardDepthPrepassPipelineKey>,
     normal: HashSet<WorldMeshForwardNormalPipelineKey>,
+    /// Allocated only when this frame compiles shadow keys. Real GPUs leave it empty
+    /// so the per-frame shadow `HashSet` is not created.
+    shadow: Option<HashSet<WorldMeshForwardDepthPrepassPipelineKey>>,
 }
 
 impl WorldMeshPrepassPipelineWarmupKeys {
-    fn record_item(&mut self, item: &WorldMeshDrawItem, pipeline: &WorldMeshForwardPipelineState) {
+    fn record_item(
+        &mut self,
+        item: &WorldMeshDrawItem,
+        pipeline: &WorldMeshForwardPipelineState,
+        record_shadows: bool,
+    ) {
         if let Some(key) = depth_prepass_pipeline_key_for_draw(item, pipeline) {
             self.depth.insert(key);
         }
@@ -312,9 +323,19 @@ impl WorldMeshPrepassPipelineWarmupKeys {
         {
             self.normal.insert(key);
         }
+        // Real GPUs compile shadows on the background pool. Building the key
+        // hashes the draw and allocates the set, so skip both unless this frame
+        // will compile shadows here.
+        if record_shadows
+            && item.shadow_cast_mode != ShadowCastMode::Off
+            && let Some(key) =
+                WorldMeshForwardDepthPrepassPipelineKey::for_shadow_draw(item, pipeline)
+        {
+            self.shadow.get_or_insert_with(HashSet::new).insert(key);
+        }
     }
 
-    fn warm(self, device: &wgpu::Device) -> (usize, usize) {
+    fn warm(self, device: &wgpu::Device, compile_shadows: bool) -> (usize, usize) {
         let depth_count = self.depth.len();
         let normal_count = self.normal.len();
         for key in self.depth {
@@ -322,6 +343,11 @@ impl WorldMeshPrepassPipelineWarmupKeys {
         }
         for key in self.normal {
             pre_warm_normal_pipeline(device, key);
+        }
+        if compile_shadows && let Some(shadow) = self.shadow {
+            for key in shadow {
+                pre_warm_shadow_pipeline(device, key);
+            }
         }
         (depth_count, normal_count)
     }
@@ -358,6 +384,29 @@ impl<'a> BackendGraphAccess<'a> {
         );
         self.pre_warm_material_assets_from_blackboards(views, view_layouts, resource_layouts);
         self.pre_warm_world_mesh_prepass_pipelines_from_blackboards(device, views, view_layouts);
+    }
+
+    /// Compiles clustered light, Hi-Z, and scene compose before the first submit.
+    ///
+    /// Depth and normal prepasses are warmed from the draw list just above. Shadow
+    /// keys are collected and compiled there only when this same flag is set, so a
+    /// windowed frame or a frame-bench frame does not hash shadow draws for this
+    /// warmup. Those frames return on the flag. A material lookup during a capture
+    /// frame stays pending and compiles on the next frame-start drain.
+    pub(crate) fn precompile_pass_owned_pipelines(
+        &self,
+        device: &wgpu::Device,
+        compose_targets: &[(wgpu::TextureFormat, bool)],
+    ) {
+        if !self.materials.compiles_pipelines_on_render_thread() {
+            return;
+        }
+        profiling::scope!("graph::precompile_pass_pipelines");
+        precompile_clustered_light_pipeline(device);
+        crate::occlusion::gpu::precompile_hi_z_pipelines(device);
+        for &(format, multiview_stereo) in compose_targets {
+            precompile_scene_color_compose_pipeline(device, format, multiview_stereo);
+        }
     }
 
     fn pre_warm_material_assets_from_blackboards(
@@ -477,6 +526,7 @@ impl<'a> BackendGraphAccess<'a> {
         view_layouts: &[Option<PreRecordViewResourceLayout>],
     ) {
         profiling::scope!("graph::pre_warm_world_mesh_prepass_pipelines");
+        let compile_shadows = self.materials.compiles_pipelines_on_render_thread();
         let mut keys = WorldMeshPrepassPipelineWarmupKeys::default();
         for (view, layout) in views.iter().zip(view_layouts.iter()) {
             let Some(layout) = *layout else {
@@ -503,11 +553,11 @@ impl<'a> BackendGraphAccess<'a> {
                     front_face_flip: front_face_flip_for_warmup_target(view.view_winding, target),
                 };
                 for item in &collection.items {
-                    keys.record_item(item, &pipeline);
+                    keys.record_item(item, &pipeline, compile_shadows);
                 }
             }
         }
-        let (depth_prepass_requests, normal_prepass_requests) = keys.warm(device);
+        let (depth_prepass_requests, normal_prepass_requests) = keys.warm(device, compile_shadows);
         logger::trace!(
             "graph pre-warm world mesh prepass pipelines: depth_requests={} normal_requests={}",
             depth_prepass_requests,
@@ -739,8 +789,8 @@ mod tests {
         let item = draw(1);
         let mut keys = WorldMeshPrepassPipelineWarmupKeys::default();
 
-        keys.record_item(&item, &pipeline);
-        keys.record_item(&item, &pipeline);
+        keys.record_item(&item, &pipeline, true);
+        keys.record_item(&item, &pipeline, true);
 
         assert_eq!(keys.depth.len(), 1);
         assert_eq!(keys.normal.len(), 1);
@@ -755,8 +805,8 @@ mod tests {
         let mut flipped_pipeline = pipeline_state();
         flipped_pipeline.front_face_flip = true;
 
-        keys.record_item(&item, &pipeline);
-        keys.record_item(&item, &flipped_pipeline);
+        keys.record_item(&item, &pipeline, true);
+        keys.record_item(&item, &flipped_pipeline, true);
 
         assert_eq!(keys.depth.len(), 2);
         assert_eq!(keys.normal.len(), 2);
@@ -770,11 +820,27 @@ mod tests {
 
         for target in targets {
             let pipeline = pipeline_state_for_target(target);
-            keys.record_item(&item, &pipeline);
-            keys.record_item(&item, &pipeline);
+            keys.record_item(&item, &pipeline, true);
+            keys.record_item(&item, &pipeline, true);
         }
 
         assert_eq!(keys.depth.len(), 2);
         assert_eq!(keys.normal.len(), 2);
+    }
+
+    #[test]
+    fn shadow_keys_are_collected_only_when_this_frame_compiles_them() {
+        let pipeline = pipeline_state();
+        let item = draw(1);
+        let mut keys = WorldMeshPrepassPipelineWarmupKeys::default();
+
+        keys.record_item(&item, &pipeline, false);
+
+        assert!(keys.shadow.is_none());
+        assert_eq!(keys.depth.len(), 1);
+
+        keys.record_item(&item, &pipeline, true);
+
+        assert_eq!(keys.shadow.expect("shadow keys").len(), 1);
     }
 }

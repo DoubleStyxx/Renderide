@@ -7,6 +7,7 @@ use super::cache::{
     MaterialPipelineCache, MaterialPipelineCacheDiagnosticSnapshot, MaterialPipelineLookup,
     MaterialPipelineSet, MaterialPipelineVariantSpec,
 };
+use super::pipeline_frame_readiness::PendingPipelineDraws;
 use super::pipeline_kind::RasterPipelineKind;
 use super::raster_pipeline::MaterialPipelineDesc;
 use super::router::MaterialRouter;
@@ -48,6 +49,8 @@ pub struct MaterialRegistry {
     /// Shader/material graph state for routes, source generations, and dependency hooks.
     asset_graph: MaterialAssetGraph,
     cache: MaterialPipelineCache,
+    /// Pending-draw count for this registry. Not shared with any other instance.
+    pending_draws: PendingPipelineDraws,
 }
 
 impl MaterialRegistry {
@@ -64,18 +67,32 @@ impl MaterialRegistry {
         let source = self
             .asset_graph
             .shader_source_snapshot(kind, variant.permutation);
-        match self.cache.get_or_queue(
+        let lookup = self.cache.get_or_queue(
             kind,
             desc,
             variant,
             source.generation,
             source.source_override,
-        ) {
-            MaterialPipelineLookup::Ready(p) => {
-                Some(MaterialPipelineResolution::new(kind.clone(), p))
+        );
+        // `note` counts only Pending, and only on a capture readback. A failed lookup
+        // that still draws through a ready Null pipeline stays at zero so the harness
+        // compares that frame. Returning no pipeline at all is counted once below, and
+        // only when nothing was pending. Windowed frames do not increment the counter.
+        self.note_lookup(&lookup);
+        let requested_pending = matches!(lookup, MaterialPipelineLookup::Pending);
+        let (resolution, fallback_pending) = match lookup {
+            MaterialPipelineLookup::Ready(p) => (
+                Some(MaterialPipelineResolution::new(kind.clone(), p)),
+                false,
+            ),
+            MaterialPipelineLookup::Pending if matches!(kind, RasterPipelineKind::Null) => {
+                (None, false)
             }
-            MaterialPipelineLookup::Pending if matches!(kind, RasterPipelineKind::Null) => None,
-            MaterialPipelineLookup::Pending => self.null_pipeline_fallback(desc, variant),
+            MaterialPipelineLookup::Pending => {
+                // A compiled Null stand-in is still the wrong program. The pending note
+                // above makes the harness wait for the requested pipeline.
+                self.lookup_null_pipeline(desc, variant)
+            }
             MaterialPipelineLookup::Failed(err) if matches!(kind, RasterPipelineKind::Null) => {
                 match shader_asset_id {
                     Some(id) => {
@@ -85,7 +102,7 @@ impl MaterialRegistry {
                         logger::error!("Null pipeline build failed: {err}");
                     }
                 }
-                None
+                (None, false)
             }
             MaterialPipelineLookup::Failed(err) => {
                 match shader_asset_id {
@@ -100,35 +117,64 @@ impl MaterialRegistry {
                         );
                     }
                 }
-                self.null_pipeline_fallback(desc, variant)
+                self.lookup_null_pipeline(desc, variant)
             }
-        }
+        };
+        self.note_abandoned_draw(resolution.is_none(), requested_pending || fallback_pending);
+        resolution
     }
 
-    fn null_pipeline_fallback(
+    /// Looks up the Null stand-in. The bool is true when that lookup was pending.
+    fn lookup_null_pipeline(
         &self,
         desc: &MaterialPipelineDesc,
         variant: MaterialPipelineVariantSpec,
-    ) -> Option<MaterialPipelineResolution> {
+    ) -> (Option<MaterialPipelineResolution>, bool) {
         let fallback = RasterPipelineKind::Null;
         let variant = variant.without_shader_specialization();
         let source = self
             .asset_graph
             .shader_source_snapshot(&fallback, variant.permutation);
-        match self.cache.get_or_queue(
+        let lookup = self.cache.get_or_queue(
             &fallback,
             desc,
             variant,
             source.generation,
             source.source_override,
-        ) {
+        );
+        self.note_lookup(&lookup);
+        let saw_pending = matches!(lookup, MaterialPipelineLookup::Pending);
+        let resolution = match lookup {
             MaterialPipelineLookup::Ready(p) => Some(MaterialPipelineResolution::new(fallback, p)),
             MaterialPipelineLookup::Pending => None,
             MaterialPipelineLookup::Failed(e) => {
                 logger::error!("fallback Null pipeline build failed: {e}");
                 None
             }
+        };
+        (resolution, saw_pending)
+    }
+
+    /// Counts a skipped draw once when no pending lookup was already recorded for it.
+    fn note_abandoned_draw(&self, dropped: bool, already_pending: bool) {
+        if dropped && !already_pending {
+            self.note_dropped_draw();
         }
+    }
+
+    /// Capture readback stamps this counter into the PNG. Windowed frames leave it at zero.
+    fn counts_pending_pipeline_draws(&self) -> bool {
+        self.cache.compiles_on_render_thread()
+    }
+
+    fn note_lookup(&self, lookup: &MaterialPipelineLookup) {
+        self.pending_draws
+            .note_readback(self.counts_pending_pipeline_draws(), lookup);
+    }
+
+    fn note_dropped_draw(&self) {
+        self.pending_draws
+            .note_dropped_readback(self.counts_pending_pipeline_draws());
     }
 
     /// Resolves the Null fallback pipeline for a caller that must abandon a routed embedded draw.
@@ -137,13 +183,25 @@ impl MaterialRegistry {
         desc: &MaterialPipelineDesc,
         variant: MaterialPipelineVariantSpec,
     ) -> Option<MaterialPipelineResolution> {
-        self.null_pipeline_fallback(desc, variant)
+        let (resolution, saw_pending) = self.lookup_null_pipeline(desc, variant);
+        self.note_abandoned_draw(resolution.is_none(), saw_pending);
+        resolution
+    }
+
+    /// Counts a draw skipped after a ready lookup returned no pipeline.
+    ///
+    /// The registry lookup itself did not return [`None`], so it did not count the skip.
+    /// Call this only for that empty-set path. A [`None`] lookup is already counted.
+    pub(crate) fn note_skipped_pipeline_draw(&self) {
+        self.note_dropped_draw();
     }
 
     /// Builds a registry whose router falls back to [`RasterPipelineKind::Null`] for unknown shader assets.
     pub fn with_default_families(
         device: Arc<wgpu::Device>,
         limits: Arc<crate::gpu::GpuLimits>,
+        compile_on_render_thread: bool,
+        render_thread_compiles_per_frame: usize,
     ) -> Self {
         let mut asset_graph = MaterialAssetGraph::new(RasterPipelineKind::Null);
         asset_graph.register_global_uniform("Renderide_FrameIndex", GlobalUniformValueType::Uint);
@@ -154,7 +212,13 @@ impl MaterialRegistry {
             .register_global_uniform("Renderide_ViewProjection", GlobalUniformValueType::Mat4);
         Self {
             asset_graph,
-            cache: MaterialPipelineCache::new(device, limits),
+            cache: MaterialPipelineCache::new(
+                device,
+                limits,
+                compile_on_render_thread,
+                render_thread_compiles_per_frame,
+            ),
+            pending_draws: PendingPipelineDraws::new(),
         }
     }
 
@@ -247,10 +311,23 @@ impl MaterialRegistry {
             .variant_bits_for_shader_asset(shader_asset_id)
     }
 
-    /// Drains finished background pipeline builds into the cache.
+    /// Attach-time flag. True only for a capture readback.
+    pub(crate) fn compiles_on_render_thread(&self) -> bool {
+        self.cache.compiles_on_render_thread()
+    }
+
+    /// Takes this registry's pending-draw count and resets it.
+    pub fn take_pending_pipeline_draws(&self) -> u64 {
+        self.pending_draws.take()
+    }
+
+    /// Drains finished pipeline builds into the cache.
     ///
     /// Invoked once per frame from the renderer's tick before per-view recording so worker
     /// threads never touch the completion channel or the pending/failed mutexes during draw.
+    /// A capture readback compiles every pipeline already queued for this thread and
+    /// does not wait for an idle device. Every other frame only installs builds the
+    /// background pool has already finished.
     pub fn drain_pipeline_build_completions(&self) {
         self.cache.drain_pipeline_build_completions();
     }
@@ -273,5 +350,50 @@ impl MaterialRegistry {
     /// Captures pipeline cache diagnostics.
     pub(crate) fn pipeline_cache_diagnostics(&self) -> MaterialPipelineCacheDiagnosticSnapshot {
         self.cache.diagnostic_snapshot()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::cache::MaterialPipelineLookup;
+    use super::super::pipeline_frame_readiness::PendingPipelineDraws;
+
+    #[test]
+    fn pending_lookups_count_the_requested_shader_and_its_null_fallback() {
+        let draws = PendingPipelineDraws::new();
+        let other = PendingPipelineDraws::new();
+
+        draws.note(&MaterialPipelineLookup::Pending);
+        assert_eq!(draws.take(), 1);
+        assert_eq!(other.take(), 0);
+
+        // The requested shader is pending, and the Null fallback lookup is pending too.
+        draws.note(&MaterialPipelineLookup::Pending);
+        draws.note(&MaterialPipelineLookup::Pending);
+        assert_eq!(draws.take(), 2);
+
+        draws.note(&MaterialPipelineLookup::Failed(
+            "shader compile failed".to_string(),
+        ));
+        assert_eq!(draws.take(), 0);
+
+        // A failed lookup that still draws adds nothing. A skipped draw, with no
+        // pending lookup already counted, adds one on this registry only.
+        draws.note_dropped();
+        assert_eq!(draws.take(), 1);
+        assert_eq!(other.take(), 0);
+    }
+
+    #[test]
+    fn windowed_frames_do_not_increment_the_pending_counter() {
+        let draws = PendingPipelineDraws::new();
+
+        draws.note_readback(false, &MaterialPipelineLookup::Pending);
+        draws.note_dropped_readback(false);
+        assert_eq!(draws.take(), 0);
+
+        draws.note_readback(true, &MaterialPipelineLookup::Pending);
+        draws.note_dropped_readback(true);
+        assert_eq!(draws.take(), 2);
     }
 }

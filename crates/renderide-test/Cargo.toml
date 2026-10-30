@@ -15,6 +15,7 @@ renderide-shared = { path = "../renderide-shared" }
 logger = { path = "../logger" }
 clap = { version = "4.6", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
+png = "0.18"
 image-compare = "0.5"
 gltf = "1.4"
 glam = { version = "0.34", features = ["bytemuck"] }

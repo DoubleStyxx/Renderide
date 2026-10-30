@@ -370,6 +370,9 @@ impl RendererRuntime {
                 ..Default::default()
             };
         }
+        // Pass-owned pipelines are compiled at attach, before any submit, and again
+        // from the graph once the view format is known. Compiling them here would
+        // run after earlier frames have already submitted.
         crash_context::set_tick_phase(TickPhase::RenderViews);
         let graph_error = self.render_desktop_frame(gpu).err();
         self.note_frame_render_attempted();

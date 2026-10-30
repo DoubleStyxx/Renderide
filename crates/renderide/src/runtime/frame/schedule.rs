@@ -201,6 +201,13 @@ impl Drop for CpuRenderPhaseScope {
 }
 
 /// Runs global asset/material preparation for a schedule-backed render submission.
+///
+/// A capture readback compiles every pipeline already queued for this thread
+/// at frame start. It does not flush or poll first, and a lookup during this
+/// frame stays pending until the next drain. Windowed frames, and headless
+/// frames that are not read back, only install background builds that have
+/// already finished. They do not wait, so the frame returns with the rest
+/// still pending.
 pub(in crate::runtime) fn prepare_assets_for_schedule(backend: &mut RenderBackend) {
     backend.sync_material_shader_hot_reload();
     backend.drain_pipeline_build_completions();

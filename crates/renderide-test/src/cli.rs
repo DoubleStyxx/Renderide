@@ -191,8 +191,23 @@ fn print_suite_outcome(
     success_label: &str,
     result_label: &str,
 ) {
+    if let Some(warning) = outcome.report.quarantine_warning.as_deref() {
+        println!("{}", crate::scene_dsl::warn_line(warning));
+    }
     for case in &outcome.report.cases {
-        if case.passed {
+        if crate::scene_dsl::warp_pbs_is_expected(case) {
+            println!(
+                "EXPECTED FAIL {} ({}) {}",
+                case.name,
+                case.artifacts_dir.display(),
+                crate::scene_dsl::WARP_EXPECTED_FAILURE_LABEL
+            );
+        } else if crate::scene_dsl::case_is_quarantined_216(case) {
+            println!(
+                "{}",
+                crate::scene_dsl::quarantined_line(&case.name, &case.artifacts_dir)
+            );
+        } else if case.passed {
             println!(
                 "{} {} ({})",
                 success_label,
@@ -209,10 +224,31 @@ fn print_suite_outcome(
         }
     }
     println!("Suite report: {}", outcome.report_path.display());
-    println!(
-        "Suite result: {}/{} {}",
-        outcome.report.passed, outcome.report.total, result_label
-    );
+    println!("{}", format_suite_result(&outcome.report, result_label));
+    println!("{}", crate::scene_dsl::suite::SUITE_READINESS_SUMMARY);
+}
+
+fn format_suite_result(
+    report: &crate::scene_dsl::suite::SuiteReport,
+    result_label: &str,
+) -> String {
+    let passed = report.passed;
+    let total = report.total;
+    let expected = report.expected_failures;
+    let quarantined = report.quarantined;
+    let expected_label = crate::scene_dsl::WARP_EXPECTED_FAILURE_LABEL;
+    match (expected, quarantined) {
+        (0, 0) => format!("Suite result: {passed}/{total} {result_label}"),
+        (_, 0) => {
+            format!("Suite result: {passed}/{total} {result_label}, {expected} {expected_label}")
+        }
+        (0, _) => {
+            format!("Suite result: {passed}/{total} {result_label}, {quarantined} quarantined")
+        }
+        (_, _) => format!(
+            "Suite result: {passed}/{total} {result_label}, {expected} {expected_label}, {quarantined} quarantined"
+        ),
+    }
 }
 
 /// Cargo build profile selecting which `target/<profile>/renderide-renderer` binary to spawn.
@@ -367,6 +403,61 @@ mod cli_tests {
         assert_eq!(BuildProfile::from_flags(false, true), BuildProfile::DevFast);
         // dev_fast wins when both flags are set; clap rejects that combination at the CLI layer.
         assert_eq!(BuildProfile::from_flags(true, true), BuildProfile::DevFast);
+    }
+
+    #[test]
+    fn suite_result_line_counts_quarantine_apart_from_expected_failures() {
+        use crate::scene_dsl::WARP_EXPECTED_FAILURE_LABEL;
+        use crate::scene_dsl::suite::{SuiteCaseReport, SuiteReport};
+
+        fn case(
+            name: &str,
+            passed: bool,
+            result: Option<&str>,
+            status: Option<&str>,
+            reason: Option<&str>,
+        ) -> SuiteCaseReport {
+            SuiteCaseReport {
+                name: name.to_string(),
+                passed,
+                artifacts_dir: PathBuf::from(name),
+                report_json: PathBuf::from(name),
+                error: None,
+                result: result.map(str::to_string),
+                status: status.map(str::to_string),
+                reason: reason.map(str::to_string),
+            }
+        }
+
+        let pass = case("a", true, None, None, None);
+        let expected = case("b", false, Some(WARP_EXPECTED_FAILURE_LABEL), None, None);
+        let quarantined = case(
+            "c",
+            false,
+            None,
+            Some("quarantined"),
+            Some("quarantined:#216"),
+        );
+        let passes = SuiteReport::from_cases(vec![pass.clone()]);
+        assert_eq!(
+            super::format_suite_result(&passes, "passed"),
+            "Suite result: 1/1 passed"
+        );
+        let with_expected = SuiteReport::from_cases(vec![pass.clone(), expected.clone()]);
+        assert_eq!(
+            super::format_suite_result(&with_expected, "passed"),
+            "Suite result: 1/2 passed, 1 expected failure (WARP, #212)"
+        );
+        let with_quarantine = SuiteReport::from_cases(vec![pass.clone(), quarantined.clone()]);
+        assert_eq!(
+            super::format_suite_result(&with_quarantine, "passed"),
+            "Suite result: 1/2 passed, 1 quarantined"
+        );
+        let both = SuiteReport::from_cases(vec![pass, expected, quarantined]);
+        assert_eq!(
+            super::format_suite_result(&both, "passed"),
+            "Suite result: 1/3 passed, 1 expected failure (WARP, #212), 1 quarantined"
+        );
     }
 
     fn expected_exe() -> &'static str {
