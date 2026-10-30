@@ -5,6 +5,7 @@
 //! existing per-case artifact, and emits a suite-level JSON report for CI artifact collection.
 
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -80,8 +81,11 @@ pub struct SuiteReport {
     /// Points at the bounded WARP stall (#214) and the black clear captured during it (#216).
     #[serde(default = "default_summary")]
     pub summary: String,
-    /// Set inside the last 48 hours before the #216 quarantine expires. Omitted from JSON.
-    #[serde(skip)]
+    /// Set inside the last 48 hours before the #216 quarantine expires.
+    ///
+    /// Written to `suite-report.json` when present. Absent after expiry and
+    /// while more than 48 hours remain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quarantine_warning: Option<String>,
 }
 
@@ -135,6 +139,18 @@ impl SuiteReport {
     }
 }
 
+/// Why a harness timeout failed, when the suite recorded one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SuiteFailureKind {
+    /// Timed out on a flat or unstable frame.
+    FlatOrUnstableFrame,
+    /// Timed out while material draws were still compiling or skipped.
+    PipelineNotReady,
+    /// No stable PNG arrived before the deadline.
+    PngOutputMissing,
+}
+
 /// Per-case suite report entry.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SuiteCaseReport {
@@ -158,6 +174,87 @@ pub struct SuiteCaseReport {
     /// `quarantined:#216` while that quarantine applies. Absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Timed-out harness failure, when this case has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_kind: Option<SuiteFailureKind>,
+    /// Pending count on the frame the harness timed out on.
+    ///
+    /// `None` means that frame did not record a count. It is not zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_pending: Option<u64>,
+    /// GPU-done flag from the frame the harness timed out on.
+    ///
+    /// `None` means no frame was observed. It is not `false` and it is not done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_done: Option<bool>,
+    /// Dropped draws on the frame the harness timed out on. `None` is not zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dropped_draws: Option<u64>,
+}
+
+impl SuiteCaseReport {
+    /// A finished case with no quarantine label and no timed-out frame facts.
+    pub(crate) fn plain(
+        name: impl Into<String>,
+        passed: bool,
+        artifacts_dir: PathBuf,
+        report_json: PathBuf,
+        error: Option<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            passed,
+            artifacts_dir,
+            report_json,
+            error,
+            result: None,
+            status: None,
+            reason: None,
+            failure_kind: None,
+            frame_pending: None,
+            gpu_done: None,
+            dropped_draws: None,
+        }
+    }
+
+    /// Copies the timeout kind and the timed-out frame from `err`.
+    ///
+    /// Pending and GPU-done come from that error, not from a later read of `actual.png`.
+    pub(crate) fn from_harness_error(
+        name: impl Into<String>,
+        artifacts_dir: PathBuf,
+        report_json: PathBuf,
+        err: &HarnessError,
+    ) -> Self {
+        let mut case = Self::plain(
+            name,
+            false,
+            artifacts_dir,
+            report_json,
+            Some(err.to_string()),
+        );
+        match err {
+            HarnessError::FlatOrUnstableFrame {
+                frame_pending,
+                gpu_done,
+                dropped_draws,
+                ..
+            } => {
+                case.failure_kind = Some(SuiteFailureKind::FlatOrUnstableFrame);
+                case.frame_pending = *frame_pending;
+                case.gpu_done = Some(*gpu_done);
+                case.dropped_draws = *dropped_draws;
+            }
+            HarnessError::PipelineNotReady { .. } => {
+                case.failure_kind = Some(SuiteFailureKind::PipelineNotReady);
+            }
+            HarnessError::PngOutputMissing { .. } => {
+                case.failure_kind = Some(SuiteFailureKind::PngOutputMissing);
+            }
+            _ => {}
+        }
+        case
+    }
 }
 
 /// Resolves requested case names against the registry.
@@ -187,17 +284,18 @@ pub fn select_cases(requested: &[String]) -> Result<Vec<IntegrationCase>, Harnes
 
 /// Runs every configured case in parallel and writes the suite-level report.
 pub fn run_suite(config: SuiteConfig) -> Result<SuiteRunOutcome, HarnessError> {
-    run_suite_with(config, run_case_for_suite)
+    run_suite_with(config, run_case_for_suite, true)
 }
 
 /// Runs every configured case and promotes each non-flat capture into its committed golden.
 pub fn update_suite(config: SuiteConfig) -> Result<SuiteRunOutcome, HarnessError> {
-    run_suite_with(config, run_case_for_update)
+    run_suite_with(config, run_case_for_update, false)
 }
 
 fn run_suite_with(
     config: SuiteConfig,
     run_case: fn(&IntegrationCase, &RunnerConfig) -> SuiteCaseReport,
+    check_suite: bool,
 ) -> Result<SuiteRunOutcome, HarnessError> {
     host_info::log_suite_host();
     std::fs::create_dir_all(&config.runner.output_root)?;
@@ -227,8 +325,12 @@ fn run_suite_with(
         };
 
     let mut report = SuiteReport::from_cases(case_reports);
-    super::warp_pbs::apply_expected_failure(&mut report);
-    super::quarantine_216::apply_quarantine_now(&mut report);
+    apply_suite_labels(
+        &mut report,
+        check_suite,
+        SystemTime::now(),
+        super::quarantine_216::capture_is_warp,
+    );
     let report_path = write_suite_report(&config.runner.output_root, &report)?;
     Ok(SuiteRunOutcome {
         report,
@@ -236,20 +338,30 @@ fn run_suite_with(
     })
 }
 
+/// The #212 label applies to both commands. The #216 quarantine is check-suite only,
+/// so a failed `update-suite` cannot exit 0 by counting a flat frame as quarantined.
+fn apply_suite_labels(
+    report: &mut SuiteReport,
+    check_suite: bool,
+    now: SystemTime,
+    is_warp: impl Fn(&Path) -> bool,
+) {
+    super::warp_pbs::apply_expected_failure(report);
+    if check_suite {
+        super::quarantine_216::apply_quarantine(report, now, is_warp);
+    }
+}
+
 fn run_case_for_suite(case: &IntegrationCase, runner: &RunnerConfig) -> SuiteCaseReport {
     let fallback_layout = CaseOutputLayout::for_case(&runner.output_root, &case.name);
     match run_integration_case(case, runner) {
         Ok(outcome) => report_from_outcome(outcome),
-        Err(err) => SuiteCaseReport {
-            name: case.name.clone(),
-            passed: false,
-            artifacts_dir: fallback_layout.root,
-            report_json: fallback_layout.report_json,
-            error: Some(err.to_string()),
-            result: None,
-            status: None,
-            reason: None,
-        },
+        Err(err) => SuiteCaseReport::from_harness_error(
+            case.name.clone(),
+            fallback_layout.root,
+            fallback_layout.report_json,
+            &err,
+        ),
     }
 }
 
@@ -257,32 +369,28 @@ fn run_case_for_update(case: &IntegrationCase, runner: &RunnerConfig) -> SuiteCa
     let fallback_layout = CaseOutputLayout::for_case(&runner.output_root, &case.name);
     match run_integration_case(case, runner) {
         Ok(outcome) => report_from_update_outcome(case, outcome),
-        Err(err) => SuiteCaseReport {
-            name: case.name.clone(),
-            passed: false,
-            artifacts_dir: fallback_layout.root,
-            report_json: fallback_layout.report_json,
-            error: Some(err.to_string()),
-            result: None,
-            status: None,
-            reason: None,
-        },
+        Err(err) => SuiteCaseReport::from_harness_error(
+            case.name.clone(),
+            fallback_layout.root,
+            fallback_layout.report_json,
+            &err,
+        ),
     }
 }
 
 fn report_from_update_outcome(case: &IntegrationCase, outcome: CaseRunOutcome) -> SuiteCaseReport {
     match promote_case_golden(case, &outcome) {
         Ok(report) => report,
-        Err(err) => SuiteCaseReport {
-            name: case.name.clone(),
-            passed: false,
-            artifacts_dir: outcome.layout.root,
-            report_json: outcome.layout.report_json,
-            error: Some(format!("golden update: {err}")),
-            result: None,
-            status: None,
-            reason: None,
-        },
+        Err(err) => {
+            let mut report = SuiteCaseReport::from_harness_error(
+                case.name.clone(),
+                outcome.layout.root,
+                outcome.layout.report_json,
+                &err,
+            );
+            report.error = Some(format!("golden update: {err}"));
+            report
+        }
     }
 }
 
@@ -325,16 +433,13 @@ fn promote_case_golden(
     let mut report = report_from_evaluation(case, eval);
     write_report(&outcome.layout, &mut report)
         .map_err(|e| HarnessError::QueueOptions(format!("write update report: {e}")))?;
-    Ok(SuiteCaseReport {
-        name: report.name,
-        passed: true,
-        artifacts_dir: outcome.layout.root.clone(),
-        report_json: outcome.layout.report_json.clone(),
-        error: None,
-        result: None,
-        status: None,
-        reason: None,
-    })
+    Ok(SuiteCaseReport::plain(
+        report.name,
+        true,
+        outcome.layout.root.clone(),
+        outcome.layout.report_json.clone(),
+        None,
+    ))
 }
 
 fn report_from_outcome(outcome: CaseRunOutcome) -> SuiteCaseReport {
@@ -347,19 +452,20 @@ fn report_from_outcome(outcome: CaseRunOutcome) -> SuiteCaseReport {
             .clone()
             .or_else(|| Some("case failed tolerance".to_string()))
     };
-    SuiteCaseReport {
-        name: outcome.report.name,
-        passed: outcome.report.passed,
-        artifacts_dir: outcome.layout.root,
-        report_json: outcome.layout.report_json,
+    SuiteCaseReport::plain(
+        outcome.report.name,
+        outcome.report.passed,
+        outcome.layout.root,
+        outcome.layout.report_json,
         error,
-        result: None,
-        status: None,
-        reason: None,
-    }
+    )
 }
 
-fn write_suite_report(output_root: &Path, report: &SuiteReport) -> Result<PathBuf, HarnessError> {
+/// Writes `suite-report.json`, including the #216 expiry warning when one is set.
+pub(crate) fn write_suite_report(
+    output_root: &Path,
+    report: &SuiteReport,
+) -> Result<PathBuf, HarnessError> {
     let report_path = output_root.join(SUITE_REPORT_FILENAME);
     let json = serde_json::to_string_pretty(report)
         .map_err(|e| HarnessError::QueueOptions(format!("serialize suite report: {e}")))?;
@@ -372,18 +478,15 @@ mod tests {
     use super::*;
 
     fn case_report(name: &str, passed: bool) -> SuiteCaseReport {
-        SuiteCaseReport {
-            name: name.to_string(),
+        SuiteCaseReport::plain(
+            name,
             passed,
-            artifacts_dir: PathBuf::from("target/renderide-test-out").join(name),
-            report_json: PathBuf::from("target/renderide-test-out")
+            PathBuf::from("target/renderide-test-out").join(name),
+            PathBuf::from("target/renderide-test-out")
                 .join(name)
                 .join("report.json"),
-            error: (!passed).then(|| "failed".to_string()),
-            result: None,
-            status: None,
-            reason: None,
-        }
+            (!passed).then(|| "failed".to_string()),
+        )
     }
 
     #[test]
@@ -469,5 +572,120 @@ mod tests {
         assert!(report.cases[0].status.is_none());
         assert!(report.cases[0].reason.is_none());
         assert!(report.cases[0].result.is_none());
+        assert!(report.cases[0].failure_kind.is_none());
+        assert!(report.cases[0].frame_pending.is_none());
+        assert!(report.cases[0].gpu_done.is_none());
+        assert!(report.cases[0].dropped_draws.is_none());
+    }
+
+    #[test]
+    fn write_suite_report_writes_the_quarantine_warning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut report = SuiteReport::from_cases(vec![case_report("a", false)]);
+        let warning = "quarantine #216 expires at 2026-11-14T23:59:59Z".to_string();
+        report.quarantine_warning = Some(warning.clone());
+        let path = write_suite_report(dir.path(), &report).expect("write suite report");
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some(SUITE_REPORT_FILENAME)
+        );
+        let bytes = std::fs::read(path).expect("read report");
+        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(json["quarantine_warning"], warning);
+    }
+
+    fn quarantinable_case(dir: &Path) -> SuiteCaseReport {
+        let artifacts = dir.join("pbs_lit_material_matrix");
+        std::fs::create_dir_all(&artifacts).expect("artifacts");
+        let report_json = artifacts.join("report.json");
+        let integration = crate::scene_dsl::cases::pbs_lit_material_matrix();
+        let case_report =
+            crate::scene_dsl::output::report_from_error(&integration, "flat or unstable");
+        std::fs::write(
+            &report_json,
+            serde_json::to_string_pretty(&case_report).expect("report json"),
+        )
+        .expect("write report");
+        let mut case = SuiteCaseReport::plain(
+            "pbs_lit_material_matrix",
+            false,
+            artifacts,
+            report_json,
+            Some("flat or unstable".to_string()),
+        );
+        case.failure_kind = Some(SuiteFailureKind::FlatOrUnstableFrame);
+        case.frame_pending = Some(0);
+        case.gpu_done = Some(true);
+        case.dropped_draws = Some(0);
+        case
+    }
+
+    #[test]
+    fn quarantine_applies_on_check_suite_and_not_on_update_suite() {
+        let now = SystemTime::UNIX_EPOCH;
+        let check_dir = tempfile::tempdir().expect("check dir");
+        let mut check = SuiteReport::from_cases(vec![quarantinable_case(check_dir.path())]);
+        apply_suite_labels(&mut check, true, now, |_| true);
+        assert_eq!(check.quarantined, 1);
+        assert_eq!(check.failed, 0);
+        assert!(check.passed());
+        assert_eq!(check.cases[0].status.as_deref(), Some("quarantined"));
+
+        let update_dir = tempfile::tempdir().expect("update dir");
+        let mut update = SuiteReport::from_cases(vec![quarantinable_case(update_dir.path())]);
+        apply_suite_labels(&mut update, false, now, |_| true);
+        assert_eq!(update.quarantined, 0);
+        assert_eq!(update.failed, 1);
+        assert!(!update.passed());
+        assert!(update.cases[0].status.is_none());
+        assert!(update.cases[0].reason.is_none());
+    }
+
+    #[test]
+    fn harness_timeout_copies_the_timed_out_frame() {
+        let flat = HarnessError::FlatOrUnstableFrame {
+            path: PathBuf::from("actual.png"),
+            wait: std::time::Duration::from_secs(300),
+            last_pending: 0,
+            ready_chunks: 1,
+            pending_chunks: 0,
+            missing_chunks: 0,
+            frame_count: 1,
+            frame_pending: Some(4),
+            gpu_done: true,
+            dropped_draws: None,
+        };
+        let case = SuiteCaseReport::from_harness_error(
+            "pbs_lit_material_matrix",
+            PathBuf::from("out"),
+            PathBuf::from("out/report.json"),
+            &flat,
+        );
+        assert_eq!(
+            case.failure_kind,
+            Some(SuiteFailureKind::FlatOrUnstableFrame)
+        );
+        assert_eq!(case.frame_pending, Some(4));
+        assert_eq!(case.gpu_done, Some(true));
+        assert_eq!(case.dropped_draws, None);
+        let text = case.error.expect("error");
+        assert!(text.contains("last pending=0"), "{text}");
+        assert!(text.contains("flat or unstable"), "{text}");
+        assert!(!text.contains("pipeline-pending"), "{text}");
+
+        let missing = HarnessError::PngOutputMissing {
+            path: PathBuf::from("actual.png"),
+            wait: std::time::Duration::from_secs(180),
+        };
+        let case = SuiteCaseReport::from_harness_error(
+            "pbs_lit_material_matrix",
+            PathBuf::from("out"),
+            PathBuf::from("out/report.json"),
+            &missing,
+        );
+        assert_eq!(case.failure_kind, Some(SuiteFailureKind::PngOutputMissing));
+        assert!(case.frame_pending.is_none());
+        assert!(case.gpu_done.is_none());
+        assert!(case.dropped_draws.is_none());
     }
 }

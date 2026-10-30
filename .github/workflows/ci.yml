@@ -206,12 +206,14 @@ jobs:
             # Defer one non-Null material pipeline for 12s without blocking the
             # render thread. The suite must still match the lit golden, which
             # requires the pending==0 wait, and that wait must log the
-            # pending-rejection line itself before the ready frame. A flat-frame
-            # line is not a substitute: the stall can otherwise pass without
-            # pending>0 ever firing. Release builds ignore the env.
+            # pending-rejection line itself before the ready frame. The line has
+            # to name pbs_lit_material_matrix/actual.png. A flat frame with
+            # pending>0 is not a substitute: that path used to set the same flag
+            # and swallow this line, so the stall could pass without it. Release
+            # builds ignore the env.
             RENDERIDE_TEST_PIPELINE_STALL_MS=12000 \
               ./target/debug/renderide-test check-suite --jobs 1
-            grep -R -q "still has compiling or skipped material draws" logs/renderer-test
+            grep -R -q "pbs_lit_material_matrix/actual.png still has compiling or skipped material draws" logs/renderer-test
           else
             ./target/debug/renderide-test check-suite --jobs 1
           fi

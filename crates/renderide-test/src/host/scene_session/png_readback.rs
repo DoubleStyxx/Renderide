@@ -371,6 +371,7 @@ pub(super) fn run_lockstep_until_png_stable(
         &progress.chunks,
         progress.pending_pipeline_seen,
         progress.flat_candidate_seen,
+        progress.last_observed,
     )
 }
 
@@ -379,6 +380,10 @@ pub(super) fn run_lockstep_until_png_stable(
 struct CaptureProgress {
     flat_candidate_seen: bool,
     pending_pipeline_seen: bool,
+    /// The compiling-or-skipped line has its own flag. A flat frame with
+    /// `pending > 0` still sets `pending_pipeline_seen` for timeout classification,
+    /// and that must not swallow the line the Linux stall grep looks for.
+    compiling_or_skipped_logged: bool,
     gpu_not_done_logged: bool,
     settle_hold_logged: bool,
     last_observed: Option<ObservedSettleState>,
@@ -400,7 +405,8 @@ fn settle_stable_frame(
         return false;
     };
     let decoded = read_frame_readiness(output_path);
-    note_stable_frame(
+    let _ = note_stable_frame(
+        output_path,
         decoded.pending_text.as_deref(),
         &decoded.readiness,
         progress,
@@ -408,7 +414,7 @@ fn settle_stable_frame(
     stats.sync(settle.longest_stall_ms(), warp_used);
     let completed_before = settle.completed_frames();
     let decision = settle.observe(mtime, decoded.readiness);
-    log_settle_rejection(
+    let _ = log_settle_rejection(
         mtime,
         &decoded.readiness,
         decision,
@@ -438,7 +444,12 @@ fn timeout_outcome(
     chunks: &ObservedChunks,
     pending_pipeline_seen: bool,
     flat_candidate_seen: bool,
+    last_observed: Option<ObservedSettleState>,
 ) -> Result<SceneSessionOutcome, HarnessError> {
+    let (frame_pending, gpu_done, dropped_draws) = match last_observed {
+        Some(observed) => (observed.pending, observed.gpu_done, observed.dropped_draws),
+        None => (None, false, None),
+    };
     match classify_capture_timeout(chunks, pending_pipeline_seen, flat_candidate_seen) {
         CaptureTimeout::FlatOrUnstable => Err(HarnessError::FlatOrUnstableFrame {
             path: PathBuf::from(output_path),
@@ -448,6 +459,9 @@ fn timeout_outcome(
             pending_chunks: chunks.pending,
             missing_chunks: chunks.missing,
             frame_count: chunks.frames,
+            frame_pending,
+            gpu_done,
+            dropped_draws,
         }),
         CaptureTimeout::PipelineNotReady => Err(HarnessError::PipelineNotReady {
             path: PathBuf::from(output_path),
@@ -531,31 +545,32 @@ impl ObservedSettleState {
 /// Repeated identical frames produce one line. `good` then `flat` then `good`
 /// then `flat` produces a line on each return to `flat`, with `reset` set when
 /// a counted frame was cleared. `stall_ms` is printed but does not by itself
-/// open a new line.
+/// open a new line. Returns that line, or `None` when this observation did not log.
 fn log_settle_rejection(
     mtime: SystemTime,
     frame: &FrameReadiness,
     decision: SettleDecision,
     had_counted_frame: bool,
     progress: &mut CaptureProgress,
-) {
+) -> Option<String> {
     let observed = ObservedSettleState::from_frame(frame);
     let changed = progress.last_observed != Some(observed);
     progress.last_observed = Some(observed);
     if decision != SettleDecision::Reject || !changed {
-        return;
+        return None;
     }
     let reset = had_counted_frame;
-    logger::info!(
-        "Session: settle reject mtime={} flat={} pending={} gpu_done={} dropped={} stall_ms={} reset={}",
+    let pending = format_count(frame.pending);
+    let dropped = format_count(frame.dropped_draws);
+    let line = format!(
+        "Session: settle reject mtime={} flat={} pending={pending} gpu_done={} dropped={dropped} stall_ms={} reset={reset}",
         mtime_millis(mtime),
         frame.flat,
-        format_count(frame.pending),
         frame.gpu_done,
-        format_count(frame.dropped_draws),
         frame.stall_ms,
-        reset,
     );
+    logger::info!("{line}");
+    Some(line)
 }
 
 fn mtime_millis(mtime: SystemTime) -> u128 {
@@ -584,12 +599,15 @@ fn reported_wait(overall: Duration, warp_budget_used: bool, deadline_floor: Dura
 /// Records the stable frame and logs the same rejection lines the Linux suite greps for.
 ///
 /// `pending_text` is the chunk already decoded with the frame. This does not reopen the PNG.
+/// Returns the compiling-or-skipped line when this call is the one that logs it.
 fn note_stable_frame(
+    output_path: &Path,
     pending_text: Option<&str>,
     frame: &FrameReadiness,
     progress: &mut CaptureProgress,
-) {
+) -> Option<String> {
     let ready = pending_text.is_some_and(|text| text.trim() == "0");
+    let mut logged = None;
     if frame.flat {
         if !progress.flat_candidate_seen {
             logger::info!(
@@ -602,10 +620,13 @@ fn note_stable_frame(
         // Pipelines compile asynchronously. A draw whose pipeline is still pending,
         // or that was skipped because no pipeline was available, is stamped on the
         // PNG (materials/registry.rs). Keep pumping for a later write.
-        if !progress.pending_pipeline_seen {
-            logger::info!(
-                "Session: stable PNG still has compiling or skipped material draws; waiting for a ready frame"
-            );
+        // `compiling_or_skipped_logged` is not `pending_pipeline_seen`: a flat frame
+        // with pending>0 sets that flag and must not suppress this line.
+        if !progress.compiling_or_skipped_logged {
+            let line = compiling_or_skipped_line(output_path);
+            logger::info!("{line}");
+            progress.compiling_or_skipped_logged = true;
+            logged = Some(line);
         }
         progress.pending_pipeline_seen = true;
     } else if !frame.gpu_done && !progress.gpu_not_done_logged {
@@ -613,6 +634,15 @@ fn note_stable_frame(
         progress.gpu_not_done_logged = true;
     }
     progress.chunks.note(pending_text);
+    logged
+}
+
+/// Linux CI greps this line, including the stalled case's PNG path.
+fn compiling_or_skipped_line(output_path: &Path) -> String {
+    let shown = output_path.display();
+    format!(
+        "Session: stable PNG {shown} still has compiling or skipped material draws; waiting for a ready frame"
+    )
 }
 
 /// Writes the stall and WARP-budget flag beside the PNG on every exit, including timeout.
