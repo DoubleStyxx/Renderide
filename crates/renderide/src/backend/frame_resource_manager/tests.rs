@@ -281,6 +281,33 @@ fn prepare_lights_from_scene_keeps_and_detects_negative_lights() {
 
     assert_eq!(mgr.frame_lights().len(), 2);
     assert!(mgr.signed_scene_color_required());
+    assert_eq!(mgr.frame_lights()[0].intensity, -2.0);
+}
+
+#[test]
+fn physically_based_pack_clamps_negative_intensity_and_keeps_positive() {
+    let mut scene = SceneCoordinator::new();
+    seed_space_with_signed_light(&mut scene, RenderSpaceId(1), 100, 0.4, -2.5);
+    seed_space_with_signed_light(&mut scene, RenderSpaceId(2), 200, 0.8, 1.5);
+
+    let mut mgr = FrameResourceManager::new();
+    mgr.set_physically_based_lights(true);
+    mgr.prepare_lights_from_scene(&scene);
+
+    let packed = mgr.frame_lights();
+    assert_eq!(packed.len(), 2);
+    let negative = packed
+        .iter()
+        .find(|light| (light.color[0] - 0.4).abs() < 1e-5)
+        .expect("negative light");
+    let positive = packed
+        .iter()
+        .find(|light| (light.color[0] - 0.8).abs() < 1e-5)
+        .expect("positive light");
+    assert_eq!(negative.intensity, 0.0);
+    assert_eq!(positive.intensity, 1.5);
+    assert!((negative.color[0] - 0.4).abs() < 1e-5);
+    assert!((negative.range - 10.0).abs() < 1e-5);
 }
 
 /// Lights from inactive render spaces must not leak into the frame's GPU light buffer.

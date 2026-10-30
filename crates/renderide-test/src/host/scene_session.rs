@@ -1,16 +1,5 @@
-//! End-to-end orchestration of the harness lifecycle: open IPC -> spawn renderer -> handshake ->
-//! upload assets -> submit scene state -> wait for the renderer to write a fresh PNG -> shutdown.
-//!
-//! The implementation is split across focused submodules:
-//!
-//! - `config` -- public configuration and outcome types.
-//! - `consts` -- centralized timing, asset-id, and tessellation constants.
-//! - [`spawn`] -- renderer process spawn + RAII guard.
-//! - `scene_state` -- scene-state SHM construction and first-submit pump.
-//! - [`png_readback`] -- PNG stability state machine + readback driver loop.
-//! - `capture` -- first PNG wait plus property-update and shadow-move recaptures.
-//! - `canvas_ui` -- coplanar and tilted UI quad scenes.
-//! - `shutdown` -- graceful shutdown sequence.
+//! End-to-end harness session: IPC, renderer spawn, handshake, asset upload, scene submit,
+//! PNG capture, and shutdown. Scene variants live in the submodules next to this file.
 
 use glam::{Quat, Vec3};
 use renderide_shared::shared::{ColorProfile, RenderBoundingBox, RenderTransform, ShadowCastMode};
@@ -41,6 +30,7 @@ mod consts;
 mod custom_property;
 mod double_buffer_stack;
 mod exotic_pair;
+mod negative_light;
 mod shadowed_caster;
 
 pub use bench_drive::{BenchDriveConfig, drive_bench};
@@ -130,6 +120,13 @@ pub enum SessionTemplate {
     /// Normal Skybox camera with a higher-depth double-buffered Nothing camera on one texture.
     /// The main view displays that texture.
     DoubleBufferNothingOnSkybox,
+    /// PBS sphere, one positive directional, and an optional negative directional.
+    NegativeLightPair {
+        /// Spawns the renderer with physically based light upload.
+        physically_based: bool,
+        /// Includes the negative directional light.
+        include_negative: bool,
+    },
     /// One-bone skinned avatars; `offscreen` puts 256 of 272 behind the camera.
     SkinnedAvatars {
         /// Whether the bulk of the avatars sit outside the camera frustum.
@@ -302,6 +299,7 @@ fn template_label(template: &SessionTemplate) -> &'static str {
         SessionTemplate::ShadowedCasterMove => "ShadowedCasterMove",
         SessionTemplate::ManyShadowedPointLights => "ManyShadowedPointLights",
         SessionTemplate::DoubleBufferNothingOnSkybox => "DoubleBufferNothingOnSkybox",
+        SessionTemplate::NegativeLightPair { .. } => "NegativeLightPair",
         SessionTemplate::SkinnedAvatars { .. } => "SkinnedAvatars",
     }
 }
@@ -339,6 +337,9 @@ fn build_scene_setup(template: SessionTemplate) -> SceneSetup {
         SessionTemplate::ShadowedCasterMove => shadowed_caster::scene_setup(),
         SessionTemplate::ManyShadowedPointLights => shadowed_caster::many_point_lights_setup(),
         SessionTemplate::DoubleBufferNothingOnSkybox => double_buffer_stack::scene_setup(),
+        SessionTemplate::NegativeLightPair {
+            include_negative, ..
+        } => negative_light::scene_setup(include_negative),
         SessionTemplate::SkinnedAvatars { offscreen } => {
             bench_scenes::skinned_avatars_setup(offscreen)
         }

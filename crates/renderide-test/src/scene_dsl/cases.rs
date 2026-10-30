@@ -78,6 +78,16 @@ pub enum CaseTemplate {
     ShadowedCasterMove,
     /// Double-buffered Nothing camera stacked above a normal Skybox camera on one texture.
     DoubleBufferNothingOnSkybox,
+    /// PBS sphere under a positive directional light and an optional negative directional.
+    ///
+    /// `physically_based` selects the renderer's opt-in intensity clamp. `include_negative`
+    /// is true for the committed goldens and false for the positive-only reference render.
+    NegativeLightPair {
+        /// Spawns the renderer with physically based light upload.
+        physically_based: bool,
+        /// Includes the negative directional light in the submitted scene.
+        include_negative: bool,
+    },
 }
 
 /// Default golden directory, relative to the workspace root: `crates/renderide-test/goldens/`.
@@ -338,6 +348,45 @@ pub fn double_buffer_nothing_on_skybox() -> IntegrationCase {
     }
 }
 
+/// PBS sphere with a positive directional light and a negative directional, parity mode.
+///
+/// The negative intensity is uploaded unchanged, so that light darkens one side of the sphere.
+pub fn negative_light_parity() -> IntegrationCase {
+    IntegrationCase {
+        name: "negative_light_parity".to_string(),
+        description:
+            "PBS sphere under a positive directional light and a negative directional. Parity mode keeps the negative intensity, so one side of the sphere darkens."
+                .to_string(),
+        golden_path: default_goldens_dir().join("negative_light_parity.png"),
+        resolution: (256, 256),
+        tolerance: visual_tolerance(0.78, 56, 0.22, 18, 24, 0.06),
+        template: CaseTemplate::NegativeLightPair {
+            physically_based: false,
+            include_negative: true,
+        },
+    }
+}
+
+/// Same sphere and lights as [`negative_light_parity`], with physically based light upload.
+///
+/// Negative intensity is clamped to zero. The capture must match the same scene rendered
+/// without the negative light, within this case's tolerance.
+pub fn negative_light_physically_based() -> IntegrationCase {
+    IntegrationCase {
+        name: "negative_light_physically_based".to_string(),
+        description:
+            "PBS sphere under a positive directional light and a negative directional. Physically based upload clamps the negative intensity to zero. The capture must match the same scene without that light."
+                .to_string(),
+        golden_path: default_goldens_dir().join("negative_light_physically_based.png"),
+        resolution: (256, 256),
+        tolerance: visual_tolerance(0.78, 56, 0.22, 18, 24, 0.06),
+        template: CaseTemplate::NegativeLightPair {
+            physically_based: true,
+            include_negative: true,
+        },
+    }
+}
+
 /// Optional GLB fixture case. The registry includes it only when the fixture file is present,
 /// so the suite remains useful before a commit-safe model has been added.
 pub fn gltf_textured_static_mesh(path: PathBuf) -> IntegrationCase {
@@ -359,6 +408,8 @@ pub fn registry() -> Vec<IntegrationCase> {
         torus_unlit_perlin(),
         multi_primitive_unlit_grid(),
         pbs_lit_material_matrix(),
+        negative_light_parity(),
+        negative_light_physically_based(),
         alpha_cutout_masked_quads(),
         custom_shader_property_update(),
         exotic_shader_pair(),
@@ -443,6 +494,31 @@ mod tests {
         assert!(lookup("multi_primitive_unlit_grid").is_some());
         assert!(lookup("pbs_lit_material_matrix").is_some());
         assert!(lookup("alpha_cutout_masked_quads").is_some());
+    }
+
+    #[test]
+    fn negative_light_cases_are_registered() {
+        let parity = lookup("negative_light_parity").expect("parity case");
+        let physically_based = lookup("negative_light_physically_based").expect("pb case");
+        assert!(matches!(
+            parity.template,
+            CaseTemplate::NegativeLightPair {
+                physically_based: false,
+                include_negative: true,
+            }
+        ));
+        assert!(matches!(
+            physically_based.template,
+            CaseTemplate::NegativeLightPair {
+                physically_based: true,
+                include_negative: true,
+            }
+        ));
+        assert_eq!(parity.resolution, physically_based.resolution);
+        assert_eq!(
+            parity.tolerance.ssim_min,
+            physically_based.tolerance.ssim_min
+        );
     }
 
     #[test]

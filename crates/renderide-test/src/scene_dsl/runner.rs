@@ -125,6 +125,7 @@ pub fn run_integration_case(
     })?;
 
     let prepared_template = prepare_template(&case.template, &layout)?;
+    let physically_based = template_requests_physically_based(&prepared_template.session_template);
 
     let harness_cfg = HostHarnessConfig {
         renderer_path: runner.renderer_path.clone(),
@@ -134,17 +135,99 @@ pub fn run_integration_case(
         interval_ms: runner.interval_ms,
         timeout: runner.timeout,
         verbose_renderer: runner.verbose_renderer,
+        physically_based,
         template: prepared_template.session_template,
     };
 
     match drive_template(harness_cfg) {
-        Ok(()) => evaluate_and_finalize(case, layout),
+        Ok(()) => {
+            let mut outcome = evaluate_and_finalize(case, layout)?;
+            if let Err(message) = positive_only_reference_failure(case, runner, &outcome.layout) {
+                outcome.report.passed = false;
+                outcome.report.error = Some(match outcome.report.error.take() {
+                    Some(existing) => format!("{existing}; {message}"),
+                    None => message.clone(),
+                });
+                let _ = write_report(&outcome.layout, &mut outcome.report);
+                return Err(HarnessError::ImageCompare(message));
+            }
+            Ok(outcome)
+        }
         Err(err) => {
             let mut report = report_from_error(case, format!("harness error: {err}"));
             let _ = write_report(&layout, &mut report);
             Err(err)
         }
     }
+}
+
+fn template_requests_physically_based(template: &SessionTemplate) -> bool {
+    matches!(
+        template,
+        SessionTemplate::NegativeLightPair {
+            physically_based: true,
+            ..
+        }
+    )
+}
+
+/// Renders the physically based scene again with the negative light omitted and compares it
+/// to the case capture. Parity cases and every other template skip this check.
+fn positive_only_reference_failure(
+    case: &IntegrationCase,
+    runner: &RunnerConfig,
+    layout: &CaseOutputLayout,
+) -> Result<(), String> {
+    let CaseTemplate::NegativeLightPair {
+        physically_based: true,
+        include_negative: true,
+    } = case.template
+    else {
+        return Ok(());
+    };
+    if !layout.actual_png.is_file() {
+        return Err(format!(
+            "physically based capture missing at {}",
+            layout.actual_png.display()
+        ));
+    }
+
+    let reference_path = layout.root.join("positive_only.png");
+    let harness_cfg = HostHarnessConfig {
+        renderer_path: runner.renderer_path.clone(),
+        forced_output_path: Some(reference_path.clone()),
+        width: case.resolution.0,
+        height: case.resolution.1,
+        interval_ms: runner.interval_ms,
+        timeout: runner.timeout,
+        verbose_renderer: runner.verbose_renderer,
+        physically_based: false,
+        template: SessionTemplate::NegativeLightPair {
+            physically_based: false,
+            include_negative: false,
+        },
+    };
+    let mut harness = HostHarness::start(harness_cfg).map_err(|err| err.to_string())?;
+    harness.run().map_err(|err| err.to_string())?;
+
+    let actual = load_rgba(&layout.actual_png).map_err(|err| err.to_string())?;
+    let reference = load_rgba(&reference_path).map_err(|err| err.to_string())?;
+    let eval = case.tolerance.evaluate(&actual, &reference)?;
+    if eval.passed {
+        return Ok(());
+    }
+    let diff_path = layout.root.join("positive_only_diff.png");
+    if let Err(err) = write_diff_image(&actual, &reference, &diff_path) {
+        logger::warn!(
+            "runner: failed to write positive-only diff PNG at {}: {err}",
+            diff_path.display()
+        );
+    }
+    Err(format!(
+        "physically based capture does not match the same scene without the negative light \
+         (ssim={:?}, failing_fraction={:?})",
+        eval.ssim, eval.failing_pixel_fraction
+    ))
 }
 
 fn drive_template(cfg: HostHarnessConfig) -> Result<(), HarnessError> {
@@ -237,31 +320,45 @@ fn prepare_template(
         CaseTemplate::DoubleBufferNothingOnSkybox => Ok(PreparedTemplate {
             session_template: SessionTemplate::DoubleBufferNothingOnSkybox,
         }),
-        CaseTemplate::GltfTexturedStaticMesh { path } => {
-            let imported = load_static_textured_mesh(path)?;
-            let texture_size = imported.texture_size;
-            let texture_rgba = imported.texture_rgba;
-            let texture_preview =
-                image::RgbaImage::from_raw(texture_size.0, texture_size.1, texture_rgba.clone())
-                    .ok_or_else(|| {
-                        HarnessError::QueueOptions(format!(
-                            "GLB texture {}x{} did not match RGBA byte length",
-                            texture_size.0, texture_size.1
-                        ))
-                    })?;
-            save_rgba(
-                &texture_preview,
-                &layout.root.join("gltf_base_color_texture.png"),
-            )?;
-            Ok(PreparedTemplate {
-                session_template: SessionTemplate::GltfTexturedStaticMesh {
-                    mesh: imported.mesh,
-                    texture_rgba,
-                    texture_size,
-                },
-            })
-        }
+        CaseTemplate::NegativeLightPair {
+            physically_based,
+            include_negative,
+        } => Ok(PreparedTemplate {
+            session_template: SessionTemplate::NegativeLightPair {
+                physically_based: *physically_based,
+                include_negative: *include_negative,
+            },
+        }),
+        CaseTemplate::GltfTexturedStaticMesh { path } => gltf_prepared_template(path, layout),
     }
+}
+
+fn gltf_prepared_template(
+    path: &std::path::Path,
+    layout: &CaseOutputLayout,
+) -> Result<PreparedTemplate, HarnessError> {
+    let imported = load_static_textured_mesh(path)?;
+    let texture_size = imported.texture_size;
+    let texture_rgba = imported.texture_rgba;
+    let texture_preview =
+        image::RgbaImage::from_raw(texture_size.0, texture_size.1, texture_rgba.clone())
+            .ok_or_else(|| {
+                HarnessError::QueueOptions(format!(
+                    "GLB texture {}x{} did not match RGBA byte length",
+                    texture_size.0, texture_size.1
+                ))
+            })?;
+    save_rgba(
+        &texture_preview,
+        &layout.root.join("gltf_base_color_texture.png"),
+    )?;
+    Ok(PreparedTemplate {
+        session_template: SessionTemplate::GltfTexturedStaticMesh {
+            mesh: imported.mesh,
+            texture_rgba,
+            texture_size,
+        },
+    })
 }
 
 fn evaluate_and_finalize(

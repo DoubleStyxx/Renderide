@@ -24,6 +24,12 @@ impl Drop for SpawnedRenderer {
     }
 }
 
+/// Figment key for the renderer `[rendering] physically_based` setting.
+///
+/// `--ignore-config` skips the TOML file and still merges `RENDERIDE_*` variables, so the
+/// harness can select the mode without a config file.
+const PHYSICALLY_BASED_ENV: &str = "RENDERIDE_RENDERING__PHYSICALLY_BASED";
+
 /// Must match `SHADOW_ATLAS_PASS_LOG_ENV` in the renderer headless driver.
 ///
 /// The suite reads `{png}.atlas-passes` and the append-only pass log. A normal headless run
@@ -41,6 +47,8 @@ pub(super) fn spawn_renderer(
     cmd.args(&args);
     cmd.env("RENDERIDE_INTERPROCESS_DIR", backing_dir);
     cmd.env(SHADOW_ATLAS_PASS_LOG_ENV, "1");
+    let (physically_based_key, physically_based_value) = physically_based_env(cfg.physically_based);
+    cmd.env(physically_based_key, physically_based_value);
 
     if cfg.verbose_renderer {
         cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
@@ -56,6 +64,11 @@ pub(super) fn spawn_renderer(
 
     let child = cmd.spawn().map_err(HarnessError::SpawnRenderer)?;
     Ok(SpawnedRenderer { child: Some(child) })
+}
+
+/// Environment pair that selects physically based light upload for one renderer process.
+fn physically_based_env(enabled: bool) -> (&'static str, &'static str) {
+    (PHYSICALLY_BASED_ENV, if enabled { "true" } else { "false" })
 }
 
 /// Builds the renderer process arguments for one harness session.
@@ -95,7 +108,20 @@ mod tests {
             interval_ms: 250,
             timeout: Duration::from_secs(5),
             verbose_renderer: false,
+            physically_based: false,
         }
+    }
+
+    #[test]
+    fn physically_based_env_names_the_rendering_flag() {
+        assert_eq!(
+            super::physically_based_env(false),
+            ("RENDERIDE_RENDERING__PHYSICALLY_BASED", "false")
+        );
+        assert_eq!(
+            super::physically_based_env(true),
+            ("RENDERIDE_RENDERING__PHYSICALLY_BASED", "true")
+        );
     }
 
     #[test]
