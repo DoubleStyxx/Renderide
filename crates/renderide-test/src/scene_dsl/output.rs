@@ -111,6 +111,9 @@ pub struct CaseReport {
     /// Optional error message when `passed = false` and `evaluation = None` (e.g. capture
     /// failure, harness error).
     pub error: Option<String>,
+    /// `behavior` or `adapter_comparison`. Stamped after the renderer log names the adapter.
+    #[serde(default = "default_behavior_gate")]
+    pub gate: String,
     /// Set when a failure is an expected WARP mismatch. A pass leaves this empty.
     /// The text is `expected failure (WARP, #212)` and `passed` stays false.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -134,6 +137,10 @@ pub struct CaseReport {
     /// `quarantined:#216` while that quarantine applies. Absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+fn default_behavior_gate() -> String {
+    crate::adapter_gate::BEHAVIOR.to_string()
 }
 
 /// Writes a `report.json` describing the comparison outcome.
@@ -160,6 +167,7 @@ pub fn report_from_evaluation(case: &IntegrationCase, eval: ToleranceEvaluation)
         passed: eval.passed,
         evaluation: Some(eval),
         error: None,
+        gate: default_behavior_gate(),
         result: None,
         cpu_model: String::new(),
         adapter: String::new(),
@@ -180,6 +188,7 @@ pub fn report_from_error(case: &IntegrationCase, message: impl Into<String>) -> 
         passed: false,
         evaluation: None,
         error: Some(message.into()),
+        gate: default_behavior_gate(),
         result: None,
         cpu_model: String::new(),
         adapter: String::new(),

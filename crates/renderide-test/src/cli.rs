@@ -118,8 +118,9 @@ fn run_suite_command(opts: &SuiteOpts) -> Result<(), HarnessError> {
         config.runner.output_root.display()
     );
 
-    let outcome = run_suite(config)?;
-    print_suite_outcome(&outcome, "PASS", "passed");
+    let mut outcome = run_suite(config)?;
+    stamp_adapter_gate(&mut outcome);
+    print_suite_outcome(&outcome, "passed", true);
     if outcome.passed() {
         Ok(())
     } else {
@@ -141,8 +142,9 @@ fn run_update_suite_command(opts: &SuiteOpts) -> Result<(), HarnessError> {
         config.runner.output_root.display()
     );
 
-    let outcome = update_suite(config)?;
-    print_suite_outcome(&outcome, "UPDATE", "updated");
+    let mut outcome = update_suite(config)?;
+    stamp_adapter_gate(&mut outcome);
+    print_suite_outcome(&outcome, "updated", false);
     if outcome.passed() {
         Ok(())
     } else {
@@ -186,10 +188,36 @@ fn suite_config_from_opts(opts: &SuiteOpts) -> Result<SuiteConfig, HarnessError>
     })
 }
 
+fn stamp_adapter_gate(outcome: &mut crate::scene_dsl::suite::SuiteRunOutcome) {
+    let adapter = crate::adapter_gate::adapter_from_directory(&logger::log_dir_for(
+        logger::LogComponent::Renderer,
+    ));
+    let label = adapter
+        .as_ref()
+        .map(crate::adapter_gate::ObservedAdapter::label)
+        .unwrap_or_default();
+    for case in &mut outcome.report.cases {
+        let gate = crate::adapter_gate::gate_for(&case.name, adapter.as_ref());
+        case.gate = gate.as_str().to_string();
+        case.adapter.clone_from(&label);
+        if !crate::adapter_gate::stamp_case_report(&case.report_json, gate, &label) {
+            logger::warn!(
+                "Suite: could not record the adapter gate on {}",
+                case.report_json.display()
+            );
+        }
+    }
+    if let Some(root) = outcome.report_path.parent()
+        && let Err(err) = crate::scene_dsl::suite::write_suite_report(root, &outcome.report)
+    {
+        logger::warn!("Suite: could not record the adapter gate on the suite report: {err}");
+    }
+}
+
 fn print_suite_outcome(
     outcome: &crate::scene_dsl::suite::SuiteRunOutcome,
-    success_label: &str,
     result_label: &str,
+    print_adapter: bool,
 ) {
     if let Some(warning) = outcome.report.quarantine_warning.as_deref() {
         println!("{}", crate::scene_dsl::warn_line(warning));
@@ -207,24 +235,21 @@ fn print_suite_outcome(
                 "{}",
                 crate::scene_dsl::quarantined_line(&case.name, &case.artifacts_dir)
             );
-        } else if case.passed {
-            println!(
-                "{} {} ({})",
-                success_label,
-                case.name,
-                case.artifacts_dir.display()
-            );
         } else {
-            println!(
-                "FAIL {} ({}) {}",
-                case.name,
-                case.artifacts_dir.display(),
-                case.error.as_deref().unwrap_or("case failed")
-            );
+            let one = [print_case(case)];
+            let printed = if print_adapter {
+                crate::adapter_gate::format_check_suite(&one)
+            } else {
+                crate::adapter_gate::format_update_suite(&one)
+            };
+            println!("{}", printed.case_lines[0]);
         }
     }
     println!("Suite report: {}", outcome.report_path.display());
     println!("{}", format_suite_result(&outcome.report, result_label));
+    if print_adapter {
+        println!("{}", check_suite_gate_summary(&outcome.report));
+    }
     println!("{}", crate::scene_dsl::suite::SUITE_READINESS_SUMMARY);
 }
 
@@ -248,6 +273,34 @@ fn format_suite_result(
         (_, _) => format!(
             "Suite result: {passed}/{total} {result_label}, {expected} {expected_label}, {quarantined} quarantined"
         ),
+    }
+}
+
+/// Passing cases split by gate. A failure, expected failure, or quarantine is in neither count.
+fn check_suite_gate_summary(report: &crate::scene_dsl::suite::SuiteReport) -> String {
+    let passing = report
+        .cases
+        .iter()
+        .filter(|case| case.passed)
+        .map(print_case)
+        .collect::<Vec<_>>();
+    crate::adapter_gate::format_check_suite(&passing).summary
+}
+
+fn print_case(
+    case: &crate::scene_dsl::suite::SuiteCaseReport,
+) -> crate::adapter_gate::PrintCase<'_> {
+    crate::adapter_gate::PrintCase {
+        name: &case.name,
+        passed: case.passed,
+        artifacts_dir: &case.artifacts_dir,
+        error: case.error.as_deref(),
+        gate: if case.gate == crate::adapter_gate::ADAPTER_COMPARISON {
+            crate::adapter_gate::Gate::AdapterComparison
+        } else {
+            crate::adapter_gate::Gate::Behavior
+        },
+        adapter: &case.adapter,
     }
 }
 
@@ -454,10 +507,21 @@ mod cli_tests {
             super::format_suite_result(&with_quarantine, "passed"),
             "Suite result: 1/2 passed, 1 quarantined"
         );
-        let both = SuiteReport::from_cases(vec![pass, expected, quarantined]);
+        let both = SuiteReport::from_cases(vec![pass.clone(), expected, quarantined]);
         assert_eq!(
             super::format_suite_result(&both, "passed"),
             "Suite result: 1/3 passed, 1 expected failure (WARP, #212), 1 quarantined"
+        );
+        assert_eq!(
+            super::check_suite_gate_summary(&with_expected),
+            "Suite result: 1 behavior + 0 adapter comparison"
+        );
+        let mut adapter_case = case("d", true, None, None, None);
+        adapter_case.gate = crate::adapter_gate::ADAPTER_COMPARISON.to_string();
+        let split = SuiteReport::from_cases(vec![pass, adapter_case]);
+        assert_eq!(
+            super::check_suite_gate_summary(&split),
+            "Suite result: 1 behavior + 1 adapter comparison"
         );
     }
 
