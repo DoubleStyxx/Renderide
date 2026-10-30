@@ -514,9 +514,10 @@ wgpu adapter selected (headless): NVIDIA GeForce RTX 4090 type=DiscreteGpu backe
             adapter: "Microsoft Basic Render Driver type=Cpu backend=Dx12",
         }];
         let printed = format_update_suite(&print_cases);
+        let artifacts = PathBuf::from("out").join(PBS_LIT);
         assert_eq!(
             printed.case_lines,
-            vec![format!("UPDATE {PBS_LIT} (out/{PBS_LIT})")]
+            vec![format!("UPDATE {PBS_LIT} ({})", artifacts.display())]
         );
         assert!(!printed.case_lines[0].contains("ADAPTER"));
         assert_eq!(printed.summary, "Suite result: 1/1 updated");
