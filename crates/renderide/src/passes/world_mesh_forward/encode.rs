@@ -360,6 +360,7 @@ fn bind_material_packet_if_changed(
     match &packet.group1_binding {
         MaterialGroup1Binding::Empty => {
             rpass.set_bind_group(1, resources.empty_bg, &[]);
+            crate::gpu::warp_black_diag::note_group1_binding(false, None);
         }
         MaterialGroup1Binding::Embedded {
             bind_group,
@@ -371,6 +372,7 @@ fn bind_material_packet_if_changed(
             } else {
                 rpass.set_bind_group(1, bind_group.as_ref(), &[]);
             }
+            crate::gpu::warp_black_diag::note_group1_binding(true, *uniform_dynamic_offset);
         }
     }
     state.bound_batch_cursor = Some(batch_cursor);

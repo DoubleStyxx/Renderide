@@ -84,14 +84,15 @@ impl SkyboxViewUniforms {
             1.0
         };
         let ortho_flag = projection_kind_orthographic_flag(frame.view.host_camera.projection_kind);
+        let clear_color =
+            crate::gpu::warp_black_diag::skybox_clear_color(frame.view.clear.color.to_array());
+        crate::gpu::warp_black_diag_probe::log_skybox_clear(clear_color);
         Self {
             view_to_world_left: left.inverse().to_cols_array(),
             view_to_world_right: right.inverse().to_cols_array(),
             world_to_view_left: left.to_cols_array(),
             world_to_view_right: right.to_cols_array(),
-            clear_color: crate::gpu::warp_black_diag::skybox_clear_color(
-                frame.view.clear.color.to_array(),
-            ),
+            clear_color,
             ndc_y_sign_pad: [ndc_y_sign, ortho_flag, ortho_flag, 0.0],
         }
     }
@@ -478,10 +479,12 @@ fn record_prepared_skybox_inner(
             rpass.set_bind_group(2, skybox.view_bind_group.as_ref(), &[]);
             match &skybox.geometry {
                 PreparedMaterialSkyboxGeometry::FullscreenTriangle { vertex_count } => {
+                    crate::gpu::warp_black_diag::note_skybox_draw("material");
                     rpass.draw(0..*vertex_count, 0..1);
                 }
                 PreparedMaterialSkyboxGeometry::Mesh { mesh } => {
                     rpass.set_vertex_buffer(0, mesh.vertex_buffer.slice(0..));
+                    crate::gpu::warp_black_diag::note_skybox_draw("material");
                     rpass.draw(0..mesh.vertex_count, 0..1);
                 }
             }
@@ -490,6 +493,7 @@ fn record_prepared_skybox_inner(
         PreparedSkybox::ClearColor(clear) => {
             rpass.set_pipeline(clear.pipeline.as_ref());
             rpass.set_bind_group(0, clear.view_bind_group.as_ref(), &[]);
+            crate::gpu::warp_black_diag::note_skybox_draw("clear_color");
             rpass.draw(0..3, 0..1);
             true
         }

@@ -262,7 +262,12 @@ pub(super) fn draw_mesh_submesh_instanced(
 
     let first = item.first_index;
     let end = first.saturating_add(item.index_count);
-    crate::gpu::warp_black_diag::note_encoded_draw(instances.end.saturating_sub(instances.start));
+    crate::gpu::warp_black_diag::note_encoded_draw(
+        item.mesh_asset_id,
+        item.first_index,
+        item.index_count,
+        instances.end.saturating_sub(instances.start),
+    );
     rpass.draw_indexed(first..end, 0, instances);
 }
 
@@ -320,7 +325,12 @@ pub(super) fn draw_mesh_submesh_depth_instanced(
 
     let first = item.first_index;
     let end = first.saturating_add(item.index_count);
-    crate::gpu::warp_black_diag::note_encoded_draw(instances.end.saturating_sub(instances.start));
+    crate::gpu::warp_black_diag::note_encoded_draw(
+        item.mesh_asset_id,
+        item.first_index,
+        item.index_count,
+        instances.end.saturating_sub(instances.start),
+    );
     rpass.draw_indexed(first..end, 0, instances);
 }
 

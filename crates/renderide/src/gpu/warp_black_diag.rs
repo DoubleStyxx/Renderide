@@ -6,15 +6,19 @@
 //! two extra WARP frames after the watchdog resumes change the pixels. On a
 //! `pbs_lit` headless run they also log, once per change of state, the draws
 //! encoded for the forward pass and the depth prepass, the world-view cull
-//! counts, and the bound pipeline variants. Naga info and warn records already
-//! reach the renderer log; naga debug stays filtered. They do not change the
-//! expected-failure rule.
+//! counts, and the bound pipeline variants. Each of those draws is named
+//! (mesh, index range, instance count, and the group-1 bind). The same run
+//! logs the CPU camera, light, and material values that were uploaded, the
+//! forward color and depth load ops, and one second readback after
+//! `device.poll(Wait)` plus another copy submit. Naga info and warn records
+//! already reach the renderer log; naga debug stays filtered. They do not
+//! change the expected-failure rule.
 
 use std::cell::Cell;
 use std::collections::{BTreeSet, VecDeque};
 use std::fmt::Write;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
@@ -50,9 +54,45 @@ static FRAME: Mutex<FrameDiag> = Mutex::new(FrameDiag::new());
 const PASS_FORWARD: u8 = 1;
 const PASS_DEPTH: u8 = 2;
 const MAX_LOGGED_PIPELINES: usize = 16;
+const MAX_DRAW_NOTES: usize = 8;
+const LOAD_UNKNOWN: u8 = 0;
+const LOAD_CLEAR: u8 = 1;
+const LOAD_LOAD: u8 = 2;
+/// Second-readback bit: a published frame encoded at least one forward draw.
+const RETRY_DRAWN: u8 = 1;
+/// Second-readback bit: the pixels were black, or black sitting on the clear.
+const RETRY_BLACK: u8 = 2;
+
+static LAST_PUBLISHED_FORWARD: AtomicU64 = AtomicU64::new(0);
+static RETRY_BITS: AtomicU8 = AtomicU8::new(0);
 
 thread_local! {
     static ENCODE_PASS: Cell<u8> = const { Cell::new(0) };
+    static GROUP1: Cell<Group1Bind> = const { Cell::new(Group1Bind::EMPTY) };
+}
+
+#[derive(Clone, Copy)]
+struct Group1Bind {
+    embedded: bool,
+    offset: Option<u32>,
+}
+
+impl Group1Bind {
+    const EMPTY: Self = Self {
+        embedded: false,
+        offset: None,
+    };
+}
+
+/// One indexed draw recorded while the `pbs_lit` frame log is armed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct EncodedDrawNote {
+    mesh_asset_id: i32,
+    first_index: u32,
+    index_count: u32,
+    instances: u32,
+    group1_embedded: bool,
+    uniform_offset: Option<u32>,
 }
 
 struct SubmitNote {
@@ -338,8 +378,9 @@ impl Drop for MapAsyncSpan {
 pub(crate) fn log_readback_colors(bytes: &[u8]) {
     let colors = count_readback_colors(bytes);
     logger::info!(
-        "diag-readback-colors: pixels={} black_0_0_0_255={} distinctive_255_0_255_255={} other={} first=({},{},{},{}) center=({},{},{},{}) distinctive_clear_armed={}",
+        "diag-readback-colors: pixels={} class={} black_0_0_0_255={} distinctive_255_0_255_255={} other={} first=({},{},{},{}) center=({},{},{},{}) min=({},{},{},{}) max=({},{},{},{}) distinctive_clear_armed={}",
         colors.pixels,
+        classify_readback(&colors),
         colors.black,
         colors.distinctive,
         colors.other,
@@ -351,7 +392,52 @@ pub(crate) fn log_readback_colors(bytes: &[u8]) {
         colors.center[1],
         colors.center[2],
         colors.center[3],
+        colors.min[0],
+        colors.min[1],
+        colors.min[2],
+        colors.min[3],
+        colors.max[0],
+        colors.max[1],
+        colors.max[2],
+        colors.max[3],
         distinctive_clear_enabled(),
+    );
+}
+
+/// `true` once for the first drawn frame, and once for the first black frame.
+///
+/// A second copy is expensive on WARP, so a run probes at most those two
+/// readbacks. Magenta frames that encoded no draws are not probed.
+pub(crate) fn claim_second_readback(bytes: &[u8]) -> bool {
+    if !frame_log_armed() {
+        return false;
+    }
+    let bits = retry_bits(
+        classify_readback(&count_readback_colors(bytes)),
+        LAST_PUBLISHED_FORWARD.load(Ordering::Acquire),
+    );
+    if bits == 0 {
+        return false;
+    }
+    let previous = RETRY_BITS.fetch_or(bits, Ordering::AcqRel);
+    claim_retry_bits(previous, bits)
+}
+
+/// Logs the explicit `PollType::Wait` and the second copy against `first`.
+pub(crate) fn log_readback_retry(poll: &str, poll_ms: u128, first: &[u8], second: &[u8]) {
+    let before = count_readback_colors(first);
+    let after = count_readback_colors(second);
+    logger::info!(
+        "diag-readback-retry: poll={poll} poll_ms={poll_ms} same_bytes={} first_class={} first_black={} first_magenta={} first_other={} second_class={} second_black={} second_magenta={} second_other={}",
+        first == second,
+        classify_readback(&before),
+        before.black,
+        before.distinctive,
+        before.other,
+        classify_readback(&after),
+        after.black,
+        after.distinctive,
+        after.other,
     );
 }
 
@@ -363,6 +449,8 @@ struct ReadbackColors {
     other: u64,
     first: [u8; 4],
     center: [u8; 4],
+    min: [u8; 4],
+    max: [u8; 4],
 }
 
 fn count_readback_colors(bytes: &[u8]) -> ReadbackColors {
@@ -373,6 +461,8 @@ fn count_readback_colors(bytes: &[u8]) -> ReadbackColors {
         other: 0,
         first: [0, 0, 0, 0],
         center: [0, 0, 0, 0],
+        min: [255, 255, 255, 255],
+        max: [0, 0, 0, 0],
     };
     let (pixels, _) = bytes.as_chunks::<4>();
     colors.pixels = u64::try_from(pixels.len()).unwrap_or(u64::MAX);
@@ -390,8 +480,43 @@ fn count_readback_colors(bytes: &[u8]) -> ReadbackColors {
         } else {
             colors.other += 1;
         }
+        for (channel, sample) in px.iter().enumerate() {
+            colors.min[channel] = colors.min[channel].min(*sample);
+            colors.max[channel] = colors.max[channel].max(*sample);
+        }
     }
     colors
+}
+
+fn classify_readback(colors: &ReadbackColors) -> &'static str {
+    if colors.pixels == 0 {
+        "empty"
+    } else if colors.distinctive == colors.pixels {
+        "magenta_clear"
+    } else if colors.black == colors.pixels {
+        "black"
+    } else if colors.other > 0 {
+        "shaded"
+    } else if colors.black > 0 && colors.distinctive > 0 {
+        "black_on_clear"
+    } else {
+        "mixed"
+    }
+}
+
+fn retry_bits(class: &str, forward_draws: u64) -> u8 {
+    let mut bits = 0;
+    if forward_draws > 0 {
+        bits |= RETRY_DRAWN;
+    }
+    if class == "black" || class == "black_on_clear" {
+        bits |= RETRY_BLACK;
+    }
+    bits
+}
+
+fn claim_retry_bits(already: u8, new_bits: u8) -> bool {
+    new_bits != 0 && already & new_bits != new_bits
 }
 
 fn driver_status() -> String {
@@ -442,8 +567,10 @@ pub(crate) fn arm_frame_log(path: &Path) {
     FRAME_LOG.store(armed, Ordering::Release);
     if armed {
         logger::info!(
-            "diag-pbs-frame: armed path={} naga_info_and_warn_visible=true",
-            path.display()
+            "diag-pbs-frame: armed path={} naga_info_and_warn_visible=true depth_clear={} depth_compare={:?} skybox_zwrite=off skybox_after_opaque=true",
+            path.display(),
+            super::MAIN_FORWARD_DEPTH_CLEAR,
+            super::MAIN_FORWARD_DEPTH_COMPARE,
         );
     }
 }
@@ -477,20 +604,75 @@ impl Drop for EncodePassGuard {
     }
 }
 
+/// Records the group-1 bind used by the next forward draws.
+pub(crate) fn note_group1_binding(embedded: bool, uniform_offset: Option<u32>) {
+    if !frame_log_armed() {
+        return;
+    }
+    GROUP1.with(|cell| {
+        cell.set(Group1Bind {
+            embedded,
+            offset: uniform_offset,
+        });
+    });
+}
+
 /// Records one encoded draw when a pass guard is active.
-pub(crate) fn note_encoded_draw(instances: u32) {
+pub(crate) fn note_encoded_draw(
+    mesh_asset_id: i32,
+    first_index: u32,
+    index_count: u32,
+    instances: u32,
+) {
     if !frame_log_armed() {
         return;
     }
     let pass = ENCODE_PASS.with(|cell| cell.get());
+    let group1 = GROUP1.with(|cell| cell.get());
+    let forward = pass == PASS_FORWARD;
+    let note = EncodedDrawNote {
+        mesh_asset_id,
+        first_index,
+        index_count,
+        instances,
+        group1_embedded: forward && group1.embedded,
+        uniform_offset: if forward { group1.offset } else { None },
+    };
     let mut diag = FRAME.lock();
     let count = u64::from(instances);
-    if pass == PASS_FORWARD {
+    if forward {
         diag.accum.forward_draws = diag.accum.forward_draws.saturating_add(1);
         diag.accum.forward_instances = diag.accum.forward_instances.saturating_add(count);
+        diag.accum.push_forward_draw(note);
     } else if pass == PASS_DEPTH {
         diag.accum.depth_draws = diag.accum.depth_draws.saturating_add(1);
         diag.accum.depth_instances = diag.accum.depth_instances.saturating_add(count);
+        diag.accum.push_depth_draw(note);
+    }
+}
+
+/// Records the forward pass load ops. `true` means `LoadOp::Clear`.
+pub(crate) fn note_forward_load_ops(color_clear: bool, depth_clear: bool) {
+    if !frame_log_armed() {
+        return;
+    }
+    let mut diag = FRAME.lock();
+    diag.accum.color_load = if color_clear { LOAD_CLEAR } else { LOAD_LOAD };
+    diag.accum.depth_load = if depth_clear { LOAD_CLEAR } else { LOAD_LOAD };
+}
+
+/// Records one skybox or solid-background draw. `kind` is `clear_color` or `material`.
+pub(crate) fn note_skybox_draw(kind: &'static str) {
+    if !frame_log_armed() {
+        return;
+    }
+    let mut diag = FRAME.lock();
+    diag.accum.skybox_draws = diag.accum.skybox_draws.saturating_add(1);
+    if !diag.accum.skybox_kinds.is_empty() {
+        diag.accum.skybox_kinds.push('+');
+    }
+    if diag.accum.skybox_kinds.len() < 48 {
+        diag.accum.skybox_kinds.push_str(kind);
     }
 }
 
@@ -564,6 +746,7 @@ fn publish_frame_log(record: bool) {
         let signature = diag.accum.signature();
         diag.accum = FrameAccum::new();
         if record {
+            LAST_PUBLISHED_FORWARD.store(signature.forward_draws, Ordering::Release);
             diag.log.observe(signature)
         } else {
             None
@@ -605,6 +788,14 @@ struct FrameAccum {
     visible: u64,
     views: u64,
     pipelines: BTreeSet<PipelineNote>,
+    forward_draw_notes: Vec<EncodedDrawNote>,
+    depth_draw_notes: Vec<EncodedDrawNote>,
+    forward_draw_overflow: u64,
+    depth_draw_overflow: u64,
+    skybox_draws: u64,
+    skybox_kinds: String,
+    color_load: u8,
+    depth_load: u8,
 }
 
 impl FrameAccum {
@@ -620,6 +811,30 @@ impl FrameAccum {
             visible: 0,
             views: 0,
             pipelines: BTreeSet::new(),
+            forward_draw_notes: Vec::new(),
+            depth_draw_notes: Vec::new(),
+            forward_draw_overflow: 0,
+            depth_draw_overflow: 0,
+            skybox_draws: 0,
+            skybox_kinds: String::new(),
+            color_load: LOAD_UNKNOWN,
+            depth_load: LOAD_UNKNOWN,
+        }
+    }
+
+    fn push_forward_draw(&mut self, note: EncodedDrawNote) {
+        if self.forward_draw_notes.len() < MAX_DRAW_NOTES {
+            self.forward_draw_notes.push(note);
+        } else {
+            self.forward_draw_overflow = self.forward_draw_overflow.saturating_add(1);
+        }
+    }
+
+    fn push_depth_draw(&mut self, note: EncodedDrawNote) {
+        if self.depth_draw_notes.len() < MAX_DRAW_NOTES {
+            self.depth_draw_notes.push(note);
+        } else {
+            self.depth_draw_overflow = self.depth_draw_overflow.saturating_add(1);
         }
     }
 
@@ -651,6 +866,14 @@ impl FrameAccum {
             views: self.views,
             pipelines,
             pipeline_overflow: overflow,
+            color_load: self.color_load,
+            depth_load: self.depth_load,
+            skybox_draws: self.skybox_draws,
+            skybox_kinds: self.skybox_kinds.clone(),
+            forward_draws_detail: format_draw_notes(&self.forward_draw_notes, false),
+            depth_draws_detail: format_draw_notes(&self.depth_draw_notes, true),
+            forward_draw_overflow: self.forward_draw_overflow,
+            depth_draw_overflow: self.depth_draw_overflow,
         }
     }
 }
@@ -681,6 +904,14 @@ struct FrameSignature {
     views: u64,
     pipelines: String,
     pipeline_overflow: u64,
+    color_load: u8,
+    depth_load: u8,
+    skybox_draws: u64,
+    skybox_kinds: String,
+    forward_draws_detail: String,
+    depth_draws_detail: String,
+    forward_draw_overflow: u64,
+    depth_draw_overflow: u64,
 }
 
 struct FrameLogState {
@@ -728,8 +959,13 @@ fn format_frame_event(event: &FrameLogEvent) -> String {
     } else {
         signature.pipelines.as_str()
     };
+    let skybox = if signature.skybox_kinds.is_empty() {
+        "-"
+    } else {
+        signature.skybox_kinds.as_str()
+    };
     format!(
-        "diag-pbs-frame: frame={} prev_streak={} forward_draws={} forward_instances={} depth_draws={} depth_instances={} pre_cull={} frustum={} hiz={} visible={} views={} pipelines={} pipeline_overflow={}",
+        "diag-pbs-frame: frame={} prev_streak={} forward_draws={} forward_instances={} depth_draws={} depth_instances={} pre_cull={} frustum={} hiz={} visible={} views={} pipelines={} pipeline_overflow={} color_load={} depth_load={} skybox={} skybox_kind={} draws={} depth_draws_detail={} draw_overflow={} depth_draw_overflow={}",
         event.frame,
         event.prev_streak,
         signature.forward_draws,
@@ -743,6 +979,54 @@ fn format_frame_event(event: &FrameLogEvent) -> String {
         signature.views,
         pipelines,
         signature.pipeline_overflow,
+        load_label(signature.color_load),
+        load_label(signature.depth_load),
+        signature.skybox_draws,
+        skybox,
+        signature.forward_draws_detail,
+        signature.depth_draws_detail,
+        signature.forward_draw_overflow,
+        signature.depth_draw_overflow,
+    )
+}
+
+fn load_label(kind: u8) -> &'static str {
+    match kind {
+        LOAD_CLEAR => "clear",
+        LOAD_LOAD => "load",
+        _ => "unknown",
+    }
+}
+
+fn format_draw_notes(notes: &[EncodedDrawNote], depth: bool) -> String {
+    if notes.is_empty() {
+        return "-".to_owned();
+    }
+    let mut out = String::new();
+    for (index, note) in notes.iter().enumerate() {
+        if index > 0 {
+            out.push(';');
+        }
+        out.push_str(&format_draw_note(note, depth));
+    }
+    out
+}
+
+fn format_draw_note(note: &EncodedDrawNote, depth: bool) -> String {
+    let pass = if depth { "d" } else { "f" };
+    let bind = if depth {
+        String::new()
+    } else if note.group1_embedded {
+        match note.uniform_offset {
+            Some(offset) => format!("/e{offset}"),
+            None => "/e".to_owned(),
+        }
+    } else {
+        "/empty".to_owned()
+    };
+    format!(
+        "{pass}:m{}:{}+{}x{}{bind}",
+        note.mesh_asset_id, note.first_index, note.index_count, note.instances
     )
 }
 
@@ -757,8 +1041,9 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        FrameAccum, FrameLogState, HoldDecision, PipelineNote, WarpExtraWait,
-        count_readback_colors, fault_flags, path_requests_frame_log,
+        FrameAccum, FrameLogState, HoldDecision, LOAD_CLEAR, PipelineNote, RETRY_BLACK,
+        RETRY_DRAWN, WarpExtraWait, claim_retry_bits, classify_readback, count_readback_colors,
+        fault_flags, path_requests_frame_log, retry_bits,
     };
 
     #[test]
@@ -814,6 +1099,32 @@ mod tests {
         assert_eq!(colors.other, 2);
         assert_eq!(colors.first, [0, 0, 0, 255]);
         assert_eq!(colors.center, [1, 2, 3, 255]);
+        assert_eq!(colors.min[0], 0);
+        assert_eq!(colors.max[0], 255);
+        assert_eq!(classify_readback(&colors), "shaded");
+    }
+
+    #[test]
+    fn readback_class_separates_clear_black_and_black_on_clear() {
+        let magenta = count_readback_colors(&[255, 0, 255, 255, 255, 0, 255, 255]);
+        assert_eq!(classify_readback(&magenta), "magenta_clear");
+        let black = count_readback_colors(&[0, 0, 0, 255, 0, 0, 0, 255]);
+        assert_eq!(classify_readback(&black), "black");
+        let spheres = count_readback_colors(&[0, 0, 0, 255, 255, 0, 255, 255]);
+        assert_eq!(classify_readback(&spheres), "black_on_clear");
+    }
+
+    #[test]
+    fn second_readback_is_claimed_for_a_drawn_frame_and_a_later_black_frame() {
+        assert!(!claim_retry_bits(0, retry_bits("magenta_clear", 0)));
+        assert!(claim_retry_bits(0, retry_bits("shaded", 4)));
+        assert!(!claim_retry_bits(RETRY_DRAWN, retry_bits("shaded", 4)));
+        assert!(claim_retry_bits(RETRY_DRAWN, retry_bits("black", 4)));
+        assert!(!claim_retry_bits(
+            RETRY_DRAWN | RETRY_BLACK,
+            retry_bits("black_on_clear", 4)
+        ));
+        assert!(claim_retry_bits(0, retry_bits("black", 0)));
     }
 
     #[test]
@@ -881,6 +1192,14 @@ mod tests {
             views: 1,
             pipelines: pipelines.to_owned(),
             pipeline_overflow: 0,
+            color_load: LOAD_CLEAR,
+            depth_load: LOAD_CLEAR,
+            skybox_draws: 0,
+            skybox_kinds: String::new(),
+            forward_draws_detail: "-".to_owned(),
+            depth_draws_detail: "-".to_owned(),
+            forward_draw_overflow: 0,
+            depth_draw_overflow: 0,
         }
     }
 

@@ -65,6 +65,7 @@ pub(super) fn write_per_view_frame_uniforms(
         0,
         bytemuck::bytes_of(&uniforms),
     );
+    crate::gpu::warp_black_diag_probe::log_frame_uniforms(&uniforms);
 }
 
 /// Resolves cluster + camera-world scratch into [`FrameGpuUniforms`] for one view.

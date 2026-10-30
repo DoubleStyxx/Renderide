@@ -238,7 +238,7 @@ fn loads_for_seed(
     seed_color: bool,
     persistent_depth_target: bool,
 ) -> ForwardClearLoads {
-    ForwardClearLoads {
+    let loads = ForwardClearLoads {
         seed_color,
         color: if seed_color {
             wgpu::LoadOp::Load
@@ -250,7 +250,12 @@ fn loads_for_seed(
         } else {
             wgpu::LoadOp::Clear(crate::gpu::MAIN_FORWARD_DEPTH_CLEAR)
         },
-    }
+    };
+    crate::gpu::warp_black_diag::note_forward_load_ops(
+        matches!(loads.color, wgpu::LoadOp::Clear(_)),
+        matches!(loads.depth, wgpu::LoadOp::Clear(_)),
+    );
+    loads
 }
 
 /// One synthetic camera passed to [`camera_clear_load_op_checksum`].

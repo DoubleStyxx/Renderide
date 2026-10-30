@@ -792,6 +792,7 @@ impl FrameGpuResources {
             let zero = [0u8; size_of::<GpuLight>()];
             uploads.write_buffer(lights_buffer, 0, &zero);
         }
+        crate::gpu::warp_black_diag_probe::log_lights(&lights[..n]);
     }
 }
 
