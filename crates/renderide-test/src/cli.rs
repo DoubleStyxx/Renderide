@@ -222,28 +222,8 @@ fn print_suite_outcome(
     if let Some(warning) = outcome.report.quarantine_warning.as_deref() {
         println!("{}", crate::scene_dsl::warn_line(warning));
     }
-    for case in &outcome.report.cases {
-        if crate::scene_dsl::warp_pbs_is_expected(case) {
-            println!(
-                "EXPECTED FAIL {} ({}) {}",
-                case.name,
-                case.artifacts_dir.display(),
-                crate::scene_dsl::WARP_EXPECTED_FAILURE_LABEL
-            );
-        } else if crate::scene_dsl::case_is_quarantined_216(case) {
-            println!(
-                "{}",
-                crate::scene_dsl::quarantined_line(&case.name, &case.artifacts_dir)
-            );
-        } else {
-            let one = [print_case(case)];
-            let printed = if print_adapter {
-                crate::adapter_gate::format_check_suite(&one)
-            } else {
-                crate::adapter_gate::format_update_suite(&one)
-            };
-            println!("{}", printed.case_lines[0]);
-        }
+    for line in case_lines(&outcome.report, print_adapter) {
+        println!("{line}");
     }
     println!("Suite report: {}", outcome.report_path.display());
     println!("{}", format_suite_result(&outcome.report, result_label));
@@ -253,26 +233,86 @@ fn print_suite_outcome(
     println!("{}", crate::scene_dsl::suite::SUITE_READINESS_SUMMARY);
 }
 
+fn case_lines(report: &crate::scene_dsl::suite::SuiteReport, print_adapter: bool) -> Vec<String> {
+    let mut lines = Vec::new();
+    for case in &report.cases {
+        if crate::scene_dsl::warp_pbs_is_expected(case) {
+            lines.push(format!(
+                "EXPECTED FAIL {} ({}) {}",
+                case.name,
+                case.artifacts_dir.display(),
+                crate::scene_dsl::WARP_EXPECTED_FAILURE_LABEL
+            ));
+            push_adapter_line(&mut lines, case, print_adapter);
+        } else if crate::scene_dsl::case_is_quarantined_216(case) {
+            lines.push(crate::scene_dsl::quarantined_line(
+                &case.name,
+                &case.artifacts_dir,
+            ));
+            push_adapter_line(&mut lines, case, print_adapter);
+        } else if crate::scene_dsl::warp_pbs_is_unexpected_pass(case) {
+            lines.push(crate::scene_dsl::warp_unexpected_pass_line(
+                &case.name,
+                &case.artifacts_dir,
+            ));
+            push_adapter_line(&mut lines, case, print_adapter);
+        } else {
+            let one = [print_case(case)];
+            let printed = if print_adapter {
+                crate::adapter_gate::format_check_suite(&one)
+            } else {
+                crate::adapter_gate::format_update_suite(&one)
+            };
+            lines.extend(printed.case_lines);
+        }
+    }
+    lines
+}
+
+fn push_adapter_line(
+    lines: &mut Vec<String>,
+    case: &crate::scene_dsl::suite::SuiteCaseReport,
+    print_adapter: bool,
+) {
+    if print_adapter && case.gate == crate::adapter_gate::ADAPTER_COMPARISON {
+        lines.push(crate::adapter_gate::adapter_line(
+            &case.name,
+            &case.artifacts_dir,
+            &case.adapter,
+        ));
+    }
+}
+
 fn format_suite_result(
     report: &crate::scene_dsl::suite::SuiteReport,
     result_label: &str,
 ) -> String {
-    let passed = report.passed;
-    let total = report.total;
-    let expected = report.expected_failures;
-    let quarantined = report.quarantined;
-    let expected_label = crate::scene_dsl::WARP_EXPECTED_FAILURE_LABEL;
-    match (expected, quarantined) {
-        (0, 0) => format!("Suite result: {passed}/{total} {result_label}"),
-        (_, 0) => {
-            format!("Suite result: {passed}/{total} {result_label}, {expected} {expected_label}")
-        }
-        (0, _) => {
-            format!("Suite result: {passed}/{total} {result_label}, {quarantined} quarantined")
-        }
-        (_, _) => format!(
-            "Suite result: {passed}/{total} {result_label}, {expected} {expected_label}, {quarantined} quarantined"
-        ),
+    let mut notes = Vec::new();
+    if report.expected_failures > 0 {
+        notes.push(format!(
+            "{} {}",
+            report.expected_failures,
+            crate::scene_dsl::WARP_EXPECTED_FAILURE_LABEL
+        ));
+    }
+    if report.unexpected_passes > 0 {
+        notes.push(format!(
+            "{} {}",
+            report.unexpected_passes,
+            crate::scene_dsl::WARP_UNEXPECTED_PASS_LABEL
+        ));
+    }
+    if report.quarantined > 0 {
+        notes.push(format!("{} quarantined", report.quarantined));
+    }
+    let head = format!(
+        "Suite result: {}/{} {result_label}",
+        report.passed, report.total
+    );
+    if notes.is_empty() {
+        head
+    } else {
+        format!("{head}, {}", notes.join(", "))
     }
 }
 
@@ -523,6 +563,106 @@ mod cli_tests {
             super::check_suite_gate_summary(&split),
             "Suite result: 1 behavior + 1 adapter comparison"
         );
+        let mut unexpected = case(
+            "e",
+            true,
+            Some(crate::scene_dsl::WARP_UNEXPECTED_PASS_LABEL),
+            None,
+            None,
+        );
+        unexpected.gate = crate::adapter_gate::ADAPTER_COMPARISON.to_string();
+        unexpected.adapter = "Microsoft Basic Render Driver type=Cpu backend=Dx12".to_string();
+        let with_unexpected = SuiteReport::from_cases(vec![unexpected]);
+        assert_eq!(
+            super::format_suite_result(&with_unexpected, "passed"),
+            "Suite result: 1/1 passed, 1 unexpected pass (WARP, #212)"
+        );
+        assert_eq!(with_unexpected.failed, 0);
+        assert!(with_unexpected.passed());
+    }
+
+    #[test]
+    fn adapter_line_prints_on_every_outcome() {
+        use crate::scene_dsl::suite::{SuiteCaseReport, SuiteReport};
+        use crate::scene_dsl::{WARP_EXPECTED_FAILURE_LABEL, WARP_UNEXPECTED_PASS_LABEL};
+
+        fn labeled(
+            name: &str,
+            passed: bool,
+            result: Option<&str>,
+            status: Option<&str>,
+            reason: Option<&str>,
+        ) -> SuiteCaseReport {
+            let mut case = SuiteCaseReport::plain(
+                name,
+                passed,
+                PathBuf::from("out").join(name),
+                PathBuf::from(name),
+                (!passed).then(|| "case failed".to_string()),
+            );
+            case.gate = crate::adapter_gate::ADAPTER_COMPARISON.to_string();
+            case.adapter = "Microsoft Basic Render Driver type=Cpu backend=Dx12".to_string();
+            case.result = result.map(str::to_string);
+            case.status = status.map(str::to_string);
+            case.reason = reason.map(str::to_string);
+            case
+        }
+
+        let cases = vec![
+            labeled("pass_case", true, None, None, None),
+            labeled("fail_case", false, None, None, None),
+            labeled(
+                "expected_case",
+                false,
+                Some(WARP_EXPECTED_FAILURE_LABEL),
+                None,
+                None,
+            ),
+            labeled(
+                "quarantine_case",
+                false,
+                None,
+                Some("quarantined"),
+                Some("quarantined:#216"),
+            ),
+            labeled(
+                "unexpected_case",
+                true,
+                Some(WARP_UNEXPECTED_PASS_LABEL),
+                None,
+                None,
+            ),
+        ];
+        let lines = super::case_lines(&SuiteReport::from_cases(cases), true);
+        for name in [
+            "pass_case",
+            "fail_case",
+            "expected_case",
+            "quarantine_case",
+            "unexpected_case",
+        ] {
+            assert!(
+                lines.iter().any(|line| {
+                    line.starts_with("ADAPTER ")
+                        && line.contains(name)
+                        && line.contains("Microsoft Basic Render Driver")
+                }),
+                "{name} missing from {lines:?}"
+            );
+        }
+        assert!(lines.iter().any(|line| line.starts_with("EXPECTED FAIL ")));
+        assert!(lines.iter().any(|line| line.starts_with("QUARANTINED ")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("UNEXPECTED PASS ") && line.contains("#212"))
+        );
+        assert!(lines.iter().any(|line| line.starts_with("FAIL ")));
+        let update = super::case_lines(
+            &SuiteReport::from_cases(vec![labeled("pass_case", true, None, None, None)]),
+            false,
+        );
+        assert!(update.iter().all(|line| !line.contains("ADAPTER")));
     }
 
     fn expected_exe() -> &'static str {

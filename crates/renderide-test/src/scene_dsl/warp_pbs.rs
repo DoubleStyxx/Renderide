@@ -7,7 +7,14 @@
 //! ready, a timeout, a flat or unstable frame, a positive pending count, a dropped
 //! draw, a missing case, or a crash stays a hard failure.
 //!
-//! The label is [`EXPECTED_FAILURE_LABEL`]. The case stays `passed: false`.
+//! The expected-failure label is [`EXPECTED_FAILURE_LABEL`]. The case stays
+//! `passed: false`. A real pass stays a pass and is labeled
+//! [`UNEXPECTED_PASS_LABEL`] instead of failing the suite.
+//!
+//! The excuse is the region-color signature: all 4 bands fail that criterion.
+//! SSIM, pixel diff, image coverage, and band count may fail beside it.
+//! Evidence from the Windows captures: 40088875619, 40096421641, 40097968491,
+//! 41084635804, 41089310635, 41093531109, 41103575428, 41099685993.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,6 +24,9 @@ use super::suite::{SuiteCaseReport, SuiteReport};
 
 /// Text written into `report.json` and the suite summary. This is not a pass.
 pub(crate) const EXPECTED_FAILURE_LABEL: &str = "expected failure (WARP, #212)";
+
+/// `report.json` `result` when WARP passes `pbs_lit`. The case stays a pass.
+pub(crate) const UNEXPECTED_PASS_LABEL: &str = "unexpected pass (WARP, #212)";
 
 /// Case whose WARP image mismatch is expected.
 const PBS_LIT: &str = "pbs_lit_material_matrix";
@@ -67,11 +77,56 @@ struct CaseSnapshot<'a> {
     frame_accepted: bool,
     pending: Option<u64>,
     dropped_draws: Option<u64>,
+    /// Region-color signature and the criteria that failed beside it.
+    signature: ImageSignature,
+}
+
+/// Failed criteria beside the region-color signature.
+///
+/// `foreign_failure` is the extension point. A criterion that is not region
+/// color, SSIM, pixel diff, image coverage, or band count sets it and the
+/// excuse does not apply.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ImageSignature {
+    /// Region-color bands present in the evaluation, passed or failed.
+    region_color_bands: u8,
+    /// Region-color bands whose criterion failed.
+    region_color_failed: u8,
+    ssim_failed: bool,
+    pixel_diff_failed: bool,
+    coverage_failed: bool,
+    band_failed: bool,
+    /// A failed criterion outside the signature and the allowed co-failures.
+    foreign_failure: bool,
+}
+
+impl ImageSignature {
+    /// Region color failed in all 4 bands, and every other failed criterion is allowed.
+    ///
+    /// Allowed beside that signature: SSIM, pixel diff, image coverage, and band
+    /// count. Evidence: 40088875619, 40096421641, 40097968491, 41084635804,
+    /// 41089310635, 41093531109, 41103575428, 41099685993.
+    const fn is_expected_mismatch(self) -> bool {
+        self.region_color_bands == 4 && self.region_color_failed == 4 && !self.foreign_failure
+    }
 }
 
 /// Whether `case` carries the expected-failure label.
 pub(crate) fn case_is_expected_failure(case: &SuiteCaseReport) -> bool {
     case.result.as_deref() == Some(EXPECTED_FAILURE_LABEL) && !case.passed
+}
+
+/// Whether `case` passed on WARP and carries the unexpected-pass label.
+pub(crate) fn case_is_unexpected_pass(case: &SuiteCaseReport) -> bool {
+    case.passed && case.result.as_deref() == Some(UNEXPECTED_PASS_LABEL)
+}
+
+/// Loud suite line for a WARP `pbs_lit` pass. Names #212.
+pub(crate) fn unexpected_pass_line(name: &str, artifacts: &Path) -> String {
+    format!(
+        "UNEXPECTED PASS {name} ({}) {UNEXPECTED_PASS_LABEL}",
+        artifacts.display()
+    )
 }
 
 /// Labels `pbs_lit` when the selected adapter is WARP and the image check failed
@@ -83,6 +138,21 @@ pub(crate) fn apply_expected_failure(report: &mut SuiteReport) {
     let actual = output::actual_png_in(&report.cases[index].artifacts_dir);
     let is_warp = output_is_warp(&actual);
     let snapshot = snapshot_for(&report.cases[index]);
+    if unexpected_pass(is_warp, &snapshot) {
+        report.cases[index].result = Some(UNEXPECTED_PASS_LABEL.to_string());
+        report.recompute();
+        if let Err(err) = stamp_outcome(
+            &report.cases[index].report_json,
+            true,
+            UNEXPECTED_PASS_LABEL,
+        ) {
+            logger::warn!(
+                "WARP unexpected pass: could not stamp {}: {err}",
+                report.cases[index].report_json.display()
+            );
+        }
+        return;
+    }
     if !excuse(is_warp, &snapshot) {
         return;
     }
@@ -91,12 +161,20 @@ pub(crate) fn apply_expected_failure(report: &mut SuiteReport) {
     case.error = Some(EXPECTED_FAILURE_LABEL.to_string());
     case.result = Some(EXPECTED_FAILURE_LABEL.to_string());
     report.recompute();
-    if let Err(err) = stamp_case_report(&report.cases[index].report_json) {
+    if let Err(err) = stamp_outcome(
+        &report.cases[index].report_json,
+        false,
+        EXPECTED_FAILURE_LABEL,
+    ) {
         logger::warn!(
             "WARP expected failure: could not stamp {}: {err}",
             report.cases[index].report_json.display()
         );
     }
+}
+
+fn unexpected_pass(is_warp: bool, case: &CaseSnapshot<'_>) -> bool {
+    is_warp && case.name == PBS_LIT && case.fault == CaseFault::None
 }
 
 fn excuse(is_warp: bool, case: &CaseSnapshot<'_>) -> bool {
@@ -106,16 +184,22 @@ fn excuse(is_warp: bool, case: &CaseSnapshot<'_>) -> bool {
         && case.fault == CaseFault::ImageCheck
         && case.pending == Some(0)
         && case.dropped_draws == Some(0)
+        && case.signature.is_expected_mismatch()
 }
 
 fn snapshot_for(case: &SuiteCaseReport) -> CaseSnapshot<'_> {
     let fault = fault_from_failure(case.passed, case.error.as_deref());
-    let frame_accepted = fault == CaseFault::ImageCheck;
-    let (pending, dropped_draws) = if frame_accepted {
+    let frame_accepted = case.passed || fault == CaseFault::ImageCheck;
+    let (pending, dropped_draws, signature) = if frame_accepted {
         let chunk = read_pipeline_pending_chunk(&output::actual_png_in(&case.artifacts_dir));
-        counts_for_compared_frame(chunk.as_deref())
+        let (pending, dropped_draws) = counts_for_compared_frame(chunk.as_deref());
+        (
+            pending,
+            dropped_draws,
+            signature_from_report(&case.report_json),
+        )
     } else {
-        (None, None)
+        (None, None, ImageSignature::default())
     };
     CaseSnapshot {
         name: &case.name,
@@ -123,7 +207,55 @@ fn snapshot_for(case: &SuiteCaseReport) -> CaseSnapshot<'_> {
         frame_accepted,
         pending,
         dropped_draws,
+        signature,
     }
+}
+
+fn signature_from_report(path: &Path) -> ImageSignature {
+    let Ok(bytes) = fs::read(path) else {
+        return ImageSignature::default();
+    };
+    let Ok(report) = serde_json::from_slice::<CaseReport>(&bytes) else {
+        return ImageSignature::default();
+    };
+    let Some(evaluation) = report.evaluation.as_ref() else {
+        return ImageSignature::default();
+    };
+    signature_from_criteria(&evaluation.criteria)
+}
+
+/// Classifies a tolerance evaluation.
+///
+/// Region color is the signature. SSIM, pixel diff, image coverage, and band
+/// count are recorded as co-failures and do not reject the excuse. The match
+/// is exhaustive so a new criterion has to be classified before it can hide
+/// inside the signature.
+fn signature_from_criteria(criteria: &[super::tolerance::CriterionResult]) -> ImageSignature {
+    use super::tolerance::CriterionResult;
+    let mut signature = ImageSignature::default();
+    for criterion in criteria {
+        match criterion {
+            CriterionResult::RegionColor { passed, .. } => {
+                signature.region_color_bands = signature.region_color_bands.saturating_add(1);
+                if !passed {
+                    signature.region_color_failed = signature.region_color_failed.saturating_add(1);
+                }
+            }
+            CriterionResult::Ssim { passed: false, .. } => signature.ssim_failed = true,
+            CriterionResult::PixelDiff { passed: false, .. } => signature.pixel_diff_failed = true,
+            CriterionResult::ImageCoverage { passed: false, .. } => {
+                signature.coverage_failed = true;
+            }
+            CriterionResult::RegionNonDominant { passed: false, .. } => {
+                signature.band_failed = true;
+            }
+            CriterionResult::Ssim { passed: true, .. }
+            | CriterionResult::PixelDiff { passed: true, .. }
+            | CriterionResult::ImageCoverage { passed: true, .. }
+            | CriterionResult::RegionNonDominant { passed: true, .. } => {}
+        }
+    }
+    signature
 }
 
 fn fault_from_failure(passed: bool, error: Option<&str>) -> CaseFault {
@@ -230,13 +362,13 @@ fn text_keyword(data: &[u8], keyword: &str) -> Option<String> {
     Some(String::from_utf8_lossy(text).into_owned())
 }
 
-fn stamp_case_report(path: &Path) -> std::io::Result<()> {
+fn stamp_outcome(path: &Path, passed: bool, label: &str) -> std::io::Result<()> {
     let bytes = fs::read(path)?;
     let mut report: CaseReport = serde_json::from_slice(&bytes)
         .map_err(|err| std::io::Error::other(format!("parse report: {err}")))?;
-    report.passed = false;
-    report.error = Some(EXPECTED_FAILURE_LABEL.to_string());
-    report.result = Some(EXPECTED_FAILURE_LABEL.to_string());
+    report.passed = passed;
+    report.error = (!passed).then(|| label.to_string());
+    report.result = Some(label.to_string());
     let json = serde_json::to_string_pretty(&report)
         .map_err(|err| std::io::Error::other(format!("serialize report: {err}")))?;
     fs::write(path, json)
@@ -372,6 +504,14 @@ wgpu adapter candidate: llvmpipe (LLVM 20.1.2, 256 bits) type=Cpu backend=Vulkan
 wgpu adapter selected (headless): llvmpipe (LLVM 20.1.2, 256 bits) type=Cpu backend=Vulkan (preference=HighPerformance)
 ";
 
+    fn four_band_color_failure() -> ImageSignature {
+        ImageSignature {
+            region_color_bands: 4,
+            region_color_failed: 4,
+            ..ImageSignature::default()
+        }
+    }
+
     fn image_failure() -> CaseSnapshot<'static> {
         CaseSnapshot {
             name: PBS_LIT,
@@ -379,6 +519,7 @@ wgpu adapter selected (headless): llvmpipe (LLVM 20.1.2, 256 bits) type=Cpu back
             frame_accepted: true,
             pending: Some(0),
             dropped_draws: Some(0),
+            signature: four_band_color_failure(),
         }
     }
 
@@ -431,6 +572,7 @@ wgpu adapter selected (headless): llvmpipe (LLVM 20.1.2, 256 bits) type=Cpu back
             frame_accepted: true,
             pending: Some(0),
             dropped_draws: Some(0),
+            signature: four_band_color_failure(),
         };
         assert!(!excuse(true, &other));
 
@@ -555,7 +697,7 @@ wgpu adapter selected (headless): Microsoft Basic Render Driver type=Cpu backend
         let mut suite = SuiteReport::from_cases(vec![case]);
         suite.cases[0].passed = false;
         suite.recompute();
-        stamp_case_report(&report_path).expect("stamp");
+        stamp_outcome(&report_path, false, EXPECTED_FAILURE_LABEL).expect("stamp");
 
         let text = fs::read_to_string(&report_path).expect("read");
         assert!(text.contains(EXPECTED_FAILURE_LABEL));
@@ -566,5 +708,203 @@ wgpu adapter selected (headless): Microsoft Basic Render Driver type=Cpu backend
         assert_eq!(suite.expected_failures, 1);
         assert!(suite.passed());
         assert_eq!(suite.passed, 0);
+    }
+
+    fn color(passed: bool) -> crate::scene_dsl::tolerance::CriterionResult {
+        crate::scene_dsl::tolerance::CriterionResult::RegionColor {
+            x: 0,
+            y: 0,
+            width: 160,
+            height: 72,
+            mean_r: 0.0,
+            mean_g: 0.0,
+            mean_b: 0.0,
+            golden_mean_r: 1.0,
+            golden_mean_g: 1.0,
+            golden_mean_b: 1.0,
+            max_channel_delta: 10.0,
+            max_mean_channel_delta: 8.0,
+            passed,
+        }
+    }
+
+    fn ssim(passed: bool) -> crate::scene_dsl::tolerance::CriterionResult {
+        crate::scene_dsl::tolerance::CriterionResult::Ssim {
+            score: 0.01,
+            threshold: 0.78,
+            passed,
+        }
+    }
+
+    fn pixel(passed: bool) -> crate::scene_dsl::tolerance::CriterionResult {
+        crate::scene_dsl::tolerance::CriterionResult::PixelDiff {
+            max_abs_diff: 56,
+            failing_fraction: 0.9,
+            max_failing_fraction: 0.22,
+            passed,
+        }
+    }
+
+    fn coverage(passed: bool) -> crate::scene_dsl::tolerance::CriterionResult {
+        crate::scene_dsl::tolerance::CriterionResult::ImageCoverage {
+            luma_range: 105,
+            min_luma_range: Some(18),
+            unique_rgb_colors: 2,
+            min_unique_colors: Some(24),
+            non_background_pixel_fraction: 0.16,
+            min_non_background_pixel_fraction: Some(0.06),
+            passed,
+        }
+    }
+
+    fn band(passed: bool) -> crate::scene_dsl::tolerance::CriterionResult {
+        crate::scene_dsl::tolerance::CriterionResult::RegionNonDominant {
+            x: 0,
+            y: 77,
+            width: 160,
+            height: 73,
+            count: 10,
+            min_count: 100,
+            passed,
+        }
+    }
+
+    fn four_failed_colors() -> Vec<crate::scene_dsl::tolerance::CriterionResult> {
+        (0..4).map(|_| color(false)).collect()
+    }
+
+    fn excused(criteria: &[crate::scene_dsl::tolerance::CriterionResult]) -> bool {
+        let mut case = image_failure();
+        case.signature = signature_from_criteria(criteria);
+        excuse(true, &case)
+    }
+
+    #[test]
+    fn region_color_signature_on_its_own_is_excused() {
+        assert!(excused(&four_failed_colors()));
+    }
+
+    #[test]
+    fn signature_plus_each_allowed_co_failure_is_excused() {
+        for extra in [ssim(false), pixel(false), coverage(false), band(false)] {
+            let mut criteria = four_failed_colors();
+            criteria.push(extra);
+            assert!(excused(&criteria));
+        }
+        let mut all = four_failed_colors();
+        all.extend([ssim(false), pixel(false), coverage(false), band(false)]);
+        assert!(excused(&all));
+    }
+
+    #[test]
+    fn allowed_co_failures_without_the_signature_are_not_excused() {
+        assert!(!excused(&[ssim(false)]));
+        assert!(!excused(&[pixel(false)]));
+        assert!(!excused(&[coverage(false)]));
+        assert!(!excused(&[band(false)]));
+        assert!(!excused(&[
+            ssim(false),
+            pixel(false),
+            coverage(false),
+            band(false)
+        ]));
+    }
+
+    #[test]
+    fn region_color_failing_in_fewer_than_four_bands_is_not_excused() {
+        let mut three_of_four = four_failed_colors();
+        three_of_four.pop();
+        three_of_four.push(color(true));
+        assert!(!excused(&three_of_four));
+        assert!(!excused(&[color(false), color(false), color(false)]));
+    }
+
+    #[test]
+    fn a_criterion_outside_the_allowed_set_is_not_excused() {
+        let mut signature = four_band_color_failure();
+        signature.foreign_failure = true;
+        let mut case = image_failure();
+        case.signature = signature;
+        assert!(!excuse(true, &case));
+    }
+
+    #[test]
+    fn full_signature_on_a_non_warp_adapter_is_not_excused() {
+        assert!(!excuse(false, &image_failure()));
+    }
+
+    #[test]
+    fn a_warp_pass_is_labeled_and_does_not_fail_the_suite() {
+        let pass = CaseSnapshot {
+            name: PBS_LIT,
+            fault: CaseFault::None,
+            frame_accepted: true,
+            pending: Some(0),
+            dropped_draws: Some(0),
+            signature: ImageSignature::default(),
+        };
+        assert!(unexpected_pass(true, &pass));
+        assert!(!unexpected_pass(false, &pass));
+        assert!(!excuse(true, &pass));
+        let mut other = pass;
+        other.name = "unlit_sphere";
+        assert!(!unexpected_pass(true, &other));
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let report_path = dir.path().join("report.json");
+        let integration = super::super::cases::pbs_lit_material_matrix();
+        let mut case_report = output::report_from_evaluation(
+            &integration,
+            crate::scene_dsl::tolerance::ToleranceEvaluation {
+                ssim: Some(1.0),
+                max_abs_diff_observed: Some(0),
+                failing_pixel_fraction: Some(0.0),
+                actual_coverage: crate::scene_dsl::tolerance::ImageCoverageStats {
+                    luma_min: 0,
+                    luma_max: 1,
+                    luma_range: 1,
+                    unique_rgb_colors: 2,
+                    dominant_rgb_fraction: 0.5,
+                    non_background_pixel_fraction: 0.5,
+                    transparent_pixel_fraction: 0.0,
+                },
+                golden_coverage: crate::scene_dsl::tolerance::ImageCoverageStats {
+                    luma_min: 0,
+                    luma_max: 1,
+                    luma_range: 1,
+                    unique_rgb_colors: 2,
+                    dominant_rgb_fraction: 0.5,
+                    non_background_pixel_fraction: 0.5,
+                    transparent_pixel_fraction: 0.0,
+                },
+                criteria: Vec::new(),
+                passed: true,
+                combine: crate::scene_dsl::tolerance::Combine::And,
+            },
+        );
+        case_report.passed = true;
+        fs::write(
+            &report_path,
+            serde_json::to_string_pretty(&case_report).expect("json"),
+        )
+        .expect("write");
+        stamp_outcome(&report_path, true, UNEXPECTED_PASS_LABEL).expect("stamp");
+        let text = fs::read_to_string(&report_path).expect("read");
+        assert!(text.contains(UNEXPECTED_PASS_LABEL), "{text}");
+        assert!(text.contains("\"passed\": true"), "{text}");
+
+        let mut case =
+            SuiteCaseReport::plain(PBS_LIT, true, dir.path().to_path_buf(), report_path, None);
+        case.result = Some(UNEXPECTED_PASS_LABEL.to_string());
+        let suite = SuiteReport::from_cases(vec![case]);
+        assert!(suite.passed());
+        assert_eq!(suite.failed, 0);
+        assert_eq!(suite.passed, 1);
+        assert_eq!(suite.unexpected_passes, 1);
+        assert_eq!(suite.expected_failures, 0);
+        assert!(case_is_unexpected_pass(&suite.cases[0]));
+        let line = unexpected_pass_line(PBS_LIT, dir.path());
+        assert!(line.starts_with("UNEXPECTED PASS pbs_lit_material_matrix"));
+        assert!(line.contains("#212"));
     }
 }
