@@ -424,36 +424,33 @@ pub struct MaterialPipelineCache {
     stats: AtomicCacheCounters,
     warmup_stats: PipelineWarmupDedupeCounters,
     shader_module_cache: Arc<ShaderModuleCache>,
-    /// Headless and software adapters compile here, on the render thread.
-    /// Real GPUs leave this false and use the background pool.
+    /// Capture readback compiles here, on the render thread.
+    /// Windowed frames and non-capture headless frames leave this false and use
+    /// the background pool.
     compile_on_render_thread: bool,
     /// Compiles `drain_pipeline_build_completions` may run on this thread.
     ///
-    /// Headless is unbounded so the capture builds the whole queue before submit.
-    /// A windowed software adapter is one. Real GPUs store zero and ignore it.
+    /// A capture readback is unbounded so the frame builds the whole queue
+    /// before submit. Every other frame stores zero and ignores it.
     render_thread_compiles_per_frame: usize,
 }
 
 impl MaterialPipelineCache {
-    /// Attach-time flag. Real GPUs are false and never take the render-thread build queue lock.
+    /// Attach-time flag. False when this frame must not block on a queued compile.
     pub(super) fn compiles_on_render_thread(&self) -> bool {
         self.compile_on_render_thread
-    }
-
-    /// Headless compiles the whole queued set at the frame-start drain, not during lookup.
-    pub(super) fn compiles_full_render_thread_queue(&self) -> bool {
-        self.compile_on_render_thread && self.render_thread_compiles_per_frame == usize::MAX
     }
 }
 
 impl MaterialPipelineCache {
     /// Creates an empty cache for `device` with the device's effective [`crate::gpu::GpuLimits`].
     ///
-    /// `compile_on_render_thread` is set for headless and software adapters. Real GPUs pass false.
+    /// `compile_on_render_thread` is set for a capture readback. Windowed frames and
+    /// frame-bench frames pass false and keep the background pool.
     ///
-    /// `render_thread_compiles_per_frame` is the drain budget. Headless passes `usize::MAX`.
-    /// A windowed software adapter passes one. The value is ignored when
-    /// `compile_on_render_thread` is false.
+    /// `render_thread_compiles_per_frame` is the drain budget. A capture readback
+    /// passes [`usize::MAX`]. Every other frame passes zero. The value is ignored
+    /// when `compile_on_render_thread` is false.
     pub fn new(
         device: Arc<wgpu::Device>,
         limits: Arc<crate::gpu::GpuLimits>,
@@ -607,20 +604,11 @@ impl MaterialPipelineCache {
     /// every cache probe.
     pub(super) fn drain_pipeline_build_completions(&self) {
         profiling::scope!("materials::drain_pipeline_build_completions");
-        // Software and headless builds were queued for this thread. Headless finishes
-        // the queue; a windowed software adapter finishes at most one. Real GPUs leave
-        // the queue empty and only observe the background pool here.
+        // Capture readback finishes the render-thread queue before the frame draws.
+        // Every other frame leaves that queue empty and only observes the background pool.
         if self.compile_on_render_thread {
             drain_render_thread_pipeline_builds(self.render_thread_compiles_per_frame);
         }
-        self.drain_completed_pipeline_builds();
-    }
-
-    /// Applies pipeline builds that already finished, without starting a render-thread compile.
-    ///
-    /// Used when the driver thread is still inside a previous submit. Compiling then would
-    /// overlap `Queue::submit` on DX12 WARP.
-    pub(super) fn drain_finished_pipeline_builds(&self) {
         self.drain_completed_pipeline_builds();
     }
 

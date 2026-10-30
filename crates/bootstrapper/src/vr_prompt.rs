@@ -67,9 +67,16 @@ pub fn sanitize_linux_display_env() {
     {
         for key in ["WAYLAND_DISPLAY", "DISPLAY"] {
             if env::var_os(key).is_some_and(|v| v.is_empty()) {
-                // SAFETY: edition 2024 marks `env::remove_var` as unsafe because mutating the
-                // process environment is not thread-safe. This call runs during early bootstrap
-                // before any worker threads (GUI subprocesses or otherwise) have been spawned.
+                #[cfg(test)]
+                crate::test_env::assert_shared_env_lock_held();
+                // SAFETY: `env::remove_var` mutates the process environment. On
+                // Windows this is safe. On Unix it is undefined behavior if it
+                // overlaps `getenv`. `main` calls this before it starts any
+                // worker thread, so no other thread exists yet and no concurrent
+                // `getenv` is possible. `std::env::var` and `var_os` take the
+                // standard library's env lock and are not that hazard. Test
+                // builds also debug-assert `PROCESS_ENV_LOCK` above so test
+                // helpers that mutate the environment do not overlap this call.
                 unsafe {
                     env::remove_var(key);
                 }
@@ -124,6 +131,10 @@ pub(crate) fn apply_host_vr_choice(host_args: Vec<String>, vr: bool) -> Vec<Stri
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::significant_drop_tightening,
+    reason = "dialog decisions read the environment, and the snapshot restores it, only while the process env lock is still held"
+)]
 mod tests {
     use super::*;
 
@@ -173,41 +184,41 @@ mod tests {
 
     #[test]
     fn should_prompt_false_when_ci_set() {
-        let _g = crate::test_env::lock_process_env();
-        let _snap = crate::test_env::EnvSnapshot::capture(VR_ENV_KEYS);
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        let guard = crate::test_env::lock();
+        let _snap = guard.capture(VR_ENV_KEYS);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::set_var("CI", "1");
+            guard.set_var("CI", "1");
         }
         assert!(!should_prompt_vr_dialog(&[]));
     }
 
     #[test]
     fn should_prompt_false_when_skip_env_set() {
-        let _g = crate::test_env::lock_process_env();
-        let _snap = crate::test_env::EnvSnapshot::capture(VR_ENV_KEYS);
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        let guard = crate::test_env::lock();
+        let _snap = guard.capture(VR_ENV_KEYS);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::set_var(ENV_SKIP_VR_DIALOG, "1");
+            guard.set_var(ENV_SKIP_VR_DIALOG, "1");
         }
         assert!(!should_prompt_vr_dialog(&[]));
     }
 
     #[test]
     fn should_prompt_false_for_attached_device_form() {
-        let _g = crate::test_env::lock_process_env();
-        let _snap = crate::test_env::EnvSnapshot::capture(VR_ENV_KEYS);
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        let guard = crate::test_env::lock();
+        let _snap = guard.capture(VR_ENV_KEYS);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::remove_var("CI");
+            guard.remove_var("CI");
         }
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::remove_var(ENV_SKIP_VR_DIALOG);
+            guard.remove_var(ENV_SKIP_VR_DIALOG);
         }
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::set_var("DISPLAY", ":0");
+            guard.set_var("DISPLAY", ":0");
         }
         assert!(!should_prompt_vr_dialog(&["-Device=SteamVR".into()]));
         assert!(!should_prompt_vr_dialog(&["-SteamVR".into()]));
@@ -217,38 +228,38 @@ mod tests {
 
     #[test]
     fn should_prompt_false_when_device_explicit() {
-        let _g = crate::test_env::lock_process_env();
-        let _snap = crate::test_env::EnvSnapshot::capture(VR_ENV_KEYS);
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        let guard = crate::test_env::lock();
+        let _snap = guard.capture(VR_ENV_KEYS);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::remove_var("CI");
+            guard.remove_var("CI");
         }
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::remove_var(ENV_SKIP_VR_DIALOG);
+            guard.remove_var(ENV_SKIP_VR_DIALOG);
         }
         assert!(!should_prompt_vr_dialog(&["-Device".into(), "x".into()]));
     }
 
     #[test]
     fn should_prompt_true_when_unset_and_display_present() {
-        let _g = crate::test_env::lock_process_env();
-        let _snap = crate::test_env::EnvSnapshot::capture(VR_ENV_KEYS);
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        let guard = crate::test_env::lock();
+        let _snap = guard.capture(VR_ENV_KEYS);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::remove_var("CI");
+            guard.remove_var("CI");
         }
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::remove_var(ENV_SKIP_VR_DIALOG);
+            guard.remove_var(ENV_SKIP_VR_DIALOG);
         }
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::set_var("DISPLAY", ":0");
+            guard.set_var("DISPLAY", ":0");
         }
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::remove_var("WAYLAND_DISPLAY");
+            guard.remove_var("WAYLAND_DISPLAY");
         }
         assert!(should_prompt_vr_dialog(&[]));
     }
@@ -256,23 +267,23 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn should_prompt_false_on_linux_when_no_display() {
-        let _g = crate::test_env::lock_process_env();
-        let _snap = crate::test_env::EnvSnapshot::capture(VR_ENV_KEYS);
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        let guard = crate::test_env::lock();
+        let _snap = guard.capture(VR_ENV_KEYS);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::remove_var("CI");
+            guard.remove_var("CI");
         }
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::remove_var(ENV_SKIP_VR_DIALOG);
+            guard.remove_var(ENV_SKIP_VR_DIALOG);
         }
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::remove_var("DISPLAY");
+            guard.remove_var("DISPLAY");
         }
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::remove_var("WAYLAND_DISPLAY");
+            guard.remove_var("WAYLAND_DISPLAY");
         }
         assert!(!should_prompt_vr_dialog(&[]));
     }
@@ -280,23 +291,23 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn should_prompt_true_on_linux_with_wayland_only() {
-        let _g = crate::test_env::lock_process_env();
-        let _snap = crate::test_env::EnvSnapshot::capture(VR_ENV_KEYS);
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        let guard = crate::test_env::lock();
+        let _snap = guard.capture(VR_ENV_KEYS);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::remove_var("CI");
+            guard.remove_var("CI");
         }
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::remove_var(ENV_SKIP_VR_DIALOG);
+            guard.remove_var(ENV_SKIP_VR_DIALOG);
         }
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::remove_var("DISPLAY");
+            guard.remove_var("DISPLAY");
         }
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::set_var("WAYLAND_DISPLAY", "wayland-0");
+            guard.set_var("WAYLAND_DISPLAY", "wayland-0");
         }
         assert!(should_prompt_vr_dialog(&[]));
     }
@@ -304,23 +315,23 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn should_prompt_false_on_linux_when_display_is_empty_string() {
-        let _g = crate::test_env::lock_process_env();
-        let _snap = crate::test_env::EnvSnapshot::capture(VR_ENV_KEYS);
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        let guard = crate::test_env::lock();
+        let _snap = guard.capture(VR_ENV_KEYS);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::remove_var("CI");
+            guard.remove_var("CI");
         }
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::remove_var(ENV_SKIP_VR_DIALOG);
+            guard.remove_var(ENV_SKIP_VR_DIALOG);
         }
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::set_var("DISPLAY", "");
+            guard.set_var("DISPLAY", "");
         }
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::set_var("WAYLAND_DISPLAY", "");
+            guard.set_var("WAYLAND_DISPLAY", "");
         }
         assert!(!should_prompt_vr_dialog(&[]));
     }
@@ -328,15 +339,15 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn sanitize_removes_empty_display_vars() {
-        let _g = crate::test_env::lock_process_env();
-        let _snap = crate::test_env::EnvSnapshot::capture(VR_ENV_KEYS);
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        let guard = crate::test_env::lock();
+        let _snap = guard.capture(VR_ENV_KEYS);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::set_var("DISPLAY", "");
+            guard.set_var("DISPLAY", "");
         }
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::set_var("WAYLAND_DISPLAY", "");
+            guard.set_var("WAYLAND_DISPLAY", "");
         }
         sanitize_linux_display_env();
         assert!(env::var_os("DISPLAY").is_none());
@@ -346,15 +357,15 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn sanitize_preserves_non_empty_display_vars() {
-        let _g = crate::test_env::lock_process_env();
-        let _snap = crate::test_env::EnvSnapshot::capture(VR_ENV_KEYS);
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        let guard = crate::test_env::lock();
+        let _snap = guard.capture(VR_ENV_KEYS);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::set_var("DISPLAY", ":0");
+            guard.set_var("DISPLAY", ":0");
         }
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::set_var("WAYLAND_DISPLAY", "wayland-0");
+            guard.set_var("WAYLAND_DISPLAY", "wayland-0");
         }
         sanitize_linux_display_env();
         assert_eq!(env::var_os("DISPLAY").as_deref(), Some(":0".as_ref()));
@@ -367,15 +378,15 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn sanitize_only_strips_empty_var_when_other_is_set() {
-        let _g = crate::test_env::lock_process_env();
-        let _snap = crate::test_env::EnvSnapshot::capture(VR_ENV_KEYS);
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        let guard = crate::test_env::lock();
+        let _snap = guard.capture(VR_ENV_KEYS);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::set_var("DISPLAY", ":0");
+            guard.set_var("DISPLAY", ":0");
         }
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::set_var("WAYLAND_DISPLAY", "");
+            guard.set_var("WAYLAND_DISPLAY", "");
         }
         sanitize_linux_display_env();
         assert_eq!(env::var_os("DISPLAY").as_deref(), Some(":0".as_ref()));

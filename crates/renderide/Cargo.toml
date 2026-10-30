@@ -61,6 +61,10 @@ bench-api = []
 ## default renderer build do not include the TCP server. Enable with
 ## `--features control-api` and pass `--control-port <port>` to bind `127.0.0.1`.
 control-api = ["dep:renderide-control-client"]
+## Compiles HUD work counters into non-test builds. Off by default, and empty, so a
+## normal release frame does not pay for the atomics. Unit tests compile the counters
+## through `cfg(test)` without enabling this feature.
+hud-counters = []
 
 [package.metadata.cargo-machete]
 ignored = ["tracing", "tracy-client"]
@@ -104,7 +108,7 @@ naga_oil = { version = "0.23", default-features = false }
 unity-asset = "0.2"
 unity-asset-binary = "0.2"
 wgpu = "30.0"
-winit = "0.31.0-beta.3"
+winit = "0.31.0-beta.4"
 ash = "0.38"
 openxr = { version = "0.22", default-features = false, features = ["loaded"] }
 imgui = { version = "0.12", features = ["tables-api"] }

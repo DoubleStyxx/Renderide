@@ -134,6 +134,10 @@ where
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::significant_drop_tightening,
+    reason = "dialog decisions read the environment, and the snapshot restores it, only while the process env lock is still held"
+)]
 mod tests {
     use super::*;
 
@@ -322,15 +326,15 @@ mod tests {
 
     #[test]
     fn resolve_vr_choice_bypasses_dialog_on_skip_env() {
-        let _g = crate::test_env::lock_process_env();
-        let _snap = crate::test_env::EnvSnapshot::capture(VR_ENV_KEYS);
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        let guard = crate::test_env::lock();
+        let _snap = guard.capture(VR_ENV_KEYS);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::set_var(vr_prompt::ENV_SKIP_VR_DIALOG, "1");
+            guard.set_var(vr_prompt::ENV_SKIP_VR_DIALOG, "1");
         }
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::set_var("CI", "1");
+            guard.set_var("CI", "1");
         }
         let out = resolve_vr_choice(vec!["-Invisible".to_string()], unreachable_prompt)
             .expect("bypass path must yield Some");
@@ -339,15 +343,15 @@ mod tests {
 
     #[test]
     fn resolve_vr_choice_preserves_explicit_screen_arg() {
-        let _g = crate::test_env::lock_process_env();
-        let _snap = crate::test_env::EnvSnapshot::capture(VR_ENV_KEYS);
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        let guard = crate::test_env::lock();
+        let _snap = guard.capture(VR_ENV_KEYS);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::remove_var(vr_prompt::ENV_SKIP_VR_DIALOG);
+            guard.remove_var(vr_prompt::ENV_SKIP_VR_DIALOG);
         }
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::remove_var("CI");
+            guard.remove_var("CI");
         }
         let out = resolve_vr_choice(
             vec!["-Screen".to_string(), "-Invisible".to_string()],
@@ -361,23 +365,23 @@ mod tests {
     /// propagates the cancellation as `None` so `main` can exit cleanly without launching the Host.
     #[test]
     fn resolve_vr_choice_returns_none_when_prompt_cancels() {
-        let _g = crate::test_env::lock_process_env();
-        let _snap = crate::test_env::EnvSnapshot::capture(VR_ENV_KEYS);
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        let guard = crate::test_env::lock();
+        let _snap = guard.capture(VR_ENV_KEYS);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::remove_var(vr_prompt::ENV_SKIP_VR_DIALOG);
+            guard.remove_var(vr_prompt::ENV_SKIP_VR_DIALOG);
         }
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::remove_var("CI");
+            guard.remove_var("CI");
         }
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::set_var("DISPLAY", ":0");
+            guard.set_var("DISPLAY", ":0");
         }
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::remove_var("WAYLAND_DISPLAY");
+            guard.remove_var("WAYLAND_DISPLAY");
         }
         let result = resolve_vr_choice(vec!["-Invisible".to_string()], || None);
         assert!(result.is_none(), "cancelled dialog must yield None");
@@ -387,23 +391,23 @@ mod tests {
     /// prepended with `-Device SteamVR` ahead of any forwarded tokens.
     #[test]
     fn resolve_vr_choice_applies_vr_device_when_prompt_confirms() {
-        let _g = crate::test_env::lock_process_env();
-        let _snap = crate::test_env::EnvSnapshot::capture(VR_ENV_KEYS);
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        let guard = crate::test_env::lock();
+        let _snap = guard.capture(VR_ENV_KEYS);
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::remove_var(vr_prompt::ENV_SKIP_VR_DIALOG);
+            guard.remove_var(vr_prompt::ENV_SKIP_VR_DIALOG);
         }
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::remove_var("CI");
+            guard.remove_var("CI");
         }
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::set_var("DISPLAY", ":0");
+            guard.set_var("DISPLAY", ":0");
         }
-        // SAFETY: env mutation in test; serialized via the process env test lock.
+        // SAFETY: `guard` holds `PROCESS_ENV_LOCK` on this thread.
         unsafe {
-            env::remove_var("WAYLAND_DISPLAY");
+            guard.remove_var("WAYLAND_DISPLAY");
         }
         let out = resolve_vr_choice(vec!["-Invisible".to_string()], || Some(true))
             .expect("vr choice must yield host args");

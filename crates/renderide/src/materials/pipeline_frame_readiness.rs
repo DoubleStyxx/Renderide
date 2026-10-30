@@ -14,7 +14,8 @@
 //!
 //! The headless PNG writer stores that snapshot in a `tEXt` chunk of the PNG itself.
 //! The golden harness refuses a frame until the count is zero, instead of skipping a
-//! fixed number of non-flat images.
+//! fixed number of non-flat images. Windowed frames do not increment the counter:
+//! nothing in that mode takes it.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -32,6 +33,22 @@ impl PendingPipelineDraws {
     pub(super) const fn new() -> Self {
         Self {
             count: AtomicU64::new(0),
+        }
+    }
+
+    /// Counts `lookup` when this frame's image will be read back.
+    ///
+    /// Windowed frames pass `false` and leave the counter unchanged.
+    pub(super) fn note_readback(&self, readback: bool, lookup: &MaterialPipelineLookup) {
+        if readback {
+            self.note(lookup);
+        }
+    }
+
+    /// Counts a skipped draw when this frame's image will be read back.
+    pub(super) fn note_dropped_readback(&self, readback: bool) {
+        if readback {
+            self.note_dropped();
         }
     }
 

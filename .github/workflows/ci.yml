@@ -11,6 +11,7 @@ name: CI
     branches: [master]
     paths:
       - ".github/workflows/ci.yml"
+      - ".github/actions/lavapipe/**"
       - ".taplo.toml"
       - "Cargo.lock"
       - "Cargo.toml"
@@ -23,6 +24,7 @@ name: CI
   pull_request:
     paths:
       - ".github/workflows/ci.yml"
+      - ".github/actions/lavapipe/**"
       - ".taplo.toml"
       - "Cargo.lock"
       - "Cargo.toml"
@@ -62,7 +64,7 @@ jobs:
           # via the system package manager, so it's the only OS that exercises the
           # `video-textures` feature (which pulls in gstreamer-sys / glib-sys).
           # `--all-features` here also enables `tracy`, giving us lint coverage of that path.
-          # ubuntu-24.04, not ubuntu-latest: the lavapipe debs below are noble builds.
+          # ubuntu-24.04, not ubuntu-latest: the pinned lavapipe debs are noble builds.
           # ubuntu-latest is scheduled to move off 24.04.
           - os: ubuntu-24.04
             clippy_features: "--all-features"
@@ -76,60 +78,27 @@ jobs:
 
       # Linux goldens run on lavapipe. Windows CI has no Vulkan ICD and wgpu uses
       # DX12 WARP. macOS CI uses Metal. Those captures are adapter comparisons.
-      # Lavapipe is the behavior gate.
-      #
-      # noble-updates only lists the newest mesa-vulkan-drivers, so
-      # `apt-get install mesa-vulkan-drivers=<version>` breaks when a newer Mesa
-      # is published. Ubuntu 24.04's apt 2.7 also has no `--snapshot`. Fetch the
-      # debs from one snapshot.ubuntu.com timestamp and check sha256. libllvm20
-      # is pinned the same way: the Mesa deb depends on it with no version, and
-      # lavapipe's shader compiler is that LLVM. Snapshot 20261003T000000Z is the
-      # daily snapshot after 25.2.8-0ubuntu0.24.04.4 was published to noble-updates
-      # (2026-10-02 13:47:56 UTC). Hashes are from that snapshot's Packages index
-      # and were checked against the downloaded debs.
-      #
+      # Lavapipe is the behavior gate. The pin (snapshot, versions, sha256) lives in
+      # .github/actions/lavapipe so frame-bench.yml measures on the same build.
+      - name: Install pinned lavapipe
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        uses: ./.github/actions/lavapipe
+
       # GStreamer stays on the trimmed #190 install. plugins-good, flite, and the
       # soundfont are Depends of gstreamer1.0-plugins-bad, not recommends. The
       # MPEG-TS test only loads tsdemux, whose .so needs libgstreamer-plugins-bad1.0-0
       # plus the base plugins. `--no-install-recommends` still skips VA-API.
       # On master 0104fee7 the full plugins-bad install fetched 96.2 MB in 20 min 31 s.
       # 10 minutes bounds this apt step. A healthy fetch is a few seconds.
-      - name: Install Linux system dependencies (pinned lavapipe + GStreamer)
+      # apt lists were refreshed by the lavapipe action above.
+      - name: Install Linux system dependencies (GStreamer)
         if: runner.os == 'Linux'
         timeout-minutes: 10
         run: |
           set -euo pipefail
-          snapshot="https://snapshot.ubuntu.com/ubuntu/20261003T000000Z"
-          mesa_version="25.2.8-0ubuntu0.24.04.4"
-          llvm_version="1:20.1.2-0ubuntu1~24.04.3"
-          mesa_deb="mesa-vulkan-drivers_25.2.8-0ubuntu0.24.04.4_amd64.deb"
-          llvm_deb='libllvm20_20.1.2-0ubuntu1~24.04.3_amd64.deb'
-          mesa_sha="a4ec58cb952b4e2a8b7c7a9b4ea80fa3d2914e347ad13b11dfb67518b409fb57"
-          llvm_sha="f018e71c72c7a4742fb1aff9dc98b45586f42e6ea464d4918af7e3772b7f0658"
-          . /etc/os-release
-          if [ "${VERSION_ID}" != "24.04" ]; then
-            echo "lavapipe debs are for Ubuntu 24.04; this runner is ${VERSION_ID}" >&2
-            exit 1
-          fi
-          work="$(mktemp -d)"
-          trap 'rm -rf "$work"' EXIT
-          curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
-            -o "${work}/${mesa_deb}" \
-            "${snapshot}/pool/main/m/mesa/${mesa_deb}"
-          curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
-            -o "${work}/${llvm_deb}" \
-            "${snapshot}/pool/main/l/llvm-toolchain-20/${llvm_deb}"
-          (
-            cd "$work"
-            printf '%s  %s\n' "$mesa_sha" "$mesa_deb" "$llvm_sha" "$llvm_deb" | sha256sum -c -
-          )
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --allow-downgrades \
-            "${work}/${llvm_deb}" \
-            "${work}/${mesa_deb}"
-          sudo apt-mark hold libllvm20 mesa-vulkan-drivers
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            vulkan-tools pkg-config \
+            pkg-config \
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             gstreamer1.0-plugins-base libgstreamer-plugins-bad1.0-0
           plugindir="$(pkg-config --variable=pluginsdir gstreamer-1.0)"
@@ -143,47 +112,6 @@ jobs:
           test -f "$gsttmp"/root/usr/lib/*/gstreamer-1.0/libgstmpegtsdemux.so
           sudo cp "$gsttmp"/root/usr/lib/*/gstreamer-1.0/libgstmpegtsdemux.so "$plugindir/"
           rm -rf "$gsttmp"
-          installed_mesa="$(dpkg-query -W -f='${Version}' mesa-vulkan-drivers)"
-          installed_llvm="$(dpkg-query -W -f='${Version}' libllvm20)"
-          if [ "${installed_mesa}" != "${mesa_version}" ]; then
-            echo "mesa-vulkan-drivers ${installed_mesa} != pin ${mesa_version}" >&2
-            exit 1
-          fi
-          if [ "${installed_llvm}" != "${llvm_version}" ]; then
-            echo "libllvm20 ${installed_llvm} != pin ${llvm_version}" >&2
-            exit 1
-          fi
-          icd=""
-          shopt -s nullglob
-          for candidate in /usr/share/vulkan/icd.d/lvp_icd*.json /etc/vulkan/icd.d/lvp_icd*.json; do
-            if [[ -f "${candidate}" ]]; then
-              icd="${candidate}"
-              break
-            fi
-          done
-          if [[ -z "${icd}" ]]; then
-            echo "lvp_icd json not found after installing mesa-vulkan-drivers" >&2
-            find /usr /etc -name 'lvp_icd*.json' >&2 || true
-            exit 1
-          fi
-          echo "VK_ICD_FILENAMES=${icd}" >> "${GITHUB_ENV}"
-          echo "VK_DRIVER_FILES=${icd}" >> "${GITHUB_ENV}"
-          echo "WGPU_BACKEND=vulkan" >> "${GITHUB_ENV}"
-          {
-            echo "### Lavapipe"
-            echo "Ubuntu ${VERSION_ID}"
-            echo "snapshot 20261003T000000Z"
-            echo "mesa-vulkan-drivers ${installed_mesa}"
-            echo "mesa sha256 ${mesa_sha}"
-            echo "libllvm20 ${installed_llvm}"
-            echo "libllvm20 sha256 ${llvm_sha}"
-            echo "ICD ${icd}"
-          } >> "${GITHUB_STEP_SUMMARY}"
-          VK_ICD_FILENAMES="${icd}" VK_DRIVER_FILES="${icd}" vulkaninfo --summary | tee /tmp/vulkaninfo.txt
-          if ! grep -Eq 'llvmpipe|lavapipe' /tmp/vulkaninfo.txt; then
-            echo "Vulkan loader did not select lavapipe/llvmpipe" >&2
-            exit 1
-          fi
 
       - uses: dtolnay/rust-toolchain@stable
         with:

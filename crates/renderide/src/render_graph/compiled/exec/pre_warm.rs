@@ -17,13 +17,13 @@ use crate::hi_z_cpu::{hi_z_pyramid_dimensions, mip_levels_for_extent};
 use crate::occlusion::gpu::HIZ_MAX_MIPS;
 use crate::render_graph::HistorySlotId;
 
-/// Compiles pass-owned pipelines before command recording on headless and software adapters.
+/// Compiles pass-owned pipelines before command recording on a capture readback.
 ///
 /// Normal and depth prepasses are already warmed from the draw list in the backend.
 /// Scene compose, clustered lighting, and Hi-Z are not on the material queue. Building
 /// them inside an open pass hangs DX12 WARP even when no submits are queued. The graph
-/// only reads the attach-time flag and forwards the compose formats. Real GPUs return
-/// on that flag. The backend compiles the pipelines.
+/// only reads the attach-time flag and forwards the compose formats. Windowed and
+/// frame-bench frames return on that flag. The backend compiles the pipelines.
 fn precompile_pass_owned_pipelines_before_submit(
     mv_ctx: &mut MultiViewExecutionContext<'_>,
     views: &[FrameView<'_>],

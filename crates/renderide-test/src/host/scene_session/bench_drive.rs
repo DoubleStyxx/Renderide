@@ -57,6 +57,9 @@ pub struct BenchDriveConfig {
     pub timeout: Duration,
     /// Inherit the renderer stdout and stderr when set.
     pub verbose_renderer: bool,
+    /// With `verbose_renderer`, route the renderer's stdout to this process's stderr instead of
+    /// stdout, so a `--json` caller's stdout stays one JSON document.
+    pub renderer_stdout_to_stderr: bool,
     /// Skip `--headless`. The winit window size is not pinned.
     pub windowed: bool,
     /// World-space camera position applied before the first submit.
@@ -235,7 +238,12 @@ fn spawn_bench_renderer(
     cmd.args(&args);
     cmd.env("RENDERIDE_INTERPROCESS_DIR", backing_dir);
     if cfg.verbose_renderer {
-        cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+        let stdout = if cfg.renderer_stdout_to_stderr {
+            Stdio::from(std::io::stderr())
+        } else {
+            Stdio::inherit()
+        };
+        cmd.stdout(stdout).stderr(Stdio::inherit());
     } else {
         cmd.env("RENDERIDE_LOG_TEE_TERMINAL", "0");
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
@@ -362,6 +370,7 @@ mod tests {
             measured_frames: 4,
             timeout: Duration::from_secs(5),
             verbose_renderer: false,
+            renderer_stdout_to_stderr: false,
             windowed,
             camera_position: [0.0, 0.0, -3.0],
             camera_rotation_xyzw: [0.0, 0.0, 0.0, 1.0],

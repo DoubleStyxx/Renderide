@@ -1,6 +1,8 @@
 # Manual lavapipe frame benchmark. Does not run on push or pull_request.
 # The job builds master and the selected head on one runner and gates only on
-# relative regression of cpu_frame_ms.p95. Absolute milliseconds are not a gate.
+# relative regression of cpu_frame_ms.p95. Absolute milliseconds are not a gate. The gate's
+# --abs-floor-ms (a head-minus-base median delta at or below it never flags or fails) defaults
+# to 0, off, and this job does not set it; a nonzero floor is open question O8.
 #
 # Gate (scripts/ci/frame_bench_gate.py, taken from the ref that dispatched this workflow;
 # its docstring is the full rule). delta = (median head per-run p95 - median base per-run p95)
@@ -95,7 +97,8 @@ permissions:
 jobs:
   frame-bench-lavapipe:
     name: frame-bench-lavapipe
-    runs-on: ubuntu-latest
+    # ubuntu-24.04, not ubuntu-latest: the pinned lavapipe debs are noble builds.
+    runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
       - name: Checkout gate script (dispatching ref)
@@ -104,11 +107,23 @@ jobs:
           ref: ${{ github.sha }}
           path: tools
           persist-credentials: false
-          sparse-checkout: scripts/ci
+          sparse-checkout: |
+            scripts/ci
+            .github/actions/lavapipe
 
       # Runs before any base/head tree is checked out.
       - name: Self-test gate script
         run: python3 -m unittest discover -s tools/scripts/ci -p 'test_frame_bench_gate.py' -v
+
+      # Same pinned lavapipe as ci.yml's goldens (snapshot 20261003T000000Z,
+      # mesa 25.2.8, libllvm20, sha256-checked), taken from the dispatching ref
+      # like the gate script. Sets VK_ICD_FILENAMES, VK_DRIVER_FILES and
+      # WGPU_BACKEND, and prints `vulkaninfo --summary`. Runs before the
+      # base/head trees are checked out, so no untrusted checkout precedes a
+      # local action (CodeQL actions/cache-poisoning/poisonable-step).
+      - name: Install pinned lavapipe
+        timeout-minutes: 10
+        uses: ./tools/.github/actions/lavapipe
 
       - name: Checkout candidate
         uses: actions/checkout@v7
@@ -124,14 +139,9 @@ jobs:
           path: base
           persist-credentials: false
 
-      - name: Install mesa Vulkan (lavapipe)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y mesa-vulkan-drivers vulkan-tools
-
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Pin lavapipe and thread count
+      - name: Pin thread count
         env:
           INPUT_THREADS: ${{ inputs.threads }}
         run: |
@@ -140,29 +150,8 @@ jobs:
             echo "threads must be a positive integer" >&2
             exit 1
           fi
-          icd=""
-          shopt -s nullglob
-          for candidate in /usr/share/vulkan/icd.d/lvp_icd*.json /etc/vulkan/icd.d/lvp_icd*.json; do
-            if [[ -f "$candidate" ]]; then
-              icd="$candidate"
-              break
-            fi
-          done
-          if [[ -z "$icd" ]]; then
-            echo "lvp_icd json not found after installing mesa-vulkan-drivers" >&2
-            find /usr /etc -name 'lvp_icd*.json' >&2 || true
-            exit 1
-          fi
-          echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
-          echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
-          echo "WGPU_BACKEND=vulkan" >> "$GITHUB_ENV"
           echo "RAYON_NUM_THREADS=$INPUT_THREADS" >> "$GITHUB_ENV"
           echo "RENDERIDE_LOG_TEE_TERMINAL=0" >> "$GITHUB_ENV"
-          VK_ICD_FILENAMES="$icd" VK_DRIVER_FILES="$icd" vulkaninfo --summary | tee /tmp/vulkaninfo.txt
-          if ! grep -Eq 'llvmpipe|lavapipe' /tmp/vulkaninfo.txt; then
-            echo "Vulkan loader did not select lavapipe/llvmpipe" >&2
-            exit 1
-          fi
 
       - name: Measure and compare
         env:
@@ -282,7 +271,8 @@ jobs:
           }
 
           # Each tree is measured with ITS OWN renderide-framebench binary. Reports from different
-          # trees are only ever compared through the schema-1 JSON.
+          # trees are only ever compared through the report JSON (schema 1 or 2; the gate accepts
+          # both, in any mix). The gate script comes from the dispatching ref.
           # usage: run_tree <target dir> <out json> [scenario ...]
           run_tree() {
             local target="$1"
