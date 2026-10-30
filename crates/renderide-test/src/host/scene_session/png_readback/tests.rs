@@ -51,6 +51,9 @@ fn non_warp_adapter_timeout_still_reports_flat_or_unstable() {
         pending_chunks: ready.pending,
         missing_chunks: ready.missing,
         frame_count: ready.frames,
+        frame_pending: Some(0),
+        gpu_done: true,
+        dropped_draws: Some(0),
     };
     let text = err.to_string();
     assert!(text.contains("flat or unstable"), "{text}");
@@ -283,46 +286,153 @@ fn repeated_flat_rejections_log_once_and_alternation_logs_again() {
     };
     let mut progress = super::CaptureProgress::default();
     let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
-    assert!(settle_logs(
+    let first = settle_log(
         &mut progress,
         t0,
         &flat,
         super::SettleDecision::Reject,
-        false
-    ));
-    assert!(!settle_logs(
-        &mut progress,
-        t0 + Duration::from_secs(1),
-        &flat,
-        super::SettleDecision::Reject,
-        false
-    ));
-    assert!(!settle_logs(
-        &mut progress,
-        t0 + Duration::from_secs(2),
-        &good,
-        super::SettleDecision::Hold,
-        false
-    ));
-    assert!(settle_logs(
+        false,
+    )
+    .expect("first flat reject");
+    assert!(first.contains("reset=false"), "{first}");
+    assert!(first.contains("flat=true"), "{first}");
+
+    assert!(
+        settle_log(
+            &mut progress,
+            t0 + Duration::from_secs(1),
+            &flat,
+            super::SettleDecision::Reject,
+            false
+        )
+        .is_none(),
+        "an identical flat reject does not log again"
+    );
+    assert!(
+        settle_log(
+            &mut progress,
+            t0 + Duration::from_secs(2),
+            &good,
+            super::SettleDecision::Hold,
+            false
+        )
+        .is_none(),
+        "a held good frame does not log a rejection"
+    );
+
+    let again = settle_log(
         &mut progress,
         t0 + Duration::from_secs(3),
         &flat,
         super::SettleDecision::Reject,
-        true
-    ));
+        true,
+    )
+    .expect("return to flat");
+    assert!(again.contains("reset=true"), "{again}");
 }
 
-fn settle_logs(
+fn settle_log(
     progress: &mut super::CaptureProgress,
     mtime: SystemTime,
     frame: &super::FrameReadiness,
     decision: super::SettleDecision,
     had_counted_frame: bool,
-) -> bool {
-    let before = progress.last_observed;
-    super::log_settle_rejection(mtime, frame, decision, had_counted_frame, progress);
-    progress.last_observed != before && decision == super::SettleDecision::Reject
+) -> Option<String> {
+    super::log_settle_rejection(mtime, frame, decision, had_counted_frame, progress)
+}
+
+#[test]
+fn flat_pending_frame_does_not_suppress_the_compiling_line() {
+    let path = std::path::Path::new("target/renderide-test-out/pbs_lit_material_matrix/actual.png");
+    let mut progress = super::CaptureProgress::default();
+    let flat_pending = super::FrameReadiness {
+        gpu_done: false,
+        pending: Some(4),
+        dropped_draws: None,
+        flat: true,
+        stall_ms: 12,
+    };
+    assert!(super::note_stable_frame(path, Some("4"), &flat_pending, &mut progress).is_none());
+    assert!(progress.pending_pipeline_seen);
+    assert!(!progress.compiling_or_skipped_logged);
+
+    let compiling = super::FrameReadiness {
+        flat: false,
+        pending: Some(2),
+        ..flat_pending
+    };
+    let line = super::note_stable_frame(path, Some("2"), &compiling, &mut progress)
+        .expect("compiling line");
+    let shown = path.display();
+    assert_eq!(line, super::compiling_or_skipped_line(path));
+    assert!(
+        line.contains(&format!(
+            "{shown} still has compiling or skipped material draws"
+        )),
+        "{line}"
+    );
+    assert!(
+        line.contains("pbs_lit_material_matrix/actual.png"),
+        "{line}"
+    );
+    assert!(progress.compiling_or_skipped_logged);
+    assert!(super::note_stable_frame(path, Some("2"), &compiling, &mut progress).is_none());
+}
+
+#[test]
+fn timeout_copies_the_observed_frame_and_fails_closed_without_one() {
+    let path = std::path::Path::new("target/renderide-test-out/pbs_lit_material_matrix/actual.png");
+    let chunks = chunks_with_last(Some(0), 3);
+    let observed = super::ObservedSettleState {
+        flat: true,
+        pending: Some(4),
+        gpu_done: true,
+        dropped_draws: None,
+    };
+    let err = super::timeout_outcome(
+        path,
+        Duration::from_secs(300),
+        &chunks,
+        true,
+        true,
+        Some(observed),
+    )
+    .expect_err("timeout");
+    match err {
+        crate::HarnessError::FlatOrUnstableFrame {
+            frame_pending,
+            gpu_done,
+            dropped_draws,
+            last_pending,
+            ..
+        } => {
+            assert_eq!(frame_pending, Some(4));
+            assert!(gpu_done);
+            assert_eq!(dropped_draws, None);
+            assert_eq!(last_pending, 0);
+        }
+        other => panic!("expected flat or unstable, got {other}"),
+    }
+
+    let unseen = super::timeout_outcome(path, Duration::from_secs(300), &chunks, false, true, None)
+        .expect_err("unobserved");
+    let text = unseen.to_string();
+    assert!(text.contains("flat or unstable"), "{text}");
+    assert!(text.contains("last pending=0"), "{text}");
+    assert!(!text.contains("pipeline-pending"), "{text}");
+    match unseen {
+        crate::HarnessError::FlatOrUnstableFrame {
+            frame_pending,
+            gpu_done,
+            dropped_draws,
+            ..
+        } => {
+            assert_eq!(frame_pending, None);
+            assert!(!gpu_done);
+            assert_eq!(dropped_draws, None);
+        }
+        other => panic!("expected flat or unstable, got {other}"),
+    }
 }
 
 #[test]

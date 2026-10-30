@@ -544,18 +544,15 @@ wgpu adapter selected (headless): Microsoft Basic Render Driver type=Cpu backend
         )
         .expect("write");
 
-        let mut suite = SuiteReport::from_cases(vec![SuiteCaseReport {
-            name: PBS_LIT.to_string(),
-            passed: false,
-            artifacts_dir: dir.path().to_path_buf(),
-            report_json: report_path.clone(),
-            error: Some("case failed tolerance".to_string()),
-            result: Some(EXPECTED_FAILURE_LABEL.to_string()),
-            status: None,
-            reason: None,
-            gate: crate::adapter_gate::BEHAVIOR.to_string(),
-            adapter: String::new(),
-        }]);
+        let mut case = SuiteCaseReport::plain(
+            PBS_LIT,
+            false,
+            dir.path().to_path_buf(),
+            report_path.clone(),
+            Some("case failed tolerance".to_string()),
+        );
+        case.result = Some(EXPECTED_FAILURE_LABEL.to_string());
+        let mut suite = SuiteReport::from_cases(vec![case]);
         suite.cases[0].passed = false;
         suite.recompute();
         stamp_case_report(&report_path).expect("stamp");

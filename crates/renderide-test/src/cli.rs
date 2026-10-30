@@ -470,18 +470,17 @@ mod cli_tests {
             status: Option<&str>,
             reason: Option<&str>,
         ) -> SuiteCaseReport {
-            SuiteCaseReport {
-                name: name.to_string(),
+            let mut case = SuiteCaseReport::plain(
+                name,
                 passed,
-                artifacts_dir: PathBuf::from(name),
-                report_json: PathBuf::from(name),
-                error: None,
-                result: result.map(str::to_string),
-                status: status.map(str::to_string),
-                reason: reason.map(str::to_string),
-                gate: crate::adapter_gate::BEHAVIOR.to_string(),
-                adapter: String::new(),
-            }
+                PathBuf::from(name),
+                PathBuf::from(name),
+                None,
+            );
+            case.result = result.map(str::to_string);
+            case.status = status.map(str::to_string);
+            case.reason = reason.map(str::to_string);
+            case
         }
 
         let pass = case("a", true, None, None, None);
