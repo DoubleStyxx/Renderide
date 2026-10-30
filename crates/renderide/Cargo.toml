@@ -61,6 +61,10 @@ bench-api = []
 ## default renderer build do not include the TCP server. Enable with
 ## `--features control-api` and pass `--control-port <port>` to bind `127.0.0.1`.
 control-api = ["dep:renderide-control-client"]
+## Compiles HUD work counters into non-test builds. Off by default, and empty, so a
+## normal release frame does not pay for the atomics. Unit tests compile the counters
+## through `cfg(test)` without enabling this feature.
+hud-counters = []
 
 [package.metadata.cargo-machete]
 ignored = ["tracing", "tracy-client"]
@@ -95,6 +99,7 @@ toml_edit = "0.25"
 figment = { version = "0.10", features = ["toml", "env"] }
 hashbrown = "0.17"
 image = { version = "0.25", default-features = false, features = ["png"] }
+png = "0.18"
 texture2ddecoder = "0.1"
 notify-debouncer-mini = "0.7"
 notify = "8.2"

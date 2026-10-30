@@ -3477,6 +3477,7 @@ dependencies = [
  "notify-debouncer-mini",
  "openxr",
  "parking_lot",
+ "png",
  "pollster 1.0.1",
  "profiling",
  "rayon",
@@ -3507,8 +3508,14 @@ dependencies = [
 name = "renderide-bench"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "criterion",
  "renderide",
+ "renderide-framebench",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -3559,6 +3566,7 @@ dependencies = [
  "image-compare",
  "logger",
  "mimalloc",
+ "png",
  "rayon",
  "renderide-shared",
  "serde",

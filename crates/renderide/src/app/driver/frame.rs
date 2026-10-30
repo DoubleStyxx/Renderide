@@ -532,8 +532,9 @@ impl AppDriver {
             self.render_non_hmd_views(mode)?;
         }
 
+        // `true` is ignored until H7; visibility is not read on this path.
         let hud_in =
-            crate::diagnostics::DebugHudInput::from_winit(window.as_ref(), &mut self.input);
+            crate::diagnostics::frame_hud_input(true, window.scale_factor(), &mut self.input);
         self.runtime.set_debug_hud_input(hud_in);
 
         Some(RenderViewsOutcome {

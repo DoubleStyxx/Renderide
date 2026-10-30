@@ -95,6 +95,7 @@ impl OverlayFeatureFlags {
     /// When the read lock cannot be acquired (poisoned), defaults to the lightweight windows
     /// enabled and the expensive debug-content windows off.
     pub fn from_settings(settings: &RendererSettingsHandle) -> Self {
+        super::work_counters::note_settings_lock();
         settings
             .read()
             .map(|g| OverlayFeatureFlags {

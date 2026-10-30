@@ -181,6 +181,7 @@ fn positive_only_reference_failure(
     let CaseTemplate::NegativeLightPair {
         physically_based: true,
         include_negative: true,
+        ..
     } = case.template
     else {
         return Ok(());
@@ -205,6 +206,7 @@ fn positive_only_reference_failure(
         template: SessionTemplate::NegativeLightPair {
             physically_based: false,
             include_negative: false,
+            negative_color: false,
         },
     };
     let mut harness = HostHarness::start(harness_cfg).map_err(|err| err.to_string())?;
@@ -323,10 +325,12 @@ fn prepare_template(
         CaseTemplate::NegativeLightPair {
             physically_based,
             include_negative,
+            negative_color,
         } => Ok(PreparedTemplate {
             session_template: SessionTemplate::NegativeLightPair {
                 physically_based: *physically_based,
                 include_negative: *include_negative,
+                negative_color: *negative_color,
             },
         }),
         CaseTemplate::GltfTexturedStaticMesh { path } => gltf_prepared_template(path, layout),

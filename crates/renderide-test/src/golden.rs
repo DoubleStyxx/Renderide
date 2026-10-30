@@ -137,6 +137,19 @@ mod tests {
     }
 
     #[test]
+    fn black_spheres_on_the_production_clear_are_flat() {
+        let mut production = RgbaImage::new(4, 4);
+        for pixel in production.pixels_mut() {
+            *pixel = image::Rgba([0, 0, 0, 255]);
+        }
+        assert!(super::is_flat_image(&production));
+
+        let mut magenta = production.clone();
+        magenta.put_pixel(0, 0, image::Rgba([255, 0, 255, 255]));
+        assert!(!super::is_flat_image(&magenta));
+    }
+
+    #[test]
     fn flat_detects_single_fill_color() {
         let mut img = RgbaImage::new(4, 4);
         for p in img.pixels_mut() {

@@ -21,7 +21,7 @@ mod stats;
 pub use cli::cli_main;
 pub use compare::{
     CompareOptions, CompareOutcome, DEFAULT_ABS_FLOOR_MS, DEFAULT_GATE_METRIC,
-    DEFAULT_THRESHOLD_PERCENT, compare_loaded, compare_reports,
+    DEFAULT_THRESHOLD_PERCENT, RelativeStatus, compare_loaded, compare_reports, relative_status,
 };
 pub use error::{BenchError, exit_code};
 pub use report::{

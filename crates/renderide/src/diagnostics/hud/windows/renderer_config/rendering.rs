@@ -101,8 +101,9 @@ fn rendering_graph_section(ui: &imgui::Ui, g: &mut RendererSettings, dirty: &mut
         }
     }
     ui.text_disabled(
-        "Physically based lights. When on, a negative intensity is clamped to zero at light \
-         upload. Off by default so Resonite parity keeps negative lights, which darken the scene.",
+        "Physically based lights. When on, each channel of color times intensity is clamped \
+         to be non-negative at light upload. Off by default so Resonite parity keeps negative \
+         lights, which darken the scene.",
     );
     if ui.checkbox("Physically based", &mut g.rendering.physically_based) {
         *dirty = true;

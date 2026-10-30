@@ -15,6 +15,7 @@ use crate::error::HarnessError;
 use super::super::lockstep::LockstepDriver;
 use super::config::SceneSessionOutcome;
 use super::consts::timing;
+use super::gpu_ready::{self, FrameReadiness, GpuFrameSettle, SettleDecision};
 
 /// Wall-clock + monotonic anchors for one readback wait.
 pub struct PngStabilityWaitTiming {
@@ -26,12 +27,6 @@ pub struct PngStabilityWaitTiming {
     pub overall_timeout: Duration,
     /// Renderer's configured PNG write interval.
     pub interval: Duration,
-    /// How many non-flat stable PNGs to ignore before accepting one.
-    ///
-    /// Async pipeline compiles can present one shader while the next is still building.
-    /// A clear frame is already rejected. This count rejects that many later colored
-    /// frames so the capture waits for the following write.
-    pub non_flat_skips: u32,
 }
 
 /// Filesystem snapshot of the renderer's PNG output, supplied to [`PngStabilityState::observe`].
@@ -142,17 +137,131 @@ impl PngStabilityState {
         PngStabilityVerdict::Pending
     }
 
-    /// Rejects the current stable candidate so only a strictly newer PNG write can become
-    /// `Stable`. Used when the candidate is a flat clear-only frame rendered before async
-    /// material pipelines finished compiling.
+    /// Drops the current stability window so the same PNG can be judged again.
+    ///
+    /// Clearing only `stable_since` left `last_seen_mtime` set, and the next observation of
+    /// that same mtime never reopened the window. A frame that became ready without a newer
+    /// write, or a write whose mtime did not change, then waited out the whole capture.
     pub fn reject_candidate(&mut self) {
         self.stable_since = None;
+        self.last_seen_mtime = None;
     }
 }
 
-/// Whether the PNG at `path` decodes to a flat single-color image.
-fn png_is_flat(path: &Path) -> bool {
-    crate::image_io::load_rgba(path).is_ok_and(|img| crate::golden::is_flat_image(&img))
+/// Keyword of the PNG `tEXt` chunk written by the headless PNG encoder.
+const PIPELINE_PENDING_TEXT_KEYWORD: &str = "renderide_pipeline_pending";
+/// `1` only after that frame's submission reached `on_submitted_work_done`.
+const GPU_DONE_TEXT_KEYWORD: &str = "renderide_gpu_done";
+/// Milliseconds spent waiting for that submission inside the headless readback.
+const SUBMIT_STALL_TEXT_KEYWORD: &str = "renderide_submit_stall_ms";
+
+/// Whether this PNG's own `tEXt` chunk says the frame had no compiling or skipped draws.
+///
+/// The count is inside the PNG, so a later frame cannot publish `0` next to an older image.
+/// A missing chunk, a non-numeric chunk, or a non-zero count is not ready. A Null fallback
+/// drawn while the requested shader is still compiling is a positive count. A draw skipped
+/// because no pipeline was available is a positive count too.
+#[cfg(test)]
+fn pipeline_frame_is_ready(path: &Path) -> bool {
+    decode_stable_png(path)
+        .text(PIPELINE_PENDING_TEXT_KEYWORD)
+        .is_some_and(|text| text.trim() == "0")
+}
+
+/// One open of a stable PNG: every `tEXt` chunk and the RGBA pixels, when they decode.
+struct DecodedPng {
+    texts: Vec<(String, String)>,
+    image: Option<image::RgbaImage>,
+}
+
+impl DecodedPng {
+    fn missing() -> Self {
+        Self {
+            texts: Vec::new(),
+            image: None,
+        }
+    }
+
+    fn text(&self, keyword: &str) -> Option<&str> {
+        self.texts
+            .iter()
+            .find(|(key, _)| key == keyword)
+            .map(|(_, text)| text.as_str())
+    }
+}
+
+/// Reads the file once. A failed decode has no chunks and is not flat.
+fn decode_stable_png(path: &Path) -> DecodedPng {
+    let Ok(bytes) = std::fs::read(path) else {
+        return DecodedPng::missing();
+    };
+    let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    let Ok(mut reader) = decoder.read_info() else {
+        return DecodedPng::missing();
+    };
+    let texts = reader
+        .info()
+        .uncompressed_latin1_text
+        .iter()
+        .map(|chunk| (chunk.keyword.clone(), chunk.text.clone()))
+        .collect();
+    let Some(size) = reader.output_buffer_size() else {
+        return DecodedPng { texts, image: None };
+    };
+    let mut buf = vec![0u8; size];
+    let Ok(output) = reader.next_frame(&mut buf) else {
+        return DecodedPng { texts, image: None };
+    };
+    DecodedPng {
+        texts,
+        image: rgba8_image(&output, &buf),
+    }
+}
+
+/// Headless captures are 8-bit RGBA with packed rows. Anything else is not a flat image.
+fn rgba8_image(output: &png::OutputInfo, buf: &[u8]) -> Option<image::RgbaImage> {
+    if output.color_type != png::ColorType::Rgba || output.bit_depth != png::BitDepth::Eight {
+        return None;
+    }
+    let bytes = output.buffer_size();
+    if buf.len() < bytes || output.line_size != output.width as usize * 4 {
+        return None;
+    }
+    image::RgbaImage::from_raw(output.width, output.height, buf[..bytes].to_vec())
+}
+
+/// Readiness plus the pending chunk text, from a single decode.
+struct DecodedFrame {
+    readiness: FrameReadiness,
+    pending_text: Option<String>,
+}
+
+fn read_frame_readiness(path: &Path) -> DecodedFrame {
+    let decoded = decode_stable_png(path);
+    let pending_text = decoded
+        .text(PIPELINE_PENDING_TEXT_KEYWORD)
+        .map(str::to_string);
+    let (pending, dropped_draws) = gpu_ready::counts_from_pending_chunk(pending_text.as_deref());
+    let gpu_done = decoded
+        .text(GPU_DONE_TEXT_KEYWORD)
+        .is_some_and(|text| text.trim() == "1");
+    let stall_ms = decoded
+        .text(SUBMIT_STALL_TEXT_KEYWORD)
+        .and_then(|text| text.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    DecodedFrame {
+        readiness: FrameReadiness {
+            gpu_done,
+            pending,
+            dropped_draws,
+            flat: decoded
+                .image
+                .as_ref()
+                .is_some_and(crate::golden::is_flat_image),
+            stall_ms,
+        },
+        pending_text,
+    }
 }
 
 /// Reads the current observation of `output_path`. Maps any I/O failure to
@@ -181,17 +290,36 @@ pub(super) fn run_lockstep_until_png_stable(
 ) -> Result<SceneSessionOutcome, HarnessError> {
     let mut state = PngStabilityState::new(&wait_timing);
     let deadline_floor = state.min_wall_after_submit() + timing::PNG_DEADLINE_SLACK;
-    let deadline = Instant::now() + wait_timing.overall_timeout.max(deadline_floor);
+    let wait_started = Instant::now();
     let mut last_log_at = Instant::now();
-    let mut flat_candidate_seen = false;
-    let mut non_flat_skips = wait_timing.non_flat_skips;
+    let mut warp = WarpBudgetWatch {
+        last_check: wait_started
+            .checked_sub(timing::LOG_INTERVAL)
+            .unwrap_or(wait_started),
+        decided: false,
+        used: false,
+        deadline: wait_started + wait_timing.overall_timeout.max(deadline_floor),
+    };
+    let mut progress = CaptureProgress::default();
+    let mut settle = GpuFrameSettle::default();
+    let mut stats = CaptureStatsWriter::new(
+        output_path.with_file_name(crate::scene_dsl::output::CAPTURE_STATS_FILENAME),
+    );
 
-    while Instant::now() < deadline {
+    while Instant::now() < warp.deadline {
+        extend_warp_budget(
+            output_path,
+            &wait_timing,
+            wait_started,
+            deadline_floor,
+            &mut warp,
+        );
+        stats.sync(settle.longest_stall_ms(), warp.used);
         let _ = lockstep.tick(queues);
 
         if let Ok(Some(status)) = renderer.try_wait() {
             return Err(HarnessError::AssetAckTimeout(
-                deadline.elapsed(),
+                wait_started.elapsed(),
                 if status.success() {
                     "renderer exited cleanly before producing PNG"
                 } else {
@@ -205,37 +333,21 @@ pub(super) fn run_lockstep_until_png_stable(
             state.observe(now, read_png_observation(output_path)),
             PngStabilityVerdict::Stable
         ) {
-            // Pipelines compile asynchronously; draws whose pipeline is still pending are
-            // skipped (materials/registry.rs), so an early frame can be clear-only. Keep
-            // pumping for a later write instead of capturing it.
-            if png_is_flat(output_path) {
-                if !flat_candidate_seen {
-                    logger::info!(
-                        "Session: stable PNG is flat; waiting for a later frame (pipelines may still be compiling)"
-                    );
-                }
-                flat_candidate_seen = true;
-                state.reject_candidate();
-                std::thread::sleep(timing::POLL_INTERVAL);
-                continue;
+            if settle_stable_frame(
+                output_path,
+                &wait_timing,
+                &mut state,
+                &mut progress,
+                &mut settle,
+                &mut stats,
+                warp.used,
+            ) {
+                return Ok(SceneSessionOutcome {
+                    png_path: output_path.to_path_buf(),
+                });
             }
-            if non_flat_skips > 0 {
-                non_flat_skips -= 1;
-                logger::info!(
-                    "Session: stable PNG is only a partial compile; waiting for a newer frame"
-                );
-                state.reject_candidate();
-                std::thread::sleep(timing::POLL_INTERVAL);
-                continue;
-            }
-            logger::info!(
-                "Session: fresh PNG stabilized at {} after {:?}",
-                output_path.display(),
-                wait_timing.scene_submit_instant.elapsed()
-            );
-            return Ok(SceneSessionOutcome {
-                png_path: output_path.to_path_buf(),
-            });
+            std::thread::sleep(timing::POLL_INTERVAL);
+            continue;
         }
 
         if last_log_at.elapsed() >= timing::LOG_INTERVAL {
@@ -251,172 +363,389 @@ pub(super) fn run_lockstep_until_png_stable(
         std::thread::sleep(timing::POLL_INTERVAL);
     }
 
-    if flat_candidate_seen {
-        // Never rendered anything but a flat frame: hand it to the golden check so the
-        // failure is reported as "flat single color" rather than "missing PNG".
-        return Ok(SceneSessionOutcome {
-            png_path: output_path.to_path_buf(),
-        });
-    }
-
-    Err(HarnessError::PngOutputMissing {
-        path: PathBuf::from(output_path),
-        wait: wait_timing.overall_timeout,
-    })
+    let wait = reported_wait(wait_timing.overall_timeout, warp.used, deadline_floor);
+    stats.sync(settle.longest_stall_ms(), warp.used);
+    timeout_outcome(
+        output_path,
+        wait,
+        &progress.chunks,
+        progress.pending_pipeline_seen,
+        progress.flat_candidate_seen,
+        progress.last_observed,
+    )
 }
 
-#[cfg(test)]
-mod tests {
-    use std::time::{Duration, Instant, SystemTime};
+/// Flags and chunk counts gathered while a capture is still waiting.
+#[derive(Default)]
+struct CaptureProgress {
+    flat_candidate_seen: bool,
+    pending_pipeline_seen: bool,
+    /// The compiling-or-skipped line has its own flag. A flat frame with
+    /// `pending > 0` still sets `pending_pipeline_seen` for timeout classification,
+    /// and that must not swallow the line the Linux stall grep looks for.
+    compiling_or_skipped_logged: bool,
+    gpu_not_done_logged: bool,
+    settle_hold_logged: bool,
+    last_observed: Option<ObservedSettleState>,
+    chunks: ObservedChunks,
+}
 
-    use super::{PngObservation, PngStabilityState, PngStabilityVerdict, PngStabilityWaitTiming};
+/// Returns true when this stable PNG is the settled capture.
+fn settle_stable_frame(
+    output_path: &Path,
+    wait_timing: &PngStabilityWaitTiming,
+    state: &mut PngStabilityState,
+    progress: &mut CaptureProgress,
+    settle: &mut GpuFrameSettle,
+    stats: &mut CaptureStatsWriter,
+    warp_used: bool,
+) -> bool {
+    let Some(mtime) = state.last_seen_mtime() else {
+        state.reject_candidate();
+        return false;
+    };
+    let decoded = read_frame_readiness(output_path);
+    let _ = note_stable_frame(
+        output_path,
+        decoded.pending_text.as_deref(),
+        &decoded.readiness,
+        progress,
+    );
+    stats.sync(settle.longest_stall_ms(), warp_used);
+    let completed_before = settle.completed_frames();
+    let decision = settle.observe(mtime, decoded.readiness);
+    let _ = log_settle_rejection(
+        mtime,
+        &decoded.readiness,
+        decision,
+        completed_before > 0,
+        progress,
+    );
+    stats.sync(settle.longest_stall_ms(), warp_used);
+    if decision == SettleDecision::Accept {
+        logger::info!(
+            "Session: fresh PNG stabilized at {} after {:?}",
+            output_path.display(),
+            wait_timing.scene_submit_instant.elapsed()
+        );
+        return true;
+    }
+    if decision == SettleDecision::Hold && !progress.settle_hold_logged {
+        logger::info!("Session: GPU-completed frame recorded; waiting for a later settled frame");
+        progress.settle_hold_logged = true;
+    }
+    state.reject_candidate();
+    false
+}
 
-    /// Builds a timing where `interval=1s` -> `min_wall_after_submit=2s`
-    /// (since `interval*2 = 2s > MIN_WALL_AFTER_SUBMIT_FLOOR = 1.5s`).
-    fn make_timing(
-        scene_submitted_at: SystemTime,
-        scene_submit_instant: Instant,
-    ) -> PngStabilityWaitTiming {
-        PngStabilityWaitTiming {
-            scene_submitted_at,
-            scene_submit_instant,
-            overall_timeout: Duration::from_secs(10),
-            interval: Duration::from_secs(1),
-            non_flat_skips: 0,
+fn timeout_outcome(
+    output_path: &Path,
+    wait: Duration,
+    chunks: &ObservedChunks,
+    pending_pipeline_seen: bool,
+    flat_candidate_seen: bool,
+    last_observed: Option<ObservedSettleState>,
+) -> Result<SceneSessionOutcome, HarnessError> {
+    let (frame_pending, gpu_done, dropped_draws) = match last_observed {
+        Some(observed) => (observed.pending, observed.gpu_done, observed.dropped_draws),
+        None => (None, false, None),
+    };
+    match classify_capture_timeout(chunks, pending_pipeline_seen, flat_candidate_seen) {
+        CaptureTimeout::FlatOrUnstable => Err(HarnessError::FlatOrUnstableFrame {
+            path: PathBuf::from(output_path),
+            wait,
+            last_pending: chunks.last_pending.unwrap_or(0),
+            ready_chunks: chunks.ready,
+            pending_chunks: chunks.pending,
+            missing_chunks: chunks.missing,
+            frame_count: chunks.frames,
+            frame_pending,
+            gpu_done,
+            dropped_draws,
+        }),
+        CaptureTimeout::PipelineNotReady => Err(HarnessError::PipelineNotReady {
+            path: PathBuf::from(output_path),
+            wait,
+        }),
+        CaptureTimeout::FlatHandedOff => {
+            // Never rendered anything but a flat frame, and the pending chunk was not
+            // zero: hand it to the golden check so the failure is "flat single color".
+            Ok(SceneSessionOutcome {
+                png_path: output_path.to_path_buf(),
+            })
+        }
+        CaptureTimeout::Missing => Err(HarnessError::PngOutputMissing {
+            path: PathBuf::from(output_path),
+            wait,
+        }),
+    }
+}
+
+/// Deadline state for one capture wait. WARP extends it once, from `wait_started`.
+struct WarpBudgetWatch {
+    last_check: Instant,
+    decided: bool,
+    used: bool,
+    deadline: Instant,
+}
+
+/// Grows the deadline once, from the start of the wait, when the selected adapter is WARP.
+fn extend_warp_budget(
+    output_path: &Path,
+    wait_timing: &PngStabilityWaitTiming,
+    wait_started: Instant,
+    deadline_floor: Duration,
+    watch: &mut WarpBudgetWatch,
+) {
+    if watch.decided || watch.last_check.elapsed() < timing::LOG_INTERVAL {
+        return;
+    }
+    watch.last_check = Instant::now();
+    let Some(is_warp) = crate::scene_dsl::output_warp_decision(output_path) else {
+        return;
+    };
+    watch.decided = true;
+    if !is_warp {
+        return;
+    }
+    let budget = gpu_ready::warp_readiness_budget(true, wait_timing.overall_timeout);
+    let extended = wait_started + budget.max(deadline_floor);
+    if extended > watch.deadline {
+        watch.deadline = extended;
+    }
+    watch.used = true;
+    logger::info!(
+        "Session: WARP adapter; readiness budget is {:?} (#216, #214)",
+        budget
+    );
+}
+
+/// Readiness facts that distinguish a flat stretch from an alternating one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ObservedSettleState {
+    flat: bool,
+    pending: Option<u64>,
+    gpu_done: bool,
+    dropped_draws: Option<u64>,
+}
+
+impl ObservedSettleState {
+    fn from_frame(frame: &FrameReadiness) -> Self {
+        Self {
+            flat: frame.flat,
+            pending: frame.pending,
+            gpu_done: frame.gpu_done,
+            dropped_draws: frame.dropped_draws,
+        }
+    }
+}
+
+/// Logs a settle rejection when its readiness state differs from the last observation.
+///
+/// Repeated identical frames produce one line. `good` then `flat` then `good`
+/// then `flat` produces a line on each return to `flat`, with `reset` set when
+/// a counted frame was cleared. `stall_ms` is printed but does not by itself
+/// open a new line. Returns that line, or `None` when this observation did not log.
+fn log_settle_rejection(
+    mtime: SystemTime,
+    frame: &FrameReadiness,
+    decision: SettleDecision,
+    had_counted_frame: bool,
+    progress: &mut CaptureProgress,
+) -> Option<String> {
+    let observed = ObservedSettleState::from_frame(frame);
+    let changed = progress.last_observed != Some(observed);
+    progress.last_observed = Some(observed);
+    if decision != SettleDecision::Reject || !changed {
+        return None;
+    }
+    let reset = had_counted_frame;
+    let pending = format_count(frame.pending);
+    let dropped = format_count(frame.dropped_draws);
+    let line = format!(
+        "Session: settle reject mtime={} flat={} pending={pending} gpu_done={} dropped={dropped} stall_ms={} reset={reset}",
+        mtime_millis(mtime),
+        frame.flat,
+        frame.gpu_done,
+        frame.stall_ms,
+    );
+    logger::info!("{line}");
+    Some(line)
+}
+
+fn mtime_millis(mtime: SystemTime) -> u128 {
+    mtime
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or(0)
+}
+
+fn format_count(count: Option<u64>) -> String {
+    match count {
+        Some(count) => count.to_string(),
+        None => "none".to_string(),
+    }
+}
+
+fn reported_wait(overall: Duration, warp_budget_used: bool, deadline_floor: Duration) -> Duration {
+    let budget = if warp_budget_used {
+        gpu_ready::warp_readiness_budget(true, overall)
+    } else {
+        overall
+    };
+    budget.max(deadline_floor)
+}
+
+/// Records the stable frame and logs the same rejection lines the Linux suite greps for.
+///
+/// `pending_text` is the chunk already decoded with the frame. This does not reopen the PNG.
+/// Returns the compiling-or-skipped line when this call is the one that logs it.
+fn note_stable_frame(
+    output_path: &Path,
+    pending_text: Option<&str>,
+    frame: &FrameReadiness,
+    progress: &mut CaptureProgress,
+) -> Option<String> {
+    let ready = pending_text.is_some_and(|text| text.trim() == "0");
+    let mut logged = None;
+    if frame.flat {
+        if !progress.flat_candidate_seen {
+            logger::info!(
+                "Session: stable PNG is flat; waiting for a later frame (pipelines may still be compiling)"
+            );
+        }
+        progress.flat_candidate_seen = true;
+        progress.pending_pipeline_seen |= !ready;
+    } else if !ready {
+        // Pipelines compile asynchronously. A draw whose pipeline is still pending,
+        // or that was skipped because no pipeline was available, is stamped on the
+        // PNG (materials/registry.rs). Keep pumping for a later write.
+        // `compiling_or_skipped_logged` is not `pending_pipeline_seen`: a flat frame
+        // with pending>0 sets that flag and must not suppress this line.
+        if !progress.compiling_or_skipped_logged {
+            let line = compiling_or_skipped_line(output_path);
+            logger::info!("{line}");
+            progress.compiling_or_skipped_logged = true;
+            logged = Some(line);
+        }
+        progress.pending_pipeline_seen = true;
+    } else if !frame.gpu_done && !progress.gpu_not_done_logged {
+        logger::info!("Session: stable PNG gpu submission is not done; waiting for a later frame");
+        progress.gpu_not_done_logged = true;
+    }
+    progress.chunks.note(pending_text);
+    logged
+}
+
+/// Linux CI greps this line, including the stalled case's PNG path.
+fn compiling_or_skipped_line(output_path: &Path) -> String {
+    let shown = output_path.display();
+    format!(
+        "Session: stable PNG {shown} still has compiling or skipped material draws; waiting for a ready frame"
+    )
+}
+
+/// Writes the stall and WARP-budget flag beside the PNG on every exit, including timeout.
+struct CaptureStatsWriter {
+    path: PathBuf,
+    longest_submission_stall_ms: u64,
+    warp_readiness_budget_used: bool,
+}
+
+impl CaptureStatsWriter {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            longest_submission_stall_ms: 0,
+            warp_readiness_budget_used: false,
         }
     }
 
-    fn fresh_state() -> (PngStabilityState, Instant, SystemTime) {
-        let i0 = Instant::now();
-        let t0 = SystemTime::now();
-        let state = PngStabilityState::new(&make_timing(t0, i0));
-        (state, i0, t0)
-    }
-
-    #[test]
-    fn pending_before_render_window_opens() {
-        let (mut s, i0, t0) = fresh_state();
-        let now = i0 + Duration::from_millis(500);
-        let mtime = t0 + Duration::from_millis(100);
-        let v = s.observe(now, PngObservation::Present { mtime, size: 1024 });
-        assert_eq!(v, PngStabilityVerdict::Pending);
-    }
-
-    #[test]
-    fn pending_when_mtime_not_advanced_past_scene() {
-        let (mut s, i0, t0) = fresh_state();
-        let now = i0 + Duration::from_millis(2500);
-        let mtime = t0 - Duration::from_millis(100);
-        let v = s.observe(now, PngObservation::Present { mtime, size: 1024 });
-        assert_eq!(v, PngStabilityVerdict::Pending);
-    }
-
-    #[test]
-    fn pending_when_size_zero() {
-        let (mut s, i0, t0) = fresh_state();
-        let now = i0 + Duration::from_millis(2500);
-        let mtime = t0 + Duration::from_millis(100);
-        let v = s.observe(now, PngObservation::Present { mtime, size: 0 });
-        assert_eq!(v, PngStabilityVerdict::Pending);
-    }
-
-    #[test]
-    fn pending_within_stability_window() {
-        let (mut s, i0, t0) = fresh_state();
-        let mtime = t0 + Duration::from_millis(2200);
-        assert_eq!(
-            s.observe(
-                i0 + Duration::from_millis(2300),
-                PngObservation::Present { mtime, size: 1024 }
-            ),
-            PngStabilityVerdict::Pending
-        );
-        assert_eq!(
-            s.observe(
-                i0 + Duration::from_millis(2400),
-                PngObservation::Present { mtime, size: 1024 }
-            ),
-            PngStabilityVerdict::Pending
-        );
-    }
-
-    #[test]
-    fn stable_after_window_elapses() {
-        let (mut s, i0, t0) = fresh_state();
-        let mtime = t0 + Duration::from_millis(2200);
-        assert_eq!(
-            s.observe(
-                i0 + Duration::from_millis(2300),
-                PngObservation::Present { mtime, size: 1024 }
-            ),
-            PngStabilityVerdict::Pending
-        );
-        assert_eq!(
-            s.observe(
-                i0 + Duration::from_millis(2500),
-                PngObservation::Present { mtime, size: 1024 }
-            ),
-            PngStabilityVerdict::Stable
-        );
-    }
-
-    #[test]
-    fn stable_since_resets_when_mtime_changes() {
-        let (mut s, i0, t0) = fresh_state();
-        let mtime1 = t0 + Duration::from_millis(2200);
-        assert_eq!(
-            s.observe(
-                i0 + Duration::from_millis(2300),
-                PngObservation::Present {
-                    mtime: mtime1,
-                    size: 1024,
-                }
-            ),
-            PngStabilityVerdict::Pending
-        );
-
-        let mtime2 = t0 + Duration::from_millis(2400);
-        assert_eq!(
-            s.observe(
-                i0 + Duration::from_millis(2450),
-                PngObservation::Present {
-                    mtime: mtime2,
-                    size: 1024,
-                }
-            ),
-            PngStabilityVerdict::Pending
-        );
-        // Past the original `stable_since` by >200ms, but mtime changed so the window restarted.
-        assert_eq!(
-            s.observe(
-                i0 + Duration::from_millis(2600),
-                PngObservation::Present {
-                    mtime: mtime2,
-                    size: 1024,
-                }
-            ),
-            PngStabilityVerdict::Pending
-        );
-        assert_eq!(
-            s.observe(
-                i0 + Duration::from_millis(2650),
-                PngObservation::Present {
-                    mtime: mtime2,
-                    size: 1024,
-                }
-            ),
-            PngStabilityVerdict::Stable
-        );
-    }
-
-    #[test]
-    fn missing_file_keeps_pending() {
-        let (mut s, i0, _t0) = fresh_state();
-        let now = i0 + Duration::from_millis(2500);
-        assert_eq!(
-            s.observe(now, PngObservation::Missing),
-            PngStabilityVerdict::Pending
-        );
-        assert!(s.last_seen_mtime().is_none());
+    fn sync(&mut self, stall_ms: u64, warp_budget_used: bool) {
+        self.longest_submission_stall_ms = self.longest_submission_stall_ms.max(stall_ms);
+        self.warp_readiness_budget_used = warp_budget_used;
     }
 }
+
+impl Drop for CaptureStatsWriter {
+    fn drop(&mut self) {
+        let payload = serde_json::json!({
+            "longest_submission_stall_ms": self.longest_submission_stall_ms,
+            "warp_readiness_budget_used": self.warp_readiness_budget_used,
+        });
+        let Ok(json) = serde_json::to_string_pretty(&payload) else {
+            return;
+        };
+        if let Err(err) = std::fs::write(&self.path, json) {
+            logger::warn!("capture stats write {}: {err}", self.path.display());
+        }
+    }
+}
+
+/// Stable-frame pending chunks seen before the capture deadline.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ObservedChunks {
+    frames: u64,
+    ready: u64,
+    pending: u64,
+    missing: u64,
+    last_pending: Option<u64>,
+}
+
+impl ObservedChunks {
+    fn note(&mut self, text: Option<&str>) {
+        self.frames = self.frames.saturating_add(1);
+        match text
+            .map(str::trim)
+            .and_then(|text| text.parse::<u64>().ok())
+        {
+            Some(0) => {
+                self.ready = self.ready.saturating_add(1);
+                self.last_pending = Some(0);
+            }
+            Some(count) => {
+                self.pending = self.pending.saturating_add(1);
+                self.last_pending = Some(count);
+            }
+            None => {
+                self.missing = self.missing.saturating_add(1);
+                self.last_pending = None;
+            }
+        }
+    }
+}
+
+/// How a capture that reached its deadline is reported.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CaptureTimeout {
+    /// The last frame's pending count was zero. The image was flat or still changing.
+    FlatOrUnstable,
+    /// A frame was still compiling or had skipped draws when the deadline hit.
+    PipelineNotReady,
+    /// Only flat frames were seen, and none of them recorded pending=0.
+    FlatHandedOff,
+    /// No stable PNG arrived.
+    Missing,
+}
+
+/// A timeout whose last pending count is zero is a flat or unstable frame, not
+/// [`HarnessError::PipelineNotReady`].
+fn classify_capture_timeout(
+    chunks: &ObservedChunks,
+    pending_pipeline_seen: bool,
+    flat_candidate_seen: bool,
+) -> CaptureTimeout {
+    if chunks.frames > 0 && chunks.last_pending == Some(0) {
+        return CaptureTimeout::FlatOrUnstable;
+    }
+    if pending_pipeline_seen {
+        return CaptureTimeout::PipelineNotReady;
+    }
+    if flat_candidate_seen {
+        return CaptureTimeout::FlatHandedOff;
+    }
+    CaptureTimeout::Missing
+}
+
+#[cfg(test)]
+mod tests;

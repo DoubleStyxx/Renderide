@@ -15,7 +15,8 @@ use serde::{Deserialize, Serialize};
 use crate::scene::gltf_fixture::default_fixture_path;
 use crate::scene::perlin::PerlinTextureSpec;
 
-use super::tolerance::{Combine, Tolerance};
+use super::region_color::pbs_lit_region_colors;
+use super::tolerance::{Combine, Tolerance, pbs_lit_region_floors};
 
 /// A single named integration test case.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -80,13 +81,16 @@ pub enum CaseTemplate {
     DoubleBufferNothingOnSkybox,
     /// PBS sphere under a positive directional light and an optional negative directional.
     ///
-    /// `physically_based` selects the renderer's opt-in intensity clamp. `include_negative`
-    /// is true for the committed goldens and false for the positive-only reference render.
+    /// `physically_based` selects the renderer's opt-in radiance clamp. `include_negative`
+    /// is true for the committed goldens and false for the reference render that omits the
+    /// extra light. `negative_color` uses a negative color instead of a negative intensity.
     NegativeLightPair {
         /// Spawns the renderer with physically based light upload.
         physically_based: bool,
-        /// Includes the negative directional light in the submitted scene.
+        /// Includes the extra darkening light in the submitted scene.
         include_negative: bool,
+        /// The extra light has a negative color and a positive intensity.
+        negative_color: bool,
     },
 }
 
@@ -164,7 +168,12 @@ pub fn pbs_lit_material_matrix() -> IntegrationCase {
                 .to_string(),
         golden_path: default_goldens_dir().join("pbs_lit_material_matrix.png"),
         resolution: (320, 320),
-        tolerance: visual_tolerance(0.78, 56, 0.22, 18, 24, 0.06),
+        tolerance: {
+            let mut tolerance = visual_tolerance(0.78, 56, 0.22, 18, 24, 0.06);
+            tolerance.region_floors = pbs_lit_region_floors();
+            tolerance.region_colors = pbs_lit_region_colors();
+            tolerance
+        },
         template: CaseTemplate::PbsLitMaterialMatrix,
     }
 }
@@ -201,6 +210,8 @@ pub fn custom_shader_property_update() -> IntegrationCase {
             min_luma_range: Some(20),
             min_unique_colors: Some(8),
             min_non_background_pixel_fraction: Some(0.12),
+            region_floors: Vec::new(),
+            region_colors: Vec::new(),
             combine: Combine::And,
         },
         template: CaseTemplate::CustomShaderPropertyUpdate,
@@ -242,6 +253,8 @@ pub fn exotic_shader_pair() -> IntegrationCase {
             min_luma_range: Some(24),
             min_unique_colors: Some(16),
             min_non_background_pixel_fraction: Some(0.15),
+            region_floors: Vec::new(),
+            region_colors: Vec::new(),
             combine: Combine::Or,
         },
         template: CaseTemplate::ExoticShaderPair,
@@ -288,6 +301,8 @@ pub fn tilted_canvas_ui_quads() -> IntegrationCase {
             min_luma_range: Some(16),
             min_unique_colors: Some(3),
             min_non_background_pixel_fraction: Some(0.04),
+            region_floors: Vec::new(),
+            region_colors: Vec::new(),
             combine: Combine::And,
         },
         template: CaseTemplate::TiltedCanvasUiQuads,
@@ -363,19 +378,20 @@ pub fn negative_light_parity() -> IntegrationCase {
         template: CaseTemplate::NegativeLightPair {
             physically_based: false,
             include_negative: true,
+            negative_color: false,
         },
     }
 }
 
 /// Same sphere and lights as [`negative_light_parity`], with physically based light upload.
 ///
-/// Negative intensity is clamped to zero. The capture must match the same scene rendered
-/// without the negative light, within this case's tolerance.
+/// Each channel of color times intensity is clamped to be non-negative. The capture must
+/// match the same scene rendered without the negative light, within this case's tolerance.
 pub fn negative_light_physically_based() -> IntegrationCase {
     IntegrationCase {
         name: "negative_light_physically_based".to_string(),
         description:
-            "PBS sphere under a positive directional light and a negative directional. Physically based upload clamps the negative intensity to zero. The capture must match the same scene without that light."
+            "PBS sphere under a positive directional light and a negative directional. Physically based upload clamps each channel of color times intensity to be non-negative. The capture must match the same scene without that light."
                 .to_string(),
         golden_path: default_goldens_dir().join("negative_light_physically_based.png"),
         resolution: (256, 256),
@@ -383,6 +399,28 @@ pub fn negative_light_physically_based() -> IntegrationCase {
         template: CaseTemplate::NegativeLightPair {
             physically_based: true,
             include_negative: true,
+            negative_color: false,
+        },
+    }
+}
+
+/// Same sphere as [`negative_light_physically_based`], but the extra light has a negative color.
+///
+/// Physically based upload clamps that color to zero per channel. The capture must match the
+/// same scene rendered without the extra light, within this case's tolerance.
+pub fn negative_color_physically_based() -> IntegrationCase {
+    IntegrationCase {
+        name: "negative_color_physically_based".to_string(),
+        description:
+            "PBS sphere under a positive directional light and a directional with a negative color. Physically based upload clamps each negative radiance channel to zero. The capture must match the same scene without that light."
+                .to_string(),
+        golden_path: default_goldens_dir().join("negative_color_physically_based.png"),
+        resolution: (256, 256),
+        tolerance: visual_tolerance(0.78, 56, 0.22, 18, 24, 0.06),
+        template: CaseTemplate::NegativeLightPair {
+            physically_based: true,
+            include_negative: true,
+            negative_color: true,
         },
     }
 }
@@ -410,6 +448,7 @@ pub fn registry() -> Vec<IntegrationCase> {
         pbs_lit_material_matrix(),
         negative_light_parity(),
         negative_light_physically_based(),
+        negative_color_physically_based(),
         alpha_cutout_masked_quads(),
         custom_shader_property_update(),
         exotic_shader_pair(),
@@ -471,6 +510,8 @@ fn visual_tolerance(
         min_luma_range: Some(min_luma_range),
         min_unique_colors: Some(min_unique_colors),
         min_non_background_pixel_fraction: Some(min_non_background_pixel_fraction),
+        region_floors: Vec::new(),
+        region_colors: Vec::new(),
         combine: Combine::Or,
     }
 }
@@ -505,6 +546,7 @@ mod tests {
             CaseTemplate::NegativeLightPair {
                 physically_based: false,
                 include_negative: true,
+                negative_color: false,
             }
         ));
         assert!(matches!(
@@ -512,8 +554,22 @@ mod tests {
             CaseTemplate::NegativeLightPair {
                 physically_based: true,
                 include_negative: true,
+                negative_color: false,
             }
         ));
+        let negative_color = lookup("negative_color_physically_based").expect("negative color");
+        assert!(matches!(
+            negative_color.template,
+            CaseTemplate::NegativeLightPair {
+                physically_based: true,
+                include_negative: true,
+                negative_color: true,
+            }
+        ));
+        assert_eq!(
+            negative_color.tolerance.ssim_min,
+            physically_based.tolerance.ssim_min
+        );
         assert_eq!(parity.resolution, physically_based.resolution);
         assert_eq!(
             parity.tolerance.ssim_min,
@@ -585,6 +641,43 @@ mod tests {
                     plain.display()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn pbs_lit_band_floor_is_three_quarters_of_the_golden() {
+        let case = lookup("pbs_lit_material_matrix").expect("registered");
+        let expected = [
+            (0, 77, 160, 73),
+            (160, 77, 160, 73),
+            (0, 162, 160, 72),
+            (160, 162, 160, 72),
+        ];
+        assert_eq!(case.tolerance.region_floors.len(), expected.len());
+        for (floor, (x, y, width, height)) in case.tolerance.region_floors.iter().zip(expected) {
+            assert_eq!(
+                (floor.x, floor.y, floor.width, floor.height),
+                (x, y, width, height)
+            );
+            assert_eq!(
+                super::super::band_count::fraction_floor(1_000, floor.min_fraction_of_golden),
+                super::super::band_count::fraction_floor(
+                    1_000,
+                    super::super::tolerance::PBS_BAND_FLOOR_FRACTION
+                )
+            );
+        }
+        assert_eq!(case.tolerance.region_colors.len(), expected.len());
+        for (region, (x, y, width, height)) in case.tolerance.region_colors.iter().zip(expected) {
+            assert_eq!(
+                (region.x, region.y, region.width, region.height),
+                (x, y, width, height)
+            );
+            assert!(region.max_mean_channel_delta > 0.011);
+            assert!(
+                region.max_mean_channel_delta < 17.6,
+                "24 lets the top-right gray band through"
+            );
         }
     }
 

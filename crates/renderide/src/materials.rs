@@ -80,6 +80,8 @@ pub(crate) mod host_data;
 mod material_passes;
 mod null_pipeline;
 mod pipeline_build_error;
+mod pipeline_compile;
+mod pipeline_frame_readiness;
 mod pipeline_kind;
 mod pipeline_property_resolver;
 pub(crate) mod raster_pipeline;
@@ -93,6 +95,7 @@ pub(crate) mod shader_permutation;
 mod shader_specialization;
 mod shadow_caster;
 mod system;
+mod test_pipeline_stall;
 #[cfg(test)]
 mod wgsl;
 mod wgsl_reflect;
@@ -168,6 +171,9 @@ pub(crate) use null_pipeline::NullFamily;
 pub(crate) use pipeline_property_resolver::PipelinePropertyResolver;
 
 /// Shader route table, optional material asset registry, and WGSL composition patches.
+pub(crate) use pipeline_compile::{
+    material_compile_blocks_frame, render_thread_compiles_per_frame,
+};
 pub(crate) use registry::{MaterialPipelineResolution, MaterialRegistry};
 pub(crate) use render_buffer_shader::{
     ensure_render_buffer_billboard_variant_bits, remap_variant_bits_for_billboard,

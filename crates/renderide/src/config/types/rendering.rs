@@ -58,11 +58,14 @@ pub struct RenderingSettings {
     pub scene_color_format: SceneColorFormat,
     /// Opt-in physically based light upload.
     ///
-    /// When `true`, packing clamps a negative intensity to zero. Color, range, shadows, and
-    /// every other light field stay as the host authored them. The default is `false` so
-    /// Resonite parity stays intact: Renderite's Unity renderer keeps negative intensity
-    /// (a light can darken the scene). A missing `physically_based` key deserializes to
-    /// `false`, so existing config files stay on that parity path.
+    /// When `true`, packing clamps each channel of `color * intensity` so the product is
+    /// non-negative. That removes darkening from a negative intensity or a negative color
+    /// channel. A negative color times a negative intensity stays, because that product is
+    /// positive. Range, shadows, and the other light fields stay as the host authored them.
+    /// The default is `false` so Resonite parity stays intact: Renderite's Unity renderer
+    /// keeps negative intensity and negative color, and those lights darken the scene. A
+    /// missing `physically_based` key deserializes to `false`, so existing config files stay
+    /// on that parity path.
     #[serde(default)]
     pub physically_based: bool,
 }

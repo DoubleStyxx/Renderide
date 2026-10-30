@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use crate::config::{DebugHudMainTab, RendererSettings};
 use crate::diagnostics::DebugHudMetricInterest;
+use crate::diagnostics::{note_settings_lock, note_snapshot_clone};
 use crate::gpu::GpuContext;
 use crate::hud_contract::DebugHudEncodeError;
 
@@ -66,7 +67,10 @@ impl RendererRuntime {
                 },
                 allocator: crate::diagnostics::GpuAllocatorHudRefresh {
                     gpu_allocator_totals: self.diagnostics.allocator_report_totals,
-                    gpu_allocator_report: self.diagnostics.allocator_report_hud.clone(),
+                    gpu_allocator_report: {
+                        note_snapshot_clone();
+                        self.diagnostics.allocator_report_hud.clone()
+                    },
                     gpu_allocator_report_next_refresh_in_secs: next_refresh_in_secs,
                 },
                 frame_submit_apply_failures: self.diagnostics.frame_submit_apply_failures,
@@ -74,6 +78,7 @@ impl RendererRuntime {
             },
         );
         if tab == DebugHudMainTab::Stats {
+            note_settings_lock();
             let msaa_requested = self
                 .config
                 .settings
@@ -102,7 +107,8 @@ impl RendererRuntime {
     }
 
     /// Copies debug HUD capture flags into the backend before the render graph runs.
-    pub(super) fn sync_debug_hud_diagnostics_from_settings(&mut self) {
+    pub(crate) fn sync_debug_hud_diagnostics_from_settings(&mut self) {
+        note_settings_lock();
         let mut flags = self
             .config
             .settings
@@ -122,8 +128,18 @@ impl RendererRuntime {
 
     /// Updates debug HUD snapshots after [`crate::gpu::GpuContext::end_frame_timing`] for the winit tick.
     pub fn capture_debug_hud_after_frame_end(&mut self, gpu: &GpuContext) {
+        self.capture_debug_hud_frame(Some(gpu));
+    }
+
+    /// Same capture as [`Self::capture_debug_hud_after_frame_end`], with `gpu` optional so the
+    /// hidden-HUD counter test can drive the clear path without a device.
+    ///
+    /// Production always passes [`Some`]. Branches that sample the device no-op when `gpu` is
+    /// [`None`]; the hidden path (`imgui_visible = false`) never enters those branches.
+    pub(crate) fn capture_debug_hud_frame(&mut self, gpu: Option<&GpuContext>) {
         profiling::scope!("hud::capture_snapshot");
         let wall_ms = self.backend.debug_frame_time_ms();
+        note_settings_lock();
         let flags = self
             .config
             .settings
@@ -131,46 +147,88 @@ impl RendererRuntime {
             .map(|s| debug_hud_metric_interest(&s))
             .unwrap_or_default();
         let now = Instant::now();
-        if flags.wants_allocator_totals() {
-            self.diagnostics
-                .refresh_gpu_allocator_report_hud(gpu, now, flags.wants_gpu_memory());
-            if !flags.wants_gpu_memory() {
-                self.diagnostics.clear_allocator_report_detail();
-            }
-        } else {
+        self.capture_allocator_interest(gpu, flags, now);
+        self.capture_frame_timing_interest(gpu, flags, wall_ms, now);
+        self.capture_main_debug_interest(gpu, flags, now);
+        self.capture_scene_transforms_interest(flags, now);
+        self.capture_textures_interest(flags, now);
+    }
+
+    fn capture_allocator_interest(
+        &mut self,
+        gpu: Option<&GpuContext>,
+        flags: DebugHudMetricInterest,
+        now: Instant,
+    ) {
+        if !flags.wants_allocator_totals() {
             self.diagnostics.clear_allocator_report();
+            return;
         }
+        let Some(gpu) = gpu else {
+            return;
+        };
+        self.diagnostics
+            .refresh_gpu_allocator_report_hud(gpu, now, flags.wants_gpu_memory());
+        if !flags.wants_gpu_memory() {
+            self.diagnostics.clear_allocator_report_detail();
+        }
+    }
 
-        if flags.frame_timing {
-            let host = self.diagnostics.host_hud.snapshot();
-            let frame_timing = crate::diagnostics::FrameTimingHudSnapshot::capture(
-                crate::diagnostics::FrameTimingHudCapture {
-                    gpu,
-                    wall_frame_time_ms: wall_ms,
-                    host_frame_begin_to_submit: self.last_frame_begin_to_submit(),
-                    host_hud: &host,
-                    gpu_allocator: self.diagnostics.allocator_report_totals,
-                    history: &mut self.diagnostics.frame_time_history,
-                    ema: &mut self.diagnostics.frame_timing_ema,
-                    now,
-                },
-            );
-            self.backend.set_debug_hud_frame_timing(frame_timing);
-        } else {
+    fn capture_frame_timing_interest(
+        &mut self,
+        gpu: Option<&GpuContext>,
+        flags: DebugHudMetricInterest,
+        wall_ms: f64,
+        now: Instant,
+    ) {
+        if !flags.frame_timing {
             self.backend.clear_debug_hud_frame_timing();
+            return;
         }
+        let Some(gpu) = gpu else {
+            return;
+        };
+        let host = self.diagnostics.host_hud.snapshot();
+        let frame_timing = crate::diagnostics::FrameTimingHudSnapshot::capture(
+            crate::diagnostics::FrameTimingHudCapture {
+                gpu,
+                wall_frame_time_ms: wall_ms,
+                host_frame_begin_to_submit: self.last_frame_begin_to_submit(),
+                host_hud: &host,
+                gpu_allocator: self.diagnostics.allocator_report_totals,
+                history: &mut self.diagnostics.frame_time_history,
+                ema: &mut self.diagnostics.frame_timing_ema,
+                now,
+            },
+        );
+        self.backend.set_debug_hud_frame_timing(frame_timing);
+    }
 
+    fn capture_main_debug_interest(
+        &mut self,
+        gpu: Option<&GpuContext>,
+        flags: DebugHudMetricInterest,
+        now: Instant,
+    ) {
         if flags.wants_gpu_passes() {
             self.backend.clear_debug_hud_stats_snapshots();
             self.diagnostics.clear_main_hud_snapshot_timer();
+            let Some(gpu) = gpu else {
+                return;
+            };
             let gpu_profiler_snapshot = gpu
                 .latest_gpu_profiler_snapshot_handle()
                 .lock()
-                .map(|guard| guard.clone())
+                .map(|guard| {
+                    note_snapshot_clone();
+                    guard.clone()
+                })
                 .unwrap_or_default();
             self.backend
                 .set_debug_hud_gpu_profiler_snapshot(gpu_profiler_snapshot);
-        } else if flags.wants_main_debug() {
+            return;
+        }
+        if flags.wants_main_debug() {
             self.backend.clear_debug_hud_gpu_profiler_snapshot();
             if let Some(tab) = flags.main_tab
                 && self.diagnostics.should_refresh_main_hud_snapshot(
@@ -178,19 +236,22 @@ impl RendererRuntime {
                     tab,
                     flags.main_hud_snapshot_signature(),
                 )
+                && let Some(gpu) = gpu
             {
                 self.capture_main_debug_hud_tab(gpu, now, flags, tab);
             }
-        } else {
-            self.backend.clear_debug_hud_stats_snapshots();
-            self.diagnostics.clear_main_hud_snapshot_timer();
-            if flags.frame_timing {
-                self.diagnostics.clear_allocator_report_detail();
-            } else {
-                self.diagnostics.clear_allocator_report();
-            }
+            return;
         }
+        self.backend.clear_debug_hud_stats_snapshots();
+        self.diagnostics.clear_main_hud_snapshot_timer();
+        if flags.frame_timing {
+            self.diagnostics.clear_allocator_report_detail();
+        } else {
+            self.diagnostics.clear_allocator_report();
+        }
+    }
 
+    fn capture_scene_transforms_interest(&mut self, flags: DebugHudMetricInterest, now: Instant) {
         if flags.scene_transforms
             && self
                 .diagnostics
@@ -205,7 +266,9 @@ impl RendererRuntime {
             self.backend.clear_debug_hud_scene_transforms_snapshot();
             self.diagnostics.clear_scene_transforms_snapshot_timer();
         }
+    }
 
+    fn capture_textures_interest(&mut self, flags: DebugHudMetricInterest, now: Instant) {
         if flags.textures && self.diagnostics.should_refresh_texture_debug_snapshot(now) {
             profiling::scope!("hud::capture_texture_debug_snapshot");
             let textures = crate::diagnostics::TextureDebugSnapshot::capture(
@@ -219,6 +282,20 @@ impl RendererRuntime {
         }
     }
 
+    /// Hidden-HUD encode early-out shared with [`Self::encode_debug_hud_overlay_on_surface`].
+    ///
+    /// Returns `true` when nothing visible would draw. Callers skip command-encoder creation.
+    /// The hidden counter tests drive this without a device. Capture counters are asserted
+    /// now; H7 un-ignores the `input_builds` half.
+    pub(crate) fn skip_debug_hud_overlay_encode(&mut self) -> bool {
+        if self.backend.debug_hud_has_visible_content() {
+            false
+        } else {
+            self.backend.clear_debug_hud_input_capture();
+            true
+        }
+    }
+
     /// Encodes the Dear ImGui debug overlay onto an acquired swapchain view (e.g. after the VR mirror blit).
     ///
     /// Uses the same composite path as the desktop render graph (`LoadOp::Load`). Caller must keep
@@ -229,8 +306,7 @@ impl RendererRuntime {
         encoder: &mut wgpu::CommandEncoder,
         backbuffer: &wgpu::TextureView,
     ) -> Result<(), DebugHudEncodeError> {
-        if !self.backend.debug_hud_has_visible_content() {
-            self.backend.clear_debug_hud_input_capture();
+        if self.skip_debug_hud_overlay_encode() {
             return Ok(());
         }
         let device = gpu.device().as_ref();
@@ -296,5 +372,123 @@ mod tests {
         assert_eq!(interest.main_tab, Some(DebugHudMainTab::GpuPasses));
         assert!(interest.wants_gpu_passes());
         assert!(!interest.wants_gpu_memory());
+    }
+}
+
+#[cfg(test)]
+mod hidden_zero_work {
+    use std::path::PathBuf;
+    use std::sync::{Arc, RwLock};
+
+    use crate::config::RendererSettings;
+    use crate::diagnostics::hud_measure::{HudMeasureView, HudUi};
+    use crate::diagnostics::{
+        DebugHudMetricInterest, HudWorkCounts, frame_hud_input, reset_hud_work_counters,
+        snapshot_hud_work_counters,
+    };
+    use crate::frontend::input::WindowInputAccumulator;
+    use crate::hud_contract::{PerViewHudConfig, PerViewHudOutputs};
+
+    use super::super::RendererRuntime;
+
+    const HIDDEN_FRAMES: u32 = 300;
+
+    fn hidden_capture_settings() -> RendererSettings {
+        let mut settings = RendererSettings::default();
+        settings.debug.hud.imgui_visible = false;
+        settings.debug.debug_hud_frame_timing = true;
+        settings.debug.debug_hud_enabled = true;
+        settings.debug.debug_hud_transforms = true;
+        settings.debug.debug_hud_textures = true;
+        settings
+    }
+
+    fn assert_hidden_settings_disable_capture(settings: &RendererSettings) {
+        let interest = super::debug_hud_metric_interest(settings);
+        assert_eq!(interest, DebugHudMetricInterest::default());
+        let config = interest.per_view_hud_config();
+        assert_eq!(config, PerViewHudConfig::default());
+        assert!(!config.capture_world_mesh_draw_stats);
+        assert!(!config.capture_world_mesh_view_stats);
+        assert!(!config.capture_world_mesh_draw_state_rows);
+        assert!(!config.capture_current_view_texture_2d_asset_ids);
+    }
+
+    fn drive_mounted_hidden_frames() -> HudWorkCounts {
+        let settings = hidden_capture_settings();
+        assert_hidden_settings_disable_capture(&settings);
+        let mut runtime = RendererRuntime::new(
+            None,
+            Arc::new(RwLock::new(settings)),
+            PathBuf::from("hud-hidden-counter.toml"),
+        );
+        runtime
+            .backend
+            .mount_measure_hud(HudUi::from_measure_fixture(HudMeasureView::Hidden));
+        reset_hud_work_counters();
+        runtime
+            .backend
+            .apply_debug_hud_per_view_outputs(&PerViewHudOutputs::default());
+        let mut acc = WindowInputAccumulator::default();
+        for _ in 0..HIDDEN_FRAMES {
+            let input = frame_hud_input(false, 1.0, &mut acc);
+            runtime.set_debug_hud_input(input);
+            runtime.sync_debug_hud_diagnostics_from_settings();
+            runtime.capture_debug_hud_frame(None);
+            assert!(runtime.skip_debug_hud_overlay_encode());
+        }
+        snapshot_hud_work_counters()
+    }
+
+    #[test]
+    fn hidden_mounted_hud_does_no_capture_work() {
+        let counts = drive_mounted_hidden_frames();
+        assert!(
+            counts.ui_frames == 0
+                && counts.draw_lists == 0
+                && counts.encodes == 0
+                && counts.snapshot_clones == 0
+                && counts.fmt_calls == 0,
+            "hidden mounted HUD still did capture work over {HIDDEN_FRAMES} frames: \
+             ui_frames={} draw_lists={} encodes={} snapshot_clones={} fmt_calls={} \
+             input_builds={} settings_locks={}. input_builds stays non-zero until H7 \
+             (frame_hud_input ignores hud_visible). settings_locks are residual until H8.",
+            counts.ui_frames,
+            counts.draw_lists,
+            counts.encodes,
+            counts.snapshot_clones,
+            counts.fmt_calls,
+            counts.input_builds,
+            counts.settings_locks,
+        );
+        assert!(
+            counts.settings_locks > u64::from(HIDDEN_FRAMES) * 2,
+            "mounted HUD visibility was not consulted: settings_locks={} over {HIDDEN_FRAMES} frames. \
+             sync and capture take two locks per frame; has_visible_content must take another.",
+            counts.settings_locks,
+        );
+    }
+
+    /// H7 un-ignores this. `frame_hud_input` still builds HUD input on hidden frames
+    /// (`DebugHudInput::from_winit` in `app/driver/frame.rs`), so `input_builds` is non-zero.
+    #[test]
+    #[ignore = "H7 un-ignores this: hidden frames still build DebugHudInput::from_winit (app/driver/frame.rs)"]
+    fn hidden_frames_do_no_hud_work() {
+        let counts = drive_mounted_hidden_frames();
+        assert!(
+            counts.input_builds == 0,
+            "hidden HUD still did work over {HIDDEN_FRAMES} frames: \
+             ui_frames={} draw_lists={} encodes={} snapshot_clones={} fmt_calls={} input_builds={} \
+             settings_locks={}. input_builds is non-zero because app/driver/frame.rs still builds \
+             DebugHudInput::from_winit on every frame (frame_hud_input ignores hud_visible until H7). \
+             settings_locks are residual until H8 and are not part of this assert.",
+            counts.ui_frames,
+            counts.draw_lists,
+            counts.encodes,
+            counts.snapshot_clones,
+            counts.fmt_calls,
+            counts.input_builds,
+            counts.settings_locks,
+        );
     }
 }

@@ -26,8 +26,12 @@ pub mod exit_code {
 #[derive(Debug, Error)]
 pub enum BenchError {
     /// The harness could not complete a scenario.
+    ///
+    /// Boxed so [`BenchError`] stays within clippy's `result_large_err` limit.
+    /// The timed-out frame on `FlatOrUnstableFrame` makes `HarnessError` large
+    /// enough on Windows to fail that lint when this variant stores it inline.
     #[error(transparent)]
-    Harness(#[from] HarnessError),
+    Harness(Box<HarnessError>),
     /// Filesystem failure while reading or writing a report.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
@@ -72,6 +76,12 @@ impl BenchError {
     }
 }
 
+impl From<HarnessError> for BenchError {
+    fn from(err: HarnessError) -> Self {
+        Self::Harness(Box::new(err))
+    }
+}
+
 fn harness_exit_code(err: &HarnessError) -> u8 {
     match err {
         HarnessError::RendererBinaryMissing(_)
@@ -82,6 +92,8 @@ fn harness_exit_code(err: &HarnessError) -> u8 {
         | HarnessError::HandshakeTimeout(_)
         | HarnessError::AssetAckTimeout(..)
         | HarnessError::PngOutputMissing { .. }
+        | HarnessError::PipelineNotReady { .. }
+        | HarnessError::FlatOrUnstableFrame { .. }
         | HarnessError::PngRead { .. }
         | HarnessError::PngWrite { .. }
         | HarnessError::FlatImage { .. }
@@ -96,6 +108,7 @@ fn harness_exit_code(err: &HarnessError) -> u8 {
 
 #[cfg(test)]
 mod tests {
+    use std::mem::size_of;
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -106,8 +119,12 @@ mod tests {
     #[test]
     fn environment_errors_exit_5() {
         for err in [
-            BenchError::Harness(HarnessError::RendererBinaryMissing(PathBuf::from("/nope"))),
-            BenchError::Harness(HarnessError::SpawnRenderer(std::io::Error::other("x"))),
+            BenchError::Harness(Box::new(HarnessError::RendererBinaryMissing(
+                PathBuf::from("/nope"),
+            ))),
+            BenchError::Harness(Box::new(HarnessError::SpawnRenderer(
+                std::io::Error::other("x"),
+            ))),
             BenchError::Io(std::io::Error::other("disk full")),
             BenchError::Env("logging".to_string()),
         ] {
@@ -119,12 +136,30 @@ mod tests {
     #[test]
     fn run_failures_exit_3() {
         for err in [
-            BenchError::Harness(HarnessError::HandshakeTimeout(Duration::from_secs(1))),
-            BenchError::Harness(HarnessError::BenchReportMissing {
+            BenchError::Harness(Box::new(HarnessError::HandshakeTimeout(
+                Duration::from_secs(1),
+            ))),
+            BenchError::Harness(Box::new(HarnessError::PipelineNotReady {
+                path: PathBuf::from("actual.png"),
+                wait: Duration::from_secs(1),
+            })),
+            BenchError::Harness(Box::new(HarnessError::FlatOrUnstableFrame {
+                path: PathBuf::from("actual.png"),
+                wait: Duration::from_secs(1),
+                last_pending: 0,
+                ready_chunks: 1,
+                pending_chunks: 0,
+                missing_chunks: 0,
+                frame_count: 1,
+                frame_pending: Some(0),
+                gpu_done: true,
+                dropped_draws: Some(0),
+            })),
+            BenchError::Harness(Box::new(HarnessError::BenchReportMissing {
                 path: PathBuf::from("r.json"),
                 wait: Duration::from_secs(1),
                 renderer_state: "exited".to_string(),
-            }),
+            })),
             BenchError::Run("incomplete raw report".to_string()),
             BenchError::Message("legacy".to_string()),
         ] {
@@ -137,10 +172,33 @@ mod tests {
     fn usage_errors_exit_2() {
         for err in [
             BenchError::Usage("runs must be >= 1".to_string()),
-            BenchError::Harness(HarnessError::UnknownBenchScenario("nope".to_string())),
+            BenchError::Harness(Box::new(HarnessError::UnknownBenchScenario(
+                "nope".to_string(),
+            ))),
         ] {
             assert_eq!(err.run_exit_code(), exit_code::USAGE, "{err}");
             assert_eq!(err.kind(), "usage");
         }
+    }
+
+    #[test]
+    fn harness_error_is_boxed_and_still_displays_the_flat_timeout() {
+        let err = BenchError::from(HarnessError::FlatOrUnstableFrame {
+            path: PathBuf::from("actual.png"),
+            wait: Duration::from_secs(1),
+            last_pending: 0,
+            ready_chunks: 1,
+            pending_chunks: 0,
+            missing_chunks: 0,
+            frame_count: 1,
+            frame_pending: Some(0),
+            gpu_done: true,
+            dropped_draws: Some(0),
+        });
+        assert!(size_of::<BenchError>() <= 128);
+        let text = err.to_string();
+        assert!(text.contains("flat or unstable"), "{text}");
+        assert!(text.contains("last pending=0"), "{text}");
+        assert!(matches!(err, BenchError::Harness(_)));
     }
 }
