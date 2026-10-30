@@ -7,15 +7,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
-
-/// Worst-case block for one windowed software frame while a compile waits for idle.
-///
-/// Flush and device poll share this budget. A windowed software adapter used to
-/// wait 120s for the driver and another 120s for the device. Headless does not use
-/// this wait: flushing and polling before `create_render_pipeline` on DX12 WARP
-/// cached the under-drawn PBS pipeline.
-const PIPELINE_COMPILE_WINDOWED_SOFTWARE_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
+use std::time::Instant;
 
 use super::GpuContext;
 use crate::gpu::GpuRetainedResources;
@@ -334,55 +326,6 @@ impl GpuContext {
         self.submission.driver_thread.flush();
     }
 
-    /// Waits until the driver thread has finished `Queue::submit` and the device
-    /// reports no pending GPU work, or the windowed budget runs out.
-    ///
-    /// One budget covers the flush and the poll. A timeout returns false so the
-    /// caller leaves the compile queued. Headless captures do not call this.
-    pub fn wait_until_idle_for_windowed_software_pipeline_compile(&self) -> bool {
-        self.wait_until_idle_for_pipeline_compile_within(
-            PIPELINE_COMPILE_WINDOWED_SOFTWARE_IDLE_TIMEOUT,
-        )
-    }
-
-    fn wait_until_idle_for_pipeline_compile_within(&self, budget: Duration) -> bool {
-        let started = Instant::now();
-        if !self.submission.driver_thread.flush_within(budget) {
-            logger::warn!(
-                "material pipeline compile deferred: driver thread did not finish Queue::submit within {}s",
-                budget.as_secs()
-            );
-            return false;
-        }
-        let remaining = budget.saturating_sub(started.elapsed());
-        if remaining.is_zero() {
-            logger::warn!(
-                "material pipeline compile deferred: idle budget of {}s was spent waiting for Queue::submit",
-                budget.as_secs()
-            );
-            return false;
-        }
-        match self.device().poll(wgpu::PollType::Wait {
-            submission_index: None,
-            timeout: Some(remaining),
-        }) {
-            Ok(_) => true,
-            Err(wgpu::PollError::Timeout) => {
-                logger::warn!(
-                    "material pipeline compile deferred: device poll timed out inside a {}s idle budget",
-                    budget.as_secs()
-                );
-                false
-            }
-            Err(err) => {
-                logger::warn!(
-                    "material pipeline compile deferred: device poll failed before create_render_pipeline: {err}"
-                );
-                false
-            }
-        }
-    }
-
     /// Blocks only until the most recently submitted surface-carrying batch has reached
     /// [`wgpu::SurfaceTexture::present`] on the driver thread.
     ///
@@ -402,15 +345,7 @@ impl GpuContext {
 
 #[cfg(test)]
 mod tests {
-    use super::{FrameSubmitKind, PIPELINE_COMPILE_WINDOWED_SOFTWARE_IDLE_TIMEOUT};
-
-    #[test]
-    fn windowed_software_pipeline_compile_wait_is_a_single_short_budget() {
-        assert!(
-            PIPELINE_COMPILE_WINDOWED_SOFTWARE_IDLE_TIMEOUT <= std::time::Duration::from_secs(2),
-            "windowed software must not stack a 120s flush and a 120s poll"
-        );
-    }
+    use super::FrameSubmitKind;
 
     #[test]
     fn render_submit_frame_mark_only_tracks_primary_frame_work() {
