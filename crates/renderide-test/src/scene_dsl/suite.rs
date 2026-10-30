@@ -190,6 +190,16 @@ pub struct SuiteCaseReport {
     /// Dropped draws on the frame the harness timed out on. `None` is not zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dropped_draws: Option<u64>,
+    /// `behavior` or `adapter_comparison`.
+    #[serde(default = "default_behavior_gate")]
+    pub gate: String,
+    /// Selected adapter label. Empty until the renderer log is read.
+    #[serde(default)]
+    pub adapter: String,
+}
+
+fn default_behavior_gate() -> String {
+    crate::adapter_gate::BEHAVIOR.to_string()
 }
 
 impl SuiteCaseReport {
@@ -214,6 +224,8 @@ impl SuiteCaseReport {
             frame_pending: None,
             gpu_done: None,
             dropped_draws: None,
+            gate: default_behavior_gate(),
+            adapter: String::new(),
         }
     }
 

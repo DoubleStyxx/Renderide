@@ -30,7 +30,6 @@ pub(crate) use quarantine_216::warn_line;
 /// Summary text for the known WARP `pbs_lit` image mismatch.
 pub(crate) use warp_pbs::EXPECTED_FAILURE_LABEL as WARP_EXPECTED_FAILURE_LABEL;
 /// Vendor `0x1414` and device `0x008c`, including a log that prints `0x8c`.
-#[cfg(test)]
 pub(crate) use warp_pbs::adapter_is_warp;
 /// Whether a suite case is that expected failure and not a pass.
 pub(crate) use warp_pbs::case_is_expected_failure as warp_pbs_is_expected;
