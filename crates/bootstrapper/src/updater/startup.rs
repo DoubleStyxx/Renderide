@@ -2,7 +2,8 @@
 
 use super::{
     ENV_SKIP_UPDATE_CHECK, ReleaseBuildMetadata, StartupUpdateOutcome, UpdateCandidate,
-    UpdateNotice, UpdateNoticeLevel, UpdatePrompt, UpdatePromptChoice, github, install, state,
+    UpdateError, UpdateNotice, UpdateNoticeLevel, UpdatePrompt, UpdatePromptChoice, github,
+    install, state,
 };
 
 /// Runs the startup update check and optional install flow.
@@ -19,7 +20,29 @@ where
         return StartupUpdateOutcome::Continue;
     }
 
-    let candidate = match github::fetch_latest_candidate(&metadata) {
+    run_with_fetched_candidate(
+        &metadata,
+        github::fetch_latest_candidate(&metadata),
+        prompt_update,
+        notify,
+    )
+}
+
+/// Applies the startup prompt and install rules to an already fetched candidate.
+///
+/// A fetch error or an up-to-date result continues without prompting. That is the same rule
+/// [`run_startup_update_check`] uses after `ReleaseList`-style listing.
+pub(super) fn run_with_fetched_candidate<P, N>(
+    metadata: &ReleaseBuildMetadata,
+    fetched: Result<Option<UpdateCandidate>, UpdateError>,
+    prompt_update: P,
+    notify: N,
+) -> StartupUpdateOutcome
+where
+    P: FnOnce(&UpdatePrompt) -> UpdatePromptChoice,
+    N: Fn(UpdateNotice),
+{
+    let candidate = match fetched {
         Ok(Some(candidate)) => candidate,
         Ok(None) => return StartupUpdateOutcome::Continue,
         Err(e) => {
@@ -36,7 +59,7 @@ where
         return StartupUpdateOutcome::Continue;
     }
 
-    let update_prompt = prompt_from_candidate(&metadata, &candidate);
+    let update_prompt = prompt_from_candidate(metadata, &candidate);
     match prompt_update(&update_prompt) {
         UpdatePromptChoice::SkipOnce => StartupUpdateOutcome::Continue,
         UpdatePromptChoice::SkipRelease => {
@@ -45,7 +68,7 @@ where
             }
             StartupUpdateOutcome::Continue
         }
-        UpdatePromptChoice::Update => install_prompted_candidate(&metadata, &candidate, notify),
+        UpdatePromptChoice::Update => install_prompted_candidate(metadata, &candidate, notify),
     }
 }
 
@@ -113,7 +136,7 @@ fn prompt_from_candidate(
         current_commit: metadata.commit.clone(),
         latest_tag: candidate.tag.clone(),
         latest_commit: candidate.commit.clone(),
-        asset_name: candidate.asset.name.clone(),
+        asset_name: candidate.asset.name().to_owned(),
         changelog: candidate.changelog.clone(),
     }
 }
@@ -175,10 +198,10 @@ mod tests {
             tag: "nightly-2026-05-27-2222222".to_owned(),
             commit: "2222222222222222222222222222222222222222".to_owned(),
             changelog: changelog.clone(),
-            asset: ReleaseAsset {
-                name: asset_name_for(&metadata.platform, "nightly-2026-05-27-2222222"),
-                download_url: String::new(),
-            },
+            asset: ReleaseAsset::new(
+                asset_name_for(&metadata.platform, "nightly-2026-05-27-2222222"),
+                String::new(),
+            ),
         };
 
         let prompt = prompt_from_candidate(&metadata, &candidate);

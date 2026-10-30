@@ -3,9 +3,19 @@
 //! A gated metric fails only when `(candidate - baseline) / baseline * 100` is greater than
 //! the threshold. Equality with the threshold passes. A zero baseline is `n/a` and does not
 //! fail. Absolute milliseconds are never a gate.
+//!
+//! Absolute floor (opt-in, off by default): with `--abs-floor-ms` above 0, a millisecond metric
+//! (`cpu_frame_ms.*`, `gpu_passes_ms.*`) whose `candidate - baseline` is at most the floor never
+//! fails, whatever its percent. [`DEFAULT_ABS_FLOOR_MS`] is 0 because a nonzero default is open
+//! question O8 (plans/test-bench-rewrite.md): at ~0.2 ms lavapipe medians a 0.05 ms floor is a
+//! 25% effective bar. `scripts/ci/frame_bench_gate.py` has the same flag and default, so both
+//! tools share one rule.
+//!
+//! Schema 1 and schema 2 reports are both accepted, in any mix. A schema-2 report must carry
+//! its `runner` block, as in the gate; a schema-2 report without one is an input error.
 
 use crate::error::BenchError;
-use crate::report::{FrameBenchReport, SCHEMA, ScenarioReport};
+use crate::report::{FrameBenchReport, SUPPORTED_SCHEMAS, ScenarioReport, schema_supported};
 use crate::stats::Percentiles;
 
 /// Default relative threshold, in percent. Fail when the delta is strictly greater.
@@ -13,6 +23,15 @@ pub const DEFAULT_THRESHOLD_PERCENT: f64 = 10.0;
 
 /// Default gated metric.
 pub const DEFAULT_GATE_METRIC: &str = "cpu_frame_ms.p95";
+
+/// Default absolute floor in milliseconds: 0, off.
+///
+/// `--abs-floor-ms` opts in. With a floor above 0, a ms-metric delta at or below it never
+/// fails. O8 decides whether a nonzero default ships.
+pub const DEFAULT_ABS_FLOOR_MS: f64 = 0.0;
+
+/// Slack for floating-point noise at the floor boundary (`1.05 - 1.0` is `0.0500000…04`).
+const ABS_FLOOR_EPSILON_MS: f64 = 1e-9;
 
 const INFO_METRICS: &[&str] = &[
     "cpu_frame_ms.p50",
@@ -30,6 +49,9 @@ pub struct CompareOptions {
     pub threshold_percent: f64,
     /// Metrics that can fail the process. Empty means [`DEFAULT_GATE_METRIC`].
     pub gate: Vec<String>,
+    /// Millisecond deltas at or below this never fail. [`DEFAULT_ABS_FLOOR_MS`] (0, off) by
+    /// default.
+    pub abs_floor_ms: f64,
 }
 
 impl Default for CompareOptions {
@@ -37,6 +59,7 @@ impl Default for CompareOptions {
         Self {
             threshold_percent: DEFAULT_THRESHOLD_PERCENT,
             gate: vec![DEFAULT_GATE_METRIC.to_string()],
+            abs_floor_ms: DEFAULT_ABS_FLOOR_MS,
         }
     }
 }
@@ -50,11 +73,12 @@ pub struct CompareOutcome {
     pub failed: bool,
 }
 
-/// Loads two schema-1 reports and compares them.
+/// Loads two schema-1 or schema-2 reports and compares them.
 ///
 /// # Errors
 ///
-/// Returns an error when a file is missing, the schema is not 1, or a gate metric path is unknown.
+/// Returns an error when a file is missing, a schema is not 1 or 2, or a gate metric path is
+/// unknown.
 pub fn compare_reports(
     baseline_path: &std::path::Path,
     candidate_path: &std::path::Path,
@@ -69,16 +93,31 @@ pub fn compare_reports(
 ///
 /// # Errors
 ///
-/// Returns an error when a gate metric path is unknown.
+/// Returns an error when a schema is unsupported, a schema-2 report has no `runner` block, a
+/// gate metric path is unknown, or the absolute floor is negative or not finite.
 pub fn compare_loaded(
     baseline: &FrameBenchReport,
     candidate: &FrameBenchReport,
     options: &CompareOptions,
 ) -> Result<CompareOutcome, BenchError> {
-    if baseline.schema != SCHEMA || candidate.schema != SCHEMA {
+    if !schema_supported(baseline.schema) || !schema_supported(candidate.schema) {
         return Err(BenchError::Message(format!(
-            "expected schema {SCHEMA}, got baseline {} and candidate {}",
+            "expected schema in {SUPPORTED_SCHEMAS:?}, got baseline {} and candidate {}",
             baseline.schema, candidate.schema
+        )));
+    }
+    for (side, report) in [("baseline", baseline), ("candidate", candidate)] {
+        if report.schema >= 2 && report.runner.is_none() {
+            return Err(BenchError::Message(format!(
+                "{side} is a schema {} report without a `runner` object",
+                report.schema
+            )));
+        }
+    }
+    if !options.abs_floor_ms.is_finite() || options.abs_floor_ms < 0.0 {
+        return Err(BenchError::Message(format!(
+            "abs floor must be a finite number >= 0 ms, got {}",
+            options.abs_floor_ms
         )));
     }
     let gate = if options.gate.is_empty() {
@@ -117,6 +156,7 @@ pub fn compare_loaded(
                 metric,
                 gate.iter().any(|gated| gated == metric),
                 options.threshold_percent,
+                options.abs_floor_ms,
             );
             if row.status == "FAIL" {
                 failed = true;
@@ -131,6 +171,7 @@ pub fn compare_loaded(
             baseline,
             candidate,
             options.threshold_percent,
+            options.abs_floor_ms,
             &gate,
             &rows,
             failed,
@@ -143,9 +184,9 @@ fn load_report(path: &std::path::Path) -> Result<FrameBenchReport, BenchError> {
     let bytes = std::fs::read(path)
         .map_err(|err| BenchError::Message(format!("read {}: {err}", path.display())))?;
     let report: FrameBenchReport = serde_json::from_slice(&bytes)?;
-    if report.schema != SCHEMA {
+    if !schema_supported(report.schema) {
         return Err(BenchError::Message(format!(
-            "{} has schema {}, expected {SCHEMA}",
+            "{} has schema {}, expected one of {SUPPORTED_SCHEMAS:?}",
             path.display(),
             report.schema
         )));
@@ -169,12 +210,14 @@ fn compare_metric(
     metric: &str,
     gated: bool,
     threshold: f64,
+    abs_floor_ms: f64,
 ) -> Row {
     let left = lookup(baseline, scenario, metric);
     let right = lookup(candidate, scenario, metric);
+    let floor = metric_is_ms(metric).then_some(abs_floor_ms);
     let (delta, status) = match (left, right) {
         (Lookup::Value(base), Lookup::Value(cand)) => {
-            let (_, _, delta, status) = status_for_values(base, cand, gated, threshold);
+            let (_, _, delta, status) = status_for_values(base, cand, gated, threshold, floor);
             (delta, status)
         }
         (Lookup::Missing, _) | (_, Lookup::Missing) => ("n/a".to_string(), "missing"),
@@ -198,11 +241,22 @@ fn format_lookup(value: Lookup) -> String {
     }
 }
 
+/// True for millisecond metrics, the only ones the absolute floor applies to.
+fn metric_is_ms(metric: &str) -> bool {
+    metric.starts_with("cpu_frame_ms.") || metric.starts_with("gpu_passes_ms.")
+}
+
+/// True when `cand - base` is at or below the absolute floor (with float slack).
+fn below_abs_floor(base: f64, cand: f64, floor_ms: f64) -> bool {
+    cand - base <= floor_ms + ABS_FLOOR_EPSILON_MS
+}
+
 fn status_for_values(
     base: f64,
     cand: f64,
     gated: bool,
     threshold: f64,
+    floor_ms: Option<f64>,
 ) -> (String, String, String, &'static str) {
     let Some(delta) = relative_delta(base, cand) else {
         return (
@@ -214,10 +268,12 @@ fn status_for_values(
     };
     let status = if !gated {
         "info"
-    } else if delta > threshold {
-        "FAIL"
-    } else {
+    } else if delta <= threshold {
         "ok"
+    } else if floor_ms.is_some_and(|floor| below_abs_floor(base, cand, floor)) {
+        "ok (abs floor)"
+    } else {
+        "FAIL"
     };
     (
         format_ms(base),
@@ -265,7 +321,7 @@ fn gpu_info_rows(
                         match (base_value, cand_value) {
                             (Some(base_ms), Some(cand_ms)) => {
                                 let (_, _, delta, status) =
-                                    status_for_values(base_ms, cand_ms, false, 0.0);
+                                    status_for_values(base_ms, cand_ms, false, 0.0, None);
                                 (format_ms(base_ms), format_ms(cand_ms), delta, status)
                             }
                             _ => (
@@ -429,6 +485,7 @@ fn render_markdown(
     baseline: &FrameBenchReport,
     candidate: &FrameBenchReport,
     threshold: f64,
+    abs_floor_ms: f64,
     gate: &[String],
     rows: &[Row],
     failed: bool,
@@ -438,11 +495,17 @@ fn render_markdown(
     let mut out = String::new();
     out.push_str("# Frame benchmark compare\n\n");
     out.push_str(
-        "Absolute milliseconds are not a gate and are not comparable across machines, adapters, or lavapipe versus a discrete GPU. The gate is relative only.\n\n",
+        "Absolute milliseconds are not a gate and are not comparable across machines, adapters, or lavapipe versus a discrete GPU. The gate is relative; an absolute floor, when set, only ever clears a row, never fails one.\n\n",
     );
     let _ = writeln!(out, "baseline_git: {}", baseline.git_sha);
     let _ = writeln!(out, "candidate_git: {}", candidate.git_sha);
     let _ = writeln!(out, "threshold: >{threshold:.4}% on gated metrics");
+    if abs_floor_ms > 0.0 {
+        let _ = writeln!(
+            out,
+            "abs_floor: ms deltas <= {abs_floor_ms:.4} ms never fail"
+        );
+    }
     let gated = gate.join(", ");
     let _ = write!(out, "gated: {gated}\n\n");
     out.push_str("| scenario | metric | baseline | candidate | delta | status |\n");
@@ -474,10 +537,11 @@ fn cell(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::compare::{CompareOptions, compare_loaded};
+    use crate::compare::{CompareOptions, DEFAULT_ABS_FLOOR_MS, compare_loaded};
     use crate::report::{
         AdapterInfo, ControlApi, FrameBenchReport, SCHEMA, ScenarioReport, standard_notes,
     };
+    use crate::runner_env::{IcdInfo, RunnerInfo};
     use crate::stats::Percentiles;
 
     fn percentiles(p50: f64, p95: f64, p99: f64) -> Percentiles {
@@ -509,6 +573,17 @@ mod tests {
             measured_frames: 4,
             runs: 1,
             adapter: AdapterInfo::empty(),
+            runner: Some(RunnerInfo {
+                os: "linux".to_string(),
+                cpu_model: "AMD EPYC 7763 64-Core Processor".to_string(),
+                icd: IcdInfo {
+                    path: Some("/usr/share/vulkan/icd.d/lvp_icd.x86_64.json".to_string()),
+                    source: "env".to_string(),
+                    var: Some("VK_DRIVER_FILES".to_string()),
+                },
+                rayon_threads: 2,
+                rayon_threads_source: "env".to_string(),
+            }),
             timestamp_query: false,
             control_api: ControlApi::unimplemented(),
             scenarios: vec![scenario("unlit_sphere", p95)],
@@ -556,5 +631,124 @@ mod tests {
         assert!(outcome.markdown.contains("gpu_passes_ms"));
         assert!(outcome.markdown.contains("| null | null |"));
         assert!(!outcome.failed);
+    }
+
+    fn schema1(p95: f64) -> FrameBenchReport {
+        let mut report = report(p95);
+        report.schema = 1;
+        report.runner = None;
+        report
+    }
+
+    #[test]
+    fn schema_1_baseline_and_schema_2_candidate_compare() {
+        let outcome = compare_loaded(&schema1(10.0), &report(10.0), &CompareOptions::default())
+            .expect("mixed schemas");
+        assert!(!outcome.failed, "{}", outcome.markdown);
+        let outcome = compare_loaded(&report(10.0), &schema1(12.0), &CompareOptions::default())
+            .expect("mixed schemas");
+        assert!(outcome.failed, "{}", outcome.markdown);
+    }
+
+    #[test]
+    fn unknown_schema_is_rejected() {
+        let mut future = report(10.0);
+        future.schema = 3;
+        assert!(compare_loaded(&report(10.0), &future, &CompareOptions::default()).is_err());
+        let mut zero = report(10.0);
+        zero.schema = 0;
+        assert!(compare_loaded(&zero, &report(10.0), &CompareOptions::default()).is_err());
+    }
+
+    fn floor(ms: f64) -> CompareOptions {
+        CompareOptions {
+            abs_floor_ms: ms,
+            ..CompareOptions::default()
+        }
+    }
+
+    #[test]
+    fn schema_2_without_runner_is_rejected() {
+        let mut bare = report(10.0);
+        bare.runner = None;
+        assert!(compare_loaded(&report(10.0), &bare, &CompareOptions::default()).is_err());
+        assert!(compare_loaded(&bare, &report(10.0), &CompareOptions::default()).is_err());
+    }
+
+    #[test]
+    fn delta_at_or_below_abs_floor_never_fails() {
+        // +20% but only 0.04 ms, with the floor opted in at 0.05 ms.
+        let outcome = compare_loaded(&report(0.2), &report(0.24), &floor(0.05)).expect("cmp");
+        assert!(!outcome.failed, "{}", outcome.markdown);
+        assert!(
+            outcome.markdown.contains("| ok (abs floor) |"),
+            "{}",
+            outcome.markdown
+        );
+        assert!(
+            outcome
+                .markdown
+                .contains("abs_floor: ms deltas <= 0.0500 ms never fail")
+        );
+        // +50% and exactly 0.05 ms: the floor is inclusive.
+        let outcome = compare_loaded(&report(0.1), &report(0.15), &floor(0.05)).expect("cmp");
+        assert!(!outcome.failed, "{}", outcome.markdown);
+    }
+
+    #[test]
+    fn delta_above_abs_floor_still_fails() {
+        let outcome = compare_loaded(&report(0.2), &report(0.2501), &floor(0.05)).expect("cmp");
+        assert!(outcome.failed, "{}", outcome.markdown);
+        let outcome = compare_loaded(&report(2.0), &report(2.4), &floor(0.05)).expect("cmp");
+        assert!(outcome.failed, "{}", outcome.markdown);
+    }
+
+    #[test]
+    fn default_abs_floor_is_off() {
+        // O8 is open: the default is relative-only, so +20% at 0.2 ms (0.04 ms) fails.
+        assert_eq!(DEFAULT_ABS_FLOOR_MS, 0.0);
+        assert_eq!(CompareOptions::default().abs_floor_ms, 0.0);
+        let outcome =
+            compare_loaded(&report(0.2), &report(0.24), &CompareOptions::default()).expect("cmp");
+        assert!(outcome.failed, "{}", outcome.markdown);
+        assert!(
+            !outcome.markdown.contains("abs_floor"),
+            "{}",
+            outcome.markdown
+        );
+        assert!(!outcome.markdown.contains("ok (abs floor)"));
+        let outcome = compare_loaded(&report(0.2), &report(0.24), &floor(0.0)).expect("cmp");
+        assert!(outcome.failed, "{}", outcome.markdown);
+        assert!(compare_loaded(&report(0.2), &report(0.24), &floor(-0.01)).is_err());
+        assert!(compare_loaded(&report(0.2), &report(0.24), &floor(f64::NAN)).is_err());
+    }
+
+    #[test]
+    fn abs_floor_does_not_apply_to_counts() {
+        let mut base = report(10.0);
+        let mut cand = report(10.0);
+        base.scenarios[0].draw_calls = percentiles(1.0, 1.0, 1.0);
+        cand.scenarios[0].draw_calls = percentiles(1.02, 1.02, 1.02);
+        let options = CompareOptions {
+            gate: vec!["draw_calls.p50".to_string()],
+            ..floor(0.05)
+        };
+        let outcome = compare_loaded(&base, &cand, &options).expect("cmp");
+        assert!(
+            !outcome.failed,
+            "2% is under the threshold: {}",
+            outcome.markdown
+        );
+        cand.scenarios[0].draw_calls = percentiles(1.04, 1.04, 1.04);
+        let options = CompareOptions {
+            threshold_percent: 3.0,
+            ..options
+        };
+        let outcome = compare_loaded(&base, &cand, &options).expect("cmp");
+        assert!(
+            outcome.failed,
+            "a 0.04 draw delta is not in ms: {}",
+            outcome.markdown
+        );
     }
 }

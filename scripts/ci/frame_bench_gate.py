@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Noise-aware gate for the `Frame bench` workflow (.github/workflows/frame-bench.yml).
 
-Reads schema-1 `renderide-framebench run` reports. It does not import renderer code, so the
-same script gates any base/head pair whose reports share schema 1.
+Reads schema-1 or schema-2 `renderide-framebench run` reports, in any mix (a master base tree
+may still write schema 1 while the head writes schema 2). Schema 2 is a strict superset of
+schema 1 that adds a top-level `runner` object (`os`, `cpu_model`, `icd`, `rayon_threads`); the
+gate reads only the schema-1 fields, and prints each side's runner line when present. It does
+not import renderer code. A `--json` error document (a top-level `error` object, no scenarios)
+is an input error.
 
 Gate metric: `cpu_frame_ms.p95`. For each side, every report contributes its
 `per_run_cpu_frame_ms_p95` list (one value per measured run). The side's value is the median
@@ -14,6 +18,15 @@ Two thresholds, both percent, `--flag-threshold <= --fail-threshold`:
 - `--fail-threshold` (default 10): the policy bar. Nothing fails at or below it.
   `--threshold` is a deprecated alias of `--fail-threshold`, like the workflow input: it sets the
   fail threshold and, with a warning, lowers `--flag-threshold` to it when the flag is larger.
+
+Absolute floor (`--abs-floor-ms`, default 0, i.e. off; opt-in): a scenario whose head median
+minus base median is at most the floor (in ms) never flags and never fails, whatever its percent.
+The floor applies to every data set the rule looks at (first pass, pooled, confirm-only). Such
+rows show `ok (abs floor)`. Whether CI should use a nonzero default is open question O8
+(plans/test-bench-rewrite.md); it is off by default because at today's lavapipe medians
+(~0.2-0.4 ms) a 0.05 ms floor is a 12.5-25% effective bar, above the 10% fail threshold (seeded
+simulation at a 0.2 ms median, test_simulation_at_0_2_ms_floor_off_and_on: a true +15% fails
+about 90% of the time with the floor off and almost never with a 0.05 ms floor).
 
 Decision rule:
 
@@ -39,8 +52,9 @@ Decision rule:
    implements the same rule.
 
 Measured at the workflow defaults (`runs=9`, flag 5, fail 10, `confirm_rounds=3`; seeded noise
-model below, 4000 trials per point): a true 0% passes 99.925%; a true +10% fails 47.65% (10% is
-the bar itself, so about 50% is expected); +12% fails 69.725%; +15% fails 90.0%. Flag 5 was
+model below, true value 1 ms, no abs floor, 4000 trials per point): a true 0% passes
+99.925%; a true +10% fails 47.65% (10% is the bar itself, so about 50% is expected); +12%
+fails 69.725%; +15% fails 90.0%. Flag 5 was
 chosen over 6 (+15% failed 87.875%) to reach the 90% target at the same 0% pass rate.
 
 Known limit (tested, see test_frame_bench_gate.py): if confirm rounds add no new information
@@ -61,14 +75,16 @@ deterministic; the gate uses no randomness.
 Rows:
 
 - `ok`: no regression.
+- `ok (abs floor)`: delta above the threshold in percent, but at most `--abs-floor-ms` in ms.
 - `FLAG` (first mode): delta above the flag threshold; re-measure it.
 - `FAIL (pooled)`, `FAIL (confirm-only)`, `FAIL (pooled, confirm-only)` (confirm mode): a
   confirmed regression and the path(s) that failed it.
 - `base N/A`: scenario measured on head, not defined on base. Never fails.
 - `head N/A, skipped`: scenario requested but not defined on head (`--head-missing`). Never fails.
 
-Input errors (exit 2, message on stderr): bad arguments; a report that is unreadable, has the
-wrong schema or a missing field; a head report with zero scenarios; a NaN or infinite value; a
+Input errors (exit 2, message on stderr): bad arguments; a report that is unreadable, has a
+schema other than 1 or 2, is a schema-2 report without a `runner` object, is a `--json` error
+document, or misses a field; a head report with zero scenarios; a NaN or infinite value; a
 base median that is 0 or negative (first pass, confirm rounds alone, or pooled).
 
 Exit status: 0 pass, 1 flagged (first) or regression (confirm), 2 usage or input error.
@@ -85,8 +101,14 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-SCHEMA = 1
+SCHEMA = 2  # newest schema renderide-framebench writes
+SUPPORTED_SCHEMAS = (1, 2)
 DEFAULT_ALPHA = 0.05
+# Head-minus-base median deltas at or below this many ms never flag or fail. 0 = off (default);
+# the floor is opt-in via --abs-floor-ms until O8 is decided.
+DEFAULT_ABS_FLOOR_MS = 0.0
+# Float slack at the floor boundary (1.05 - 1.0 is 0.05000000000000004).
+ABS_FLOOR_EPSILON_MS = 1e-9
 # C(14, 7) = 3432 and C(16, 8) = 12870 are exact; C(18, 9) = 48620 uses the normal approximation.
 EXACT_MAX_COMBINATIONS = 20_000
 
@@ -120,9 +142,7 @@ def load(paths: list[Path], require_scenarios: bool = False) -> dict[str, list[f
     """
     pooled: dict[str, list[float]] = {}
     for path in paths:
-        report = json.loads(path.read_text(encoding="utf-8"))
-        if report.get("schema") != SCHEMA:
-            raise InputError(f"{path}: schema {report.get('schema')!r}, expected {SCHEMA}")
+        report = read_report(path)
         scenarios = report.get("scenarios") or []
         if require_scenarios and not scenarios:
             raise InputError(f"{path}: head report has zero scenarios")
@@ -134,6 +154,50 @@ def load(paths: list[Path], require_scenarios: bool = False) -> dict[str, list[f
                 raise InputError(f"{path}: scenario {scenario['name']!r} has a non-finite value ({bad[0]!r})")
             pooled.setdefault(scenario["name"], []).extend(values)
     return pooled
+
+
+def read_report(path: Path) -> dict:
+    """Parse one report and validate its schema (1 or 2). Raises `InputError`."""
+    report = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(report, dict):
+        raise InputError(f"{path}: report is not a JSON object")
+    if "error" in report:
+        error = report.get("error") or {}
+        raise InputError(
+            f"{path}: framebench error document (exit {error.get('exit_code')!r}, "
+            f"{error.get('kind')!r}): {error.get('message')!r}"
+        )
+    schema = report.get("schema")
+    # bool is an int subclass: `True == 1` must not pass as schema 1.
+    if isinstance(schema, bool) or not isinstance(schema, int) or schema not in SUPPORTED_SCHEMAS:
+        raise InputError(f"{path}: schema {schema!r}, expected one of {list(SUPPORTED_SCHEMAS)}")
+    if schema >= 2 and not isinstance(report.get("runner"), dict):
+        raise InputError(f"{path}: schema {schema} report has no `runner` object")
+    return report
+
+
+def runner_line(label: str, paths: list[Path]) -> str | None:
+    """`label runner: cpu=... icd=... rayon_threads=...` from the first schema-2 report, if any."""
+    for path in paths:
+        try:
+            runner = read_report(path).get("runner")
+        except (OSError, ValueError):
+            return None
+        if isinstance(runner, dict):
+            icd = runner.get("icd") or {}
+            icd_text = icd.get("path") or "none"
+            source = icd.get("var") or icd.get("source") or "?"
+            return (
+                f"{label} runner: os={runner.get('os', '?')} cpu=\"{runner.get('cpu_model', '?')}\" "
+                f"icd={icd_text} ({source}) rayon_threads={runner.get('rayon_threads', '?')} "
+                f"({runner.get('rayon_threads_source', '?')})"
+            )
+    return None
+
+
+def below_abs_floor(base: list[float], head: list[float], abs_floor_ms: float) -> bool:
+    """True when median(head) - median(base) is at most the absolute floor, in ms."""
+    return statistics.median(head) - statistics.median(base) <= abs_floor_ms + ABS_FLOOR_EPSILON_MS
 
 
 def check_base_medians(label: str, base: dict[str, list[float]]) -> None:
@@ -230,28 +294,41 @@ def evaluate_first(
     head: dict[str, list[float]],
     flag_threshold: float,
     head_missing: list[str],
+    abs_floor_ms: float = DEFAULT_ABS_FLOOR_MS,
 ) -> list[Row]:
-    """First pass: `FLAG` when delta > flag_threshold."""
+    """First pass: `FLAG` when delta > flag_threshold AND the ms delta is above the floor."""
     both, rows = _missing_rows(base, head, head_missing)
     for name in both:
         b, h = base[name], head[name]
         delta = delta_percent(b, h)
         if delta is None:
             status = "n/a"
+        elif delta <= flag_threshold:
+            status = "ok"
+        elif below_abs_floor(b, h, abs_floor_ms):
+            status = "ok (abs floor)"
         else:
-            status = "FLAG" if delta > flag_threshold else "ok"
+            status = "FLAG"
         rows.append(Row(name, statistics.median(b), statistics.median(h), delta, None, len(b), len(h), status))
     return _order(rows)
 
 
-def _significant_regression(base: list[float], head: list[float], fail_threshold: float, alpha: float):
-    """(delta, p, regressed) for one data set: delta > fail_threshold AND Mann-Whitney p < alpha."""
+def _significant_regression(
+    base: list[float], head: list[float], fail_threshold: float, alpha: float,
+    abs_floor_ms: float = DEFAULT_ABS_FLOOR_MS,
+):
+    """(delta, p, regressed, floored) for one data set.
+
+    regressed: delta > fail_threshold AND Mann-Whitney p < alpha AND the ms delta is above the
+    absolute floor. floored: the first two held and only the floor cleared it.
+    """
     if not base or not head:
-        return None, None, False
+        return None, None, False, False
     delta = delta_percent(base, head)
     p_value = mann_whitney_greater(base, head)
-    regressed = delta is not None and delta > fail_threshold and p_value < alpha
-    return delta, p_value, regressed
+    relative = delta is not None and delta > fail_threshold and p_value < alpha
+    floored = relative and below_abs_floor(base, head, abs_floor_ms)
+    return delta, p_value, relative and not floored, floored
 
 
 def evaluate_confirm(
@@ -262,8 +339,10 @@ def evaluate_confirm(
     fail_threshold: float,
     head_missing: list[str],
     alpha: float = DEFAULT_ALPHA,
+    abs_floor_ms: float = DEFAULT_ABS_FLOOR_MS,
 ) -> list[Row]:
-    """Confirm: FAIL when (a) pooled or (b) confirm-only data shows delta > fail AND MW p < alpha."""
+    """Confirm: FAIL when (a) pooled or (b) confirm-only data shows delta > fail AND MW p < alpha,
+    each path also needing its ms delta above the absolute floor."""
     pooled_base = {k: list(v) for k, v in first_base.items()}
     pooled_head = {k: list(v) for k, v in first_head.items()}
     for k, v in confirm_base.items():
@@ -273,14 +352,18 @@ def evaluate_confirm(
     both, rows = _missing_rows(pooled_base, pooled_head, head_missing)
     for name in both:
         b, h = pooled_base[name], pooled_head[name]
-        delta, p_value, pooled_fail = _significant_regression(b, h, fail_threshold, alpha)
+        delta, p_value, pooled_fail, pooled_floor = _significant_regression(b, h, fail_threshold, alpha, abs_floor_ms)
         cb, ch = confirm_base.get(name) or [], confirm_head.get(name) or []
-        c_delta, c_p, confirm_fail = _significant_regression(cb, ch, fail_threshold, alpha)
+        c_delta, c_p, confirm_fail, confirm_floor = _significant_regression(
+            cb, ch, fail_threshold, alpha, abs_floor_ms
+        )
         paths = [label for label, hit in (("pooled", pooled_fail), ("confirm-only", confirm_fail)) if hit]
         if delta is None:
             status = "n/a"
         elif paths:
             status = f"FAIL ({', '.join(paths)})"
+        elif pooled_floor or confirm_floor:
+            status = "ok (abs floor)"
         else:
             status = "ok"
         rows.append(
@@ -302,6 +385,7 @@ def decide(
     flag_threshold: float,
     fail_threshold: float,
     alpha: float = DEFAULT_ALPHA,
+    abs_floor_ms: float = DEFAULT_ABS_FLOOR_MS,
 ) -> str:
     """Whole-gate decision for one scenario, as the workflow runs it: `pass` or `fail`.
 
@@ -309,15 +393,15 @@ def decide(
     then the first pass runs at the fail threshold (a delta between the two thresholds passes).
     """
     if not confirm_base and not confirm_head:
-        first = evaluate_first({"s": first_base}, {"s": first_head}, fail_threshold, [])[0]
+        first = evaluate_first({"s": first_base}, {"s": first_head}, fail_threshold, [], abs_floor_ms)[0]
         return "fail" if first.status == "FLAG" else "pass"
-    first = evaluate_first({"s": first_base}, {"s": first_head}, flag_threshold, [])[0]
+    first = evaluate_first({"s": first_base}, {"s": first_head}, flag_threshold, [], abs_floor_ms)[0]
     if first.status != "FLAG":
         return "pass"
     row = evaluate_confirm(
         {"s": first_base}, {"s": first_head},
         {"s": [v for run in confirm_base for v in run]}, {"s": [v for run in confirm_head for v in run]},
-        fail_threshold, [], alpha,
+        fail_threshold, [], alpha, abs_floor_ms,
     )[0]
     return "fail" if row.status.startswith("FAIL") else "pass"
 
@@ -341,13 +425,20 @@ def render(
     fail_threshold: float,
     mode: str = "first",
     alpha: float = DEFAULT_ALPHA,
+    abs_floor_ms: float = DEFAULT_ABS_FLOOR_MS,
+    runner_lines: list[str] | None = None,
 ) -> str:
     lines = [f"### {title}", ""]
+    floor_text = (
+        f" Absolute floor: a head-minus-base median delta <= {abs_floor_ms:g} ms never flags or fails."
+        if abs_floor_ms > 0 else ""
+    )
     if mode == "confirm":
         lines += [
             "Gate: cpu_frame_ms.p95 (median of per-run p95). Confirm: FAIL when EITHER "
             f"(a) pooled (first pass + confirm) delta > {fail_threshold:g}% AND one-sided Mann-Whitney U p < {alpha:g}, "
-            f"OR (b) confirm-rounds-only delta > {fail_threshold:g}% AND Mann-Whitney p < {alpha:g} (head slower).",
+            f"OR (b) confirm-rounds-only delta > {fail_threshold:g}% AND Mann-Whitney p < {alpha:g} (head slower)."
+            + floor_text,
             "",
             "| scenario | base p95 ms | head p95 ms | pooled delta | pooled runs base/head | pooled MW p "
             "| confirm-only delta | confirm runs base/head | confirm-only MW p | status |",
@@ -362,7 +453,8 @@ def render(
     else:
         lines += [
             f"Gate: cpu_frame_ms.p95 (median of per-run p95). First pass: FLAG when delta > {flag_threshold:g}% "
-            f"(no spread condition); flags are re-measured and fail only above {fail_threshold:g}%.",
+            f"(no spread condition); flags are re-measured and fail only above {fail_threshold:g}%."
+            + floor_text,
             "",
             "| scenario | base p95 ms | head p95 ms | delta | runs base/head | status |",
             "|---|---|---|---|---|---|",
@@ -372,6 +464,9 @@ def render(
                 f"| {r.scenario} | {fmt_ms(r.base)} | {fmt_ms(r.head)} | {fmt_pct(r.delta)} "
                 f"| {r.n_base}/{r.n_head} | {r.status} |"
             )
+    if runner_lines:
+        lines.append("")
+        lines.extend(f"- {line}" for line in runner_lines)
     lines.append("")
     return "\n".join(lines)
 
@@ -392,6 +487,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--mode", choices=("first", "confirm"), default="first", help="first pass or confirm")
     parser.add_argument("--alpha", type=float, default=DEFAULT_ALPHA, help="confirm: Mann-Whitney one-sided level")
+    parser.add_argument(
+        "--abs-floor-ms",
+        type=float,
+        default=DEFAULT_ABS_FLOOR_MS,
+        help="ms; a head-minus-base median delta at or below this never flags or fails (default 0 = off; opt-in, O8)",
+    )
     parser.add_argument("--head-missing", action="append", default=[], help="requested scenario head does not define")
     parser.add_argument("--title", default="Frame bench gate")
     parser.add_argument("--suspects-out", type=Path, help="first mode: write flagged scenario names, one per line")
@@ -410,6 +511,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if not 0.0 < args.alpha < 1.0:
         print("frame_bench_gate: --alpha must be in (0, 1)", file=sys.stderr)
+        return 2
+    if not (math.isfinite(args.abs_floor_ms) and args.abs_floor_ms >= 0.0):
+        print("frame_bench_gate: --abs-floor-ms must be a finite number >= 0", file=sys.stderr)
         return 2
     if not 0.0 <= args.flag_threshold <= args.fail_threshold:
         print("frame_bench_gate: need 0 <= --flag-threshold <= --fail-threshold", file=sys.stderr)
@@ -433,10 +537,17 @@ def main(argv: list[str] | None = None) -> int:
         print(f"frame_bench_gate: {err}", file=sys.stderr)
         return 2
     if args.mode == "confirm":
-        rows = evaluate_confirm(base, head, confirm_base, confirm_head, args.fail_threshold, args.head_missing, args.alpha)
+        rows = evaluate_confirm(
+            base, head, confirm_base, confirm_head, args.fail_threshold, args.head_missing, args.alpha,
+            args.abs_floor_ms,
+        )
     else:
-        rows = evaluate_first(base, head, args.flag_threshold, args.head_missing)
-    sys.stdout.write(render(rows, args.title, args.flag_threshold, args.fail_threshold, args.mode, args.alpha))
+        rows = evaluate_first(base, head, args.flag_threshold, args.head_missing, args.abs_floor_ms)
+    runners = [line for line in (runner_line("base", args.base), runner_line("head", args.head)) if line]
+    sys.stdout.write(
+        render(rows, args.title, args.flag_threshold, args.fail_threshold, args.mode, args.alpha,
+               args.abs_floor_ms, runners)
+    )
     hit = [row.scenario for row in rows if is_failure(row.status)]
     if args.suspects_out is not None:
         args.suspects_out.write_text("".join(f"{name}\n" for name in hit), encoding="utf-8")

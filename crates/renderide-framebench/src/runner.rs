@@ -9,9 +9,10 @@ use serde::Deserialize;
 
 use crate::error::BenchError;
 use crate::report::{
-    AdapterInfo, ControlApi, FrameBenchReport, SCHEMA, ScenarioRun, aggregate_scenario,
+    AdapterInfo, ControlApi, FrameBenchReport, RAW_SCHEMA, SCHEMA, ScenarioRun, aggregate_scenario,
     standard_notes,
 };
+use crate::runner_env::RunnerInfo;
 use crate::scenario;
 
 /// Inputs for [`run_bench`].
@@ -35,22 +36,33 @@ pub struct RunConfig {
     pub timeout: Duration,
     /// Inherit renderer logs.
     pub verbose_renderer: bool,
+    /// With `verbose_renderer`, send the renderer's stdout to this process's stderr so stdout
+    /// carries only the `--json` document.
+    pub renderer_stdout_to_stderr: bool,
     /// Skip headless flags. Window size is not pinned.
     pub windowed: bool,
     /// Final JSON path.
     pub output_path: PathBuf,
 }
 
-/// Runs every scenario and writes one schema-1 report.
+/// Runs every scenario and writes one schema-2 report.
+///
+/// `runner` is stored as the report's `runner` block; callers normally pass
+/// [`crate::runner_env::detect`].
 ///
 /// # Errors
 ///
 /// Returns an error when a scenario name, frame count, or raw report is invalid, or when the
-/// harness fails.
-pub fn run_bench(cfg: &RunConfig) -> Result<FrameBenchReport, BenchError> {
-    let _ = renderide_test::logging::init_renderer_test_logging()
-        .map_err(|err| BenchError::Message(format!("logging: {err}")))?;
+/// harness fails. [`BenchError::run_exit_code`] classifies it.
+pub fn run_bench(cfg: &RunConfig, runner: RunnerInfo) -> Result<FrameBenchReport, BenchError> {
     validate(cfg)?;
+    for name in &cfg.scenarios {
+        if scenario::by_name(name).is_none() {
+            return Err(BenchError::Usage(format!("unknown scenario `{name}`")));
+        }
+    }
+    let _ = renderide_test::logging::init_renderer_test_logging()
+        .map_err(|err| BenchError::Env(format!("logging: {err}")))?;
     let names = if cfg.scenarios.is_empty() {
         scenario::DEFAULT_SCENARIOS
             .into_iter()
@@ -65,11 +77,10 @@ pub fn run_bench(cfg: &RunConfig) -> Result<FrameBenchReport, BenchError> {
     let mut saw_adapter = false;
     for name in &names {
         let scenario = scenario::by_name(name)
-            .ok_or_else(|| BenchError::Message(format!("unknown scenario `{name}`")))?;
+            .ok_or_else(|| BenchError::Usage(format!("unknown scenario `{name}`")))?;
         let steps = scenario::script(scenario, cfg.warmup_frames, cfg.measured_frames);
-        let (position, rotation) = scenario::pose_from_script(&steps).ok_or_else(|| {
-            BenchError::Message(format!("scenario {name} has no camera.set_pose"))
-        })?;
+        let (position, rotation) = scenario::pose_from_script(&steps)
+            .ok_or_else(|| BenchError::Run(format!("scenario {name} has no camera.set_pose")))?;
         let mut runs = Vec::with_capacity(usize::try_from(cfg.runs).unwrap_or(1));
         for index in 0..cfg.runs {
             let run = run_once(cfg, scenario.name, index, position, rotation)?;
@@ -78,14 +89,13 @@ pub fn run_bench(cfg: &RunConfig) -> Result<FrameBenchReport, BenchError> {
                 renderer_commit.clone_from(&run.renderer_commit);
                 saw_adapter = true;
             } else if run.renderer_commit != renderer_commit {
-                return Err(BenchError::Message(
+                return Err(BenchError::Run(
                     "renderer commit changed between runs".to_string(),
                 ));
             }
             runs.push(run);
         }
-        scenarios
-            .push(aggregate_scenario(scenario.name, &runs, steps).map_err(BenchError::Message)?);
+        scenarios.push(aggregate_scenario(scenario.name, &runs, steps).map_err(BenchError::Run)?);
     }
     let report = FrameBenchReport {
         schema: SCHEMA,
@@ -102,6 +112,7 @@ pub fn run_bench(cfg: &RunConfig) -> Result<FrameBenchReport, BenchError> {
         measured_frames: cfg.measured_frames,
         runs: cfg.runs,
         adapter,
+        runner: Some(runner),
         timestamp_query: scenarios
             .iter()
             .any(|scenario| scenario.gpu_passes_ms.is_some()),
@@ -115,15 +126,15 @@ pub fn run_bench(cfg: &RunConfig) -> Result<FrameBenchReport, BenchError> {
 
 fn validate(cfg: &RunConfig) -> Result<(), BenchError> {
     if cfg.runs == 0 {
-        return Err(BenchError::Message("runs must be >= 1".to_string()));
+        return Err(BenchError::Usage("runs must be >= 1".to_string()));
     }
     if cfg.measured_frames == 0 {
-        return Err(BenchError::Message(
+        return Err(BenchError::Usage(
             "measured frames must be >= 1".to_string(),
         ));
     }
     if cfg.width == 0 || cfg.height == 0 {
-        return Err(BenchError::Message(
+        return Err(BenchError::Usage(
             "resolution width and height must be >= 1".to_string(),
         ));
     }
@@ -152,6 +163,7 @@ fn run_once(
             measured_frames: cfg.measured_frames,
             timeout: cfg.timeout,
             verbose_renderer: cfg.verbose_renderer,
+            renderer_stdout_to_stderr: cfg.renderer_stdout_to_stderr,
             windowed: cfg.windowed,
             camera_position: position,
             camera_rotation_xyzw: rotation,
@@ -161,16 +173,17 @@ fn run_once(
 }
 
 fn parse_raw(path: &Path, cfg: &RunConfig) -> Result<ScenarioRun, BenchError> {
-    let bytes = std::fs::read(path)?;
+    let bytes = std::fs::read(path)
+        .map_err(|err| BenchError::Run(format!("read raw report {}: {err}", path.display())))?;
     let raw: RawReport = serde_json::from_slice(&bytes)?;
-    if raw.schema != SCHEMA || !raw.complete {
-        return Err(BenchError::Message(format!(
-            "{} is not a complete schema {SCHEMA} raw report",
+    if raw.schema != RAW_SCHEMA || !raw.complete {
+        return Err(BenchError::Run(format!(
+            "{} is not a complete schema {RAW_SCHEMA} raw report",
             path.display()
         )));
     }
     if raw.warmup_frames != cfg.warmup_frames || raw.measured_frames != cfg.measured_frames {
-        return Err(BenchError::Message(format!(
+        return Err(BenchError::Run(format!(
             "{} recorded warmup/measured {}/{}, expected {}/{}",
             path.display(),
             raw.warmup_frames,
@@ -181,7 +194,7 @@ fn parse_raw(path: &Path, cfg: &RunConfig) -> Result<ScenarioRun, BenchError> {
     }
     let expected = usize::try_from(cfg.measured_frames).unwrap_or(usize::MAX);
     if raw.frames.len() != expected {
-        return Err(BenchError::Message(format!(
+        return Err(BenchError::Run(format!(
             "{} has {} frames, expected {expected}",
             path.display(),
             raw.frames.len()
@@ -210,7 +223,7 @@ fn counts(path: &Path, values: impl Iterator<Item = u64>) -> Result<Vec<f64>, Be
     values
         .map(|value| {
             u32::try_from(value).map(f64::from).map_err(|_err| {
-                BenchError::Message(format!("{} count {value} exceeds u32", path.display()))
+                BenchError::Run(format!("{} count {value} exceeds u32", path.display()))
             })
         })
         .collect()
