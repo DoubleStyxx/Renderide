@@ -325,13 +325,99 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
     hash
 }
 
+const DISTINCTIVE_BYTES: [u8; 4] = [255, 0, 255, 255];
+const BLACK_BYTES: [u8; 4] = [0, 0, 0, 255];
+/// Second-readback bit: a published frame encoded at least one forward draw.
+pub(crate) const RETRY_DRAWN: u8 = 1;
+/// Second-readback bit: the pixels were black, or black sitting on the clear.
+pub(crate) const RETRY_BLACK: u8 = 2;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ReadbackColors {
+    pub pixels: u64,
+    pub black: u64,
+    pub distinctive: u64,
+    pub other: u64,
+    pub first: [u8; 4],
+    pub center: [u8; 4],
+    pub min: [u8; 4],
+    pub max: [u8; 4],
+}
+
+pub(crate) fn count_readback_colors(bytes: &[u8]) -> ReadbackColors {
+    let mut colors = ReadbackColors {
+        pixels: 0,
+        black: 0,
+        distinctive: 0,
+        other: 0,
+        first: [0, 0, 0, 0],
+        center: [0, 0, 0, 0],
+        min: [255, 255, 255, 255],
+        max: [0, 0, 0, 0],
+    };
+    let (pixels, _) = bytes.as_chunks::<4>();
+    colors.pixels = u64::try_from(pixels.len()).unwrap_or(u64::MAX);
+    if let Some(first) = pixels.first() {
+        colors.first = *first;
+    }
+    if let Some(center) = pixels.get(pixels.len() / 2) {
+        colors.center = *center;
+    }
+    for px in pixels {
+        if *px == BLACK_BYTES {
+            colors.black += 1;
+        } else if *px == DISTINCTIVE_BYTES {
+            colors.distinctive += 1;
+        } else {
+            colors.other += 1;
+        }
+        for (channel, sample) in px.iter().enumerate() {
+            colors.min[channel] = colors.min[channel].min(*sample);
+            colors.max[channel] = colors.max[channel].max(*sample);
+        }
+    }
+    colors
+}
+
+pub(crate) fn classify_readback(colors: &ReadbackColors) -> &'static str {
+    if colors.pixels == 0 {
+        "empty"
+    } else if colors.distinctive == colors.pixels {
+        "magenta_clear"
+    } else if colors.black == colors.pixels {
+        "black"
+    } else if colors.other > 0 {
+        "shaded"
+    } else if colors.black > 0 && colors.distinctive > 0 {
+        "black_on_clear"
+    } else {
+        "mixed"
+    }
+}
+
+pub(crate) fn retry_bits(class: &str, forward_draws: u64) -> u8 {
+    let mut bits = 0;
+    if forward_draws > 0 {
+        bits |= RETRY_DRAWN;
+    }
+    if class == "black" || class == "black_on_clear" {
+        bits |= RETRY_BLACK;
+    }
+    bits
+}
+
+pub(crate) fn claim_retry_bits(already: u8, new_bits: u8) -> bool {
+    new_bits != 0 && already & new_bits != new_bits
+}
+
 #[cfg(test)]
 mod tests {
     use bytemuck::Zeroable;
 
     use super::{
-        MaterialBytes, finite4, format_frame_uniforms, format_lights, format_material,
-        frame_non_finite, light_non_finite, non_finite_f32s, proj_finite,
+        MaterialBytes, RETRY_BLACK, RETRY_DRAWN, claim_retry_bits, classify_readback,
+        count_readback_colors, finite4, format_frame_uniforms, format_lights, format_material,
+        frame_non_finite, light_non_finite, non_finite_f32s, proj_finite, retry_bits,
     };
     use crate::gpu::frame_bindings::GpuLight;
     use crate::gpu::frame_globals::FrameGpuUniforms;
@@ -401,6 +487,45 @@ mod tests {
         assert!(line.contains("lights=0"), "{line}");
         assert!(line.contains("proj00=0.0000"), "{line}");
         assert!(line.contains("non_finite=false"), "{line}");
+    }
+
+    #[test]
+    fn readback_counts_separate_black_magenta_and_other() {
+        let mut bytes = vec![0, 0, 0, 255, 255, 0, 255, 255, 1, 2, 3, 255];
+        bytes.extend_from_slice(&[9, 9, 9, 255]);
+        let colors = count_readback_colors(&bytes);
+        assert_eq!(colors.pixels, 4);
+        assert_eq!(colors.black, 1);
+        assert_eq!(colors.distinctive, 1);
+        assert_eq!(colors.other, 2);
+        assert_eq!(colors.first, [0, 0, 0, 255]);
+        assert_eq!(colors.center, [1, 2, 3, 255]);
+        assert_eq!(colors.min[0], 0);
+        assert_eq!(colors.max[0], 255);
+        assert_eq!(classify_readback(&colors), "shaded");
+    }
+
+    #[test]
+    fn readback_class_separates_clear_black_and_black_on_clear() {
+        let magenta = count_readback_colors(&[255, 0, 255, 255, 255, 0, 255, 255]);
+        assert_eq!(classify_readback(&magenta), "magenta_clear");
+        let black = count_readback_colors(&[0, 0, 0, 255, 0, 0, 0, 255]);
+        assert_eq!(classify_readback(&black), "black");
+        let spheres = count_readback_colors(&[0, 0, 0, 255, 255, 0, 255, 255]);
+        assert_eq!(classify_readback(&spheres), "black_on_clear");
+    }
+
+    #[test]
+    fn second_readback_is_claimed_for_a_drawn_frame_and_a_later_black_frame() {
+        assert!(!claim_retry_bits(0, retry_bits("magenta_clear", 0)));
+        assert!(claim_retry_bits(0, retry_bits("shaded", 4)));
+        assert!(!claim_retry_bits(RETRY_DRAWN, retry_bits("shaded", 4)));
+        assert!(claim_retry_bits(RETRY_DRAWN, retry_bits("black", 4)));
+        assert!(!claim_retry_bits(
+            RETRY_DRAWN | RETRY_BLACK,
+            retry_bits("black_on_clear", 4)
+        ));
+        assert!(claim_retry_bits(0, retry_bits("black", 0)));
     }
 
     fn vec4_bytes(values: [f32; 4]) -> [u8; 16] {

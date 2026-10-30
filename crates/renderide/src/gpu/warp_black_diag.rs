@@ -37,8 +37,6 @@ const DIAG_CLEAR: wgpu::Color = wgpu::Color {
     b: 1.0,
     a: 1.0,
 };
-const DISTINCTIVE_BYTES: [u8; 4] = [255, 0, 255, 255];
-const BLACK_BYTES: [u8; 4] = [0, 0, 0, 255];
 
 static DISTINCTIVE_CLEAR: AtomicBool = AtomicBool::new(false);
 static CLEAR_LOGGED: AtomicBool = AtomicBool::new(false);
@@ -58,11 +56,6 @@ const MAX_DRAW_NOTES: usize = 8;
 const LOAD_UNKNOWN: u8 = 0;
 const LOAD_CLEAR: u8 = 1;
 const LOAD_LOAD: u8 = 2;
-/// Second-readback bit: a published frame encoded at least one forward draw.
-const RETRY_DRAWN: u8 = 1;
-/// Second-readback bit: the pixels were black, or black sitting on the clear.
-const RETRY_BLACK: u8 = 2;
-
 static LAST_PUBLISHED_FORWARD: AtomicU64 = AtomicU64::new(0);
 static RETRY_BITS: AtomicU8 = AtomicU8::new(0);
 
@@ -376,11 +369,11 @@ impl Drop for MapAsyncSpan {
 
 /// Counts black, magenta, and other pixels in a tight RGBA readback.
 pub(crate) fn log_readback_colors(bytes: &[u8]) {
-    let colors = count_readback_colors(bytes);
+    let colors = super::warp_black_diag_probe::count_readback_colors(bytes);
     logger::info!(
         "diag-readback-colors: pixels={} class={} black_0_0_0_255={} distinctive_255_0_255_255={} other={} first=({},{},{},{}) center=({},{},{},{}) min=({},{},{},{}) max=({},{},{},{}) distinctive_clear_armed={}",
         colors.pixels,
-        classify_readback(&colors),
+        super::warp_black_diag_probe::classify_readback(&colors),
         colors.black,
         colors.distinctive,
         colors.other,
@@ -412,111 +405,35 @@ pub(crate) fn claim_second_readback(bytes: &[u8]) -> bool {
     if !frame_log_armed() {
         return false;
     }
-    let bits = retry_bits(
-        classify_readback(&count_readback_colors(bytes)),
+    let bits = super::warp_black_diag_probe::retry_bits(
+        super::warp_black_diag_probe::classify_readback(
+            &super::warp_black_diag_probe::count_readback_colors(bytes),
+        ),
         LAST_PUBLISHED_FORWARD.load(Ordering::Acquire),
     );
     if bits == 0 {
         return false;
     }
     let previous = RETRY_BITS.fetch_or(bits, Ordering::AcqRel);
-    claim_retry_bits(previous, bits)
+    super::warp_black_diag_probe::claim_retry_bits(previous, bits)
 }
 
 /// Logs the explicit `PollType::Wait` and the second copy against `first`.
 pub(crate) fn log_readback_retry(poll: &str, poll_ms: u128, first: &[u8], second: &[u8]) {
-    let before = count_readback_colors(first);
-    let after = count_readback_colors(second);
+    let before = super::warp_black_diag_probe::count_readback_colors(first);
+    let after = super::warp_black_diag_probe::count_readback_colors(second);
     logger::info!(
         "diag-readback-retry: poll={poll} poll_ms={poll_ms} same_bytes={} first_class={} first_black={} first_magenta={} first_other={} second_class={} second_black={} second_magenta={} second_other={}",
         first == second,
-        classify_readback(&before),
+        super::warp_black_diag_probe::classify_readback(&before),
         before.black,
         before.distinctive,
         before.other,
-        classify_readback(&after),
+        super::warp_black_diag_probe::classify_readback(&after),
         after.black,
         after.distinctive,
         after.other,
     );
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ReadbackColors {
-    pixels: u64,
-    black: u64,
-    distinctive: u64,
-    other: u64,
-    first: [u8; 4],
-    center: [u8; 4],
-    min: [u8; 4],
-    max: [u8; 4],
-}
-
-fn count_readback_colors(bytes: &[u8]) -> ReadbackColors {
-    let mut colors = ReadbackColors {
-        pixels: 0,
-        black: 0,
-        distinctive: 0,
-        other: 0,
-        first: [0, 0, 0, 0],
-        center: [0, 0, 0, 0],
-        min: [255, 255, 255, 255],
-        max: [0, 0, 0, 0],
-    };
-    let (pixels, _) = bytes.as_chunks::<4>();
-    colors.pixels = u64::try_from(pixels.len()).unwrap_or(u64::MAX);
-    if let Some(first) = pixels.first() {
-        colors.first = *first;
-    }
-    if let Some(center) = pixels.get(pixels.len() / 2) {
-        colors.center = *center;
-    }
-    for px in pixels {
-        if *px == BLACK_BYTES {
-            colors.black += 1;
-        } else if *px == DISTINCTIVE_BYTES {
-            colors.distinctive += 1;
-        } else {
-            colors.other += 1;
-        }
-        for (channel, sample) in px.iter().enumerate() {
-            colors.min[channel] = colors.min[channel].min(*sample);
-            colors.max[channel] = colors.max[channel].max(*sample);
-        }
-    }
-    colors
-}
-
-fn classify_readback(colors: &ReadbackColors) -> &'static str {
-    if colors.pixels == 0 {
-        "empty"
-    } else if colors.distinctive == colors.pixels {
-        "magenta_clear"
-    } else if colors.black == colors.pixels {
-        "black"
-    } else if colors.other > 0 {
-        "shaded"
-    } else if colors.black > 0 && colors.distinctive > 0 {
-        "black_on_clear"
-    } else {
-        "mixed"
-    }
-}
-
-fn retry_bits(class: &str, forward_draws: u64) -> u8 {
-    let mut bits = 0;
-    if forward_draws > 0 {
-        bits |= RETRY_DRAWN;
-    }
-    if class == "black" || class == "black_on_clear" {
-        bits |= RETRY_BLACK;
-    }
-    bits
-}
-
-fn claim_retry_bits(already: u8, new_bits: u8) -> bool {
-    new_bits != 0 && already & new_bits != new_bits
 }
 
 fn driver_status() -> String {
@@ -1037,177 +954,5 @@ fn monotonic_ms() -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::path::Path;
-
-    use super::{
-        FrameAccum, FrameLogState, HoldDecision, LOAD_CLEAR, PipelineNote, RETRY_BLACK,
-        RETRY_DRAWN, WarpExtraWait, claim_retry_bits, classify_readback, count_readback_colors,
-        fault_flags, path_requests_frame_log, retry_bits,
-    };
-
-    #[test]
-    fn fault_flags_detect_device_removed_tdr_and_timeout() {
-        let removed = fault_flags("DXGI_ERROR_DEVICE_REMOVED (0x887A0005)");
-        assert!(removed.dxgi_device_removed);
-        assert!(!removed.tdr);
-
-        let hung = fault_flags("DXGI_ERROR_DEVICE_HUNG");
-        assert!(!hung.dxgi_device_removed);
-        assert!(hung.tdr);
-        assert!(hung.timeout);
-
-        let tdr = fault_flags("Timeout Detection and Recovery");
-        assert!(tdr.tdr);
-        assert!(tdr.timeout);
-
-        let plain = fault_flags("wgpu validation error: binding mismatch");
-        assert!(!plain.dxgi_device_removed);
-        assert!(!plain.tdr);
-        assert!(!plain.timeout);
-    }
-
-    #[test]
-    fn warp_hold_waits_two_ready_frames_after_the_watchdog_resumes() {
-        let mut wait = WarpExtraWait::default();
-        assert_eq!(wait.withhold(false, 0, 1), HoldDecision::NotWarp);
-        assert_eq!(wait.withhold(true, 4, 1), HoldDecision::PipelinesNotReady);
-        assert_eq!(wait.withhold(true, 0, 0), HoldDecision::WatchdogNotQuiet);
-        assert_eq!(
-            wait.withhold(true, 0, 1),
-            HoldDecision::Withhold { frame: 1 }
-        );
-        assert_eq!(
-            wait.withhold(true, 0, 1),
-            HoldDecision::Withhold { frame: 2 }
-        );
-        assert_eq!(wait.withhold(true, 0, 1), HoldDecision::PublishAfterWait);
-        assert_eq!(
-            wait.withhold(true, 0, 2),
-            HoldDecision::Withhold { frame: 1 }
-        );
-    }
-
-    #[test]
-    fn readback_counts_separate_black_magenta_and_other() {
-        let mut bytes = vec![0, 0, 0, 255, 255, 0, 255, 255, 1, 2, 3, 255];
-        bytes.extend_from_slice(&[9, 9, 9, 255]);
-        let colors = count_readback_colors(&bytes);
-        assert_eq!(colors.pixels, 4);
-        assert_eq!(colors.black, 1);
-        assert_eq!(colors.distinctive, 1);
-        assert_eq!(colors.other, 2);
-        assert_eq!(colors.first, [0, 0, 0, 255]);
-        assert_eq!(colors.center, [1, 2, 3, 255]);
-        assert_eq!(colors.min[0], 0);
-        assert_eq!(colors.max[0], 255);
-        assert_eq!(classify_readback(&colors), "shaded");
-    }
-
-    #[test]
-    fn readback_class_separates_clear_black_and_black_on_clear() {
-        let magenta = count_readback_colors(&[255, 0, 255, 255, 255, 0, 255, 255]);
-        assert_eq!(classify_readback(&magenta), "magenta_clear");
-        let black = count_readback_colors(&[0, 0, 0, 255, 0, 0, 0, 255]);
-        assert_eq!(classify_readback(&black), "black");
-        let spheres = count_readback_colors(&[0, 0, 0, 255, 255, 0, 255, 255]);
-        assert_eq!(classify_readback(&spheres), "black_on_clear");
-    }
-
-    #[test]
-    fn second_readback_is_claimed_for_a_drawn_frame_and_a_later_black_frame() {
-        assert!(!claim_retry_bits(0, retry_bits("magenta_clear", 0)));
-        assert!(claim_retry_bits(0, retry_bits("shaded", 4)));
-        assert!(!claim_retry_bits(RETRY_DRAWN, retry_bits("shaded", 4)));
-        assert!(claim_retry_bits(RETRY_DRAWN, retry_bits("black", 4)));
-        assert!(!claim_retry_bits(
-            RETRY_DRAWN | RETRY_BLACK,
-            retry_bits("black_on_clear", 4)
-        ));
-        assert!(claim_retry_bits(0, retry_bits("black", 0)));
-    }
-
-    #[test]
-    fn frame_log_emits_on_state_change_and_counts_the_previous_streak() {
-        let mut log = FrameLogState::new();
-        let first = log
-            .observe(sample_signature(3, "stem@1:0x2"))
-            .expect("first");
-        assert_eq!(first.frame, 1);
-        assert_eq!(first.prev_streak, 0);
-        assert!(log.observe(sample_signature(3, "stem@1:0x2")).is_none());
-        let changed = log
-            .observe(sample_signature(0, "stem@1:0x2"))
-            .expect("change");
-        assert_eq!(changed.frame, 3);
-        assert_eq!(changed.prev_streak, 2);
-        assert_eq!(changed.signature.forward_draws, 0);
-        assert!(changed.signature.pipelines.contains("stem@1:0x2"));
-    }
-
-    #[test]
-    fn pipeline_signature_is_sorted_and_caps_the_logged_list() {
-        let mut first = FrameAccum::new();
-        let mut second = FrameAccum::new();
-        for (kind, bits) in [("b", 2u32), ("a", 1), ("c", 3)] {
-            first.pipelines.insert(pipeline(kind, bits));
-        }
-        for (kind, bits) in [("c", 3u32), ("a", 1), ("b", 2)] {
-            second.pipelines.insert(pipeline(kind, bits));
-        }
-        assert_eq!(first.signature(), second.signature());
-        for bits in 0..20 {
-            first
-                .pipelines
-                .insert(pipeline(&format!("p{bits:02}"), bits));
-        }
-        let signature = first.signature();
-        assert_eq!(
-            signature.pipeline_overflow,
-            u64::try_from(first.pipelines.len() - 16).unwrap()
-        );
-        assert_eq!(signature.pipelines.matches(';').count(), 15);
-    }
-
-    #[test]
-    fn pbs_lit_output_path_arms_the_frame_log() {
-        assert!(path_requests_frame_log(Path::new(
-            "suites/pbs_lit_material_matrix/capture.png"
-        )));
-        assert!(!path_requests_frame_log(Path::new(
-            "suites/unlit_textured/capture.png"
-        )));
-    }
-
-    fn sample_signature(forward_draws: u64, pipelines: &str) -> super::FrameSignature {
-        super::FrameSignature {
-            forward_draws,
-            forward_instances: forward_draws,
-            depth_draws: 0,
-            depth_instances: 0,
-            pre_cull: 4,
-            frustum: 1,
-            hiz: 0,
-            visible: 3,
-            views: 1,
-            pipelines: pipelines.to_owned(),
-            pipeline_overflow: 0,
-            color_load: LOAD_CLEAR,
-            depth_load: LOAD_CLEAR,
-            skybox_draws: 0,
-            skybox_kinds: String::new(),
-            forward_draws_detail: "-".to_owned(),
-            depth_draws_detail: "-".to_owned(),
-            forward_draw_overflow: 0,
-            depth_draw_overflow: 0,
-        }
-    }
-
-    fn pipeline(kind: &str, bits: u32) -> PipelineNote {
-        PipelineNote {
-            kind: kind.to_owned(),
-            shader_asset_id: 7,
-            variant_bits: bits,
-        }
-    }
-}
+#[path = "warp_black_diag_tests.rs"]
+mod tests;
