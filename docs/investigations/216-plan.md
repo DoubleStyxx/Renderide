@@ -18,6 +18,51 @@ Each encoded the same draw, then read it back as black spheres on the magenta cl
 
 `direct_metallic_clustered` returns `vec3(0)` when the cluster's light count is 0 (`shaders/modules/pbs/lighting.wgsl`). With no indirect contribution, the fragment is black even though the CPU light list is not.
 
+## How #212 and #216 are chosen
+
+On master `8831f004` the capture gate runs first, then the two labels, in this order (`suite.rs` `run_suite_with`):
+
+1. `png_readback` either accepts a frame or times out.
+2. `warp_pbs::apply_expected_failure` (#212).
+3. `quarantine_216::apply_quarantine_now` (#216).
+
+A frame is a settle candidate only when `gpu_done`, pending=0, no dropped draws, and `golden::is_flat_image` is false (`gpu_ready.rs`). Flat means every channel's min/max span is at most 1. Two consecutive candidates are required. A flat frame is `SettleDecision::Reject` and never accepted.
+
+Timeout with `last_pending == Some(0)` becomes `HarnessError::FlatOrUnstableFrame`, whose text contains `flat or unstable`. That path does not run the image check. `FlatImage` (`flat single color`) is a different error: the golden check, used when the only frames were flat and pending was not 0.
+
+#212 matches only an accepted frame whose error contains `case failed tolerance`, on WARP, for `pbs_lit_material_matrix`, with pending=0 and no dropped draws. It then rewrites `error` and `result` to `expected failure (WARP, #212)`. `fault_from_failure` checks `flat or unstable` and `flat single color` before `case failed tolerance`, so those errors are not #212.
+
+#216 matches only while `now < 2026-10-31T23:59:59Z`, on WARP, for that same case, when the error contains `flat or unstable` and does not contain `pipeline-pending` or `PipelineNotReady`, and the PNG text is pending `0` and gpu_done `1`. It sets `status=quarantined` and `reason=quarantined:#216`. It does not read pixels. `flat single color` is not a #216 match (`other_failures_stay_hard_failures`).
+
+They do not overlap. #212 runs first but refuses a `flat or unstable` error, so it cannot erase a #216 case. #216 leaves a #212 label alone (`expected_failure_label_is_left_unchanged`). A settled non-flat frame cannot reach #216, because that frame is accepted and the error is the image check, not `flat or unstable`. An unsettled capture can still be #216 without the last PNG being flat: the timeout only requires last pending=0.
+
+## Windows samples
+
+| Run | CPU | Clear | Label | black | other |
+| --- | --- | --- | --- | --- | --- |
+| [40088875619](https://github.com/DoubleStyxx/Renderide/actions/runs/40088875619) `c721bbbe` | Xeon Platinum 8370C | magenta | #212 | 8547 | 8667 |
+| [40096421641](https://github.com/DoubleStyxx/Renderide/actions/runs/40096421641) `92dd8076` | EPYC 9V74 | magenta | #212 | 27 | 17187 |
+| [40097968491](https://github.com/DoubleStyxx/Renderide/actions/runs/40097968491) `234d01e7` | not recorded | magenta | #212 | not recorded | not recorded |
+| [41084635804](https://github.com/DoubleStyxx/Renderide/actions/runs/41084635804) `03e36e51` | EPYC 9V74 | magenta | #212 | 17214 | 0 |
+| [41089310635](https://github.com/DoubleStyxx/Renderide/actions/runs/41089310635) `c7194e42` | EPYC 7763 | magenta | #212 | 17214 | 0 |
+| [41093531109](https://github.com/DoubleStyxx/Renderide/actions/runs/41093531109) `4a271512` | EPYC 7763 | magenta | #212 | 17214 | 0 |
+| [41103575428](https://github.com/DoubleStyxx/Renderide/actions/runs/41103575428) `48f67568` | EPYC 9V45 | magenta | #212 | 17214 | 0 |
+| [41099685993](https://github.com/DoubleStyxx/Renderide/actions/runs/41099685993) `8c514272` (#219) | EPYC 9V45 | production black | #212 | 93697 | 8703 |
+
+No row is `quarantined:#216`. The pure-black canary rows (`other=0`, 17214 black, 85186 magenta) are exact `(0,0,0,255)` spheres. The production clear is linear black, stored as `(0,0,0,255)`. `black_spheres_on_the_production_clear_are_flat` runs that through `is_flat_image`: the same pixels with the background replaced by black are flat; one magenta pixel is not. A pure-black sphere frame on the production clear is therefore rejected by settle and times out as `FlatOrUnstableFrame`, which is the #216 path. #219 is the other exit: 8703 non-black pixels, 1435 unique colors, luma range 255, so it was accepted and took #212. Same shading bug, two harness exits. The exit depends on whether the accepted frame stays within one color of the clear.
+
+## Keeping the #216 path in CI
+
+Do not wait on a WARP sample to land flat. The classifier is already what CI should run:
+
+- `warp_flat_frame_is_quarantined_before_expiry_and_fails_after` builds a real `FlatOrUnstableFrame` string and a PNG with pending `0` and gpu_done `1`, then calls `apply_quarantine`.
+- `other_failures_stay_hard_failures` shows `flat single color` and a pipeline timeout are not #216.
+- `expected_failure_label_is_left_unchanged` shows a #212 label is not reclassified.
+- `warp_pending_timeout_flat_and_dropped_draws_stay_failures` shows a flat timeout is not #212.
+- `black_spheres_on_the_production_clear_are_flat` locks the pixel rule that sends a pure-black sphere frame to that timeout.
+
+That set is the Nov 14 check. A forced-flat GPU frame on WARP is not required, and it would still depend on which way the shade falls. Owner: Bridge. ETA: the tests are on the canary now; they stay in the #216 fix PR. No Shader or Gauge work for this routing.
+
 ## Hypotheses
 
 ### 1. The frame encodes no draws
@@ -55,17 +100,12 @@ Owner: Bridge for the log and the WARP-vs-Linux compare. Shader only if the coun
 
 Owner: Bridge. ETA: Nov 4, beside the cluster log.
 
-### 7. A flat `(0,0,0,255)` timeout is this same black fragment on the production black clear
+### 7. #216 and #212 are one shading bug with two harness exits
 
-**Likely, not yet remeasured on the merged tree.** Black spheres plus a black clear is a flat frame, so the harness waits until `FlatOrUnstableFrame`. The magenta clear makes the same frame non-flat, so these runs were accepted as #212. Three pre-merge samples did not produce a flat timeout. Older canary runs (`92dd8076`) had ~17k non-black, non-magenta pixels, so a tinted #212 picture has existed and was not reproduced here.
-
-**Experiment.** Keep the magenta clear. On the merged tree, classify each Windows `pbs_lit` readback as `black_on_clear`, `shaded`, `magenta_clear`, or `black`. Stop at a non-`black_on_clear` sample or at 8 merged-tree runs, whichever comes first. Do not turn the clear back to black just to recreate the timeout.
-
-Owner: Bridge. ETA: Nov 3 for the first merged-tree samples, Nov 5 for the set.
+**Supported.** A pure-black sphere frame on the production clear is flat (`black_spheres_on_the_production_clear_are_flat`), so settle rejects it and the timeout is #216. The same pixels on the magenta clear are not flat, so the frame is accepted and the image check is #212. That is runs 41084635804, 41089310635, 41093531109, and the merged-tree run 41103575428. #219 (`41099685993`, production clear, 8703 non-black pixels) was not flat and took #212. Older magenta runs with thousands of `other` pixels are the same #212 exit. Owner: Bridge. ETA: routing is done Oct 30. The shade itself is hypothesis 5.
 
 ## Order
 
-1. Bridge: merged-tree samples (hypothesis 7), using the logs already on the canary.
-2. Bridge: cluster-count log and the material-bind hash (hypotheses 5 and 6).
-3. Shader: only if hypothesis 5's count is non-zero and the frame is still black.
-4. Gauge: #214 stall, after the Nov 7 color finding, not instead of it.
+1. Bridge: cluster-count log and the material-bind hash (hypotheses 5 and 6). The #212/#216 split is the routing above, not another sample hunt.
+2. Shader: only if hypothesis 5's count is non-zero and the frame is still black.
+3. Gauge: #214 stall, after the Nov 7 color finding, not instead of it.
