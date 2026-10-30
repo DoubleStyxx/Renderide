@@ -1,11 +1,41 @@
-//! CPU microbenchmarks for Renderide helpers that do not need Resonite or a GPU.
+//! CPU microbenchmarks for Renderide helpers that do not need Resonite or a GPU, plus the
+//! `renderide-bench` front-door binary (`run` / `compare` / `list`).
 //!
 //! ```text
 //! cargo bench -p renderide-bench
+//! cargo run -p renderide-bench -- list --json
+//! cargo run -p renderide-bench -- run --suite cpu --json
+//! cargo run -p renderide-bench -- compare --base A.json --head B.json --json
 //! ```
+//!
+//! Decision rule for compare: [`renderide_framebench::relative_status`], shared with
+//! `renderide-framebench compare` and (for percent / abs-floor semantics)
+//! `scripts/ci/frame_bench_gate.py`. Default absolute floor is 0 while O8 is open.
 //!
 //! GPU-device benches, when they exist, compile only with `--features gpu` and are not part of
 //! the default command.
+
+#![forbid(unsafe_code)]
+
+mod catalog;
+mod cli;
+mod compare_front;
+mod criterion_read;
+mod error;
+mod report;
+mod run_suite;
+
+pub use catalog::{CPU_BENCH_IDS, CpuBenchId, FRAME_SCENARIOS};
+pub use cli::cli_main;
+pub use compare_front::{
+    DEFAULT_FLAG_THRESHOLD_PERCENT, FrontCompareOptions, compare_paths, decision_rule_doc,
+};
+pub use error::{BenchError, exit_code};
+pub use report::{
+    BenchCompareReport, BenchListReport, BenchRunReport, COMPARE_SCHEMA, CompareRow, CpuSample,
+    LIST_SCHEMA, RUN_SCHEMA, Verdict,
+};
+pub use run_suite::{RunOptions, Suite, cpu_catalog_complete, run_suites};
 
 pub use renderide::bench_api::SkinnedGeometryWorkload;
 pub use renderide::bench_api::{
@@ -154,10 +184,8 @@ mod tests {
         let mut moving = HysteresisHistoryWorkload::new(count, true);
         let moving_kept = moving.step();
         assert_eq!(moving_kept, u32::try_from(count).unwrap_or(0));
-        // `8192_quarter_occluded` is this unmoving set at the budget.
         assert!(!stable.fast_path_engaged());
         assert!(!moving.fast_path_engaged());
-        // `8192_after_motion_all_visible` measures the step after this warm-up.
         assert_eq!(moving.step(), u32::try_from(count).unwrap_or(0));
         assert!(moving.fast_path_engaged());
         let mut visible = HysteresisHistoryWorkload::all_visible(count);
@@ -198,8 +226,6 @@ mod tests {
     fn skinned_geometry_fold_uses_the_posed_box() {
         let folded = SkinnedGeometryWorkload::standard().fold();
         assert!(folded.is_finite());
-        // Rest boxes sit near x=400. Posed boxes are a unit box at the root translation, so the
-        // folded minima stay well below a rest-box sum.
         assert!(folded > 0.0);
         assert!(folded < 1.0e6);
     }
