@@ -114,8 +114,9 @@ pub struct CaseReport {
     /// `behavior` or `adapter_comparison`. Stamped after the renderer log names the adapter.
     #[serde(default = "default_behavior_gate")]
     pub gate: String,
-    /// Set when a failure is an expected WARP mismatch. A pass leaves this empty.
-    /// The text is `expected failure (WARP, #212)` and `passed` stays false.
+    /// `expected failure (WARP, #212)` when that case is the known WARP mismatch.
+    /// `unexpected pass (WARP, #212)` when WARP passes `pbs_lit` and `passed` stays true.
+    /// Absent on a hard failure and on an ordinary pass.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<String>,
     /// Runner CPU model. Empty only for reports written before this field existed.

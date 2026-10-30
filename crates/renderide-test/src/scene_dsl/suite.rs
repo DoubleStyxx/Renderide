@@ -72,6 +72,9 @@ pub struct SuiteReport {
     /// Cases reported as `expected failure (WARP, #212)`. These are not passes.
     #[serde(default)]
     pub expected_failures: usize,
+    /// WARP passes of `pbs_lit_material_matrix`. Counted here and still inside `passed`.
+    #[serde(default)]
+    pub unexpected_passes: usize,
     /// Cases recorded as `quarantined` with reason `quarantined:#216`.
     /// Not a pass and not an expected failure.
     #[serde(default)]
@@ -97,6 +100,7 @@ impl SuiteReport {
             passed: 0,
             failed: 0,
             expected_failures: 0,
+            unexpected_passes: 0,
             quarantined: 0,
             cases,
             summary: SUITE_READINESS_SUMMARY.to_string(),
@@ -114,6 +118,11 @@ impl SuiteReport {
             .cases
             .iter()
             .filter(|case| super::warp_pbs::case_is_expected_failure(case))
+            .count();
+        self.unexpected_passes = self
+            .cases
+            .iter()
+            .filter(|case| super::warp_pbs::case_is_unexpected_pass(case))
             .count();
         self.quarantined = self
             .cases
@@ -165,7 +174,8 @@ pub struct SuiteCaseReport {
     /// Error summary when the case failed before or during comparison.
     pub error: Option<String>,
     /// `expected failure (WARP, #212)` when that case is the known WARP mismatch.
-    /// Absent on a pass and on a hard failure.
+    /// `unexpected pass (WARP, #212)` when WARP passes `pbs_lit`. Absent on a
+    /// hard failure and on an ordinary pass.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<String>,
     /// `quarantined` when the #216 rule covers this case. Absent otherwise.

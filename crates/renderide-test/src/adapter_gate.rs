@@ -227,16 +227,14 @@ pub(crate) fn format_check_suite(cases: &[PrintCase<'_>]) -> PrintedSuite {
                 case.artifacts_dir.display(),
                 case.error.unwrap_or("case failed")
             ));
+            if case.gate == Gate::AdapterComparison {
+                case_lines.push(adapter_line(case.name, case.artifacts_dir, case.adapter));
+            }
             continue;
         }
         if case.gate == Gate::AdapterComparison {
             adapter_comparison += 1;
-            case_lines.push(format!(
-                "ADAPTER {} ({}) {}",
-                case.name,
-                case.artifacts_dir.display(),
-                case.adapter
-            ));
+            case_lines.push(adapter_line(case.name, case.artifacts_dir, case.adapter));
         } else {
             behavior += 1;
             case_lines.push(format!(
@@ -250,6 +248,10 @@ pub(crate) fn format_check_suite(cases: &[PrintCase<'_>]) -> PrintedSuite {
         case_lines,
         summary: summary_line(behavior, adapter_comparison, failed),
     }
+}
+
+pub(crate) fn adapter_line(name: &str, artifacts: &Path, adapter: &str) -> String {
+    format!("ADAPTER {name} ({}) {adapter}", artifacts.display())
 }
 
 fn summary_line(behavior: usize, adapter_comparison: usize, failed: usize) -> String {
@@ -481,12 +483,13 @@ wgpu adapter selected (headless): NVIDIA GeForce RTX 4090 type=DiscreteGpu backe
                 .iter()
                 .any(|line| line.starts_with("FAIL pbs_lit"))
         );
-        assert!(
-            !printed
-                .case_lines
-                .iter()
-                .any(|line| line.starts_with("ADAPTER "))
-        );
+        let adapter_line = printed
+            .case_lines
+            .iter()
+            .find(|line| line.starts_with("ADAPTER "))
+            .expect("adapter line");
+        assert!(adapter_line.contains("pbs_lit_material_matrix"));
+        assert!(adapter_line.contains("Microsoft Basic Render Driver"));
         assert_eq!(
             printed.summary,
             "Suite result: 11 behavior + 0 adapter comparison, 1 failed"
