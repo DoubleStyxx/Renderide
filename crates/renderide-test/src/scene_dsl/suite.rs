@@ -582,7 +582,7 @@ mod tests {
     fn write_suite_report_writes_the_quarantine_warning() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut report = SuiteReport::from_cases(vec![case_report("a", false)]);
-        let warning = "quarantine #216 expires at 2026-10-31T23:59:59Z".to_string();
+        let warning = "quarantine #216 expires at 2026-11-14T23:59:59Z".to_string();
         report.quarantine_warning = Some(warning.clone());
         let path = write_suite_report(dir.path(), &report).expect("write suite report");
         assert_eq!(

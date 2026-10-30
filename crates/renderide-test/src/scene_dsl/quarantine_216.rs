@@ -17,8 +17,12 @@ use super::suite::{SuiteCaseReport, SuiteFailureKind, SuiteReport};
 ///
 /// Whoever fixes #216 removes this constant and the quarantine rule in that pull request.
 ///
+/// Extended to 2026-11-14T23:59:59Z pending the #216 investigation
+/// (https://github.com/DoubleStyxx/Renderide/issues/216); decision on Nov 14
+/// based on the root-cause note due Nov 7.
+///
 /// <https://github.com/DoubleStyxx/Renderide/issues/216>
-pub(crate) const QUARANTINE_216_EXPIRES: &str = "2026-10-31T23:59:59Z";
+pub(crate) const QUARANTINE_216_EXPIRES: &str = "2026-11-14T23:59:59Z";
 
 /// `report.json` and suite-report status while the quarantine applies.
 pub(crate) const QUARANTINE_STATUS: &str = "quarantined";
@@ -346,8 +350,8 @@ mod tests {
 
     #[test]
     fn expiry_constant_is_the_utc_instant_named_in_the_ruling() {
-        assert_eq!(QUARANTINE_216_EXPIRES, "2026-10-31T23:59:59Z");
-        let expected = SystemTime::UNIX_EPOCH + Duration::from_secs(1_793_491_199);
+        assert_eq!(QUARANTINE_216_EXPIRES, "2026-11-14T23:59:59Z");
+        let expected = SystemTime::UNIX_EPOCH + Duration::from_secs(1_794_700_799);
         assert_eq!(expires_at(), expected);
         assert_eq!(QUARANTINE_STATUS, "quarantined");
         assert_eq!(QUARANTINE_REASON, "quarantined:#216");
@@ -395,6 +399,7 @@ mod tests {
             suite_case(dir.path(), "unlit_sphere", None, "0", "1"),
             suite_case(dir.path(), PBS_LIT, Some(&flat_message()), "0", "1"),
         ]);
+        assert_eq!(after_expiry(), expires_at() + Duration::from_secs(1));
         apply(&mut report, after_expiry(), true);
         assert_eq!(report.passed, 1);
         assert_eq!(report.quarantined, 0);
