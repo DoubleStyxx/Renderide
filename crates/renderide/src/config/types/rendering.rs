@@ -61,7 +61,8 @@ pub struct RenderingSettings {
     /// When `true`, packing clamps each channel of `color * intensity` so the product is
     /// non-negative. That removes darkening from a negative intensity or a negative color
     /// channel. A negative color times a negative intensity stays, because that product is
-    /// positive. Range, shadows, and the other light fields stay as the host authored them.
+    /// positive. A negative intensity with no negative color left is stored as zero. Range,
+    /// shadows, and the other light fields stay as the host authored them.
     /// The default is `false` so Resonite parity stays intact: Renderite's Unity renderer
     /// keeps negative intensity and negative color, and those lights darken the scene. A
     /// missing `physically_based` key deserializes to `false`, so existing config files stay

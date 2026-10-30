@@ -446,7 +446,6 @@ pub fn registry() -> Vec<IntegrationCase> {
         torus_unlit_perlin(),
         multi_primitive_unlit_grid(),
         pbs_lit_material_matrix(),
-        negative_light_parity(),
         negative_light_physically_based(),
         negative_color_physically_based(),
         alpha_cutout_masked_quads(),
@@ -458,6 +457,11 @@ pub fn registry() -> Vec<IntegrationCase> {
         tilted_canvas_distance_bias(),
         double_buffer_nothing_on_skybox(),
     ];
+    // WARP captures this scene as a flat frame for the whole readiness budget, the same
+    // timeout signature as `pbs_lit_material_matrix` (#216). The darkening golden is checked
+    // on lavapipe and Metal. Windows CI does not spend another 300s on it.
+    #[cfg(not(windows))]
+    cases.insert(4, negative_light_parity());
     // WARP limitation, not a shadow-cache diff. Windows CI is DX12 Microsoft Basic Render Driver
     // (Vulkan reports ERROR_INCOMPATIBLE_DRIVER). On that adapter the static frame was a 48-color
     // gray slab and the post-move frame stayed clear-black for the case timeout, while unshadowed
@@ -539,7 +543,12 @@ mod tests {
 
     #[test]
     fn negative_light_cases_are_registered() {
-        let parity = lookup("negative_light_parity").expect("parity case");
+        let parity_present = lookup("negative_light_parity").is_some();
+        #[cfg(windows)]
+        assert!(!parity_present);
+        #[cfg(not(windows))]
+        assert!(parity_present);
+        let parity = negative_light_parity();
         let physically_based = lookup("negative_light_physically_based").expect("pb case");
         assert!(matches!(
             parity.template,

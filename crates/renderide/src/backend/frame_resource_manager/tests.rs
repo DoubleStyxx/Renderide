@@ -298,14 +298,13 @@ fn physically_based_pack_clamps_negative_intensity_and_keeps_positive() {
     assert_eq!(packed.len(), 2);
     let negative = packed
         .iter()
-        .find(|light| (light.intensity - -2.5).abs() < 1e-5)
+        .find(|light| (light.color[0] - 0.4).abs() < 1e-5)
         .expect("negative light");
     let positive = packed
         .iter()
-        .find(|light| (light.intensity - 1.5).abs() < 1e-5)
+        .find(|light| (light.color[0] - 0.8).abs() < 1e-5)
         .expect("positive light");
-    assert_eq!(negative.color, [0.0, 0.0, 0.0]);
-    assert_eq!(positive.color[0], 0.8);
+    assert_eq!(negative.intensity, 0.0);
     assert_eq!(positive.intensity, 1.5);
     assert!((negative.range - 10.0).abs() < 1e-5);
 }

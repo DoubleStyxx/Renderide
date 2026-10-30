@@ -42,10 +42,10 @@ pub fn gpu_light_from_resolved(light: &ResolvedLight) -> GpuLight {
 /// Color and intensity stored on a packed [`GpuLight`].
 ///
 /// When `physically_based` is set, each channel of `color * intensity` is clamped so the
-/// product is non-negative. A channel whose product is negative is stored as zero. Intensity
-/// is left unchanged, so a negative color times a negative intensity (positive radiance) stays.
-/// The flag-off path returns both values unchanged, including negatives, zero, and non-finite
-/// values. Nothing is allocated.
+/// product is non-negative. A channel whose product is negative is stored as zero. A negative
+/// color times a negative intensity stays, because that product is positive. If the negative
+/// intensity then has no negative color left, it is stored as zero. The flag-off path returns
+/// both values unchanged, including negatives, zero, and non-finite values. Nothing is allocated.
 #[must_use]
 pub fn packed_light_radiance(
     color: [f32; 3],
@@ -56,12 +56,20 @@ pub fn packed_light_radiance(
         return (color, intensity);
     }
     let mut clamped = color;
+    let mut positive_from_negative_color = false;
     for channel in &mut clamped {
-        if *channel * intensity < 0.0 {
+        let product = *channel * intensity;
+        if product < 0.0 {
             *channel = 0.0;
+        } else if intensity < 0.0 && *channel < 0.0 {
+            positive_from_negative_color = true;
         }
     }
-    (clamped, intensity)
+    if intensity < 0.0 && !positive_from_negative_color {
+        (color, 0.0)
+    } else {
+        (clamped, intensity)
+    }
 }
 
 /// Packs a [`ResolvedLight`] and its assigned cookie atlas binding for GPU consumption.
@@ -361,8 +369,8 @@ mod layout_tests {
         let positive = [0.2, 0.4, 0.6];
 
         let (color, intensity) = packed_light_radiance(positive, -4.0, true);
-        assert_eq!(color, [0.0, 0.0, 0.0]);
-        assert_eq!(intensity, -4.0);
+        assert_eq!(color, positive);
+        assert_eq!(intensity, 0.0);
 
         let (color, intensity) = packed_light_radiance(positive, 2.5, true);
         assert_eq!(color, positive);
