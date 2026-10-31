@@ -9,6 +9,22 @@ Do not merge the canary. Findings are due Nov 7. This plan is the root-cause pat
 
 The three Windows samples in the first rows of the table are from the canary **before** the #186 merge (`03e36e51`, `c7194e42`, `4a271512`). The #232 measurements are in the evidence section.
 
+## #216 CLOSED
+
+**#216 is closed (Oct 31, 2026).** The root cause is DXC codegen (`ps_6_7`, `-O3`) for the full `pbsmetallic` fragment, which was unstable on WARP. That fragment compiled both clustered light loops, the opaque loop and the premultiply-transparent loop, behind a runtime branch.
+
+The fix is [PR #265](https://github.com/DoubleStyxx/Renderide/pull/265), merged to master as `a39d0306`. `_ALPHAPREMULTIPLY_ON` is a compile-time keyword variant, so each pipeline has one light loop.
+
+Evidence is the WARP ×3 run [41218915744](https://github.com/DoubleStyxx/Renderide/actions/runs/41218915744) at canary `c1e47521`, which merges `622088a2`. That run had 0/15 flat, SSIM above 0.998, and float means within 9.2e-5 of llvmpipe. The pre-fix baseline of the full fragment was 19/27 flat.
+
+On master `a39d0306`, `FLAT_FRAME_CASES`, `NEGATIVE_LIGHT_CASES`, and `WARP_EXPECTED_FAILURE_CASES` are empty. The matcher, the expiry `2026-11-14T23:59:59Z`, and the tests stay.
+
+Gauge's frame gate passed in run [41229982534](https://github.com/DoubleStyxx/Renderide/actions/runs/41229982534) (`bench-pr-lavapipe` succeeded).
+
+Follow-up: a `pbsspecular.wgsl` single-light-loop split in a separate PR, with its own WARP ×3 check.
+
+Master confirmation: the first master CI run containing `a39d0306` is [41236074782](https://github.com/DoubleStyxx/Renderide/actions/runs/41236074782). The Windows suite result for the four formerly quarantined cases plus `pbs_metallic_premultiply` is pending.
+
 ## What those samples already show
 
 All three accepted a frame and were labeled `expected failure (WARP, #212)`, not `FlatOrUnstableFrame`. Suite time was about three minutes. CPUs were EPYC 9V74 (run [41084635804](https://github.com/DoubleStyxx/Renderide/actions/runs/41084635804)) and EPYC 7763 (runs [41089310635](https://github.com/DoubleStyxx/Renderide/actions/runs/41089310635), [41093531109](https://github.com/DoubleStyxx/Renderide/actions/runs/41093531109)).
@@ -341,9 +357,9 @@ Verdict: the clamp-off intensity reaches WARP. The float frame matches llvmpipe,
 
 ## Order
 
-1. Production: compile `shade_metallic_transparent_clustered` only into the `ALPHAPREMULTIPLY` variant, so the opaque `pbsmetallic` fragment matches the no-premul arm. PR pending. Re-check that pipeline with 3 WARP samples before any #216 quarantine is lifted.
-2. 8a is concluded (fast-math ruled out, gradients ruled out, full fragment unstable on DXC/WARP). 8b, 8c, 8d (unsigned group and negparity), hypothesis 5, and hypothesis 6 are recorded above. The 0.95 SSIM gap is the gate.
-3. Gauge: #214 stall, after the Nov 7 color finding.
+1. #216 is closed. The production fix is #265, merged as `a39d0306`. The WARP ×3 re-check is recorded below (0/15 flat). `FLAT_FRAME_CASES`, `NEGATIVE_LIGHT_CASES`, and `WARP_EXPECTED_FAILURE_CASES` are empty on that master commit.
+2. Follow-up: split `pbsspecular.wgsl` to one light loop, in a separate PR, with its own WARP ×3 check.
+3. Gauge's frame gate passed in run [41229982534](https://github.com/DoubleStyxx/Renderide/actions/runs/41229982534). The #214 stall stays after the Nov 7 color finding. 8b, 8c, 8d, hypothesis 5, and hypothesis 6 are recorded above. The 0.95 SSIM gap on the debug group is the gate.
 
 ## #265 WARP re-check
 
