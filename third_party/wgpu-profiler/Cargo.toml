@@ -1,0 +1,34 @@
+# crates.io `wgpu-profiler` 0.28.0, patched so the `tracy` feature depends on
+# `tracy-client` 0.19. The published crate requires `^0.18`, so Renderide's
+# direct 0.19 client would otherwise be a second copy. Default features stay
+# on, which keeps the 0.19 `wait-stacks` default with the 0.18 default set.
+# `profiling` is a normal optional dependency here so the `tracy` and `puffin`
+# features can enable its backends. Upstream listed it only as a dev-dependency,
+# and that dev-dependency still required `tracy-client` 0.18. Examples and tests
+# are omitted.
+[package]
+name = "wgpu-profiler"
+version = "0.28.0"
+authors = ["Andreas Reich <r_andreas2@web.de>"]
+edition = "2021"
+description = "Simple profiler scopes for wgpu using timer queries"
+homepage = "https://github.com/Wumpf/wgpu-profiler"
+repository = "https://github.com/Wumpf/wgpu-profiler"
+keywords = ["graphics"]
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lints]
+clippy.doc_markdown = "warn"
+
+[features]
+tracy = ["dep:tracy-client", "dep:profiling", "profiling/profile-with-tracy"]
+puffin = ["dep:puffin", "dep:profiling", "profiling/profile-with-puffin"]
+
+[dependencies]
+parking_lot = "0.12"
+thiserror = "2"
+wgpu = { version = "30.0.0", default-features = false }
+profiling = { version = "1", optional = true }
+tracy-client = { version = "0.19", optional = true }
+puffin = { version = "0.20", optional = true }

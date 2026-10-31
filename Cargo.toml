@@ -295,3 +295,12 @@ single_match_else = "deny"
 float_cmp = "deny"
 too_long_first_doc_paragraph = "deny"
 manual_bit_width = "deny"
+
+# `profiling` 1.0.18 and `wgpu-profiler` 0.28.0 are the newest crates.io releases
+# and both require `tracy-client` ^0.18. A second client would link a second
+# Tracy protocol into the `tracy` feature. These paths are those releases with
+# the dependency moved to 0.19; default features stay on so `wait-stacks` stays
+# in the profiling build.
+[patch.crates-io]
+profiling = { path = "third_party/profiling" }
+wgpu-profiler = { path = "third_party/wgpu-profiler" }

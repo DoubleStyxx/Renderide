@@ -258,8 +258,8 @@ cargo build --release --features tracy
 
 ### Connecting Tracy
 
-1. Download the Tracy profiler GUI from the [Tracy releases page](https://github.com/wolfpld/tracy/releases)
-   and launch it.
+1. Download the **Tracy 0.14.1** profiler GUI from the [Tracy releases page](https://github.com/wolfpld/tracy/releases)
+   and launch it. The `tracy` feature links `tracy-client` 0.19.0 (`tracy-client-sys` 0.30.1), which speaks the 0.14.1 protocol.
 
 1. Start Renderide normally (launcher or renderer directly).
 

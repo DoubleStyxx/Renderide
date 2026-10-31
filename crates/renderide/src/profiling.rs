@@ -8,7 +8,8 @@
 //! cargo build --profile dev-fast --features tracy
 //! ```
 //!
-//! Then launch the [Tracy GUI](https://github.com/wolfpld/tracy) and connect on port **8086**.
+//! Then launch the [Tracy 0.14.1 GUI](https://github.com/wolfpld/tracy/releases) and connect on port **8086**.
+//! `tracy-client` 0.19 speaks the 0.14.1 protocol.
 //! Tracy uses `ondemand` mode, so CPU data is only streamed while a GUI is connected. The GPU
 //! profiler bridge is rebuilt on clean frame boundaries as the GUI connects and disconnects, so
 //! late attach starts with fresh GPU query ids instead of replaying disconnected GPU events.

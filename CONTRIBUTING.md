@@ -183,7 +183,7 @@ The .NET solution is built and tested by the shared CI workflow (see [2.9](#29-c
 | `crates/` | The Rust workspace member crates. |
 | `generators/` | The C# code generator and its tests. |
 | `RenderideMod/` | The C# Resonite mod. |
-| `third_party/` | Vendored native libraries. Currently holds the OpenXR loader, which the renderer's build script copies onto Windows and macOS targets so the loader is available next to the binary. |
+| `third_party/` | Vendored dependencies. `openxr_loader` holds the OpenXR loader copied next to Windows and macOS binaries. `profiling` and `wgpu-profiler` are the crates.io sources patched so the `tracy` feature links one `tracy-client` 0.19. |
 | `.github/workflows/` | CI, CodeQL, release, and static-site deployment workflows. |
 | `.github/ISSUE_TEMPLATE/`, `.github/dependabot.yml` | GitHub issue forms and dependency-update configuration. |
 | `index.html`, `robots.txt`, `sitemap.xml`, `renderide_whitepaper/` | Static site and whitepaper content. |
@@ -986,7 +986,7 @@ The driver thread itself lives in `crates/renderide/src/gpu/driver_thread/`. It 
 
 ### 4.27 Profiling with Tracy
 
-When the `tracy` feature is enabled, the renderer streams CPU spans and GPU timestamps to a Tracy GUI on port 8086. The integration is on-demand: data is only streamed while a GUI is connected, so a profiled build idles near zero cost when nothing is attached.
+When the `tracy` feature is enabled, the renderer streams CPU spans and GPU timestamps to a Tracy 0.14.1 GUI on port 8086. The integration is on-demand: data is only streamed while a GUI is connected, so a profiled build idles near zero cost when nothing is attached.
 
 The CPU side comes from the `profiling` crate, which expands to no-ops when no backend feature is active. The GPU side comes from `wgpu-profiler`, which inserts timestamp queries around the render-graph execution sub-phases. GPU timing requires the adapter to support `TIMESTAMP_QUERY` and `TIMESTAMP_QUERY_INSIDE_ENCODERS`. If either is missing, the renderer logs a warning at startup and falls back to CPU spans only.
 
