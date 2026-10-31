@@ -129,18 +129,16 @@ The Windows logs for both physically based captures contain `negative direct lig
 
 ### 4. The CPU upload is NaN, zero lights, or zero materials
 
-**Ruled out** on the CPU side. Lights and material colors are finite and non-zero. Ambient SH L0 is 0, which is recorded but is not by itself the direct-light path. Owner: Bridge. ETA: done Oct 30. This does not prove the GPU saw those bytes. The frame, light, and material buffers are not `COPY_SRC`, so a GPU readback was not taken.
+**Ruled out** on the CPU side. Lights and material colors are finite and non-zero. Ambient SH L0 is 0, which is recorded but is not by itself the direct-light path. Owner: Bridge. ETA: done Oct 30. 8b is the GPU readback of those packed rows.
 
 ### 5. The cluster light list is empty at shade time, so PBS writes black
 
-**Open for the all-black frames.** The shader returns black when the cluster range count is 0. `pbs_lit` on run 41150822333 is 320×320 black, and both physically based `positive_only.png` captures are 256×256 black. CPU `light_count` on the canary was 2, so the bug would be the cluster build or the bind the shader reads, not the light authoring. The channel-zero and warm-tint frames in the evidence section are a different picture: those pixels are not `vec3(0)`. Hypothesis 8 covers them.
+**Ruled out for the steady frames on this canary.** Run [41169445681](https://github.com/DoubleStyxx/Renderide/actions/runs/41169445681) (`4d7891dd`) copied the center tile's 16 Z slices after the cluster pass. The first PNG on both adapters is the pre-light clear (`cleared=1`, every count 0). Every later sample has `cluster_lights=2` and a non-empty center column, and the WARP counts match llvmpipe:
 
-**Experiment.** On a `pbs_lit` frame, log the clustered-light pass result for that view: light count written, cluster ranges that are non-empty, and whether the pass ran. Compare one Windows WARP log with one Linux llvmpipe log from the same commit. No WGSL change in this step.
+- The three 256×256 negative-light cases, tile `(4, 4)`: all 16 slices have count 2, indices `0,1`.
+- `pbs_lit_material_matrix`, tile `(5, 5)`: `2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1`.
 
-- Count is 0 on WARP and non-zero on Linux: the cluster pass or its upload is the bug. Bridge fixes that path.
-- Count is non-zero on both, and WARP stays black: hand the bind and the `direct_metallic_clustered` inputs to Shader.
-
-Owner: Bridge for the log and the WARP-vs-Linux compare. Shader only if the count is non-zero. ETA: log on the canary by Nov 3; read the samples by Nov 5; Shader follow-up, if needed, by Nov 6. Findings note Nov 7.
+`direct_metallic_clustered` is not returning black because that list is empty. The channel-zero frames stay with hypothesis 8. Owner: Bridge. ETA: done Oct 31.
 
 ### 6. All four draws bind material offset 0 and share one slot
 
@@ -152,7 +150,7 @@ Owner: Bridge. ETA: Nov 4, beside the cluster log.
 
 ### 7. #216 and #212 are one shading bug with two harness exits
 
-**Supported for the flat-versus-accepted split.** A pure-black sphere frame on the production clear is flat (`black_spheres_on_the_production_clear_are_flat`), so settle rejects it and the timeout is #216. The same pixels on the magenta clear are not flat, so the frame is accepted and the image check is #212. That is runs 41084635804, 41089310635, 41093531109, and the merged-tree run 41103575428. #219 (`41099685993`, production clear, 8703 non-black pixels) was not flat and took #212. The `4bd5eef0` and `6ae283f1` main frames are the third exit: the OR gate passes and the pixels are still wrong. `6f0c7aa6` quarantines that finished comparison as `WARP lit shading untrusted`. Those two runs predate that stamp, so their reports are not marked quarantined. Owner: Bridge. ETA: routing is done Oct 30. The shade itself is hypotheses 5 and 8.
+**Supported for the flat-versus-accepted split.** A pure-black sphere frame on the production clear is flat (`black_spheres_on_the_production_clear_are_flat`), so settle rejects it and the timeout is #216. The same pixels on the magenta clear are not flat, so the frame is accepted and the image check is #212. That is runs 41084635804, 41089310635, 41093531109, and the merged-tree run 41103575428. #219 (`41099685993`, production clear, 8703 non-black pixels) was not flat and took #212. The `4bd5eef0` and `6ae283f1` main frames are the third exit: the OR gate passes and the pixels are still wrong. `6f0c7aa6` quarantines that finished comparison as `WARP lit shading untrusted`. Those two runs predate that stamp, so their reports are not marked quarantined. Owner: Bridge. ETA: routing is done Oct 30. The shade itself is hypothesis 8. Hypothesis 5's empty cluster is ruled out for the steady frames.
 
 ### 8. WARP lit shading zeroes whole channels
 
@@ -166,11 +164,30 @@ Candidate causes, each with its own experiment. Findings note Nov 7.
 
 Owner: Bridge. ETA: Nov 5 for the two captures, or the DXIL dump if FXC is unavailable. Shader reads the dump if the bytes disagree.
 
-**8b. Swizzle or packing.** `packed_light_radiance` is the CPU pack. The artifacts do not print its floats.
+**8b. Swizzle or packing. Ruled out.**
 
-**Experiment.** Log the packed `GpuLight` color and intensity for this case on one WARP run and one llvmpipe run. Finite, positive, and equal on both closes the CPU pack. A zero or negative channel on WARP only is the bug, and Bridge fixes the pack. A following round-trip writes those floats into a storage buffer and reads them back on WARP, so a GPU swizzle shows up as a different value than the CPU log.
+`RENDERIDE_LIGHT_PACK_PROBE` logged the packed `GpuLight` rows on the CPU and copied that storage buffer, plus the center tile's cluster column, back to the CPU. The probe is off unless the env is set. Run [41169445681](https://github.com/DoubleStyxx/Renderide/actions/runs/41169445681) at `4d7891dd`: Linux llvmpipe succeeded; Windows failed the known canary suite (`0/15`, one `expected failure (WARP, #212)`, three `WARP lit shading untrusted`) and still uploaded the logs. No `diag-light-8b diff` line, no `gpu_match=0`, no NaN, no Inf, no reordered row, and no cluster-offset mismatch on either adapter. After the pre-light clear, each steady GPU read matched the CPU bytes, and those bytes are the same on WARP and llvmpipe.
 
-Owner: Bridge. ETA: Nov 4.
+`neg=2` counts a light with any negative position, direction, color, intensity, or range. Both lights have a negative position or direction. The only negative radiance is parity's second intensity (`bfb9999a`, −1.45). Physically based stores that intensity as `00000000`.
+
+| Case | Row | type | color bits | intensity bits | direction bits |
+| --- | --- | --- | --- | --- | --- |
+| negative-light cases, light 0 | both adapters | 1 | `3f800000,3f75c28f,3f666666` | `3f866666` | `00000000,3f1aed7f,3f4bcc26` |
+| `negative_light_parity` light 1 | both | 1 | `3f400000,3f59999a,3f800000` | `bfb9999a` | `bf0cfbc1,be19ccd1,3f523183` |
+| `negative_light_physically_based` light 1 | both | 1 | `3f400000,3f59999a,3f800000` | `00000000` | `bf0cfbc1,be19ccd1,3f523183` |
+| `negative_color_physically_based` light 1 | both | 1 | `00000000,00000000,00000000` | `3fb9999a` | `bf0cfbc1,be19ccd1,3f523183` |
+| `pbs_lit_material_matrix` light 0 | both | 1 | `3f800000,3f6b851f,3f51eb85` | `3fb33333` | `00000000,3f1aed7f,3f4bcc26` |
+| `pbs_lit_material_matrix` light 1 | both | 0 | `3eb33333,3f0ccccd,3f800000` | `40c00000` | `00000000,00000000,3f800000` |
+
+Position and range bits match across the two adapters as well (`pbs_lit` light 0 position `bfc00000,400ccccd,bfc00000`, range `42480000`; light 1 position `3fe66666,3f4ccccd,bf99999a`, range `40800000`). The negative-light rows share position `bf99999a,40000000,bfb33333` and range `42480000` on light 0, and position `00000000,00000000,00000000` with range `42480000` on light 1.
+
+Packing and upload are not the WARP failure. The storage buffer the shader reads has the same floats llvmpipe shades correctly.
+
+- **8a** stays open for the shader that consumes those floats. A DXC bug in the upload itself is closed; codegen of the lit fragment is not.
+- **8c** stays open. This readback is the light storage buffer, not the `Rgba16Float` scene color or the `Rgba8UnormSrgb` surface.
+- **8d** is the next shader step. The pack is finite and the center cluster count is non-zero, so a missing channel is inside a lighting term or the output copy.
+
+Owner: Bridge. ETA: done Oct 31.
 
 **8c. sRGB conversion.** The measured frames are the 8-bit sRGB surface. Scene color is `Rgba16Float`, and post-processing is off.
 
@@ -186,7 +203,7 @@ Owner: Shader for the scene, Bridge for the two captures. ETA: Nov 6, after 8b's
 
 ## Order
 
-1. Bridge: packed-light float log (8b) and the cluster-count log (hypothesis 5), plus the material-bind hash (hypothesis 6). The #212/#216 split is the routing above.
+1. Bridge: material-bind hash (hypothesis 6). 8b and the cluster-column read are done; packing, upload, and an empty center cluster are ruled out.
 2. Bridge: FXC-versus-DXC or the DXIL dump (8a), then the pre-sRGB scene-color readback (8c).
-3. Shader: the per-term debug scene (8d) when the pack log is finite and the cluster count is non-zero on a frame that is still wrong.
+3. Shader: the per-term debug scene (8d). The pack is finite and the center cluster count is non-zero.
 4. Gauge: #214 stall, after the Nov 7 color finding.
