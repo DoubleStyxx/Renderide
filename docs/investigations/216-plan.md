@@ -172,11 +172,13 @@ Each WARP experiment from here, including 8a, 8c, and 8d, runs several times. Re
 
 ### 6. All four draws bind material offset 0 and share one slot
 
-**Open.** Every draw logged `/e0`, and each material upload also said `offset=0`, while the four colors differed. That is either four buffers at offset 0 or one slot overwritten. Black pixels hide which.
+**Not a WARP-only alias.** `RENDERIDE_MATERIAL_BIND_PROBE` is off unless set. The same three Windows jobs and the llvmpipe job below logged it for the four quarantined cases.
 
-**Experiment.** Log a hash of the bound uniform bytes and whether the four group-1 binds are distinct buffers. If they alias, Bridge fixes the arena offset. If they are distinct and match the uploaded colors, this hypothesis is closed.
+`pbs_lit_material_matrix` uploads four `pbsmetallic_default` blocks, 192 bytes, hashes `2a9db69b7744a432`, `54a5c8850b17a81b`, `a9ffe2650a9a82d1`, and `8d591371fc2ba661` on llvmpipe and on every WARP sample. The four binds use material ids 120, 121, 122, and 123, four distinct bind-group pointers, and arena generation 0. The three negative-light cases each upload one block, hash `528d53581511f46b`, one bind group, material id 120, on every sample including llvmpipe.
 
-Owner: Bridge. ETA: Nov 4, beside the cluster log.
+The numeric dynamic offset is 0 for all of those binds on llvmpipe, windows-2, and windows-3. On windows-1, material 122 is at offset 256 and the other three stay at 0; the byte hashes do not change. Several different hashes at offset 0 also happen on llvmpipe, which passes `pbs_lit` at SSIM 0.99993. Offset 0 is per arena shard, so the same number is not one shared GPU slot. A WARP-only overwrite of one material slot is not what these logs show.
+
+Owner: Bridge. ETA: done Oct 31.
 
 ### 7. #216 and #212 are one shading bug with two harness exits
 
@@ -213,27 +215,45 @@ Position and range bits match across the two adapters as well (`pbs_lit` light 0
 
 Packing and upload are not the WARP failure. The storage buffer the shader reads has the same floats llvmpipe shades correctly.
 
-- **8a** stays open for the shader that consumes those floats. A DXC bug in the upload itself is closed; codegen of the lit fragment is not.
-- **8c** stays open. This readback is the light storage buffer, not the `Rgba16Float` scene color or the `Rgba8UnormSrgb` surface.
-- **8d** is the next shader step. The pack is finite and the center cluster count is non-zero, so a missing channel is inside a lighting term or the output copy.
+- **8a** stays open for a consumer that is not this debug shader. A DXC bug in the upload itself is closed.
+- **8c** and **8d** are measured on the debug group below.
 
 Owner: Bridge. ETA: done Oct 31.
 
-**8c. sRGB conversion.** The measured frames are the 8-bit sRGB surface. Scene color is `Rgba16Float`, and post-processing is off.
+**8c. sRGB copy. No channel is dropped on the way out.**
 
-**Experiment.** Read the scene-color texture back before the sRGB surface copy, on WARP, for the same frame whose surface has G = 0. Channels present in the float target and missing on the surface put the bug in the copy. Channels already zero in the float target leave this hypothesis closed and point back at 8a or 8b.
+**8d. Isolated terms. None of them loses G, and the composed debug frame does not either.**
 
-Owner: Bridge. ETA: Nov 6.
+Shader's group is fork PR #237, head `3c960d413bf494834ca3116b9f25ae8da51a49b2`, merged into this canary. The run is [41174993308](https://github.com/DoubleStyxx/Renderide/actions/runs/41174993308) at canary `04255c43`. Linux job `124460591288` passed all 101 `warp_216_debug` cases. Windows jobs `124460591446` (windows-1), `124460591354` (windows-2), and `124460591340` (windows-3) each finished all 101 cases and uploaded `actual.scene_color.json` plus `actual.scene_color.rgba16f`. Those three jobs exit non-zero because every case misses the 0.985 SSIM gate. The scene-color flag keeps the production black clear; the magenta probe stays on for the four quarantined cases, which do not ask for that readback.
 
-**8d. The zero is in one lighting term.** This needs a new scene, so it is Shader's.
+Every debug case, on every WARP sample, is non-flat. There is no `flat_stable` exit. The accepting frame is `flat=false`. PNG stabilize times:
 
-**Experiment.** A debug scene writes one lighting term at a time into R, then G, then B, and Bridge captures it on WARP and llvmpipe. A term that is already missing G is handed back to Shader as a WGSL fix. A term that is intact, with the composed frame still missing G, closes this and stays with 8a–8c.
+| Sample | Min | Max |
+| --- | --- | --- |
+| windows-1 | 101.414s | 134.051s |
+| windows-2 | 103.576s | 118.720s |
+| windows-3 | 159.171s | 172.899s |
 
-Owner: Shader for the scene, Bridge for the two captures. ETA: Nov 6, after 8b's pack log is in.
+SSIM on WARP is identical across the three samples for all 101 cases, from 0.951686 to 0.958166. The only failed criterion is SSIM. Pixel-diff fraction stays inside the gate. Quadrant means of the PNG stay within 2 levels of llvmpipe. No quadrant has PNG G near 0 while the float G mean is still present, so the sRGB copy is not the channel wipe.
+
+The 2×2 `Rgba16Float` means match llvmpipe. The largest absolute channel difference in any quadrant, any case, any WARP sample, is 6.32e-4. NaN, Inf, and negative counts in those means match llvmpipe (all zero in R, G, and B for these captures). Grey variants do not split: no grey case has one float channel at 0 while another is not. Terms that are zero on llvmpipe, including emission, are zero on WARP too. That is the term, not a dropped channel.
+
+| Term | Rigs | WARP samples missing G | Float vs llvmpipe |
+| --- | --- | --- | --- |
+| composed | directional, point, negative, positive | 0 of 3 | matches, max delta 6.32e-4 |
+| diffuse | those four | 0 of 3 | matches |
+| specular | those four | 0 of 3 | matches |
+| ambient | those four | 0 of 3 | matches |
+| indirect | those four | 0 of 3 | matches |
+| fresnel | those four | 0 of 3 | matches |
+| emission | those four | 0 of 3 | matches, and both sides are at 0 |
+| constant `(0.25, 0.5, 0.75)` | none | 0 of 3 | matches |
+
+No isolated term loses G. The composed debug frame does not lose it either. The channel-zero pixels in the earlier production captures are not reproduced by this debug shader. 8a remains the open consumer-side question for the production lit shader, which these scenes do not compile.
+
+Owner: Bridge for the captures, Shader for the debug group. ETA: done Oct 31.
 
 ## Order
 
-1. Bridge: material-bind hash (hypothesis 6). 8b and the cluster-column read are done; packing, upload, and an empty center cluster are ruled out.
-2. Bridge: FXC-versus-DXC or the DXIL dump (8a), then the pre-sRGB scene-color readback (8c). Repeat each WARP capture and record the flat versus non-flat split and the settle-time spread.
-3. Shader: the per-term debug scene (8d). The pack is finite and the center cluster count is non-zero. The same repeat rule applies to its WARP captures.
-4. Gauge: #214 stall, after the Nov 7 color finding.
+1. Bridge: FXC-versus-DXC or a DXIL compare of the production lit fragment (8a). 8b, 8c, 8d, hypothesis 5, and hypothesis 6 are recorded above.
+2. Gauge: #214 stall, after the Nov 7 color finding.
