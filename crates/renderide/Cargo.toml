@@ -103,7 +103,7 @@ png = "0.18"
 texture2ddecoder = "0.1"
 notify-debouncer-mini = "0.7"
 notify = "8.2"
-naga = { version = "30.0", features = ["wgsl-in", "wgsl-out", "termcolor"] }
+naga = { version = "30.0", features = ["wgsl-in", "wgsl-out", "hlsl-out", "spv-out", "termcolor"] }
 naga_oil = { version = "0.23", default-features = false }
 unity-asset = "0.2"
 unity-asset-binary = "0.2"

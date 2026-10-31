@@ -289,6 +289,7 @@ impl ShaderModuleCache {
             self.stats.note_miss();
             let module = {
                 profiling::scope!("materials::shader_module_create");
+                crate::gpu::warp_shader_probe::note_wgsl(source.as_ref());
                 Arc::new(device.create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some("raster_material_shader"),
                     source: wgpu::ShaderSource::Wgsl(source.as_ref().into()),

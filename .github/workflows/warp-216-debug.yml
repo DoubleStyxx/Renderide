@@ -117,8 +117,8 @@ jobs:
       - name: Build renderer and harness
         run: cargo build --locked -p renderide -p renderide-test
 
-      - name: Run warp_216_debug and the four quarantined cases
-        timeout-minutes: 300
+      - name: Run negparity cases and the production lit shader dump
+        timeout-minutes: 180
         shell: bash
         run: |
           set -uo pipefail
@@ -127,17 +127,29 @@ jobs:
           else
             bin=./target/debug/renderide-test
           fi
+          args=(check-suite --jobs 1 --case warp216_negparity_composed)
+          for term in diffuse specular ambient indirect fresnel emission; do
+            for channel in r g b grey; do
+              args+=(--case "warp216_negparity_${term}_${channel}")
+            done
+          done
           debug_ec=0
-          "$bin" check-suite --jobs 1 --group warp_216_debug || debug_ec=$?
-          h6_ec=0
-          RENDERIDE_MATERIAL_BIND_PROBE=1 \
+          "$bin" "${args[@]}" || debug_ec=$?
+          lit_ec=0
+          RENDERIDE_LIT_SHADER_PROBE=1 \
             "$bin" check-suite --jobs 1 \
-              --case pbs_lit_material_matrix \
               --case negative_light_parity \
-              --case negative_light_physically_based \
-              --case negative_color_physically_based || h6_ec=$?
-          echo "warp_216_debug exit=${debug_ec} material_bind exit=${h6_ec}"
-          if [[ "${debug_ec}" -ne 0 || "${h6_ec}" -ne 0 ]]; then
+              --case negative_light_physically_based || lit_ec=$?
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            find target/renderide-test-out -name 'lit-production.hlsl' -print > target/renderide-test-out/lit-tools.txt || true
+            {
+              echo "dxc=$(command -v dxc || true)"
+              echo "fxc=$(command -v fxc || true)"
+              echo "static_dxc=wgpu feature static-dxc is what this binary links"
+            } >> target/renderide-test-out/lit-tools.txt
+          fi
+          echo "negparity exit=${debug_ec} lit_shader exit=${lit_ec}"
+          if [[ "${debug_ec}" -ne 0 || "${lit_ec}" -ne 0 ]]; then
             exit 1
           fi
 
