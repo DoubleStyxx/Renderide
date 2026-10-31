@@ -51,7 +51,12 @@ pub(super) fn spawn_renderer(
     cmd.env(physically_based_key, physically_based_value);
 
     if cfg.verbose_renderer {
-        cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+        let stdout = if cfg.renderer_stdout_to_stderr {
+            Stdio::from(std::io::stderr())
+        } else {
+            Stdio::inherit()
+        };
+        cmd.stdout(stdout).stderr(Stdio::inherit());
     } else {
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
@@ -112,6 +117,7 @@ mod tests {
             interval_ms: 250,
             timeout: Duration::from_secs(5),
             verbose_renderer: false,
+            renderer_stdout_to_stderr: false,
             physically_based: false,
             scene_color_readback: false,
         }

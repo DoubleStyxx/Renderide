@@ -90,6 +90,12 @@ pub struct SuiteReport {
     /// while more than 48 hours remain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quarantine_warning: Option<String>,
+    /// Process exit code for this report. Matches the `renderide-test` process.
+    #[serde(default)]
+    pub exit_code: u8,
+    /// Set when the command failed before any case ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 impl SuiteReport {
@@ -105,6 +111,8 @@ impl SuiteReport {
             cases,
             summary: SUITE_READINESS_SUMMARY.to_string(),
             quarantine_warning: None,
+            exit_code: 0,
+            error: None,
         };
         report.recompute();
         report
@@ -214,6 +222,18 @@ pub struct SuiteCaseReport {
     /// Selected adapter label. Empty until the renderer log is read.
     #[serde(default)]
     pub adapter: String,
+    /// This case's exit code. Expected failures and quarantines stay 0.
+    #[serde(default)]
+    pub exit_code: u8,
+    /// `new` or `overwritten` after a bless wrote the golden.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blessed: Option<String>,
+    /// Why bless skipped this case. The case is not a failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bless_skip: Option<String>,
+    /// Region stats of a golden written by bless.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) region_stats: Option<Vec<super::region_stats::RegionStatRow>>,
 }
 
 fn default_behavior_gate() -> String {
@@ -245,6 +265,10 @@ impl SuiteCaseReport {
             gate: default_behavior_gate(),
             adapter: String::new(),
             image_compared: false,
+            exit_code: 0,
+            blessed: None,
+            bless_skip: None,
+            region_stats: None,
         }
     }
 

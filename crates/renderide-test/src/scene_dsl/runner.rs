@@ -48,6 +48,8 @@ pub struct RunnerConfig {
     pub interval_ms: u64,
     /// Forward the renderer's stdout/stderr when `true`.
     pub verbose_renderer: bool,
+    /// With [`Self::verbose_renderer`], send the child's stdout to stderr.
+    pub renderer_stdout_to_stderr: bool,
     /// Test-output root. Defaults to `target/renderide-test-out`.
     pub output_root: std::path::PathBuf,
 }
@@ -60,6 +62,7 @@ impl RunnerConfig {
             timeout: DEFAULT_CASE_TIMEOUT,
             interval_ms: DEFAULT_INTERVAL_MS,
             verbose_renderer: false,
+            renderer_stdout_to_stderr: false,
             output_root: default_output_root(),
         }
     }
@@ -136,6 +139,7 @@ pub fn run_integration_case(
         interval_ms: runner.interval_ms,
         timeout: runner.timeout,
         verbose_renderer: runner.verbose_renderer,
+        renderer_stdout_to_stderr: runner.renderer_stdout_to_stderr,
         physically_based,
         scene_color_readback: template_requests_scene_color_readback(
             &prepared_template.session_template,

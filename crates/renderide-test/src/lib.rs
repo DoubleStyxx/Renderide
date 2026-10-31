@@ -9,6 +9,7 @@
 
 pub mod cli;
 pub mod error;
+pub mod exit;
 pub mod golden;
 pub mod host;
 pub mod logging;

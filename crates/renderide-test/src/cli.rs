@@ -1,43 +1,45 @@
 //! Command-line interface for the golden-image harness.
+//!
+//! `run` is the supported command. `check-suite` is a hidden alias of `run` and
+//! `update-suite` is a hidden alias of `run --bless`. CI keeps calling `check-suite`.
 
-#![expect(
-    clippy::print_stdout,
-    clippy::print_stderr,
-    reason = "CLI tool: stdout/stderr is the user-facing interface"
-)]
+mod print;
+mod run;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 
-use crate::error::HarnessError;
-use crate::scene_dsl::output::default_output_root;
-use crate::scene_dsl::runner::RunnerConfig;
-use crate::scene_dsl::suite::{SuiteConfig, run_suite, select_cases_in, update_suite};
+use crate::exit;
+
+use print::Presentation;
 
 /// CLI entry point.
 pub fn run() -> ExitCode {
-    let cli = Cli::parse();
-    if let Err(err) = crate::logging::init_renderer_test_logging() {
-        eprintln!("renderide-test: failed to initialize logging: {err}");
-        return ExitCode::FAILURE;
-    }
-
-    let exit_code = match dispatch(cli) {
-        Ok(()) => {
-            logger::info!("renderide-test completed successfully");
-            ExitCode::SUCCESS
-        }
-        Err(err) => {
-            logger::error!("renderide-test failed: {err}");
-            eprintln!("renderide-test: {err}");
-            ExitCode::FAILURE
-        }
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(err) => err.exit(),
     };
+    if let Err(err) = crate::logging::init_renderer_test_logging() {
+        print::startup_error(&format!("failed to initialize logging: {err}"));
+        return ExitCode::from(exit::EXIT_ENVIRONMENT);
+    }
+    let finished = dispatch(cli);
+    print::emit(&Presentation {
+        json: finished.json,
+        deprecation: finished.deprecation,
+        notes: &finished.notes,
+        human: &finished.human,
+        report: finished.report.as_ref(),
+    });
+    if finished.exit_code == exit::EXIT_OK {
+        logger::info!("renderide-test completed successfully");
+    } else {
+        logger::error!("renderide-test failed with exit {}", finished.exit_code);
+    }
     logger::flush();
-    exit_code
+    ExitCode::from(finished.exit_code)
 }
 
 #[derive(Parser, Debug)]
@@ -53,13 +55,45 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Run the registered scene suite in parallel and fail if any case fails.
+    /// Run scenes. No names means every scene for this OS. Names may be globs.
+    Run {
+        /// Scene names or globs. An unknown name exits 2.
+        #[arg(value_name = "SCENE")]
+        scenes: Vec<String>,
+        /// Print one JSON suite report on stdout. Human text goes to stderr.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+        /// Capture and write goldens. Refuses #212 and #216 cases.
+        #[arg(long, default_value_t = false)]
+        bless: bool,
+        /// Allow bless to overwrite an existing golden.
+        #[arg(long, default_value_t = false)]
+        force: bool,
+        /// Repeat the run. A disagreement is flaky and exits 6.
+        #[arg(long, default_value_t = 1)]
+        repeat: u32,
+        /// Suite harness options.
+        #[command(flatten)]
+        suite: SuiteOpts,
+    },
+    /// List scene names for this OS.
+    List {
+        /// Print `{"scenes":[...]}` on stdout.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+        /// Opt-in case group.
+        #[arg(long = "group", value_name = "NAME")]
+        group: Option<String>,
+    },
+    /// Deprecated alias of `run`. CI still calls this.
+    #[command(hide = true)]
     CheckSuite {
         /// Suite harness options.
         #[command(flatten)]
         suite: SuiteOpts,
     },
-    /// Run the registered scene suite and overwrite each selected golden with its capture.
+    /// Deprecated alias of `run --bless`.
+    #[command(hide = true)]
     UpdateSuite {
         /// Suite harness options.
         #[command(flatten)]
@@ -68,7 +102,7 @@ enum Command {
 }
 
 #[derive(Parser, Debug, Clone)]
-struct SuiteOpts {
+pub(super) struct SuiteOpts {
     /// Path to the renderer binary to spawn (defaults to `target/{profile}/renderide-renderer`).
     #[arg(long)]
     renderer: Option<PathBuf>,
@@ -89,9 +123,6 @@ struct SuiteOpts {
     #[arg(long = "group", value_name = "NAME")]
     group: Option<String>,
     /// Maximum number of cases to run concurrently.
-    ///
-    /// Defaults to the selected case count, capped at the machine's available parallelism, so a
-    /// full suite does not spawn more renderer processes than there are cores.
     #[arg(long)]
     jobs: Option<usize>,
     /// Test-output root. Defaults to the workspace target/renderide-test-out directory.
@@ -106,255 +137,74 @@ struct SuiteOpts {
     /// Print renderer processes' stdout/stderr instead of swallowing them.
     #[arg(long, default_value_t = false)]
     verbose_renderer: bool,
+    /// Set when `--json` is active so the renderer child's stdout goes to stderr.
+    #[arg(skip)]
+    json_stdout: bool,
 }
 
-fn dispatch(cli: Cli) -> Result<(), HarnessError> {
+fn dispatch(cli: Cli) -> run::Finished {
     match cli.command {
-        Command::CheckSuite { suite } => run_suite_command(&suite),
-        Command::UpdateSuite { suite } => run_update_suite_command(&suite),
-    }
-}
-
-fn run_suite_command(opts: &SuiteOpts) -> Result<(), HarnessError> {
-    let config = suite_config_from_opts(opts)?;
-    logger::info!(
-        "Suite: running {} case(s) with jobs={}, renderer_path={}, output_root={}",
-        config.cases.len(),
-        config.jobs,
-        config.runner.renderer_path.display(),
-        config.runner.output_root.display()
-    );
-
-    let mut outcome = run_suite(config)?;
-    stamp_adapter_gate(&mut outcome);
-    print_suite_outcome(&outcome, "passed", true);
-    if outcome.passed() {
-        Ok(())
-    } else {
-        Err(HarnessError::SuiteFailed {
-            failed: outcome.report.failed,
-            total: outcome.report.total,
-            report_path: outcome.report_path,
-        })
-    }
-}
-
-fn run_update_suite_command(opts: &SuiteOpts) -> Result<(), HarnessError> {
-    let config = suite_config_from_opts(opts)?;
-    logger::info!(
-        "Suite update: running {} case(s) with jobs={}, renderer_path={}, output_root={}",
-        config.cases.len(),
-        config.jobs,
-        config.runner.renderer_path.display(),
-        config.runner.output_root.display()
-    );
-
-    let mut outcome = update_suite(config)?;
-    stamp_adapter_gate(&mut outcome);
-    print_suite_outcome(&outcome, "updated", false);
-    if outcome.passed() {
-        Ok(())
-    } else {
-        Err(HarnessError::SuiteFailed {
-            failed: outcome.report.failed,
-            total: outcome.report.total,
-            report_path: outcome.report_path,
-        })
+        Command::List { json, group } => run::list_command(json, group.as_deref()),
+        Command::Run {
+            scenes,
+            json,
+            bless,
+            force,
+            repeat,
+            mut suite,
+        } => {
+            suite.json_stdout = json;
+            run::run_command(run::RunFlags {
+                scenes: &scenes,
+                case_flags: &suite.case,
+                opts: &suite,
+                json,
+                bless,
+                force,
+                repeat,
+                deprecation: false,
+            })
+        }
+        Command::CheckSuite { mut suite } => {
+            suite.json_stdout = false;
+            run::run_command(run::RunFlags {
+                scenes: &[],
+                case_flags: &suite.case,
+                opts: &suite,
+                json: false,
+                bless: false,
+                force: false,
+                repeat: 1,
+                deprecation: true,
+            })
+        }
+        Command::UpdateSuite { mut suite } => {
+            suite.json_stdout = false;
+            run::run_command(run::RunFlags {
+                scenes: &[],
+                case_flags: &suite.case,
+                opts: &suite,
+                json: false,
+                bless: true,
+                force: false,
+                repeat: 1,
+                deprecation: false,
+            })
+        }
     }
 }
 
 /// Caps an omitted `--jobs` at one renderer process per available core.
-fn default_suite_jobs(case_count: usize) -> usize {
+pub(super) fn default_suite_jobs(case_count: usize) -> usize {
     let cores = std::thread::available_parallelism()
         .map(|count| count.get())
         .unwrap_or(1);
     case_count.max(1).min(cores.max(1))
 }
 
-fn suite_config_from_opts(opts: &SuiteOpts) -> Result<SuiteConfig, HarnessError> {
-    let cases = select_cases_in(&opts.case, opts.group.as_deref())?;
-    let case_count = cases.len();
-    let renderer_path = match &opts.renderer {
-        Some(p) => p.clone(),
-        None => resolve_renderer_path(BuildProfile::from_flags(opts.release, opts.dev_fast)),
-    };
-    let mut runner = RunnerConfig::with_defaults(renderer_path);
-    runner.timeout = Duration::from_secs(opts.timeout_seconds);
-    runner.interval_ms = opts.interval_ms;
-    runner.verbose_renderer = opts.verbose_renderer;
-    runner.output_root = opts.output_root.clone().unwrap_or_else(default_output_root);
-
-    let jobs = opts
-        .jobs
-        .unwrap_or_else(|| default_suite_jobs(case_count))
-        .max(1);
-    Ok(SuiteConfig {
-        cases,
-        runner,
-        jobs,
-    })
-}
-
-fn stamp_adapter_gate(outcome: &mut crate::scene_dsl::suite::SuiteRunOutcome) {
-    let adapter = crate::adapter_gate::adapter_from_directory(&logger::log_dir_for(
-        logger::LogComponent::Renderer,
-    ));
-    let label = adapter
-        .as_ref()
-        .map(crate::adapter_gate::ObservedAdapter::label)
-        .unwrap_or_default();
-    for case in &mut outcome.report.cases {
-        let gate = crate::adapter_gate::gate_for(&case.name, adapter.as_ref());
-        case.gate = gate.as_str().to_string();
-        case.adapter.clone_from(&label);
-        if !crate::adapter_gate::stamp_case_report(&case.report_json, gate, &label) {
-            logger::warn!(
-                "Suite: could not record the adapter gate on {}",
-                case.report_json.display()
-            );
-        }
-    }
-    if let Some(root) = outcome.report_path.parent()
-        && let Err(err) = crate::scene_dsl::suite::write_suite_report(root, &outcome.report)
-    {
-        logger::warn!("Suite: could not record the adapter gate on the suite report: {err}");
-    }
-}
-
-fn print_suite_outcome(
-    outcome: &crate::scene_dsl::suite::SuiteRunOutcome,
-    result_label: &str,
-    print_adapter: bool,
-) {
-    if let Some(warning) = outcome.report.quarantine_warning.as_deref() {
-        println!("{}", crate::scene_dsl::warn_line(warning));
-    }
-    for line in case_lines(&outcome.report, print_adapter) {
-        println!("{line}");
-    }
-    println!("Suite report: {}", outcome.report_path.display());
-    println!("{}", format_suite_result(&outcome.report, result_label));
-    if print_adapter {
-        println!("{}", check_suite_gate_summary(&outcome.report));
-    }
-    println!("{}", crate::scene_dsl::suite::SUITE_READINESS_SUMMARY);
-}
-
-fn case_lines(report: &crate::scene_dsl::suite::SuiteReport, print_adapter: bool) -> Vec<String> {
-    let mut lines = Vec::new();
-    for case in &report.cases {
-        if crate::scene_dsl::warp_pbs_is_expected(case) {
-            lines.push(format!(
-                "EXPECTED FAIL {} ({}) {}",
-                case.name,
-                case.artifacts_dir.display(),
-                crate::scene_dsl::WARP_EXPECTED_FAILURE_LABEL
-            ));
-            push_adapter_line(&mut lines, case, print_adapter);
-        } else if crate::scene_dsl::case_is_quarantined_216(case) {
-            lines.push(crate::scene_dsl::quarantined_line(
-                &case.name,
-                &case.artifacts_dir,
-                case.reason.as_deref().unwrap_or(""),
-            ));
-            push_adapter_line(&mut lines, case, print_adapter);
-        } else if crate::scene_dsl::warp_pbs_is_unexpected_pass(case) {
-            lines.push(crate::scene_dsl::warp_unexpected_pass_line(
-                &case.name,
-                &case.artifacts_dir,
-            ));
-            push_adapter_line(&mut lines, case, print_adapter);
-        } else {
-            let one = [print_case(case)];
-            let printed = if print_adapter {
-                crate::adapter_gate::format_check_suite(&one)
-            } else {
-                crate::adapter_gate::format_update_suite(&one)
-            };
-            lines.extend(printed.case_lines);
-        }
-    }
-    lines
-}
-
-fn push_adapter_line(
-    lines: &mut Vec<String>,
-    case: &crate::scene_dsl::suite::SuiteCaseReport,
-    print_adapter: bool,
-) {
-    if print_adapter && case.gate == crate::adapter_gate::ADAPTER_COMPARISON {
-        lines.push(crate::adapter_gate::adapter_line(
-            &case.name,
-            &case.artifacts_dir,
-            &case.adapter,
-        ));
-    }
-}
-
-fn format_suite_result(
-    report: &crate::scene_dsl::suite::SuiteReport,
-    result_label: &str,
-) -> String {
-    let mut notes = Vec::new();
-    if report.expected_failures > 0 {
-        notes.push(format!(
-            "{} {}",
-            report.expected_failures,
-            crate::scene_dsl::WARP_EXPECTED_FAILURE_LABEL
-        ));
-    }
-    if report.unexpected_passes > 0 {
-        notes.push(format!(
-            "{} {}",
-            report.unexpected_passes,
-            crate::scene_dsl::WARP_UNEXPECTED_PASS_LABEL
-        ));
-    }
-    if report.quarantined > 0 {
-        notes.push(format!("{} quarantined", report.quarantined));
-    }
-    let head = format!(
-        "Suite result: {}/{} {result_label}",
-        report.passed, report.total
-    );
-    if notes.is_empty() {
-        head
-    } else {
-        format!("{head}, {}", notes.join(", "))
-    }
-}
-
-/// Passing cases split by gate. A failure, expected failure, or quarantine is in neither count.
-fn check_suite_gate_summary(report: &crate::scene_dsl::suite::SuiteReport) -> String {
-    let passing = report
-        .cases
-        .iter()
-        .filter(|case| case.passed)
-        .map(print_case)
-        .collect::<Vec<_>>();
-    crate::adapter_gate::format_check_suite(&passing).summary
-}
-
-fn print_case(
-    case: &crate::scene_dsl::suite::SuiteCaseReport,
-) -> crate::adapter_gate::PrintCase<'_> {
-    crate::adapter_gate::PrintCase {
-        name: &case.name,
-        passed: case.passed,
-        artifacts_dir: &case.artifacts_dir,
-        error: case.error.as_deref(),
-        gate: if case.gate == crate::adapter_gate::ADAPTER_COMPARISON {
-            crate::adapter_gate::Gate::AdapterComparison
-        } else {
-            crate::adapter_gate::Gate::Behavior
-        },
-        adapter: &case.adapter,
-    }
-}
-
 /// Cargo build profile selecting which `target/<profile>/renderide-renderer` binary to spawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BuildProfile {
+pub(super) enum BuildProfile {
     /// `target/debug/renderide-renderer` -- default `cargo build` profile.
     Debug,
     /// `target/release/renderide-renderer` -- `cargo build --release`.
@@ -365,7 +215,7 @@ enum BuildProfile {
 
 impl BuildProfile {
     /// Resolves the profile from the mutually-exclusive `--release` / `--dev-fast` CLI flags.
-    const fn from_flags(release: bool, dev_fast: bool) -> Self {
+    pub(super) const fn from_flags(release: bool, dev_fast: bool) -> Self {
         if dev_fast {
             Self::DevFast
         } else if release {
@@ -375,7 +225,6 @@ impl BuildProfile {
         }
     }
 
-    /// Subdirectory name under `target/` for this profile.
     const fn target_dir(self) -> &'static str {
         match self {
             Self::Debug => "debug",
@@ -385,7 +234,7 @@ impl BuildProfile {
     }
 }
 
-fn default_renderer_path(profile: BuildProfile) -> PathBuf {
+pub(super) fn default_renderer_path(profile: BuildProfile) -> PathBuf {
     let exe = if cfg!(windows) {
         "renderide-renderer.exe"
     } else {
@@ -394,16 +243,12 @@ fn default_renderer_path(profile: BuildProfile) -> PathBuf {
     PathBuf::from("target").join(profile.target_dir()).join(exe)
 }
 
-/// Picks a renderer next to this binary when no `--release` / `--dev-fast` flags are set, so
-/// e.g. `target/dev-fast/renderide-test` uses `target/dev-fast/renderide-renderer` by default.
-fn resolve_renderer_path(profile: BuildProfile) -> PathBuf {
+pub(super) fn resolve_renderer_path(profile: BuildProfile) -> PathBuf {
     if profile != BuildProfile::Debug {
         return default_renderer_path(profile);
     }
-    if let Some(p) = renderide_next_to_this_test_binary() {
-        return p;
-    }
-    default_renderer_path(BuildProfile::Debug)
+    renderide_next_to_this_test_binary()
+        .unwrap_or_else(|| default_renderer_path(BuildProfile::Debug))
 }
 
 fn renderide_next_to_this_test_binary() -> Option<PathBuf> {
@@ -447,13 +292,15 @@ mod cli_tests {
     }
 
     #[test]
-    fn cli_exposes_only_suite_subcommands() {
+    fn cli_exposes_run_list_and_hidden_aliases() {
         let names: Vec<_> = Cli::command()
             .get_subcommands()
             .map(|cmd| cmd.get_name().to_string())
             .collect();
-
-        assert_eq!(names, ["check-suite", "update-suite"]);
+        assert_eq!(names, ["run", "list", "check-suite", "update-suite"]);
+        let command = Cli::command();
+        let check = command.find_subcommand("check-suite").expect("alias");
+        assert!(check.is_hide_set());
     }
 
     #[test]
@@ -461,7 +308,6 @@ mod cli_tests {
         let help_subcommand = Cli::try_parse_from(["renderide-test", "help"])
             .expect_err("help subcommand should be disabled");
         assert_ne!(help_subcommand.kind(), ErrorKind::DisplayHelp);
-
         let help_flag = Cli::try_parse_from(["renderide-test", "--help"])
             .expect_err("--help should print clap help");
         assert_eq!(help_flag.kind(), ErrorKind::DisplayHelp);
@@ -502,175 +348,7 @@ mod cli_tests {
         assert_eq!(BuildProfile::from_flags(false, false), BuildProfile::Debug);
         assert_eq!(BuildProfile::from_flags(true, false), BuildProfile::Release);
         assert_eq!(BuildProfile::from_flags(false, true), BuildProfile::DevFast);
-        // dev_fast wins when both flags are set; clap rejects that combination at the CLI layer.
         assert_eq!(BuildProfile::from_flags(true, true), BuildProfile::DevFast);
-    }
-
-    #[test]
-    fn suite_result_line_counts_quarantine_apart_from_expected_failures() {
-        use crate::scene_dsl::WARP_EXPECTED_FAILURE_LABEL;
-        use crate::scene_dsl::suite::{SuiteCaseReport, SuiteReport};
-
-        fn case(
-            name: &str,
-            passed: bool,
-            result: Option<&str>,
-            status: Option<&str>,
-            reason: Option<&str>,
-        ) -> SuiteCaseReport {
-            let mut case = SuiteCaseReport::plain(
-                name,
-                passed,
-                PathBuf::from(name),
-                PathBuf::from(name),
-                None,
-            );
-            case.result = result.map(str::to_string);
-            case.status = status.map(str::to_string);
-            case.reason = reason.map(str::to_string);
-            case
-        }
-
-        let pass = case("a", true, None, None, None);
-        let expected = case("b", false, Some(WARP_EXPECTED_FAILURE_LABEL), None, None);
-        let quarantined = case(
-            "c",
-            false,
-            None,
-            Some("quarantined"),
-            Some("quarantined:#216"),
-        );
-        let passes = SuiteReport::from_cases(vec![pass.clone()]);
-        assert_eq!(
-            super::format_suite_result(&passes, "passed"),
-            "Suite result: 1/1 passed"
-        );
-        let with_expected = SuiteReport::from_cases(vec![pass.clone(), expected.clone()]);
-        assert_eq!(
-            super::format_suite_result(&with_expected, "passed"),
-            "Suite result: 1/2 passed, 1 expected failure (WARP, #212)"
-        );
-        let with_quarantine = SuiteReport::from_cases(vec![pass.clone(), quarantined.clone()]);
-        assert_eq!(
-            super::format_suite_result(&with_quarantine, "passed"),
-            "Suite result: 1/2 passed, 1 quarantined"
-        );
-        let both = SuiteReport::from_cases(vec![pass.clone(), expected, quarantined]);
-        assert_eq!(
-            super::format_suite_result(&both, "passed"),
-            "Suite result: 1/3 passed, 1 expected failure (WARP, #212), 1 quarantined"
-        );
-        assert_eq!(
-            super::check_suite_gate_summary(&with_expected),
-            "Suite result: 1 behavior + 0 adapter comparison"
-        );
-        let mut adapter_case = case("d", true, None, None, None);
-        adapter_case.gate = crate::adapter_gate::ADAPTER_COMPARISON.to_string();
-        let split = SuiteReport::from_cases(vec![pass, adapter_case]);
-        assert_eq!(
-            super::check_suite_gate_summary(&split),
-            "Suite result: 1 behavior + 1 adapter comparison"
-        );
-        let mut unexpected = case(
-            "e",
-            true,
-            Some(crate::scene_dsl::WARP_UNEXPECTED_PASS_LABEL),
-            None,
-            None,
-        );
-        unexpected.gate = crate::adapter_gate::ADAPTER_COMPARISON.to_string();
-        unexpected.adapter = "Microsoft Basic Render Driver type=Cpu backend=Dx12".to_string();
-        let with_unexpected = SuiteReport::from_cases(vec![unexpected]);
-        assert_eq!(
-            super::format_suite_result(&with_unexpected, "passed"),
-            "Suite result: 1/1 passed, 1 unexpected pass (WARP, #212)"
-        );
-        assert_eq!(with_unexpected.failed, 0);
-        assert!(with_unexpected.passed());
-    }
-
-    #[test]
-    fn adapter_line_prints_on_every_outcome() {
-        use crate::scene_dsl::suite::{SuiteCaseReport, SuiteReport};
-        use crate::scene_dsl::{WARP_EXPECTED_FAILURE_LABEL, WARP_UNEXPECTED_PASS_LABEL};
-
-        fn labeled(
-            name: &str,
-            passed: bool,
-            result: Option<&str>,
-            status: Option<&str>,
-            reason: Option<&str>,
-        ) -> SuiteCaseReport {
-            let mut case = SuiteCaseReport::plain(
-                name,
-                passed,
-                PathBuf::from("out").join(name),
-                PathBuf::from(name),
-                (!passed).then(|| "case failed".to_string()),
-            );
-            case.gate = crate::adapter_gate::ADAPTER_COMPARISON.to_string();
-            case.adapter = "Microsoft Basic Render Driver type=Cpu backend=Dx12".to_string();
-            case.result = result.map(str::to_string);
-            case.status = status.map(str::to_string);
-            case.reason = reason.map(str::to_string);
-            case
-        }
-
-        let cases = vec![
-            labeled("pass_case", true, None, None, None),
-            labeled("fail_case", false, None, None, None),
-            labeled(
-                "expected_case",
-                false,
-                Some(WARP_EXPECTED_FAILURE_LABEL),
-                None,
-                None,
-            ),
-            labeled(
-                "quarantine_case",
-                false,
-                None,
-                Some("quarantined"),
-                Some("quarantined:#216"),
-            ),
-            labeled(
-                "unexpected_case",
-                true,
-                Some(WARP_UNEXPECTED_PASS_LABEL),
-                None,
-                None,
-            ),
-        ];
-        let lines = super::case_lines(&SuiteReport::from_cases(cases), true);
-        for name in [
-            "pass_case",
-            "fail_case",
-            "expected_case",
-            "quarantine_case",
-            "unexpected_case",
-        ] {
-            assert!(
-                lines.iter().any(|line| {
-                    line.starts_with("ADAPTER ")
-                        && line.contains(name)
-                        && line.contains("Microsoft Basic Render Driver")
-                }),
-                "{name} missing from {lines:?}"
-            );
-        }
-        assert!(lines.iter().any(|line| line.starts_with("EXPECTED FAIL ")));
-        assert!(lines.iter().any(|line| line.starts_with("QUARANTINED ")));
-        assert!(
-            lines
-                .iter()
-                .any(|line| line.starts_with("UNEXPECTED PASS ") && line.contains("#212"))
-        );
-        assert!(lines.iter().any(|line| line.starts_with("FAIL ")));
-        let update = super::case_lines(
-            &SuiteReport::from_cases(vec![labeled("pass_case", true, None, None, None)]),
-            false,
-        );
-        assert!(update.iter().all(|line| !line.contains("ADAPTER")));
     }
 
     fn expected_exe() -> &'static str {

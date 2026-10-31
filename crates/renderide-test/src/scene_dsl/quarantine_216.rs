@@ -200,6 +200,19 @@ fn expires_at() -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(QUARANTINE_216_EXPIRES_UNIX)
 }
 
+/// Why bless must not write this case's golden. `None` means bless may proceed.
+///
+/// The #212 and #216 cases are refused on every runner, not only on WARP.
+pub(crate) fn bless_forbidden(name: &str) -> Option<&'static str> {
+    if name == PBS_LIT {
+        return Some("quarantined #212/#216; bless refused");
+    }
+    if NEGATIVE_LIGHT_CASES.contains(&name) {
+        return Some("quarantined #216; bless refused");
+    }
+    None
+}
+
 /// Whether a WARP capture of this case may end the flat-frame wait early.
 ///
 /// The four cases are the ones [`quarantine_matches`] can label. After

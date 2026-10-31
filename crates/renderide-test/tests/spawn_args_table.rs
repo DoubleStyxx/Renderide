@@ -47,6 +47,7 @@ fn spawn_args_table_covers_release_and_dev_paths() {
             interval_ms: interval,
             timeout: Duration::from_secs(5),
             verbose_renderer: false,
+            renderer_stdout_to_stderr: false,
             physically_based: false,
             scene_color_readback: false,
         };
