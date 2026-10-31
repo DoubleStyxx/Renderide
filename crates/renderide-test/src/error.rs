@@ -136,6 +136,9 @@ pub enum HarnessError {
     /// A requested named scene case does not exist in the suite registry.
     #[error("unknown integration case `{0}`")]
     UnknownCase(String),
+    /// `--group` does not name a known opt-in case group.
+    #[error("unknown suite group `{0}`")]
+    UnknownGroup(String),
     /// The frame benchmark did not write a complete report before the deadline.
     #[error("frame bench report missing at {path} after {wait:?} (renderer: {renderer_state})")]
     BenchReportMissing {

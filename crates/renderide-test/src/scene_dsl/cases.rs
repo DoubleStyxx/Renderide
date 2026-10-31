@@ -92,6 +92,11 @@ pub enum CaseTemplate {
         /// The extra light has a negative color and a positive intensity.
         negative_color: bool,
     },
+    /// Opt-in #216 term-isolation scene. Not included in [`registry`].
+    Warp216Debug {
+        /// Term, channel, and light rig for this capture.
+        spec: super::warp_216_debug::Spec,
+    },
 }
 
 /// Default golden directory, relative to the workspace root: `crates/renderide-test/goldens/`.

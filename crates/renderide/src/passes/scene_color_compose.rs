@@ -151,6 +151,10 @@ impl RasterPass for SceneColorComposePass {
         rpass.set_pipeline(pipeline.as_ref());
         rpass.set_bind_group(0, &bind_group, &[]);
         rpass.draw(0..3, 0..1);
+        // Off by default. The branch does not clone or allocate when the #216 dump is disabled.
+        if crate::debug_scene_color::readback_enabled() {
+            crate::debug_scene_color::remember_scene_color(&tex.texture);
+        }
         Ok(())
     }
 }

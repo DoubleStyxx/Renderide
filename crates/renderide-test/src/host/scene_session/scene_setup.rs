@@ -146,6 +146,7 @@ pub(super) fn build_scene_setup(template: SessionTemplate) -> SceneSetup {
             negative_color,
             ..
         } => negative_light::scene_setup(include_negative, negative_color),
+        SessionTemplate::Warp216Debug { spec } => super::warp_216_debug::scene_setup(spec),
         SessionTemplate::SkinnedAvatars { offscreen } => {
             bench_scenes::skinned_avatars_setup(offscreen)
         }

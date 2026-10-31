@@ -28,6 +28,11 @@ pub struct HeadlessParams {
     pub height: u32,
     /// Interval between consecutive PNG writes (ms).
     pub interval_ms: u64,
+    /// Copy the pre-sRGB `Rgba16Float` scene color beside the PNG.
+    ///
+    /// Off unless `--headless-scene-color-readback` is present. The #216 debug
+    /// group is the only harness path that passes it.
+    pub scene_color_readback: bool,
 }
 
 impl Default for HeadlessParams {
@@ -37,6 +42,7 @@ impl Default for HeadlessParams {
             width: DEFAULT_HEADLESS_WIDTH,
             height: DEFAULT_HEADLESS_HEIGHT,
             interval_ms: DEFAULT_HEADLESS_INTERVAL_MS,
+            scene_color_readback: false,
         }
     }
 }
@@ -81,6 +87,11 @@ pub fn parse_headless_params(args: &[String]) -> Option<HeadlessParams> {
                 params.interval_ms = ms;
             }
             i += 2;
+            continue;
+        }
+        if lower == "--headless-scene-color-readback" {
+            params.scene_color_readback = true;
+            i += 1;
             continue;
         }
         i += 1;
@@ -175,6 +186,19 @@ mod tests {
         ]))
         .expect("present");
         assert_eq!(p.interval_ms, super::DEFAULT_HEADLESS_INTERVAL_MS);
+    }
+
+    #[test]
+    fn scene_color_readback_defaults_off() {
+        let p = parse_headless_params(&s(&["renderide", "--headless"])).expect("present");
+        assert!(!p.scene_color_readback);
+        let enabled = parse_headless_params(&s(&[
+            "renderide",
+            "--headless",
+            "--headless-scene-color-readback",
+        ]))
+        .expect("present");
+        assert!(enabled.scene_color_readback);
     }
 
     #[test]

@@ -19,6 +19,7 @@ pub mod region_color;
 pub mod runner;
 pub mod suite;
 pub mod tolerance;
+pub mod warp_216_debug;
 mod warp_pbs;
 
 /// Whether a suite case is the time-limited #216 quarantine and not a pass.
