@@ -173,6 +173,7 @@ fn extract_curl_inputs(controller: &VRControllerState) -> Option<ControllerCurlI
             thumb = s.touchpad_touch
         )),
         VRControllerState::CosmosControllerState(_)
+        | VRControllerState::FrameControllerState(_)
         | VRControllerState::GenericControllerState(_)
         | VRControllerState::HPReverbControllerState(_)
         | VRControllerState::PicoNeo2ControllerState(_) => {

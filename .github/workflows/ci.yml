@@ -332,6 +332,28 @@ jobs:
           cache: true
           cache-dependency-path: |
             generators/**/packages.lock.json
+            .github/ci/renderite-shared/packages.lock.json
+
+      # Yellow-Dog-Man/Renderite @ 7ccfd2ee7c28648cb2e46dd4f52f51613a848071
+      # MIT License, Copyright (c) 2026 Yellow Dog Man Studios s.r.o.
+      # https://github.com/Yellow-Dog-Man/Renderite
+      # Publishes only Renderite.Shared in Release, with locked NuGet dependencies beside the DLL.
+      # The DLL is not committed.
+      # NuGet restore uses .github/ci/renderite-shared/packages.lock.json with --locked-mode.
+      - name: Build Renderite.Shared.dll
+        shell: bash
+        run: .github/ci/renderite-shared/build.sh
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          cache-bin: "false"
+
+      - name: Build IPC roundtrip binary
+        shell: bash
+        run: cargo build --locked -p renderide-shared --bin roundtrip
 
       - name: Restore
         run: dotnet restore Generators.sln --locked-mode
@@ -348,9 +370,62 @@ jobs:
       - name: Build (warnings as errors)
         run: dotnet build generators/SharedTypeGenerator.Tests/SharedTypeGenerator.Tests.csproj --configuration Release --no-restore -warnaserror
 
-      # Hosted runners do not have the host shared assembly: roundtrip sources are excluded at compile time (see SharedTypeGenerator.Tests.csproj).
+      # Roundtrip sources compile because RENDERITE_SHARED_DLL was set from the pinned Renderite.Shared build.
+      # A missing DLL fails this job (build error and RenderiteSharedDllPresenceTests), it does not skip.
       - name: Test
-        run: dotnet test generators/SharedTypeGenerator.Tests/SharedTypeGenerator.Tests.csproj --configuration Release --no-build --no-restore
+        shell: bash
+        run: |
+          set -euo pipefail
+          results="${RUNNER_TEMP}/shared-type-generator-tests"
+          mkdir -p "$results"
+          dotnet test generators/SharedTypeGenerator.Tests/SharedTypeGenerator.Tests.csproj \
+            --configuration Release \
+            --no-build \
+            --no-restore \
+            --logger "console;verbosity=detailed" \
+            --logger "trx;LogFileName=shared-type-generator.trx" \
+            --results-directory "$results"
+          if command -v python3 >/dev/null 2>&1; then
+            py=python3
+          elif command -v python >/dev/null 2>&1; then
+            py=python
+          else
+            echo "python is required to summarize IPC roundtrip results" >&2
+            exit 1
+          fi
+          "$py" - "$results/shared-type-generator.trx" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+          from collections import Counter
+
+          ns = {"t": "http://microsoft.com/schemas/VisualStudio/TeamTest/2010"}
+          root = ET.parse(sys.argv[1]).getroot()
+          counters = root.find(".//t:ResultSummary/t:Counters", ns)
+          if counters is None:
+              raise SystemExit("trx is missing ResultSummary counters")
+          print(
+              "Test counters:"
+              f" total={counters.get('total')}"
+              f" passed={counters.get('passed')}"
+              f" failed={counters.get('failed')}"
+              f" notExecuted={counters.get('notExecuted')}"
+          )
+          outcomes = Counter()
+          for result in root.findall(".//t:UnitTestResult", ns):
+              name = result.get("testName") or ""
+              if "CrossLanguageRoundtripTests" in name:
+                  outcomes[result.get("outcome") or ""] += 1
+          skipped = outcomes.get("NotExecuted", 0) + outcomes.get("Skipped", 0)
+          print(
+              "CrossLanguageRoundtripTests:"
+              f" passed={outcomes.get('Passed', 0)}"
+              f" failed={outcomes.get('Failed', 0)}"
+              f" skipped={skipped}"
+              f" total={sum(outcomes.values())}"
+          )
+          if outcomes.get("Passed", 0) < 1 or outcomes.get("Failed", 0) or skipped:
+              raise SystemExit("IPC roundtrip did not pass with zero skips")
+          PY
 
   # Runs after the Rust matrix. A queued macOS job that GitHub cancels for
   # capacity never executes a step, so it cannot explain itself. This check

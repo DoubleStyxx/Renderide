@@ -1,0 +1,23 @@
+<Project>
+  <!--
+    Copied onto a checkout of Yellow-Dog-Man/Renderite before restore.
+    Source: https://github.com/Yellow-Dog-Man/Renderite
+    Commit: 7ccfd2ee7c28648cb2e46dd4f52f51613a848071
+    License: MIT, Copyright (c) 2026 Yellow Dog Man Studios s.r.o.
+
+    Pins the Renderite.Shared NuGet graph, including transitive packages, to
+    packages.lock.json in this directory. CI restores in locked mode.
+    A lock mismatch fails the build, so a dependency update cannot change the
+    IPC contract without an intentional lock-file edit.
+  -->
+  <PropertyGroup>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <NuGetAudit>false</NuGetAudit>
+  </PropertyGroup>
+
+  <Target Name="RequireRenderiteSharedLockFile" BeforeTargets="Restore">
+    <Error
+      Condition="'$(NuGetLockFilePath)' == ''"
+      Text="NuGetLockFilePath must point at .github/ci/renderite-shared/packages.lock.json so Renderite.Shared restore stays locked." />
+  </Target>
+</Project>

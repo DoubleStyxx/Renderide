@@ -9,8 +9,10 @@ namespace SharedTypeGenerator.Tests;
 
 /// <summary>C# -> Rust -> C# roundtrip tests: C# packs, the Rust <c>roundtrip</c> binary unpacks and repacks, and the byte buffers must match.</summary>
 /// <remarks>
-/// These sources are only compiled when <c>Renderite.Shared.dll</c> is discoverable at build time (see <c>SharedTypeGenerator.Tests.csproj</c>).
-/// When the DLL is missing, the roundtrip test files are excluded from the project so the suite still builds.
+/// These sources are compiled when <c>Renderite.Shared.dll</c> is discoverable at build time (see <c>SharedTypeGenerator.Tests.csproj</c>).
+/// Hosted CI builds that DLL from Yellow-Dog-Man/Renderite commit 7ccfd2ee7c28648cb2e46dd4f52f51613a848071 (MIT).
+/// Outside CI, a missing DLL omits these sources and <see cref="RenderiteSharedDllPresenceTests"/> skips with an explanation.
+/// On CI, a missing DLL fails the build and that presence test.
 /// </remarks>
 [Trait("Category", "Roundtrip")]
 public sealed class CrossLanguageRoundtripTests : RoundtripTestBase

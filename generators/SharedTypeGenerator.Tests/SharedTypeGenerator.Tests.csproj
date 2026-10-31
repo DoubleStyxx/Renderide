@@ -29,7 +29,13 @@
     <RenderiteSharedDllPath Condition="'$(RenderiteSharedDllPath)' == '' and '$(HOME)' != '' and Exists('$(HOME)/.steam/steam/steamapps/common/Resonite/Renderite.Shared.dll')">$(HOME)/.steam/steam/steamapps/common/Resonite/Renderite.Shared.dll</RenderiteSharedDllPath>
     <RenderiteSharedDllPath Condition="'$(RenderiteSharedDllPath)' == '' and Exists('$(MSBuildThisFileDirectory)lib/Renderite.Shared.dll')">$(MSBuildThisFileDirectory)lib/Renderite.Shared.dll</RenderiteSharedDllPath>
     <HasRenderiteSharedDll Condition="'$(RenderiteSharedDllPath)' != '' and Exists('$(RenderiteSharedDllPath)')">true</HasRenderiteSharedDll>
+    <!-- GitHub Actions sets CI=true. A missing DLL must fail the build there, not omit the roundtrip sources. -->
+    <RenderiteRoundtripRequired Condition="'$(CI)' == 'true' or '$(CI)' == '1'">true</RenderiteRoundtripRequired>
   </PropertyGroup>
+
+  <Target Name="FailRoundtripWhenSharedDllMissingOnCi" BeforeTargets="BeforeBuild" Condition="'$(RenderiteRoundtripRequired)' == 'true' and '$(HasRenderiteSharedDll)' != 'true'">
+    <Error Text="Renderite.Shared.dll is required when CI=true. The C#/Rust IPC roundtrip must fail instead of being omitted. Set RENDERITE_SHARED_DLL to the Release build of Yellow-Dog-Man/Renderite Renderite.Shared at commit 7ccfd2ee7c28648cb2e46dd4f52f51613a848071." />
+  </Target>
 
   <ItemGroup>
     <ProjectReference Include="..\SharedTypeGenerator\SharedTypeGenerator.csproj" />
@@ -38,7 +44,8 @@
     </Reference>
   </ItemGroup>
 
-  <!-- Roundtrip sources reference Renderite.Shared types; they cannot compile without the DLL. -->
+  <!-- Roundtrip sources reference Renderite.Shared types; they cannot compile without the DLL.
+       Outside CI they are omitted and RenderiteSharedDllPresenceTests skips. On CI the target above fails first. -->
   <ItemGroup Condition="'$(HasRenderiteSharedDll)' != 'true'">
     <Compile Remove="Roundtrip/**/*.cs" />
   </ItemGroup>
