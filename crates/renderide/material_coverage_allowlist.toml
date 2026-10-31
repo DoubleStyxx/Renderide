@@ -8,10 +8,6 @@ root = "billboardunlit"
 reason = "No scene_dsl golden draws this root. Backfill bucket: particles."
 
 [[entry]]
-root = "blur"
-reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
-
-[[entry]]
 root = "blur_perobject"
 reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
 
