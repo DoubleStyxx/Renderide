@@ -2,7 +2,7 @@
 
 use naga::ShaderStage;
 use naga::valid::Capabilities;
-use naga_oil::compose::{Composer, NagaModuleDescriptor, ShaderType};
+use naga_oil::compose::{Composer, NagaModuleDescriptor, ShaderDefValue, ShaderType};
 
 use super::directives::BuildPassDirective;
 use super::error::BuildError;
@@ -25,14 +25,32 @@ fn compose_source_variant(
     file_path: &str,
     variant: ShaderVariant,
 ) -> Result<naga::Module, BuildError> {
+    compose_source_variant_with_keywords(modules, source, file_path, variant, &[])
+}
+
+/// Composes one view variant with extra `//#keyword` shader defs.
+///
+/// `#ifdef NAME` is true when `NAME` is present. The default variant omits every keyword, the
+/// same way [`ShaderVariant::shader_defs`] omits `MULTIVIEW`.
+fn compose_source_variant_with_keywords(
+    modules: &ShaderModuleSources,
+    source: &str,
+    file_path: &str,
+    variant: ShaderVariant,
+    keywords: &[String],
+) -> Result<naga::Module, BuildError> {
     let mut composer = Composer::default().with_capabilities(Capabilities::all());
     register_composable_modules(&mut composer, modules)?;
+    let mut shader_defs = variant.shader_defs();
+    for keyword in keywords {
+        shader_defs.insert(keyword.clone(), ShaderDefValue::Bool(true));
+    }
     composer
         .make_naga_module(NagaModuleDescriptor {
             source,
             file_path,
             shader_type: ShaderType::Wgsl,
-            shader_defs: std::collections::HashMap::from_iter(variant.shader_defs()),
+            shader_defs: std::collections::HashMap::from_iter(shader_defs),
             ..Default::default()
         })
         .map_err(|e| {
@@ -306,7 +324,130 @@ fn compile_variant_targets(
             pass_directives,
         });
     }
+    append_keyword_variant_targets(
+        modules,
+        source,
+        file_path,
+        stem,
+        job,
+        pass_directives,
+        targets,
+    )
+}
+
+/// Packaged shaders declare at most one `//#keyword`. That keyword is a compile-time def crossed
+/// with the existing default/multiview targets. Custom materials still compose keyword masks at
+/// runtime; this path only prebuilds the one declared keyword so pipeline warmup loads WGSL.
+fn append_keyword_variant_targets(
+    modules: &ShaderModuleSources,
+    source: &str,
+    file_path: &str,
+    stem: &str,
+    job: &ShaderJob,
+    pass_directives: &[BuildPassDirective],
+    mut targets: Vec<CompiledShaderTarget>,
+) -> Result<Vec<CompiledShaderTarget>, BuildError> {
+    let keywords = parse_packaged_keywords(source, file_path)?;
+    if keywords.is_empty() {
+        return Ok(targets);
+    }
+    for multiview in [false, true] {
+        let variant = if multiview {
+            ShaderVariant::Multiview
+        } else {
+            ShaderVariant::Default
+        };
+        let label = format!("{file_path} ({}; {})", variant.label(), keywords.join("+"));
+        let module =
+            compose_source_variant_with_keywords(modules, source, &label, variant, &keywords)?;
+        validate_composed_variant(stem, pass_directives, &module, variant)?;
+        let wgsl = flattened_wgsl_for_job(&module, stem, variant, job.source_class)?;
+        let target_stem = keyword_target_stem(stem, &keywords, multiview);
+        if job.validation.validate_view_index {
+            validate_view_index_contract(&target_stem, &wgsl, variant)?;
+        }
+        let pass_directives =
+            remapped_pass_directives_for_output(&module, &wgsl, pass_directives, &label)?;
+        targets.push(CompiledShaderTarget {
+            target_stem,
+            wgsl,
+            pass_directives,
+        });
+    }
     Ok(targets)
+}
+
+/// `//#keyword` names in source order. Packaged shaders take one name; a longer list would be a
+/// full mask product and is rejected here.
+fn parse_packaged_keywords(source: &str, file: &str) -> Result<Vec<String>, BuildError> {
+    let mut keywords = Vec::new();
+    for (line_idx, line) in source.lines().enumerate() {
+        let line_no = line_idx + 1;
+        let Some(rest) = line.trim_start().strip_prefix("//#keyword") else {
+            continue;
+        };
+        if rest
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            continue;
+        }
+        let mut tokens = rest.split_whitespace();
+        let Some(name) = tokens.next() else {
+            return Err(BuildError::Message(format!(
+                "{file}:{line_no}: `//#keyword` requires a name"
+            )));
+        };
+        if tokens.next().is_some() {
+            return Err(BuildError::Message(format!(
+                "{file}:{line_no}: `//#keyword` accepts one name"
+            )));
+        }
+        if !is_packaged_keyword_name(name) {
+            return Err(BuildError::Message(format!(
+                "{file}:{line_no}: `//#keyword` name `{name}` is not an identifier"
+            )));
+        }
+        if keywords.iter().any(|existing| existing == name) {
+            return Err(BuildError::Message(format!(
+                "{file}:{line_no}: duplicate `//#keyword` `{name}`"
+            )));
+        }
+        keywords.push(name.to_string());
+    }
+    if keywords.len() > 1 {
+        return Err(BuildError::Message(format!(
+            "{file}: packaged shaders accept one `//#keyword` compile-time variant (found {})",
+            keywords.len()
+        )));
+    }
+    Ok(keywords)
+}
+
+fn is_packaged_keyword_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c == '_' || c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+/// `_ALPHAPREMULTIPLY_ON` becomes `alphapremultiply`, crossed with `_default` or `_multiview`.
+fn keyword_target_stem(source_stem: &str, keywords: &[String], multiview: bool) -> String {
+    let token = keywords
+        .iter()
+        .map(|keyword| {
+            keyword
+                .trim_start_matches('_')
+                .trim_end_matches("_ON")
+                .to_ascii_lowercase()
+        })
+        .collect::<Vec<_>>()
+        .join("_");
+    let view = if multiview { "multiview" } else { "default" };
+    format!("{source_stem}_{token}_{view}")
 }
 
 #[cfg(test)]
@@ -359,6 +500,61 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             stems,
             ["variant_compute_default", "variant_compute_multiview"]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn packaged_keyword_crosses_the_multiview_variant() -> Result<(), BuildError> {
+        let root = tempfile::tempdir()?;
+        let source_path = root.path().join("keyword_compute.wgsl");
+        fs::write(
+            &source_path,
+            r#"
+//#keyword _ALPHAPREMULTIPLY_ON
+
+@group(0) @binding(0)
+var<storage, read_write> output: array<u32>;
+
+@compute @workgroup_size(1, 1, 1)
+fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+#ifdef _ALPHAPREMULTIPLY_ON
+    output[gid.x] = 3u;
+#else
+    output[gid.x] = 1u;
+#endif
+#ifdef MULTIVIEW
+    output[gid.x] = output[gid.x] + 1u;
+#endif
+}
+"#,
+        )?;
+
+        let compiled = compile_shader_job(
+            &Vec::new(),
+            &shader_job(source_path, ShaderSourceClass::Compute),
+        )?;
+        let stems = compiled
+            .targets
+            .iter()
+            .map(|target| target.target_stem.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            stems,
+            [
+                "keyword_compute_default",
+                "keyword_compute_multiview",
+                "keyword_compute_alphapremultiply_default",
+                "keyword_compute_alphapremultiply_multiview",
+            ]
+        );
+        let premul = compiled
+            .targets
+            .iter()
+            .find(|target| target.target_stem == "keyword_compute_alphapremultiply_default")
+            .expect("premultiply target");
+        assert!(premul.wgsl.contains("3u"));
+        assert!(!premul.wgsl.contains("output[gid.x] = 1u"));
         Ok(())
     }
 }

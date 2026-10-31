@@ -63,9 +63,10 @@ fn pbs_transparent_roots_use_premultiplied_transparent_lighting() -> io::Result<
 fn generic_pbs_premultiply_variants_use_unity_transparent_lighting() -> io::Result<()> {
     let metallic = material_source("pbsmetallic.wgsl")?;
     for required in [
-        "fn alpha_premultiply_enabled() -> bool",
-        "if (alpha_premultiply_enabled())",
+        "//#keyword _ALPHAPREMULTIPLY_ON",
+        "#ifdef _ALPHAPREMULTIPLY_ON",
         "plight::shade_metallic_transparent_clustered(",
+        "plight::shade_metallic_clustered(",
         "return vec4<f32>(color, s.alpha);",
     ] {
         assert!(
@@ -73,6 +74,10 @@ fn generic_pbs_premultiply_variants_use_unity_transparent_lighting() -> io::Resu
             "pbsmetallic.wgsl must contain `{required}`"
         );
     }
+    assert!(
+        !metallic.contains("if (alpha_premultiply_enabled())"),
+        "pbsmetallic.wgsl must select premultiply at compile time, not with a runtime branch"
+    );
     for forbidden in [
         "fn apply_premultiply(",
         "return select(color, color * alpha, alpha_premultiply_enabled());",
