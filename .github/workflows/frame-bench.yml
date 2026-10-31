@@ -12,9 +12,8 @@
 # 1. First pass: a scenario is flagged when delta > `flag_threshold`. Nothing else: the base's
 #    run-to-run spread (15-30% per run on lavapipe) is not a threshold.
 # 2. Confirm: flagged scenarios are re-measured for `confirm_rounds` interleaved rounds. A
-#    scenario fails when EITHER (a) on all runs pooled (first pass + confirm), delta >
-#    `fail_threshold` AND a one-sided Mann-Whitney U test gives p < 0.05 (head slower), OR
-#    (b) on the confirm rounds alone, delta > `fail_threshold` AND Mann-Whitney p < 0.05.
+#    scenario FAILs only when confirm-rounds-only delta > `fail_threshold` AND one-sided
+#    Mann-Whitney p < 0.05 with n>=12 per side. Pooled delta/p are reported but do not FAIL.
 # 3. `confirm_rounds` = 0: the first pass flags at `fail_threshold` and every flag fails; a
 #    delta between the two thresholds passes (it is under the policy bar).
 # `threshold` is a deprecated alias of `fail_threshold` (it wins when set, and lowers
@@ -47,7 +46,7 @@ name: Frame bench
         required: false
         type: string
       fail_threshold:
-        description: Percent, the policy bar. A flagged scenario fails when, after the confirm, either all pooled runs or the confirm rounds alone show a delta strictly greater than this AND one-sided Mann-Whitney p < 0.05 (head slower).
+        description: Percent, the policy bar. A flagged scenario FAILs when confirm-rounds-only delta > this AND one-sided Mann-Whitney p < 0.05 (head slower) with n>=12 per side. Pooled figures are reported only.
         default: "10"
         required: false
         type: string
@@ -77,7 +76,7 @@ name: Frame bench
         required: false
         type: string
       confirm_rounds:
-        description: When the first pass flags a scenario, re-measure base and head this many interleaved rounds (base/head, then head/base, ...) for the flagged scenarios only, each round with `runs` runs. Fail if (a) all runs pooled, or (b) the confirm rounds alone, show delta > fail_threshold AND one-sided Mann-Whitney p < 0.05. 0 skips the confirm and fails only first-pass deltas > fail_threshold.
+        description: When the first pass flags a scenario, re-measure base and head this many interleaved rounds (base/head, then head/base, ...) for the flagged scenarios only, each round with `runs` runs. FAIL only if confirm-rounds-only show delta > fail_threshold AND one-sided Mann-Whitney p < 0.05 with n>=12 per side (pooled reported only). 0 skips the confirm and fails only first-pass deltas > fail_threshold.
         default: "3"
         required: false
         type: string

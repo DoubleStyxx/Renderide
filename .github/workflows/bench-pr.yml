@@ -11,8 +11,10 @@
 # noise study.
 #
 # Methodology (Gauge): n>=12, interleaved chunked first pass, one reversed-order
-# confirm round judged pooled by Mann-Whitney, RAYON_NUM_THREADS=2, taskset when
-# available, CPU governor pinned to performance when the runner allows it.
+# confirm round; FAIL decided on confirm-only Mann-Whitney (n>=12) — pooled is
+# reported only. Confirm-base median drift >15% vs first-pass base → one extra
+# confirm; second drift fails closed (inconclusive: base drift). RAYON_NUM_THREADS=2,
+# taskset when available, CPU governor pinned to performance when the runner allows it.
 name: Bench PR
 
 "on":
@@ -23,6 +25,8 @@ name: Bench PR
       - "crates/renderide-bench/**"
       - "scripts/ci/frame_bench_gate.py"
       - "scripts/ci/bench_pr_assemble.py"
+      - "scripts/ci/bench_pr_report.py"
+      - "scripts/ci/bench_pr_merge_confirm.py"
       - ".github/workflows/bench-pr.yml"
       - ".github/actions/lavapipe/**"
 
@@ -32,7 +36,6 @@ concurrency:
 
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
   # -------------------------------------------------------------------------
@@ -41,7 +44,7 @@ jobs:
   bench-pr:
     name: bench-pr-lavapipe
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 55
     outputs:
       gate_exit: ${{ steps.bench.outputs.gate_exit }}
       wall_time_sec: ${{ steps.bench.outputs.wall_time_sec }}
@@ -282,7 +285,9 @@ jobs:
               --confirm-base "$out/confirm-base-a.json" --confirm-base "$out/confirm-base-b.json" \
               --confirm-head "$out/confirm-head-a.json" --confirm-head "$out/confirm-head-b.json" \
               --flag-threshold "$FLAG_THRESHOLD" --fail-threshold "$FAIL_THRESHOLD" \
-              --title "Confirm (reversed-order, ${CONFIRM_ROUNDS} round x $RUNS runs; pooled + confirm-only Mann-Whitney)" \
+              --confirm-round 1 \
+              --drift-out "$out/drift-suspects.txt" \
+              --title "Confirm round 1 (reversed-order, ${CONFIRM_ROUNDS} x $RUNS; confirm-only decides FAIL; pooled reported; base-drift guard)" \
               --json-out "$out/gate.json" | tee "$out/confirm.md"
             gate_status=${PIPESTATUS[0]}
             set -e
@@ -292,6 +297,49 @@ jobs:
               echo "gate_exit=1" >> "$GITHUB_OUTPUT"
               cat "$summary" >> "$GITHUB_STEP_SUMMARY"
               exit 1
+            fi
+
+            # Base-drift guard: one extra reversed confirm for INCONCLUSIVE scenes only.
+            if [[ -s "$out/drift-suspects.txt" ]]; then
+              mapfile -t drift_suspects < "$out/drift-suspects.txt"
+              echo "::group::Confirm round 2 (extra after base drift) for: ${drift_suspects[*]}"
+              {
+                echo
+                echo "inconclusive: base drift on round 1 for: ${drift_suspects[*]} — running one extra reversed confirm (never a silent pass)"
+              } >> "$summary"
+              run_frame "$RUNNER_TEMP/target-head" "$out/confirm2-head-a.json" "$half" "${drift_suspects[@]}"
+              run_frame "$RUNNER_TEMP/target-base" "$out/confirm2-base-a.json" "$half" "${drift_suspects[@]}"
+              run_frame "$RUNNER_TEMP/target-head" "$out/confirm2-head-b.json" "$rest" "${drift_suspects[@]}"
+              run_frame "$RUNNER_TEMP/target-base" "$out/confirm2-base-b.json" "$rest" "${drift_suspects[@]}"
+              echo "::endgroup::"
+
+              set +e
+              python3 "$gate_py" --mode confirm \
+                --base "$out/base-a.json" --base "$out/base-b.json" \
+                --head "$out/head-a.json" --head "$out/head-b.json" \
+                --confirm-base "$out/confirm2-base-a.json" --confirm-base "$out/confirm2-base-b.json" \
+                --confirm-head "$out/confirm2-head-a.json" --confirm-head "$out/confirm2-head-b.json" \
+                --flag-threshold "$FLAG_THRESHOLD" --fail-threshold "$FAIL_THRESHOLD" \
+                --confirm-round 2 --fail-closed-drift \
+                --title "Confirm round 2 (extra after base drift; fail-closed if still drifting; deciding round stated per row)" \
+                --json-out "$out/gate-confirm2.json" | tee "$out/confirm2.md"
+              c2_status=${PIPESTATUS[0]}
+              set -e
+              cat "$out/confirm2.md" >> "$summary"
+              if [[ "$c2_status" -ge 2 ]]; then
+                echo "gate script error on confirm round 2" >&2
+                echo "gate_exit=1" >> "$GITHUB_OUTPUT"
+                cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+                exit 1
+              fi
+              python3 "$GITHUB_WORKSPACE/tools/scripts/ci/bench_pr_merge_confirm.py" \
+                --gate1 "$out/gate.json" --gate2 "$out/gate-confirm2.json" --out "$out/gate.json"
+              gate_status=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['exit_code'])" "$out/gate.json")
+              if [[ "$gate_status" -ne 0 ]]; then
+                echo "gate after drift reconfirm: fail (see inconclusive: base drift or confirm-only FAIL above)" >> "$summary"
+              else
+                echo "gate after drift reconfirm: pass (deciding round = 2 for reconfirmed scenes)" >> "$summary"
+              fi
             fi
           fi
 
@@ -529,6 +577,9 @@ jobs:
     timeout-minutes: 10
     needs: [bench-pr, cpu-hot]
     if: always() && !cancelled()
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - name: Checkout assemble script
         uses: actions/checkout@v7
@@ -556,46 +607,19 @@ jobs:
         id: assemble
         run: |
           set -euo pipefail
-          assemble_py="$GITHUB_WORKSPACE/scripts/ci/bench_pr_assemble.py"
-          summary="$GITHUB_WORKSPACE/bench-pr-summary.md"
-          {
-            echo "# bench-pr (combined)"
-            echo
-            echo "- frame job: \`${{ needs.bench-pr.result }}\` (gate_exit=${{ needs.bench-pr.outputs.gate_exit }}, wall_time_sec=${{ needs.bench-pr.outputs.wall_time_sec }})"
-            echo "- cpu_hot job: \`${{ needs.cpu-hot.result }}\` (report-only; never gates)"
-            echo "- decision rule: \`scripts/ci/frame_bench_gate.py\` only"
-            echo
-          } > "$summary"
-
-          if [[ -f gate-art/frame-summary.md ]]; then
-            cat gate-art/frame-summary.md >> "$summary"
-            echo >> "$summary"
-          else
-            echo "_frame gate artifact missing_" >> "$summary"
-            echo >> "$summary"
-          fi
-
-          if [[ -f cpu-art/cpu-summary.md ]]; then
-            cat cpu-art/cpu-summary.md >> "$summary"
-            echo >> "$summary"
-          else
-            echo "_cpu_hot artifact missing (job may have been skipped or failed before upload)_" >> "$summary"
-            echo >> "$summary"
-          fi
-
-          cpu_args=()
-          if [[ -f cpu-art/cpu-compare.json ]]; then
-            cpu_args=(--cpu-compare cpu-art/cpu-compare.json)
-          fi
-
-          if [[ -f gate-art/gate.json ]]; then
-            python3 "$assemble_py" --gate gate-art/gate.json "${cpu_args[@]}" --out bench-compare.json
+          python3 "$GITHUB_WORKSPACE/scripts/ci/bench_pr_report.py" \
+            --gate-art gate-art \
+            --cpu-art cpu-art \
+            --summary-out "$GITHUB_WORKSPACE/bench-pr-summary.md" \
+            --compare-out "$GITHUB_WORKSPACE/bench-compare.json" \
+            --frame-job-result "${{ needs.bench-pr.result }}" \
+            --gate-exit "${{ needs.bench-pr.outputs.gate_exit }}" \
+            --wall-time-sec "${{ needs.bench-pr.outputs.wall_time_sec }}" \
+            --cpu-job-result "${{ needs.cpu-hot.result }}"
+          if [[ -f bench-compare.json ]]; then
             echo "assembled bench-compare.json"
-          else
-            echo "gate.json missing; cannot assemble bench-compare.json" >> "$summary"
           fi
-
-          cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+          cat "$GITHUB_WORKSPACE/bench-pr-summary.md" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload bench-compare.json
         if: always() && hashFiles('bench-compare.json') != ''

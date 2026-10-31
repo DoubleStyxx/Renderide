@@ -24,7 +24,7 @@ DECISION_RULE = "scripts/ci/frame_bench_gate.py (frame); renderide-bench compare
 
 
 def gate_status_to_verdict(status: str) -> str:
-    if status.startswith("FAIL"):
+    if status.startswith("FAIL") or status.startswith("INCONCLUSIVE"):
         return "fail"
     if status == "FLAG":
         return "flag"
@@ -49,6 +49,11 @@ def rows_from_gate(gate: dict) -> list[dict]:
                 "p_value": r.get("p_value") if r.get("p_value") is not None else r.get("confirm_p"),
                 "verdict": gate_status_to_verdict(r.get("status") or "ok"),
                 "gate_status": r.get("status"),
+                "base_drift_pct": r.get("base_drift_pct"),
+                "base_drift_pct_round1": r.get("base_drift_pct_round1"),
+                "base_drift_rounds": r.get("base_drift_rounds"),
+                "confirm_round": r.get("confirm_round"),
+                "deciding_round": r.get("deciding_round"),
             }
         )
     return rows
