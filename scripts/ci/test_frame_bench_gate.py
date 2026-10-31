@@ -1067,6 +1067,35 @@ class PostDriftPolicyTests(unittest.TestCase):
             self.assertIn(reason, line)
 
 
+
+class EchoVerdictTests(unittest.TestCase):
+    def test_first_pass_clear_summary_has_verdict_reason(self) -> None:
+        import contextlib
+        import io
+        import tempfile
+
+        import bench_pr_echo_verdict as echo
+
+        g = {
+            "schema": "frame-bench-gate/1",
+            "mode": "first",
+            "exit_code": 0,
+            "rows": [{"scenario": "s", "status": "ok"}],
+        }
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "gate.json"
+            path.write_text(json.dumps(g) + chr(10), encoding="utf-8")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.assertEqual(echo.main([str(path)]), 0)
+            line = buf.getvalue().strip()
+            self.assertIn("gate_action=pass", line)
+            self.assertIn("verdict_reason=", line)
+            self.assertIn("first pass clear", line)
+            written = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(written["gate_action"], "pass")
+
+
 class CanaryReplayTests(unittest.TestCase):
     """Replay recorded canary gate rows under the new post-drift policy."""
 
