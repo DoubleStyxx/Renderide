@@ -36,13 +36,50 @@ impl LightCookieBinding {
 
 /// Packs a [`ResolvedLight`] for GPU consumption.
 pub fn gpu_light_from_resolved(light: &ResolvedLight) -> GpuLight {
-    gpu_light_from_resolved_with_cookie(light, LightCookieBinding::NONE)
+    gpu_light_from_resolved_with_cookie(light, LightCookieBinding::NONE, false)
+}
+
+/// Color and intensity stored on a packed [`GpuLight`].
+///
+/// When `physically_based` is set, each channel of `color * intensity` is clamped so the
+/// product is non-negative. A channel whose product is negative is stored as zero. A negative
+/// color times a negative intensity stays, because that product is positive. If the negative
+/// intensity then has no negative color left, it is stored as zero. The flag-off path returns
+/// both values unchanged, including negatives, zero, and non-finite values. Nothing is allocated.
+#[must_use]
+pub fn packed_light_radiance(
+    color: [f32; 3],
+    intensity: f32,
+    physically_based: bool,
+) -> ([f32; 3], f32) {
+    if !physically_based {
+        return (color, intensity);
+    }
+    let mut clamped = color;
+    let mut positive_from_negative_color = false;
+    for channel in &mut clamped {
+        let product = *channel * intensity;
+        if product < 0.0 {
+            *channel = 0.0;
+        } else if intensity < 0.0 && *channel < 0.0 {
+            positive_from_negative_color = true;
+        }
+    }
+    if intensity < 0.0 && !positive_from_negative_color {
+        (color, 0.0)
+    } else {
+        (clamped, intensity)
+    }
 }
 
 /// Packs a [`ResolvedLight`] and its assigned cookie atlas binding for GPU consumption.
+///
+/// `physically_based` selects [`packed_light_radiance`]. Range, shadows, and the other
+/// pose fields are copied as-is.
 pub fn gpu_light_from_resolved_with_cookie(
     light: &ResolvedLight,
     cookie: LightCookieBinding,
+    physically_based: bool,
 ) -> GpuLight {
     let (spot_cos_half_angle, spot_angle_scale, spot_tan_half_angle) =
         spot_angle_terms(light.spot_angle);
@@ -51,6 +88,11 @@ pub fn gpu_light_from_resolved_with_cookie(
     } else {
         spot_tan_half_angle
     };
+    let (color, intensity) = packed_light_radiance(
+        [light.color.x, light.color.y, light.color.z],
+        light.intensity,
+        physically_based,
+    );
     GpuLight {
         position: [
             light.world_position.x,
@@ -64,8 +106,8 @@ pub fn gpu_light_from_resolved_with_cookie(
             light.world_direction.z,
         ],
         _pad1: 0.0,
-        color: [light.color.x, light.color.y, light.color.z],
-        intensity: light.intensity,
+        color,
+        intensity,
         range: light.range.max(0.001),
         spot_cos_half_angle,
         light_type: light_type_u32(light.light_type),
@@ -165,7 +207,7 @@ mod layout_tests {
         DIRECTIONAL_COOKIE_SIZE, GpuLight, LIGHT_COOKIE_KIND_DIRECTIONAL_2D,
         LIGHT_COOKIE_KIND_POINT_CUBE, LIGHT_COOKIE_KIND_SPOT_2D, LightCookieBinding, MAX_LIGHTS,
         gpu_light_from_resolved, gpu_light_from_resolved_with_cookie,
-        order_lights_for_clustered_shading_in_place,
+        order_lights_for_clustered_shading_in_place, packed_light_radiance,
     };
 
     #[test]
@@ -281,6 +323,7 @@ mod layout_tests {
                 layer: 7,
                 wrap_bits: 0x9,
             },
+            false,
         );
 
         assert_eq!(gpu.cookie_kind, LIGHT_COOKIE_KIND_SPOT_2D);
@@ -297,6 +340,7 @@ mod layout_tests {
                 layer: 13,
                 wrap_bits: 0,
             },
+            false,
         );
         assert_eq!(point.cookie_kind, LIGHT_COOKIE_KIND_POINT_CUBE);
         assert_eq!(point.cookie_layer, 13);
@@ -311,11 +355,83 @@ mod layout_tests {
                 layer: 5,
                 wrap_bits: 0,
             },
+            false,
         );
 
         assert_eq!(gpu.cookie_kind, LIGHT_COOKIE_KIND_DIRECTIONAL_2D);
         assert_eq!(gpu.cookie_layer, 5);
         assert!((gpu.cookie_right_tan_half_angle[3] - DIRECTIONAL_COOKIE_SIZE).abs() == 0.0);
+    }
+
+    #[test]
+    fn packed_light_radiance_clamps_negative_products_per_channel() {
+        let negative_zero = f32::from_bits(0x8000_0000);
+        let positive = [0.2, 0.4, 0.6];
+
+        let (color, intensity) = packed_light_radiance(positive, -4.0, true);
+        assert_eq!(color, positive);
+        assert_eq!(intensity, 0.0);
+
+        let (color, intensity) = packed_light_radiance(positive, 2.5, true);
+        assert_eq!(color, positive);
+        assert_eq!(intensity, 2.5);
+
+        let (color, intensity) = packed_light_radiance([-0.3, 0.5, 0.0], 1.5, true);
+        assert_eq!(color, [0.0, 0.5, 0.0]);
+        assert_eq!(intensity, 1.5);
+
+        let (color, intensity) = packed_light_radiance([-0.5, -0.25, -1.0], -2.0, true);
+        assert_eq!(color, [-0.5, -0.25, -1.0]);
+        assert_eq!(intensity, -2.0);
+
+        let (color, intensity) = packed_light_radiance([-0.5, 0.25, 0.0], -2.0, true);
+        assert_eq!(color, [-0.5, 0.0, 0.0]);
+        assert_eq!(intensity, -2.0);
+
+        let (color, intensity) = packed_light_radiance(positive, 0.0, true);
+        assert_eq!(color, positive);
+        assert_eq!(intensity.to_bits(), 0.0f32.to_bits());
+
+        let (color, intensity) = packed_light_radiance([negative_zero, 1.0, -1.0], 1.0, true);
+        assert_eq!(color[0].to_bits(), negative_zero.to_bits());
+        assert_eq!(color[1], 1.0);
+        assert_eq!(color[2], 0.0);
+        assert_eq!(intensity, 1.0);
+
+        let (color, intensity) = packed_light_radiance([-0.5, 0.25, 1.0], -4.0, false);
+        assert_eq!(color, [-0.5, 0.25, 1.0]);
+        assert_eq!(intensity, -4.0);
+
+        let (color, intensity) = packed_light_radiance([f32::NAN, 1.0, -1.0], f32::NAN, true);
+        assert!(color[0].is_nan());
+        assert_eq!(color[1], 1.0);
+        assert_eq!(color[2], -1.0);
+        assert!(intensity.is_nan());
+    }
+
+    #[test]
+    fn physically_based_pack_clamps_negative_radiance_and_leaves_every_other_field() {
+        let mut light = resolved_light(LightType::Point);
+        light.color = Vec3::new(0.25, -0.5, 1.25);
+        light.intensity = -1.75;
+        light.range = 6.5;
+        light.world_position = Vec3::new(1.0, 2.0, 3.0);
+
+        let parity = gpu_light_from_resolved_with_cookie(&light, LightCookieBinding::NONE, false);
+        let packed = gpu_light_from_resolved_with_cookie(&light, LightCookieBinding::NONE, true);
+
+        assert_eq!(parity.color, [0.25, -0.5, 1.25]);
+        assert_eq!(parity.intensity, -1.75);
+        assert_eq!(packed.color, [0.0, -0.5, 0.0]);
+        assert_eq!(packed.intensity, -1.75);
+        assert_eq!(packed.position, parity.position);
+        assert_eq!(packed.direction, parity.direction);
+        assert_eq!(packed.range, parity.range);
+        assert_eq!(packed.light_type, parity.light_type);
+        assert_eq!(packed.spot_cos_half_angle, parity.spot_cos_half_angle);
+        assert_eq!(packed.shadow_strength, parity.shadow_strength);
+        assert_eq!(packed.shadow_type, parity.shadow_type);
+        assert_eq!(packed.cookie_kind, parity.cookie_kind);
     }
 
     #[test]

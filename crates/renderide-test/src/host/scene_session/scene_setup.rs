@@ -26,6 +26,7 @@ use super::consts::{asset_ids, shader_variants, sphere_tessellation, torus_geome
 use super::custom_property;
 use super::double_buffer_stack;
 use super::exotic_pair;
+use super::negative_light;
 use super::scene_ids::{
     scene_material_id, scene_material_update_buffer_id, scene_mesh_buffer_id, scene_mesh_id,
     scene_property_request_id, scene_shader_id, scene_texture_buffer_id, scene_texture_id,
@@ -140,6 +141,11 @@ pub(super) fn build_scene_setup(template: SessionTemplate) -> SceneSetup {
         SessionTemplate::ShadowedCasterMove => shadowed_caster::scene_setup(),
         SessionTemplate::ManyShadowedPointLights => shadowed_caster::many_point_lights_setup(),
         SessionTemplate::DoubleBufferNothingOnSkybox => double_buffer_stack::scene_setup(),
+        SessionTemplate::NegativeLightPair {
+            include_negative,
+            negative_color,
+            ..
+        } => negative_light::scene_setup(include_negative, negative_color),
         SessionTemplate::SkinnedAvatars { offscreen } => {
             bench_scenes::skinned_avatars_setup(offscreen)
         }

@@ -111,8 +111,12 @@ pub struct CaseReport {
     /// Optional error message when `passed = false` and `evaluation = None` (e.g. capture
     /// failure, harness error).
     pub error: Option<String>,
-    /// Set when a failure is an expected WARP mismatch. A pass leaves this empty.
-    /// The text is `expected failure (WARP, #212)` and `passed` stays false.
+    /// `behavior` or `adapter_comparison`. Stamped after the renderer log names the adapter.
+    #[serde(default = "default_behavior_gate")]
+    pub gate: String,
+    /// `expected failure (WARP, #212)` when that case is the known WARP mismatch.
+    /// `unexpected pass (WARP, #212)` when WARP passes `pbs_lit` and `passed` stays true.
+    /// Absent on a hard failure and on an ordinary pass.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<String>,
     /// Runner CPU model. Empty only for reports written before this field existed.
@@ -134,6 +138,26 @@ pub struct CaseReport {
     /// `quarantined:#216` while that quarantine applies. Absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Set when a #216 WARP flat wait ended before the full readiness budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub early_exit: Option<EarlyExit>,
+}
+
+/// Why a quarantined WARP flat wait stopped before the full budget.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct EarlyExit {
+    /// Case directory name.
+    pub case: String,
+    /// Consecutive flat readbacks required.
+    pub k: u32,
+    /// Milliseconds from the start of the capture wait.
+    pub elapsed_ms: u64,
+    /// `flat_stable` when K identical settled frames were seen.
+    pub reason: String,
+}
+
+fn default_behavior_gate() -> String {
+    crate::adapter_gate::BEHAVIOR.to_string()
 }
 
 /// Writes a `report.json` describing the comparison outcome.
@@ -143,9 +167,12 @@ pub fn write_report(layout: &CaseOutputLayout, report: &mut CaseReport) -> io::R
     let host = host_info::capture(&layout.actual_png);
     report.cpu_model = host.cpu_model;
     report.adapter = host.adapter;
-    let (stall_ms, warp_budget_used) = read_capture_stats(&layout.actual_png);
+    let (stall_ms, warp_budget_used, early_exit) = read_capture_stats(&layout.actual_png);
     report.longest_submission_stall_ms = stall_ms;
     report.warp_readiness_budget_used = warp_budget_used;
+    if early_exit.is_some() {
+        report.early_exit = early_exit;
+    }
     let json = serde_json::to_string_pretty(report)
         .map_err(|e| io::Error::other(format!("serialize report: {e}")))?;
     std::fs::write(&layout.report_json, json)
@@ -160,6 +187,7 @@ pub fn report_from_evaluation(case: &IntegrationCase, eval: ToleranceEvaluation)
         passed: eval.passed,
         evaluation: Some(eval),
         error: None,
+        gate: default_behavior_gate(),
         result: None,
         cpu_model: String::new(),
         adapter: String::new(),
@@ -167,6 +195,7 @@ pub fn report_from_evaluation(case: &IntegrationCase, eval: ToleranceEvaluation)
         warp_readiness_budget_used: false,
         status: None,
         reason: None,
+        early_exit: None,
     }
 }
 
@@ -180,6 +209,7 @@ pub fn report_from_error(case: &IntegrationCase, message: impl Into<String>) -> 
         passed: false,
         evaluation: None,
         error: Some(message.into()),
+        gate: default_behavior_gate(),
         result: None,
         cpu_model: String::new(),
         adapter: String::new(),
@@ -187,16 +217,17 @@ pub fn report_from_error(case: &IntegrationCase, message: impl Into<String>) -> 
         warp_readiness_budget_used: false,
         status: None,
         reason: None,
+        early_exit: None,
     }
 }
 
-fn read_capture_stats(actual_png: &Path) -> (u64, bool) {
+fn read_capture_stats(actual_png: &Path) -> (u64, bool, Option<EarlyExit>) {
     let path = actual_png.with_file_name(CAPTURE_STATS_FILENAME);
     let Ok(bytes) = std::fs::read(path) else {
-        return (0, false);
+        return (0, false, None);
     };
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-        return (0, false);
+        return (0, false, None);
     };
     let stall_ms = value
         .get("longest_submission_stall_ms")
@@ -206,7 +237,11 @@ fn read_capture_stats(actual_png: &Path) -> (u64, bool) {
         .get("warp_readiness_budget_used")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
-    (stall_ms, warp_budget_used)
+    let early_exit = value
+        .get("early_exit")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok());
+    (stall_ms, warp_budget_used, early_exit)
 }
 
 #[cfg(test)]
@@ -285,5 +320,28 @@ mod tests {
         assert_eq!(json["warp_readiness_budget_used"], true);
         assert_eq!(report.longest_submission_stall_ms, 127_000);
         assert!(report.warp_readiness_budget_used);
+        assert!(json.get("early_exit").is_none());
+    }
+
+    #[test]
+    fn report_records_a_quarantine_early_exit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let case = crate::scene_dsl::cases::unlit_sphere();
+        let layout = CaseOutputLayout::for_case(dir.path(), &case.name);
+        layout.prepare().expect("prepare");
+        let stats = layout.actual_png.with_file_name(CAPTURE_STATS_FILENAME);
+        std::fs::write(
+            &stats,
+            r#"{"longest_submission_stall_ms":1,"warp_readiness_budget_used":true,"early_exit":{"case":"pbs_lit_material_matrix","k":3,"elapsed_ms":12500,"reason":"flat_stable"}}"#,
+        )
+        .expect("sidecar");
+        let mut report = report_from_error(&case, "boom");
+        write_report(&layout, &mut report).expect("write report");
+        let bytes = std::fs::read(&layout.report_json).expect("read report");
+        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("parse json");
+        assert_eq!(json["early_exit"]["case"], "pbs_lit_material_matrix");
+        assert_eq!(json["early_exit"]["k"], 3);
+        assert_eq!(json["early_exit"]["elapsed_ms"], 12_500);
+        assert_eq!(json["early_exit"]["reason"], "flat_stable");
     }
 }

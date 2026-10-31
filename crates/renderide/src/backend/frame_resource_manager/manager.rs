@@ -57,6 +57,11 @@ pub struct FrameResourceManager {
     pub(super) shadow_split_chunk_recorded: AtomicBool,
     /// Whether any packed light set subtracts in at least one signed-radiance channel.
     pub(super) signed_scene_color_required: bool,
+    /// When true, [`super::lights`] clamps a negative packed intensity to zero.
+    ///
+    /// Copied once per light-preparation pass from [`crate::config::RenderingSettings`]. The
+    /// pack loop reads this bool and does not allocate.
+    pub(super) physically_based_lights: bool,
     /// When true, [`crate::passes::MeshDeformPass`] already dispatched for the current graph
     /// submission.
     ///
@@ -106,6 +111,7 @@ impl FrameResourceManager {
             shadow_maps_awaiting_submit: AtomicBool::new(false),
             shadow_split_chunk_recorded: AtomicBool::new(false),
             signed_scene_color_required: false,
+            physically_based_lights: false,
             mesh_deform_dispatched_this_submission: AtomicBool::new(false),
             visible_mesh_deform_keys: Mutex::new(None),
             deform_key_scratch: HashSet::new(),

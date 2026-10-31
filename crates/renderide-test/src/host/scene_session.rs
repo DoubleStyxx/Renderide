@@ -30,6 +30,7 @@ mod custom_property;
 mod double_buffer_stack;
 mod exotic_pair;
 mod gpu_ready;
+mod negative_light;
 mod scene_setup;
 mod shadowed_caster;
 
@@ -122,6 +123,17 @@ pub enum SessionTemplate {
     /// Normal Skybox camera with a higher-depth double-buffered Nothing camera on one texture.
     /// The main view displays that texture.
     DoubleBufferNothingOnSkybox,
+    /// PBS sphere, one positive directional, and an optional negative directional.
+    NegativeLightPair {
+        /// Spawns the renderer with physically based light upload.
+        physically_based: bool,
+        /// Includes the extra light.
+        include_negative: bool,
+        /// The extra light uses a negative color and a positive intensity.
+        ///
+        /// When false, the extra light uses a negative intensity and a positive color.
+        negative_color: bool,
+    },
     /// One-bone skinned avatars; `offscreen` puts 256 of 272 behind the camera.
     SkinnedAvatars {
         /// Whether the bulk of the avatars sit outside the camera frustum.
@@ -223,6 +235,7 @@ fn template_label(template: &SessionTemplate) -> &'static str {
         SessionTemplate::ShadowedCasterMove => "ShadowedCasterMove",
         SessionTemplate::ManyShadowedPointLights => "ManyShadowedPointLights",
         SessionTemplate::DoubleBufferNothingOnSkybox => "DoubleBufferNothingOnSkybox",
+        SessionTemplate::NegativeLightPair { .. } => "NegativeLightPair",
         SessionTemplate::SkinnedAvatars { .. } => "SkinnedAvatars",
     }
 }

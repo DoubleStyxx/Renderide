@@ -79,6 +79,19 @@ pub enum CaseTemplate {
     ShadowedCasterMove,
     /// Double-buffered Nothing camera stacked above a normal Skybox camera on one texture.
     DoubleBufferNothingOnSkybox,
+    /// PBS sphere under a positive directional light and an optional negative directional.
+    ///
+    /// `physically_based` selects the renderer's opt-in radiance clamp. `include_negative`
+    /// is true for the committed goldens and false for the reference render that omits the
+    /// extra light. `negative_color` uses a negative color instead of a negative intensity.
+    NegativeLightPair {
+        /// Spawns the renderer with physically based light upload.
+        physically_based: bool,
+        /// Includes the extra darkening light in the submitted scene.
+        include_negative: bool,
+        /// The extra light has a negative color and a positive intensity.
+        negative_color: bool,
+    },
 }
 
 /// Default golden directory, relative to the workspace root: `crates/renderide-test/goldens/`.
@@ -350,6 +363,68 @@ pub fn double_buffer_nothing_on_skybox() -> IntegrationCase {
     }
 }
 
+/// PBS sphere with a positive directional light and a negative directional, parity mode.
+///
+/// The negative intensity is uploaded unchanged, so that light darkens one side of the sphere.
+pub fn negative_light_parity() -> IntegrationCase {
+    IntegrationCase {
+        name: "negative_light_parity".to_string(),
+        description:
+            "PBS sphere under a positive directional light and a negative directional. Parity mode keeps the negative intensity, so one side of the sphere darkens."
+                .to_string(),
+        golden_path: default_goldens_dir().join("negative_light_parity.png"),
+        resolution: (256, 256),
+        tolerance: visual_tolerance(0.78, 56, 0.22, 18, 24, 0.06),
+        template: CaseTemplate::NegativeLightPair {
+            physically_based: false,
+            include_negative: true,
+            negative_color: false,
+        },
+    }
+}
+
+/// Same sphere and lights as [`negative_light_parity`], with physically based light upload.
+///
+/// Each channel of color times intensity is clamped to be non-negative. The capture must
+/// match the same scene rendered without the negative light, within this case's tolerance.
+pub fn negative_light_physically_based() -> IntegrationCase {
+    IntegrationCase {
+        name: "negative_light_physically_based".to_string(),
+        description:
+            "PBS sphere under a positive directional light and a negative directional. Physically based upload clamps each channel of color times intensity to be non-negative. The capture must match the same scene without that light."
+                .to_string(),
+        golden_path: default_goldens_dir().join("negative_light_physically_based.png"),
+        resolution: (256, 256),
+        tolerance: visual_tolerance(0.78, 56, 0.22, 18, 24, 0.06),
+        template: CaseTemplate::NegativeLightPair {
+            physically_based: true,
+            include_negative: true,
+            negative_color: false,
+        },
+    }
+}
+
+/// Same sphere as [`negative_light_physically_based`], but the extra light has a negative color.
+///
+/// Physically based upload clamps that color to zero per channel. The capture must match the
+/// same scene rendered without the extra light, within this case's tolerance.
+pub fn negative_color_physically_based() -> IntegrationCase {
+    IntegrationCase {
+        name: "negative_color_physically_based".to_string(),
+        description:
+            "PBS sphere under a positive directional light and a directional with a negative color. Physically based upload clamps each negative radiance channel to zero. The capture must match the same scene without that light."
+                .to_string(),
+        golden_path: default_goldens_dir().join("negative_color_physically_based.png"),
+        resolution: (256, 256),
+        tolerance: visual_tolerance(0.78, 56, 0.22, 18, 24, 0.06),
+        template: CaseTemplate::NegativeLightPair {
+            physically_based: true,
+            include_negative: true,
+            negative_color: true,
+        },
+    }
+}
+
 /// Optional GLB fixture case. The registry includes it only when the fixture file is present,
 /// so the suite remains useful before a commit-safe model has been added.
 pub fn gltf_textured_static_mesh(path: PathBuf) -> IntegrationCase {
@@ -371,6 +446,9 @@ pub fn registry() -> Vec<IntegrationCase> {
         torus_unlit_perlin(),
         multi_primitive_unlit_grid(),
         pbs_lit_material_matrix(),
+        negative_light_parity(),
+        negative_light_physically_based(),
+        negative_color_physically_based(),
         alpha_cutout_masked_quads(),
         custom_shader_property_update(),
         exotic_shader_pair(),
@@ -457,6 +535,70 @@ mod tests {
         assert!(lookup("multi_primitive_unlit_grid").is_some());
         assert!(lookup("pbs_lit_material_matrix").is_some());
         assert!(lookup("alpha_cutout_masked_quads").is_some());
+    }
+
+    #[test]
+    fn negative_light_cases_are_registered() {
+        let parity = lookup("negative_light_parity").expect("parity case");
+        let physically_based = lookup("negative_light_physically_based").expect("pb case");
+        let negative_color = lookup("negative_color_physically_based").expect("negative color");
+        assert!(matches!(
+            parity.template,
+            CaseTemplate::NegativeLightPair {
+                physically_based: false,
+                include_negative: true,
+                negative_color: false,
+            }
+        ));
+        assert!(matches!(
+            physically_based.template,
+            CaseTemplate::NegativeLightPair {
+                physically_based: true,
+                include_negative: true,
+                negative_color: false,
+            }
+        ));
+        assert!(matches!(
+            negative_color.template,
+            CaseTemplate::NegativeLightPair {
+                physically_based: true,
+                include_negative: true,
+                negative_color: true,
+            }
+        ));
+        assert_eq!(
+            negative_color.tolerance.ssim_min,
+            physically_based.tolerance.ssim_min
+        );
+        assert_eq!(parity.resolution, physically_based.resolution);
+        assert_eq!(
+            parity.tolerance.ssim_min,
+            physically_based.tolerance.ssim_min
+        );
+    }
+
+    #[test]
+    fn physically_based_goldens_match_the_omitted_light_reference() {
+        let reference = decoded_golden("negative_light_positive_only.png");
+        assert_eq!(
+            decoded_golden("negative_light_physically_based.png"),
+            reference,
+            "negative intensity golden differs from the omitted-light reference"
+        );
+        assert_eq!(
+            decoded_golden("negative_color_physically_based.png"),
+            reference,
+            "negative color golden differs from the omitted-light reference"
+        );
+    }
+
+    fn decoded_golden(name: &str) -> Vec<u8> {
+        let path = default_goldens_dir().join(name);
+        let image = image::open(&path)
+            .unwrap_or_else(|err| panic!("open {}: {err}", path.display()))
+            .to_rgba8();
+        assert_eq!(image.dimensions(), (256, 256), "{name}");
+        image.into_raw()
     }
 
     #[test]

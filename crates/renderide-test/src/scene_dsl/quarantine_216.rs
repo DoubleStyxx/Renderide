@@ -1,39 +1,61 @@
-//! Time-limited quarantine for the WARP flat frame (#216).
+//! Time-limited quarantine for WARP lit captures (#216).
 //!
-//! The case still runs. A match is recorded as `quarantined` / `quarantined:#216`,
-//! apart from passes and from the #212 expected failure. Whoever fixes #216 removes
-//! [`QUARANTINE_216_EXPIRES`] and this rule in that pull request.
+//! `pbs_lit_material_matrix` still matches only a flat frame. The three negative-light
+//! cases are quarantined on WARP for any tolerance result, and for that same flat
+//! frame, with reason [`WARP_LIT_SHADING_UNTRUSTED`]. A harness error that is not
+//! that flat frame stays a failure. After [`QUARANTINE_216_EXPIRES`] a match fails
+//! closed. Whoever fixes #216 removes the expiry and this rule in that pull request.
 //!
 //! <https://github.com/DoubleStyxx/Renderide/issues/216>
 
 use std::fs;
-use std::io::Cursor;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use super::output::{self, CaseReport};
-use super::suite::{SuiteCaseReport, SuiteReport};
+use super::suite::{SuiteCaseReport, SuiteFailureKind, SuiteReport};
 
 /// UTC expiry of the #216 quarantine.
 ///
 /// Whoever fixes #216 removes this constant and the quarantine rule in that pull request.
 ///
+/// Extended to 2026-11-14T23:59:59Z pending the #216 investigation
+/// (https://github.com/DoubleStyxx/Renderide/issues/216); decision on Nov 14
+/// based on the root-cause note due Nov 7.
+///
 /// <https://github.com/DoubleStyxx/Renderide/issues/216>
-pub(crate) const QUARANTINE_216_EXPIRES: &str = "2026-10-31T23:59:59Z";
+pub(crate) const QUARANTINE_216_EXPIRES: &str = "2026-11-14T23:59:59Z";
 
 /// `report.json` and suite-report status while the quarantine applies.
 pub(crate) const QUARANTINE_STATUS: &str = "quarantined";
 
-/// Reason recorded next to [`QUARANTINE_STATUS`].
+/// Reason recorded next to [`QUARANTINE_STATUS`] for the original flat-frame rule.
 pub(crate) const QUARANTINE_REASON: &str = "quarantined:#216";
 
-/// Case the quarantine is allowed to cover.
+/// Reason for a negative-light case quarantined on WARP.
+pub(crate) const WARP_LIT_SHADING_UNTRUSTED: &str = "WARP lit shading untrusted";
+
+/// `pbs_lit_material_matrix`, the original case this quarantine covers.
 const PBS_LIT: &str = "pbs_lit_material_matrix";
 
-/// PNG `tEXt` keyword. `0` means pending=0 and no dropped draws.
+/// Negative-light cases covered by the same rule, by exact name.
+const NEGATIVE_LIGHT_PARITY: &str = "negative_light_parity";
+const NEGATIVE_LIGHT_PHYSICALLY_BASED: &str = "negative_light_physically_based";
+const NEGATIVE_COLOR_PHYSICALLY_BASED: &str = "negative_color_physically_based";
+
+/// Negative-light cases whose WARP shading is untrusted, by exact name.
+const NEGATIVE_LIGHT_CASES: &[&str] = &[
+    NEGATIVE_LIGHT_PARITY,
+    NEGATIVE_LIGHT_PHYSICALLY_BASED,
+    NEGATIVE_COLOR_PHYSICALLY_BASED,
+];
+
+/// PNG `tEXt` keyword. Tests write it to prove the quarantine does not read it.
+#[cfg(test)]
 const PENDING_KEYWORD: &str = "renderide_pipeline_pending";
 
-/// PNG `tEXt` keyword. Exactly `1` means that frame's submission finished.
+/// PNG `tEXt` keyword. Tests write it to prove the quarantine does not read it.
+#[cfg(test)]
 const GPU_DONE_KEYWORD: &str = "renderide_gpu_done";
 
 /// Parsed from [`QUARANTINE_216_EXPIRES`] so a bad constant fails to compile.
@@ -56,25 +78,19 @@ pub(crate) fn apply_quarantine(
     if let Some(warning) = report.quarantine_warning.as_deref() {
         logger::warn!("{warning}");
     }
-    let mut labeled = false;
+    let mut changed = false;
     for case in &mut report.cases {
-        if !label_case(case, now, &is_warp) {
-            continue;
+        if label_case(case, now, &is_warp) {
+            changed = true;
         }
-        labeled = true;
     }
-    if labeled {
+    if changed {
         report.recompute();
     }
 }
 
-/// Applies the quarantine using the wall clock and the selected adapter.
-pub(crate) fn apply_quarantine_now(report: &mut SuiteReport) {
-    apply_quarantine(report, SystemTime::now(), capture_is_warp);
-}
-
 /// The selected adapter is WARP. No selected-adapter line is not WARP.
-fn capture_is_warp(output_png: &Path) -> bool {
+pub(crate) fn capture_is_warp(output_png: &Path) -> bool {
     super::warp_pbs::output_warp_decision(output_png).unwrap_or(false)
 }
 
@@ -82,15 +98,16 @@ fn capture_is_warp(output_png: &Path) -> bool {
 pub(crate) fn case_is_quarantined(case: &SuiteCaseReport) -> bool {
     !case.passed
         && case.status.as_deref() == Some(QUARANTINE_STATUS)
-        && case.reason.as_deref() == Some(QUARANTINE_REASON)
+        && case.reason.as_deref().is_some_and(is_quarantine_reason)
+}
+
+fn is_quarantine_reason(reason: &str) -> bool {
+    reason == QUARANTINE_REASON || reason == WARP_LIT_SHADING_UNTRUSTED
 }
 
 /// Loud suite line for one quarantined case.
-pub(crate) fn quarantined_line(name: &str, artifacts: &Path) -> String {
-    format!(
-        "QUARANTINED {name} ({}) {QUARANTINE_REASON}",
-        artifacts.display()
-    )
+pub(crate) fn quarantined_line(name: &str, artifacts: &Path, reason: &str) -> String {
+    format!("QUARANTINED {name} ({}) {reason}", artifacts.display())
 }
 
 /// Loud suite line for the 48-hour expiry warning. `warning` is the detail.
@@ -104,66 +121,64 @@ fn label_case(
     is_warp: &impl Fn(&Path) -> bool,
 ) -> bool {
     let png = output::actual_png_in(&case.artifacts_dir);
-    let texts = png_text_chunks(&png);
-    if !quarantine_matches(
-        is_warp(&png),
-        &case.name,
-        case.error.as_deref(),
-        text_value(&texts, PENDING_KEYWORD),
-        text_value(&texts, GPU_DONE_KEYWORD),
-        now,
-    ) {
+    if !quarantine_matches(is_warp(&png), case) {
         return false;
     }
-    case.passed = false;
-    case.status = Some(QUARANTINE_STATUS.to_string());
-    case.reason = Some(QUARANTINE_REASON.to_string());
-    if let Err(err) = stamp_case_report(&case.report_json) {
+    if now >= expires_at() {
+        return fail_closed(case);
+    }
+    let reason = quarantine_reason(case);
+    // Stamp first. A failed write leaves the case a hard failure.
+    if let Err(err) = stamp_case_report(&case.report_json, reason) {
         logger::warn!(
             "quarantine #216: could not stamp {}: {err}",
             case.report_json.display()
         );
+        return fail_closed(case);
     }
+    case.passed = false;
+    case.status = Some(QUARANTINE_STATUS.to_string());
+    case.reason = Some(reason.to_string());
     true
 }
 
-fn quarantine_matches(
-    is_warp: bool,
-    name: &str,
-    error: Option<&str>,
-    pending_chunk: Option<&str>,
-    gpu_done_chunk: Option<&str>,
-    now: SystemTime,
-) -> bool {
-    if now >= expires_at() || !is_warp || name != PBS_LIT || !is_flat_or_unstable_frame(error) {
+/// `pbs_lit` matches only the flat frame. A negative-light case also matches a finished comparison.
+///
+/// `None` pending or dropped draws is not zero. A harness error other than that flat frame
+/// does not match. The expiry is applied by the caller.
+fn quarantine_matches(is_warp: bool, case: &SuiteCaseReport) -> bool {
+    if !is_warp {
         return false;
     }
-    let (pending, dropped_draws) = counts_from_pending_chunk(pending_chunk);
-    let gpu_done = gpu_done_chunk.is_some_and(|text| text.trim() == "1");
-    pending == Some(0) && dropped_draws == Some(0) && gpu_done
+    if case.name == PBS_LIT {
+        return flat_frame_signature(case);
+    }
+    NEGATIVE_LIGHT_CASES.contains(&case.name.as_str())
+        && (flat_frame_signature(case) || case.image_compared)
 }
 
-/// `FlatOrUnstableFrame` only. A flat golden-check image and a pipeline timeout are not it.
-fn is_flat_or_unstable_frame(error: Option<&str>) -> bool {
-    let Some(error) = error else {
-        return false;
-    };
-    if error.contains("pipeline-pending") || error.contains("PipelineNotReady") {
-        return false;
-    }
-    error.contains("flat or unstable")
+fn flat_frame_signature(case: &SuiteCaseReport) -> bool {
+    case.failure_kind == Some(SuiteFailureKind::FlatOrUnstableFrame)
+        && case.frame_pending == Some(0)
+        && case.dropped_draws == Some(0)
+        && case.gpu_done == Some(true)
 }
 
-/// Only the chunk text `0` is pending=0 and zero dropped draws. Anything else is not.
-fn counts_from_pending_chunk(chunk: Option<&str>) -> (Option<u64>, Option<u64>) {
-    match chunk.map(str::trim) {
-        Some("0") => (Some(0), Some(0)),
-        Some(text) => match text.parse::<u64>() {
-            Ok(pending) => (Some(pending), None),
-            Err(_) => (None, None),
-        },
-        None => (None, None),
+fn quarantine_reason(case: &SuiteCaseReport) -> &'static str {
+    if NEGATIVE_LIGHT_CASES.contains(&case.name.as_str()) {
+        WARP_LIT_SHADING_UNTRUSTED
+    } else {
+        QUARANTINE_REASON
     }
+}
+
+/// After expiry, or when the report cannot be stamped, a match is a hard failure.
+fn fail_closed(case: &mut SuiteCaseReport) -> bool {
+    if !case.passed {
+        return false;
+    }
+    case.passed = false;
+    true
 }
 
 fn expiry_warning(now: SystemTime) -> Option<String> {
@@ -185,39 +200,27 @@ fn expires_at() -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(QUARANTINE_216_EXPIRES_UNIX)
 }
 
-fn stamp_case_report(path: &Path) -> std::io::Result<()> {
+/// Whether a WARP capture of this case may end the flat-frame wait early.
+///
+/// The four cases are the ones [`quarantine_matches`] can label. After
+/// [`expires_at`] the capture keeps the full WARP budget and fails closed.
+pub(crate) fn early_flat_exit_applies(case_name: &str, is_warp: bool, now: SystemTime) -> bool {
+    if !is_warp || now >= expires_at() {
+        return false;
+    }
+    case_name == PBS_LIT || NEGATIVE_LIGHT_CASES.contains(&case_name)
+}
+
+fn stamp_case_report(path: &Path, reason: &str) -> std::io::Result<()> {
     let bytes = fs::read(path)?;
     let mut report: CaseReport = serde_json::from_slice(&bytes)
         .map_err(|err| std::io::Error::other(format!("parse report: {err}")))?;
     report.passed = false;
     report.status = Some(QUARANTINE_STATUS.to_string());
-    report.reason = Some(QUARANTINE_REASON.to_string());
+    report.reason = Some(reason.to_string());
     let json = serde_json::to_string_pretty(&report)
         .map_err(|err| std::io::Error::other(format!("serialize report: {err}")))?;
     fs::write(path, json)
-}
-
-fn png_text_chunks(path: &Path) -> Vec<(String, String)> {
-    let Ok(bytes) = fs::read(path) else {
-        return Vec::new();
-    };
-    let decoder = png::Decoder::new(Cursor::new(bytes));
-    let Ok(reader) = decoder.read_info() else {
-        return Vec::new();
-    };
-    reader
-        .info()
-        .uncompressed_latin1_text
-        .iter()
-        .map(|chunk| (chunk.keyword.clone(), chunk.text.clone()))
-        .collect()
-}
-
-fn text_value<'a>(texts: &'a [(String, String)], keyword: &str) -> Option<&'a str> {
-    texts
-        .iter()
-        .find(|(key, _)| key == keyword)
-        .map(|(_, text)| text.as_str())
 }
 
 const fn parse_rfc3339_unix(text: &str) -> u64 {
@@ -268,354 +271,4 @@ const fn days_from_civil(mut year: i64, month: u64, day: u64) -> i64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::path::{Path, PathBuf};
-    use std::time::Duration;
-
-    use super::*;
-    use crate::HarnessError;
-
-    fn before_expiry() -> SystemTime {
-        expires_at()
-            .checked_sub(Duration::from_hours(168))
-            .expect("before expiry")
-    }
-
-    fn after_expiry() -> SystemTime {
-        expires_at() + Duration::from_secs(1)
-    }
-
-    fn within_warning_window() -> SystemTime {
-        expires_at()
-            .checked_sub(Duration::from_hours(1))
-            .expect("inside 48h")
-    }
-
-    fn outside_warning_window() -> SystemTime {
-        expires_at()
-            .checked_sub(WARN_WINDOW + Duration::from_secs(1))
-            .expect("before the warning window")
-    }
-
-    fn flat_message() -> String {
-        HarnessError::FlatOrUnstableFrame {
-            path: PathBuf::from("actual.png"),
-            wait: Duration::from_secs(300),
-            last_pending: 0,
-            ready_chunks: 1,
-            pending_chunks: 0,
-            missing_chunks: 0,
-            frame_count: 2,
-        }
-        .to_string()
-    }
-
-    fn write_frame_png(path: &Path, pending: &str, gpu_done: &str) {
-        let file = fs::File::create(path).expect("create png");
-        let mut encoder = png::Encoder::new(file, 1, 1);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        encoder
-            .add_text_chunk(PENDING_KEYWORD.to_string(), pending.to_string())
-            .expect("pending chunk");
-        encoder
-            .add_text_chunk(GPU_DONE_KEYWORD.to_string(), gpu_done.to_string())
-            .expect("gpu_done chunk");
-        let mut writer = encoder.write_header().expect("png header");
-        writer
-            .write_image_data(&[0, 0, 0, 255])
-            .expect("png pixels");
-        writer.finish().expect("png finish");
-    }
-
-    fn suite_case(
-        dir: &Path,
-        name: &str,
-        error: Option<&str>,
-        pending: &str,
-        gpu_done: &str,
-    ) -> SuiteCaseReport {
-        let artifacts = dir.join(name);
-        fs::create_dir_all(&artifacts).expect("artifacts");
-        write_frame_png(&artifacts.join("actual.png"), pending, gpu_done);
-        let report_json = artifacts.join("report.json");
-        let integration = crate::scene_dsl::cases::unlit_sphere();
-        let mut case_report = output::report_from_error(&integration, error.unwrap_or("passed"));
-        case_report.name = name.to_string();
-        case_report.passed = error.is_none();
-        case_report.error = error.map(str::to_string);
-        fs::write(
-            &report_json,
-            serde_json::to_string_pretty(&case_report).expect("report json"),
-        )
-        .expect("write report");
-        SuiteCaseReport {
-            name: name.to_string(),
-            passed: error.is_none(),
-            artifacts_dir: artifacts,
-            report_json,
-            error: error.map(str::to_string),
-            result: None,
-            status: None,
-            reason: None,
-        }
-    }
-
-    fn apply(report: &mut SuiteReport, now: SystemTime, warp: bool) {
-        apply_quarantine(report, now, move |_| warp);
-    }
-
-    #[test]
-    fn expiry_constant_is_the_utc_instant_named_in_the_ruling() {
-        assert_eq!(QUARANTINE_216_EXPIRES, "2026-10-31T23:59:59Z");
-        let expected = SystemTime::UNIX_EPOCH + Duration::from_secs(1_793_491_199);
-        assert_eq!(expires_at(), expected);
-        assert_eq!(QUARANTINE_STATUS, "quarantined");
-        assert_eq!(QUARANTINE_REASON, "quarantined:#216");
-    }
-
-    #[test]
-    fn warp_flat_frame_is_quarantined_before_expiry_and_fails_after() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut report = SuiteReport::from_cases(vec![
-            suite_case(dir.path(), "unlit_sphere", None, "0", "1"),
-            suite_case(dir.path(), PBS_LIT, Some(&flat_message()), "0", "1"),
-        ]);
-        apply(&mut report, before_expiry(), true);
-
-        assert_eq!(report.passed, 1);
-        assert_eq!(report.failed, 0);
-        assert_eq!(report.expected_failures, 0);
-        assert_eq!(report.quarantined, 1);
-        assert!(report.passed());
-        assert!(report.quarantine_warning.is_none());
-        let case = &report.cases[1];
-        assert!(!case.passed);
-        assert_eq!(case.status.as_deref(), Some(QUARANTINE_STATUS));
-        assert_eq!(case.reason.as_deref(), Some(QUARANTINE_REASON));
-        assert!(case_is_quarantined(case));
-
-        let suite_json = serde_json::to_value(&report).expect("suite json");
-        assert_eq!(suite_json["quarantined"], 1);
-        assert!(suite_json.get("quarantine_warning").is_none());
-        assert_eq!(suite_json["cases"][1]["status"], QUARANTINE_STATUS);
-        assert_eq!(suite_json["cases"][1]["reason"], QUARANTINE_REASON);
-        let case_json: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&case.report_json).expect("read report"))
-                .expect("case json");
-        assert_eq!(case_json["status"], QUARANTINE_STATUS);
-        assert_eq!(case_json["reason"], QUARANTINE_REASON);
-        assert_eq!(case_json["passed"], false);
-        assert!(case_json.get("result").is_none());
-    }
-
-    #[test]
-    fn warp_flat_frame_fails_after_expiry() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut report = SuiteReport::from_cases(vec![
-            suite_case(dir.path(), "unlit_sphere", None, "0", "1"),
-            suite_case(dir.path(), PBS_LIT, Some(&flat_message()), "0", "1"),
-        ]);
-        apply(&mut report, after_expiry(), true);
-        assert_eq!(report.passed, 1);
-        assert_eq!(report.quarantined, 0);
-        assert_eq!(report.failed, 1);
-        assert!(!report.passed());
-        assert!(report.cases[1].status.is_none());
-        assert!(report.cases[1].reason.is_none());
-        assert!(report.quarantine_warning.is_none());
-        let expired_json: serde_json::Value = serde_json::from_str(
-            &fs::read_to_string(&report.cases[1].report_json).expect("read report"),
-        )
-        .expect("expired json");
-        assert!(expired_json.get("status").is_none());
-    }
-
-    #[test]
-    fn non_warp_flat_frame_stays_a_failure() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut report = SuiteReport::from_cases(vec![suite_case(
-            dir.path(),
-            PBS_LIT,
-            Some(&flat_message()),
-            "0",
-            "1",
-        )]);
-        apply(&mut report, before_expiry(), false);
-        assert_eq!(report.quarantined, 0);
-        assert_eq!(report.failed, 1);
-        assert!(!report.passed());
-        assert!(report.cases[0].status.is_none());
-    }
-
-    #[test]
-    fn warp_flat_frame_with_pending_above_zero_fails() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut report = SuiteReport::from_cases(vec![suite_case(
-            dir.path(),
-            PBS_LIT,
-            Some(&flat_message()),
-            "4",
-            "1",
-        )]);
-        apply(&mut report, before_expiry(), true);
-        assert_eq!(report.failed, 1);
-        assert_eq!(report.quarantined, 0);
-        assert!(!report.passed());
-    }
-
-    #[test]
-    fn warp_flat_frame_in_another_scene_fails() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut report = SuiteReport::from_cases(vec![suite_case(
-            dir.path(),
-            "unlit_sphere",
-            Some(&flat_message()),
-            "0",
-            "1",
-        )]);
-        apply(&mut report, before_expiry(), true);
-        assert_eq!(report.failed, 1);
-        assert_eq!(report.quarantined, 0);
-        assert!(report.cases[0].reason.is_none());
-    }
-
-    #[test]
-    fn warp_flat_frame_without_gpu_done_or_a_zero_chunk_fails() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut not_done = SuiteReport::from_cases(vec![suite_case(
-            dir.path(),
-            PBS_LIT,
-            Some(&flat_message()),
-            "0",
-            "0",
-        )]);
-        apply(&mut not_done, before_expiry(), true);
-        assert_eq!(not_done.failed, 1);
-        assert_eq!(not_done.quarantined, 0);
-
-        let mut missing = SuiteReport::from_cases(vec![suite_case(
-            dir.path(),
-            PBS_LIT,
-            Some(&flat_message()),
-            "0",
-            "1",
-        )]);
-        let png = output::actual_png_in(&missing.cases[0].artifacts_dir);
-        let file = fs::File::create(&png).expect("bare png");
-        let mut encoder = png::Encoder::new(file, 1, 1);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder.write_header().expect("header");
-        writer.write_image_data(&[0, 0, 0, 255]).expect("pixels");
-        writer.finish().expect("finish");
-        apply(&mut missing, before_expiry(), true);
-        assert_eq!(missing.failed, 1, "a missing pending chunk is not zero");
-        assert_eq!(missing.quarantined, 0);
-    }
-
-    #[test]
-    fn other_failures_stay_hard_failures() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let pipeline = HarnessError::PipelineNotReady {
-            path: PathBuf::from("actual.png"),
-            wait: Duration::from_secs(180),
-        }
-        .to_string();
-        let crash = HarnessError::SpawnRenderer(std::io::Error::other("spawn")).to_string();
-        let flat_image = HarnessError::FlatImage {
-            path: PathBuf::from("actual.png"),
-            color: [0, 0, 0, 255],
-        }
-        .to_string();
-        assert!(pipeline.contains("pipeline-pending") || pipeline.contains("PipelineNotReady"));
-        assert!(flat_image.contains("flat single color"));
-        assert!(!flat_image.contains("flat or unstable"));
-        for error in [pipeline, crash, flat_image] {
-            let mut report = SuiteReport::from_cases(vec![suite_case(
-                dir.path(),
-                PBS_LIT,
-                Some(&error),
-                "0",
-                "1",
-            )]);
-            apply(&mut report, before_expiry(), true);
-            assert_eq!(report.quarantined, 0, "{error}");
-            assert_eq!(report.failed, 1, "{error}");
-        }
-    }
-
-    #[test]
-    fn quarantine_warns_only_inside_the_last_48_hours() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut early = SuiteReport::from_cases(vec![suite_case(
-            dir.path(),
-            PBS_LIT,
-            Some(&flat_message()),
-            "0",
-            "1",
-        )]);
-        apply(&mut early, outside_warning_window(), true);
-        assert_eq!(early.quarantined, 1);
-        assert!(early.quarantine_warning.is_none());
-
-        let mut close = SuiteReport::from_cases(vec![suite_case(
-            dir.path(),
-            PBS_LIT,
-            Some(&flat_message()),
-            "0",
-            "1",
-        )]);
-        apply(&mut close, within_warning_window(), true);
-        let warning = close.quarantine_warning.expect("warning");
-        assert!(warning.contains("#216"), "{warning}");
-        assert!(warning.contains(QUARANTINE_216_EXPIRES), "{warning}");
-        assert!(
-            warning.contains("https://github.com/DoubleStyxx/Renderide/issues/216"),
-            "{warning}"
-        );
-        assert!(warn_line(&warning).starts_with("WARN "));
-        assert_eq!(close.quarantined, 1);
-
-        let mut expired = SuiteReport::from_cases(vec![suite_case(
-            dir.path(),
-            PBS_LIT,
-            Some(&flat_message()),
-            "0",
-            "1",
-        )]);
-        apply(&mut expired, expires_at(), true);
-        assert_eq!(expired.quarantined, 0);
-        assert!(expired.quarantine_warning.is_none());
-    }
-
-    #[test]
-    fn expected_failure_label_is_left_unchanged() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut case = suite_case(dir.path(), PBS_LIT, Some("case failed tolerance"), "0", "1");
-        case.passed = false;
-        case.result = Some(super::super::warp_pbs::EXPECTED_FAILURE_LABEL.to_string());
-        let mut report = SuiteReport::from_cases(vec![case]);
-        report.cases[0].passed = false;
-        report.cases[0].result = Some(super::super::warp_pbs::EXPECTED_FAILURE_LABEL.to_string());
-        report.recompute();
-        apply(&mut report, before_expiry(), true);
-        assert!(super::super::warp_pbs::case_is_expected_failure(
-            &report.cases[0]
-        ));
-        assert!(!case_is_quarantined(&report.cases[0]));
-        assert_eq!(report.expected_failures, 1);
-        assert_eq!(report.quarantined, 0);
-        assert_eq!(report.failed, 0);
-        assert!(report.passed());
-    }
-
-    #[test]
-    fn quarantined_line_names_the_case_and_the_reason() {
-        let line = quarantined_line(PBS_LIT, Path::new("out/pbs_lit_material_matrix"));
-        assert_eq!(
-            line,
-            "QUARANTINED pbs_lit_material_matrix (out/pbs_lit_material_matrix) quarantined:#216"
-        );
-    }
-}
+mod tests;

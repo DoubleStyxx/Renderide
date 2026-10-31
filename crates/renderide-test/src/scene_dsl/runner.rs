@@ -125,6 +125,7 @@ pub fn run_integration_case(
     })?;
 
     let prepared_template = prepare_template(&case.template, &layout)?;
+    let physically_based = template_requests_physically_based(&prepared_template.session_template);
 
     let harness_cfg = HostHarnessConfig {
         renderer_path: runner.renderer_path.clone(),
@@ -134,6 +135,7 @@ pub fn run_integration_case(
         interval_ms: runner.interval_ms,
         timeout: runner.timeout,
         verbose_renderer: runner.verbose_renderer,
+        physically_based,
         template: prepared_template.session_template,
     };
 
@@ -145,6 +147,16 @@ pub fn run_integration_case(
             Err(err)
         }
     }
+}
+
+fn template_requests_physically_based(template: &SessionTemplate) -> bool {
+    matches!(
+        template,
+        SessionTemplate::NegativeLightPair {
+            physically_based: true,
+            ..
+        }
+    )
 }
 
 fn drive_template(cfg: HostHarnessConfig) -> Result<(), HarnessError> {
@@ -237,31 +249,47 @@ fn prepare_template(
         CaseTemplate::DoubleBufferNothingOnSkybox => Ok(PreparedTemplate {
             session_template: SessionTemplate::DoubleBufferNothingOnSkybox,
         }),
-        CaseTemplate::GltfTexturedStaticMesh { path } => {
-            let imported = load_static_textured_mesh(path)?;
-            let texture_size = imported.texture_size;
-            let texture_rgba = imported.texture_rgba;
-            let texture_preview =
-                image::RgbaImage::from_raw(texture_size.0, texture_size.1, texture_rgba.clone())
-                    .ok_or_else(|| {
-                        HarnessError::QueueOptions(format!(
-                            "GLB texture {}x{} did not match RGBA byte length",
-                            texture_size.0, texture_size.1
-                        ))
-                    })?;
-            save_rgba(
-                &texture_preview,
-                &layout.root.join("gltf_base_color_texture.png"),
-            )?;
-            Ok(PreparedTemplate {
-                session_template: SessionTemplate::GltfTexturedStaticMesh {
-                    mesh: imported.mesh,
-                    texture_rgba,
-                    texture_size,
-                },
-            })
-        }
+        CaseTemplate::NegativeLightPair {
+            physically_based,
+            include_negative,
+            negative_color,
+        } => Ok(PreparedTemplate {
+            session_template: SessionTemplate::NegativeLightPair {
+                physically_based: *physically_based,
+                include_negative: *include_negative,
+                negative_color: *negative_color,
+            },
+        }),
+        CaseTemplate::GltfTexturedStaticMesh { path } => gltf_prepared_template(path, layout),
     }
+}
+
+fn gltf_prepared_template(
+    path: &std::path::Path,
+    layout: &CaseOutputLayout,
+) -> Result<PreparedTemplate, HarnessError> {
+    let imported = load_static_textured_mesh(path)?;
+    let texture_size = imported.texture_size;
+    let texture_rgba = imported.texture_rgba;
+    let texture_preview =
+        image::RgbaImage::from_raw(texture_size.0, texture_size.1, texture_rgba.clone())
+            .ok_or_else(|| {
+                HarnessError::QueueOptions(format!(
+                    "GLB texture {}x{} did not match RGBA byte length",
+                    texture_size.0, texture_size.1
+                ))
+            })?;
+    save_rgba(
+        &texture_preview,
+        &layout.root.join("gltf_base_color_texture.png"),
+    )?;
+    Ok(PreparedTemplate {
+        session_template: SessionTemplate::GltfTexturedStaticMesh {
+            mesh: imported.mesh,
+            texture_rgba,
+            texture_size,
+        },
+    })
 }
 
 fn evaluate_and_finalize(

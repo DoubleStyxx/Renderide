@@ -163,6 +163,14 @@ impl RenderBackend {
     where
         I: IntoIterator<Item = FrameLightViewDesc>,
     {
+        let physically_based = self
+            .renderer_settings
+            .as_ref()
+            .and_then(|handle| handle.read().ok())
+            .is_some_and(|settings| settings.rendering.physically_based);
+        self.frame_services
+            .frame_resources
+            .set_physically_based_lights(physically_based);
         self.frame_services
             .frame_resources
             .prepare_lights_for_views(scene, views, Some(&self.asset_transfers));

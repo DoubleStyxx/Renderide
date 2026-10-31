@@ -20,6 +20,11 @@ pub struct SceneSessionConfig {
     pub timeout: Duration,
     /// When `true`, inherit the renderer's stdout/stderr.
     pub verbose_renderer: bool,
+    /// When `true`, the spawned renderer clamps negative light intensity to zero.
+    ///
+    /// Passed as `RENDERIDE_RENDERING__PHYSICALLY_BASED`. The harness always sets the
+    /// variable so a parent-process value cannot flip the suite off the case's mode.
+    pub physically_based: bool,
 }
 
 /// Result of a successful scene-session run.
