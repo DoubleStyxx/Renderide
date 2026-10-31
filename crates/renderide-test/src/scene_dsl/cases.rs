@@ -57,6 +57,8 @@ pub enum CaseTemplate {
     PbsLitMaterialMatrix,
     /// One premultiplied PBS metallic sphere (`_ALPHAPREMULTIPLY_ON`, blend One/OneMinusSrcAlpha, queue 3000).
     PbsMetallicPremultiply,
+    /// One premultiplied PBS specular sphere (`_ALPHAPREMULTIPLY_ON`, blend One/OneMinusSrcAlpha, queue 3000).
+    PbsSpecularPremultiply,
     /// Overlapping alpha-test quads using a generated binary mask texture and scalar cutoff.
     AlphaCutoutMaskedQuads,
     /// Optional textured static mesh imported from a GLB fixture.
@@ -197,6 +199,21 @@ pub fn pbs_metallic_premultiply() -> IntegrationCase {
         resolution: (256, 256),
         tolerance: visual_tolerance(0.78, 56, 0.22, 18, 24, 0.06),
         template: CaseTemplate::PbsMetallicPremultiply,
+    }
+}
+
+/// Premultiplied PBS specular sphere. Blend factors and render queue match Unity Standard
+/// Specular setup's Transparent mode (`_ALPHAPREMULTIPLY_ON`, One / OneMinusSrcAlpha, queue 3000).
+pub fn pbs_specular_premultiply() -> IntegrationCase {
+    IntegrationCase {
+        name: "pbs_specular_premultiply".to_string(),
+        description:
+            "One PBS specular sphere with _ALPHAPREMULTIPLY_ON, Blend One OneMinusSrcAlpha, ZWrite off, and render queue 3000."
+                .to_string(),
+        golden_path: default_goldens_dir().join("pbs_specular_premultiply.png"),
+        resolution: (256, 256),
+        tolerance: visual_tolerance(0.78, 56, 0.22, 18, 24, 0.06),
+        template: CaseTemplate::PbsSpecularPremultiply,
     }
 }
 
@@ -469,6 +486,7 @@ pub fn registry() -> Vec<IntegrationCase> {
         multi_primitive_unlit_grid(),
         pbs_lit_material_matrix(),
         pbs_metallic_premultiply(),
+        pbs_specular_premultiply(),
         negative_light_parity(),
         negative_light_physically_based(),
         negative_color_physically_based(),

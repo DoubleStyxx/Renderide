@@ -427,8 +427,8 @@ pub(in crate::materials) fn embedded_composed_stem_for_permutation(
     base_stem.to_string()
 }
 
-/// Alphabetical PBS metallic keyword bit for `_ALPHAPREMULTIPLY_ON`.
-const PBSMETALLIC_ALPHAPREMULTIPLY_BIT: u32 = 1 << 1;
+/// Alphabetical Standard keyword bit for `_ALPHAPREMULTIPLY_ON` on PBS metallic and specular.
+const PBS_ALPHAPREMULTIPLY_BIT: u32 = 1 << 1;
 
 pub(in crate::materials) fn build_embedded_wgsl(
     stem: &Arc<str>,
@@ -444,7 +444,7 @@ pub(in crate::materials) fn build_embedded_wgsl(
         return Ok(wgsl.to_string());
     }
     let composed = embedded_composed_stem_for_permutation(stem.as_ref(), permutation);
-    let composed = pbsmetallic_compile_time_stem(composed, keyword_mask);
+    let composed = pbs_compile_time_premultiply_stem(composed, keyword_mask);
     let wgsl = embedded_shaders::embedded_target_wgsl(&composed)
         .ok_or_else(|| PipelineBuildError::MissingEmbeddedShader(composed.clone()))?;
     Ok(wgsl.to_string())
@@ -453,21 +453,26 @@ pub(in crate::materials) fn build_embedded_wgsl(
 /// Selects the prebuilt `_ALPHAPREMULTIPLY_ON` target when that keyword bit is set.
 ///
 /// The packaged names match `build_support`'s `//#keyword` fan-out (`alphapremultiply` crossed
-/// with `_default` / `_multiview`). Other bits stay pipeline constants. The opaque path keeps
-/// the `composed` string with no extra allocation. A stem that is not `pbsmetallic_*`, including
-/// every unlit stem, returns that same string. Warmup only visits stems in the frame's draw plan.
-fn pbsmetallic_compile_time_stem(composed: String, keyword_mask: u32) -> String {
-    if keyword_mask & PBSMETALLIC_ALPHAPREMULTIPLY_BIT == 0 {
+/// with `_default` / `_multiview`). Metallic and specular share bit 1 and the same stem shape.
+/// Other bits stay pipeline constants. The opaque path keeps the `composed` string with no extra
+/// allocation. Any other stem, including every unlit stem, returns that same string. Warmup only
+/// visits stems in the frame's draw plan.
+fn pbs_compile_time_premultiply_stem(composed: String, keyword_mask: u32) -> String {
+    if keyword_mask & PBS_ALPHAPREMULTIPLY_BIT == 0 {
         return composed;
     }
-    let Some(view) = composed.strip_prefix("pbsmetallic_") else {
+    let Some((family, view)) = composed.rsplit_once('_') else {
         return composed;
     };
-    if view == "default" || view == "multiview" {
-        format!("pbsmetallic_alphapremultiply_{view}")
-    } else {
-        composed
+    if !is_pbs_compile_time_premultiply_family(family) || (view != "default" && view != "multiview")
+    {
+        return composed;
     }
+    format!("{family}_alphapremultiply_{view}")
+}
+
+fn is_pbs_compile_time_premultiply_family(family: &str) -> bool {
+    matches!(family, "pbsmetallic" | "pbsspecular")
 }
 
 /// Returns device features required by the composed embedded target for `stem` and `permutation`.
@@ -723,42 +728,83 @@ mod tests {
 
     #[test]
     fn pbsmetallic_premultiply_variants_keep_one_light_loop() {
+        assert_pbs_premultiply_variants_keep_one_light_loop(
+            "pbsmetallic",
+            "shade_metallic_clustered",
+            "shade_metallic_transparent_clustered",
+        );
+    }
+
+    #[test]
+    fn pbsspecular_premultiply_variants_keep_one_light_loop() {
+        assert_pbs_premultiply_variants_keep_one_light_loop(
+            "pbsspecular",
+            "shade_specular_clustered",
+            "shade_specular_transparent_clustered",
+        );
+    }
+
+    #[test]
+    fn premultiply_bit_does_not_rewrite_unrelated_stems() {
+        let stem = Arc::from("unlit_default");
+        let wgsl = build_embedded_wgsl(&stem, ShaderPermutation(0), PBS_ALPHAPREMULTIPLY_BIT)
+            .expect("unlit");
+        let packaged = embedded_shaders::embedded_target_wgsl("unlit_default").expect("unlit");
+        assert_eq!(wgsl, packaged.as_ref());
+        assert!(embedded_shaders::embedded_target_wgsl("unlit_alphapremultiply_default").is_none());
+    }
+
+    fn assert_pbs_premultiply_variants_keep_one_light_loop(
+        family: &str,
+        opaque_loop: &str,
+        transparent_loop: &str,
+    ) {
         let mono = ShaderPermutation(0);
         let multi = SHADER_PERM_MULTIVIEW_STEREO;
-        let stem = Arc::from("pbsmetallic_default");
+        let stem = Arc::from(format!("{family}_default"));
         let cases = [
-            (mono, 0u32, "pbsmetallic_default", false),
-            (multi, 0u32, "pbsmetallic_multiview", false),
+            (mono, 0u32, format!("{family}_default"), false),
+            (multi, 0u32, format!("{family}_multiview"), false),
             (
                 mono,
-                1u32 << 1,
-                "pbsmetallic_alphapremultiply_default",
+                PBS_ALPHAPREMULTIPLY_BIT,
+                format!("{family}_alphapremultiply_default"),
                 true,
             ),
             (
                 multi,
-                (1u32 << 1) | (1u32 << 7),
-                "pbsmetallic_alphapremultiply_multiview",
+                PBS_ALPHAPREMULTIPLY_BIT | (1u32 << 7),
+                format!("{family}_alphapremultiply_multiview"),
                 true,
             ),
         ];
         for (permutation, bits, expected_stem, premultiply) in cases {
-            let wgsl = build_embedded_wgsl(&stem, permutation, bits).expect(expected_stem);
-            let packaged = embedded_shaders::embedded_target_wgsl(expected_stem)
+            let wgsl = build_embedded_wgsl(&stem, permutation, bits).expect(&expected_stem);
+            let packaged = embedded_shaders::embedded_target_wgsl(&expected_stem)
                 .unwrap_or_else(|| panic!("{expected_stem} missing"));
             assert_eq!(wgsl, packaged.as_ref(), "{expected_stem}");
             assert_eq!(
-                embedded_shaders::embedded_target_passes(expected_stem).len(),
+                embedded_shaders::embedded_target_passes(&expected_stem).len(),
                 1,
                 "{expected_stem} pass count"
             );
-            let has_opaque = wgsl.contains("shade_metallic_clustered");
-            let has_premultiply = wgsl.contains("shade_metallic_transparent_clustered");
+            assert_eq!(
+                embedded_shaders::embedded_target_default_render_queue(&expected_stem),
+                UNITY_RENDER_QUEUE_GEOMETRY,
+                "{expected_stem} queue"
+            );
+            let has_opaque = contains_clustered_loop(&wgsl, opaque_loop, transparent_loop);
+            let has_premultiply = wgsl.contains(transparent_loop);
             assert_eq!(
                 has_premultiply, premultiply,
                 "{expected_stem} transparent loop"
             );
             assert_eq!(has_opaque, !premultiply, "{expected_stem} opaque loop");
         }
+    }
+
+    fn contains_clustered_loop(wgsl: &str, opaque_loop: &str, transparent_loop: &str) -> bool {
+        wgsl.match_indices(opaque_loop)
+            .any(|(index, _)| !wgsl[index..].starts_with(transparent_loop))
     }
 }

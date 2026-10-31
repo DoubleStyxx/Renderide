@@ -6,9 +6,16 @@
 //!
 //! Froox variant bits populate `_RenderideVariantBits`; PBSSpecular's eleven keywords (sorted
 //! alphabetically) occupy bits 0-10. `_ALPHABLEND_ON` is pipeline-affecting (blend mode), so it
-//! reserves bit 0 but gets no shader-local constant.
+//! reserves bit 0 but gets no shader-local constant. `_ALPHAPREMULTIPLY_ON` is the one
+//! compile-time keyword (`//#keyword`, the same naga-oil shader def as custom materials,
+//! `MULTIVIEW`, and `pbsmetallic`). Bit 1 still selects it. The opaque target contains only
+//! `shade_specular_clustered`. The premultiply target contains only
+//! `shade_specular_transparent_clustered`. Blend stays host `_SrcBlend`/`_DstBlend`
+//! (Unity One / OneMinusSrcAlpha). The packaged default queue is Geometry (2000).
+//! The host `_RenderQueue` supplies Transparent (3000).
 
 
+//#keyword _ALPHAPREMULTIPLY_ON
 //#texture_default _MainTex white
 //#texture_default _SpecGlossMap white
 //#texture_default _BumpMap bump
@@ -115,10 +122,6 @@ fn pbs_kw(mask: u32) -> bool {
 
 fn alpha_test_enabled() -> bool {
     return pbs_kw(PBSSPECULAR_KW_ALPHATEST_ON);
-}
-
-fn alpha_premultiply_enabled() -> bool {
-    return pbs_kw(PBSSPECULAR_KW_ALPHAPREMULTIPLY_ON);
 }
 
 fn spec_gloss_map_enabled() -> bool {
@@ -271,15 +274,15 @@ fn fs_forward_base(
         specular_highlights_enabled(),
         glossy_reflections_enabled(),
     );
-    if (alpha_premultiply_enabled()) {
-        return plight::shade_specular_transparent_clustered(
-            frag_pos.xy,
-            world_pos,
-            view_layer,
-            surface,
-            options,
-        );
-    }
+#ifdef _ALPHAPREMULTIPLY_ON
+    return plight::shade_specular_transparent_clustered(
+        frag_pos.xy,
+        world_pos,
+        view_layer,
+        surface,
+        options,
+    );
+#else
     let color = plight::shade_specular_clustered(
         frag_pos.xy,
         world_pos,
@@ -288,4 +291,5 @@ fn fs_forward_base(
         options,
     );
     return vec4<f32>(color, s.alpha);
+#endif
 }
