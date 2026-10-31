@@ -9,6 +9,7 @@
 //! such as IPC, scene mirroring, GPU resources, materials, and the render graph are implementation
 //! details of this process crate.
 
+// B3 canary no-op: comment-only change to exercise bench-pr.yml. DO NOT MERGE.
 mod process_io;
 mod run_error;
 
