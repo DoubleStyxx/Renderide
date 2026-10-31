@@ -80,6 +80,13 @@ pub(crate) fn finish_headless_full_frame(
 ) {
     let excluded = runtime.drain_frame_timing_excluded_wait();
     gpu.record_frame_timing_excluded_wait(excluded);
+        // B3 gate-noise2 canary slowdown (~80 µs busy-wait). CANARY - DO NOT MERGE.
+    {
+        let spin_start = std::time::Instant::now();
+        while spin_start.elapsed() < std::time::Duration::from_micros(80) {
+            std::hint::spin_loop();
+        }
+    }
     gpu.record_main_thread_cpu_end(std::time::Instant::now());
     gpu.end_frame_timing();
     let record = !outcome.render_skipped && outcome.graph_error.is_none() && !outcome.fatal_error;
