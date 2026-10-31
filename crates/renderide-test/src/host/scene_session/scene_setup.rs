@@ -122,6 +122,7 @@ pub(super) fn build_scene_setup(template: SessionTemplate) -> SceneSetup {
         } => multi_primitive_unlit_grid_setup(checker_rgba, uv_ramp_rgba, texture_size),
         SessionTemplate::PbsLitMaterialMatrix => pbs_lit_material_matrix_setup(),
         SessionTemplate::PbsMetallicPremultiply => pbs_metallic_premultiply_setup(),
+        SessionTemplate::PbsSpecularPremultiply => pbs_specular_premultiply_setup(),
         SessionTemplate::ManyStaticMeshes => bench_scenes::many_static_meshes_setup(),
         SessionTemplate::LightsShadows => bench_scenes::lights_shadows_setup(),
         SessionTemplate::AlphaCutoutMaskedQuads {
@@ -428,25 +429,44 @@ fn pbs_metallic_premultiply_setup() -> SceneSetup {
     let mut material = pbs_material_for_scene(0, [0.85, 0.35, 0.2, 0.45], 0.15, 0.55)
         .with_variant(shader_variants::PBSMETALLIC_ALPHAPREMULTIPLY);
     if let Some(binding) = material.binding.as_mut() {
-        binding.floats.extend([
-            FloatBinding {
-                property_name: "_SrcBlend",
-                value: 1.0,
-            },
-            FloatBinding {
-                property_name: "_DstBlend",
-                value: 10.0,
-            },
-            FloatBinding {
-                property_name: "_ZWrite",
-                value: 0.0,
-            },
-            FloatBinding {
-                property_name: "_RenderQueue",
-                value: 3000.0,
-            },
-        ]);
+        binding.floats.extend(standard_transparent_blend_floats());
     }
+    premultiply_sphere_scene(material)
+}
+
+/// Same Transparent mode as [`pbs_metallic_premultiply_setup`], on the specular workflow.
+fn pbs_specular_premultiply_setup() -> SceneSetup {
+    let mut material =
+        pbs_specular_material_for_scene(0, [0.85, 0.35, 0.2, 0.45], [0.8, 0.75, 0.65, 1.0], 0.55)
+            .with_variant(shader_variants::PBSSPECULAR_ALPHAPREMULTIPLY);
+    if let Some(binding) = material.binding.as_mut() {
+        binding.floats.extend(standard_transparent_blend_floats());
+    }
+    premultiply_sphere_scene(material)
+}
+
+fn standard_transparent_blend_floats() -> [FloatBinding; 4] {
+    [
+        FloatBinding {
+            property_name: "_SrcBlend",
+            value: 1.0,
+        },
+        FloatBinding {
+            property_name: "_DstBlend",
+            value: 10.0,
+        },
+        FloatBinding {
+            property_name: "_ZWrite",
+            value: 0.0,
+        },
+        FloatBinding {
+            property_name: "_RenderQueue",
+            value: 3000.0,
+        },
+    ]
+}
+
+fn premultiply_sphere_scene(material: MaterialAsset) -> SceneSetup {
     SceneSetup {
         meshes: vec![mesh_asset(
             0,
@@ -612,6 +632,40 @@ pub(super) fn pbs_material_for_scene(
                 property_name: "_Color",
                 value: color,
             }],
+        }),
+    }
+}
+
+pub(super) fn pbs_specular_material_for_scene(
+    index: usize,
+    color: [f32; 4],
+    spec_color: [f32; 4],
+    glossiness: f32,
+) -> MaterialAsset {
+    MaterialAsset {
+        asset_id: scene_material_id(index as i32),
+        update_batch_id: scene_update_batch_id(index as i32),
+        property_request_id: scene_property_request_id(index as i32),
+        update_base_buffer_id: scene_material_update_buffer_id(index as i32),
+        binding: Some(MaterialBinding {
+            shader_asset_id: scene_shader_id(index as i32),
+            shader_name: "PBSSpecular.shader",
+            shader_variant_bits: None,
+            textures: Vec::new(),
+            floats: vec![FloatBinding {
+                property_name: "_Glossiness",
+                value: glossiness,
+            }],
+            float4s: vec![
+                Float4Binding {
+                    property_name: "_Color",
+                    value: color,
+                },
+                Float4Binding {
+                    property_name: "_SpecColor",
+                    value: spec_color,
+                },
+            ],
         }),
     }
 }

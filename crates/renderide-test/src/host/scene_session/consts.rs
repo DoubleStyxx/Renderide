@@ -97,6 +97,8 @@ pub(super) mod shader_variants {
     pub(in crate::host::scene_session) const UNLIT_TEXTURE: u32 = 0x0000_0200;
     /// PBS metallic `_ALPHAPREMULTIPLY_ON` (`PBSMETALLIC_KW_ALPHAPREMULTIPLY_ON = 1 << 1`).
     pub(in crate::host::scene_session) const PBSMETALLIC_ALPHAPREMULTIPLY: u32 = 0x0000_0002;
+    /// PBS specular `_ALPHAPREMULTIPLY_ON` (`PBSSPECULAR_KW_ALPHAPREMULTIPLY_ON = 1 << 1`).
+    pub(in crate::host::scene_session) const PBSSPECULAR_ALPHAPREMULTIPLY: u32 = 0x0000_0002;
 }
 
 /// Wall-clock timing parameters governing PNG readback, lockstep pumping, and shutdown.
