@@ -1,9 +1,9 @@
-# #265 WARP re-check. Not the default CI suite.
+# #284 WARP re-check. Not the default CI suite.
 #
 # One Linux llvmpipe run and three independent Windows WARP runs. Each run
-# executes the four #216 production cases, which include the #212 pbs_lit case,
-# plus pbs_metallic_premultiply. Probes stay off. Scene-color readback is the
-# float sidecar only. A docs-only commit does not match the path filter.
+# executes every pbs_specular* case plus the five #216 production cases.
+# Probes stay off. Scene-color readback is the float sidecar only.
+# A docs-only commit does not match the path filter, so it does not restart this.
 
 name: WARP 216 debug
 
@@ -117,7 +117,7 @@ jobs:
       - name: Build renderer and harness
         run: cargo build --locked -p renderide -p renderide-test
 
-      - name: Run the #265 production cases
+      - name: Run the #284 production cases
         timeout-minutes: 180
         shell: bash
         run: |
@@ -128,6 +128,7 @@ jobs:
             bin=./target/debug/renderide-test
           fi
           "$bin" check-suite --jobs 1 --scene-color-readback \
+            --case pbs_specular_premultiply \
             --case negative_light_parity \
             --case negative_light_physically_based \
             --case negative_color_physically_based \
