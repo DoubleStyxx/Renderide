@@ -43,4 +43,4 @@ jobs:
 
       # Same invocation as the self-test step in frame-bench.yml.
       - name: Run gate unit tests
-        run: python -m unittest discover -s scripts/ci -p 'test_frame_bench_gate.py' -v
+        run: python -m unittest discover -s scripts/ci -p 'test_*.py' -v

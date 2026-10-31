@@ -3,8 +3,12 @@
 
 Frame rows come from frame_bench_gate.py (the single decision rule, including Mann-Whitney
 p-values after confirm). CPU rows come from `renderide-bench compare --json` when present;
-cpu verdicts are informational and never raise this script's exit code. The process exit
-code mirrors the gate document's exit_code (0 pass, 1 fail/flagged).
+cpu verdicts are informational and never raise this script's exit code.
+
+After a successful write of --out, this process always exits 0. The gate decision lives in
+the JSON document's exit_code field (0 pass, 1 fail/flagged); the workflow reads that (or
+the Measure step's gate_exit output) in a separate final step. Exit 2 is reserved for
+usage / missing / invalid input before a document is written.
 """
 
 from __future__ import annotations
@@ -77,14 +81,27 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, required=True, help="bench-compare.json path")
     args = parser.parse_args(argv)
 
-    gate = json.loads(args.gate.read_text(encoding="utf-8"))
+    if not args.gate.is_file():
+        print(f"bench_pr_assemble: missing gate input {args.gate}", file=sys.stderr)
+        return 2
+
+    try:
+        gate = json.loads(args.gate.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as err:
+        print(f"bench_pr_assemble: invalid gate JSON: {err}", file=sys.stderr)
+        return 2
+
     if gate.get("schema") != "frame-bench-gate/1":
         print(f"bench_pr_assemble: unexpected gate schema {gate.get('schema')!r}", file=sys.stderr)
         return 2
 
     rows = rows_from_gate(gate)
     if args.cpu_compare is not None and args.cpu_compare.is_file():
-        cpu = json.loads(args.cpu_compare.read_text(encoding="utf-8"))
+        try:
+            cpu = json.loads(args.cpu_compare.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as err:
+            print(f"bench_pr_assemble: invalid cpu-compare JSON: {err}", file=sys.stderr)
+            return 2
         rows.extend(rows_from_cpu(cpu))
 
     exit_code = int(gate.get("exit_code") or 0)
@@ -98,8 +115,10 @@ def main(argv: list[str] | None = None) -> int:
         "rows": rows,
         "exit_code": exit_code,
     }
+    args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    return exit_code
+    # Gate verdict stays in payload["exit_code"]; workflow applies it in a later step.
+    return 0
 
 
 if __name__ == "__main__":
