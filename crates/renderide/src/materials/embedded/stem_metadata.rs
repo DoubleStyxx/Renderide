@@ -454,7 +454,8 @@ pub(in crate::materials) fn build_embedded_wgsl(
 ///
 /// The packaged names match `build_support`'s `//#keyword` fan-out (`alphapremultiply` crossed
 /// with `_default` / `_multiview`). Other bits stay pipeline constants. The opaque path keeps
-/// the `composed` string with no extra allocation.
+/// the `composed` string with no extra allocation. A stem that is not `pbsmetallic_*`, including
+/// every unlit stem, returns that same string. Warmup only visits stems in the frame's draw plan.
 fn pbsmetallic_compile_time_stem(composed: String, keyword_mask: u32) -> String {
     if keyword_mask & PBSMETALLIC_ALPHAPREMULTIPLY_BIT == 0 {
         return composed;
