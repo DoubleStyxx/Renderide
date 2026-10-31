@@ -103,8 +103,8 @@ def main() -> int:
         body = (
             f"`{JOB_NAME}` was cancelled before a GitHub-hosted runner picked it up. "
             "This is a runner-capacity cancellation, not a compile or test failure. "
-            "The macOS check stays required, so the run stays red until that job is rerun "
-            "on a runner."
+            "The required aggregate stays red while this job is cancelled, until "
+            "Rust / macos-latest is rerun on a runner."
         )
     else:
         title = "macOS job cancelled"
