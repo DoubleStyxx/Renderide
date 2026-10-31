@@ -1,0 +1,200 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/DoubleStyxx/Renderide/blob/master/docs/schemas/renderide-test.v2.json",
+  "title": "renderide-test case report",
+  "description": "Schema v2 case report. Existing fields stay. schema, reason_text, artifacts, capture, and runner are added. The harness checks this document with a serde_json round-trip and required-key walk. It does not depend on a jsonschema crate.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema",
+    "name",
+    "description",
+    "resolution",
+    "evaluation",
+    "passed",
+    "error",
+    "gate",
+    "cpu_model",
+    "adapter",
+    "longest_submission_stall_ms",
+    "warp_readiness_budget_used",
+    "status",
+    "reason",
+    "reason_text",
+    "capture",
+    "runner"
+  ],
+  "properties": {
+    "schema": { "const": "renderide-test.v2" },
+    "name": { "type": "string" },
+    "description": { "type": "string" },
+    "resolution": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": { "type": "integer", "minimum": 0 }
+    },
+    "evaluation": { "type": ["object", "null"] },
+    "passed": { "type": "boolean" },
+    "error": { "type": ["string", "null"] },
+    "gate": { "type": "string" },
+    "result": { "type": "string" },
+    "cpu_model": { "type": "string" },
+    "adapter": { "type": "string" },
+    "longest_submission_stall_ms": { "type": "integer", "minimum": 0 },
+    "warp_readiness_budget_used": { "type": "boolean" },
+    "status": {
+      "type": "string",
+      "enum": [
+        "pass",
+        "fail",
+        "expected-failure",
+        "unexpected-pass",
+        "quarantined",
+        "early-exit"
+      ]
+    },
+    "reason": {
+      "type": "string",
+      "enum": [
+        "ok",
+        "harness-error",
+        "expected-failure:#212",
+        "unexpected-pass:#212",
+        "quarantined:#216",
+        "WARP lit shading untrusted",
+        "early-exit",
+        "renderer-binary-missing",
+        "spawn-renderer",
+        "queue-options",
+        "handshake-timeout",
+        "asset-ack-timeout",
+        "png-output-missing",
+        "pipeline-not-ready",
+        "flat-or-unstable-frame",
+        "png-read",
+        "png-write",
+        "flat-image",
+        "golden-missing",
+        "golden-mismatch",
+        "io",
+        "gltf-fixture",
+        "image-compare",
+        "unknown-case",
+        "bench-report-missing",
+        "unknown-bench-scenario",
+        "suite-failed"
+      ]
+    },
+    "reason_text": { "type": "string", "minLength": 1 },
+    "early_exit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["case", "k", "elapsed_ms", "settle_ms", "k_window_ms", "reason"],
+      "properties": {
+        "case": { "type": "string" },
+        "k": { "type": "integer", "minimum": 0 },
+        "elapsed_ms": { "type": "integer", "minimum": 0 },
+        "settle_ms": { "type": "integer", "minimum": 0 },
+        "k_window_ms": { "type": "integer", "minimum": 0 },
+        "reason": { "type": "string", "minLength": 1 }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "actual": { "type": "string" },
+        "golden": { "type": "string" },
+        "diff": { "type": "string" },
+        "side_by_side": { "type": "string" }
+      }
+    },
+    "region_stats": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "column",
+          "row",
+          "x",
+          "y",
+          "width",
+          "height",
+          "mean",
+          "variance",
+          "non_dominant",
+          "mean_delta",
+          "variance_delta",
+          "non_dominant_delta"
+        ],
+        "properties": {
+          "column": { "type": "integer", "minimum": 0 },
+          "row": { "type": "integer", "minimum": 0 },
+          "x": { "type": "integer", "minimum": 0 },
+          "y": { "type": "integer", "minimum": 0 },
+          "width": { "type": "integer", "minimum": 0 },
+          "height": { "type": "integer", "minimum": 0 },
+          "mean": { "type": "array", "minItems": 4, "maxItems": 4, "items": { "type": "number" } },
+          "variance": { "type": "array", "minItems": 4, "maxItems": 4, "items": { "type": "number" } },
+          "non_dominant": { "type": "integer", "minimum": 0 },
+          "mean_delta": { "type": "number", "minimum": 0 },
+          "variance_delta": { "type": "number", "minimum": 0 },
+          "non_dominant_delta": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "capture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["longest_submission_stall_ms", "warp_readiness_budget_used"],
+      "properties": {
+        "longest_submission_stall_ms": { "type": "integer", "minimum": 0 },
+        "warp_readiness_budget_used": { "type": "boolean" },
+        "early_exit": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["case", "k", "elapsed_ms", "settle_ms", "k_window_ms", "reason"],
+          "properties": {
+            "case": { "type": "string" },
+            "k": { "type": "integer", "minimum": 0 },
+            "elapsed_ms": { "type": "integer", "minimum": 0 },
+            "settle_ms": { "type": "integer", "minimum": 0 },
+            "k_window_ms": { "type": "integer", "minimum": 0 },
+            "reason": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "runner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cpu_model", "adapter", "icd"],
+      "properties": {
+        "cpu_model": { "type": "string" },
+        "adapter": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["vendor", "device", "backend", "device_type"],
+          "properties": {
+            "vendor": { "type": ["integer", "null"] },
+            "device": { "type": ["integer", "null"] },
+            "backend": { "type": "string" },
+            "device_type": { "type": "string" }
+          }
+        },
+        "icd": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "source", "var"],
+          "properties": {
+            "path": { "type": ["string", "null"] },
+            "source": { "type": "string" },
+            "var": { "type": ["string", "null"] }
+          }
+        }
+      }
+    }
+  }
+}

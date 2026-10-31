@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use super::cases::IntegrationCase;
 use super::host_info;
+use super::side_by_side::SIDE_BY_SIDE_FILENAME;
 use super::tolerance::ToleranceEvaluation;
 
 /// Default name for the per-suite output directory beneath `target/`.
@@ -39,8 +40,10 @@ pub struct CaseOutputLayout {
     pub actual_png: PathBuf,
     /// Copy of the golden PNG used for comparison (debug aid).
     pub golden_png_copy: PathBuf,
-    /// Diff visualization written on mismatch.
+    /// Diff visualization. Written whenever both images load, including a pass.
     pub diff_png: PathBuf,
+    /// `golden | actual | diff`, three times the actual width.
+    pub side_by_side_png: PathBuf,
     /// JSON report describing the comparison criteria and outcome.
     pub report_json: PathBuf,
 }
@@ -53,6 +56,7 @@ impl CaseOutputLayout {
             actual_png: root.join(ACTUAL_FILENAME),
             golden_png_copy: root.join(GOLDEN_FILENAME),
             diff_png: root.join(DIFF_FILENAME),
+            side_by_side_png: root.join(SIDE_BY_SIDE_FILENAME),
             report_json: root.join(REPORT_FILENAME),
             root,
         }
@@ -69,6 +73,7 @@ impl CaseOutputLayout {
             &self.actual_png,
             &self.golden_png_copy,
             &self.diff_png,
+            &self.side_by_side_png,
             &self.report_json,
             &plain_png,
             &plain_diff,
@@ -141,6 +146,24 @@ pub struct CaseReport {
     /// Set when a #216 WARP flat wait ended before the full readiness budget.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub early_exit: Option<EarlyExit>,
+    /// `renderide-test.v2` once [`super::report_v2::stamp`] has run.
+    #[serde(default = "default_schema")]
+    pub schema: String,
+    /// Non-empty sentence for [`Self::reason`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_text: Option<String>,
+    /// Conventional artifact filenames. Absolute paths stay on the output layout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) artifacts: Option<super::report_v2::ArtifactNames>,
+    /// Stall, WARP budget, and early exit, beside the flat fields of the same facts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) capture: Option<super::report_v2::CaptureBlock>,
+    /// CPU, structured adapter, and Vulkan ICD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) runner: Option<super::report_v2::RunnerBlock>,
+    /// Default 2×2 region stats when both images were loaded. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) region_stats: Option<Vec<super::region_stats::RegionStatRow>>,
 }
 
 /// Why a quarantined WARP flat wait stopped before the full budget.
@@ -170,6 +193,10 @@ fn default_behavior_gate() -> String {
     crate::adapter_gate::BEHAVIOR.to_string()
 }
 
+fn default_schema() -> String {
+    super::report_v2::SCHEMA.to_string()
+}
+
 /// Writes a `report.json` describing the comparison outcome.
 ///
 /// Stamps the runner CPU and the adapter line for this case's PNG before serializing.
@@ -183,6 +210,7 @@ pub fn write_report(layout: &CaseOutputLayout, report: &mut CaseReport) -> io::R
     if early_exit.is_some() {
         report.early_exit = early_exit;
     }
+    super::report_v2::stamp(report, layout);
     let json = serde_json::to_string_pretty(report)
         .map_err(|e| io::Error::other(format!("serialize report: {e}")))?;
     std::fs::write(&layout.report_json, json)
@@ -190,35 +218,29 @@ pub fn write_report(layout: &CaseOutputLayout, report: &mut CaseReport) -> io::R
 
 /// Builds a [`CaseReport`] from the comparison evaluation.
 pub fn report_from_evaluation(case: &IntegrationCase, eval: ToleranceEvaluation) -> CaseReport {
-    CaseReport {
-        name: case.name.clone(),
-        description: case.description.clone(),
-        resolution: case.resolution,
-        passed: eval.passed,
-        evaluation: Some(eval),
-        error: None,
-        gate: default_behavior_gate(),
-        result: None,
-        cpu_model: String::new(),
-        adapter: String::new(),
-        longest_submission_stall_ms: 0,
-        warp_readiness_budget_used: false,
-        status: None,
-        reason: None,
-        early_exit: None,
-    }
+    let passed = eval.passed;
+    base_report(case, passed, Some(eval), None)
 }
 
 /// Builds a [`CaseReport`] for a case that failed before image comparison ran (e.g. renderer
 /// crash, golden missing).
 pub fn report_from_error(case: &IntegrationCase, message: impl Into<String>) -> CaseReport {
+    base_report(case, false, None, Some(message.into()))
+}
+
+fn base_report(
+    case: &IntegrationCase,
+    passed: bool,
+    evaluation: Option<ToleranceEvaluation>,
+    error: Option<String>,
+) -> CaseReport {
     CaseReport {
         name: case.name.clone(),
         description: case.description.clone(),
         resolution: case.resolution,
-        passed: false,
-        evaluation: None,
-        error: Some(message.into()),
+        passed,
+        evaluation,
+        error,
         gate: default_behavior_gate(),
         result: None,
         cpu_model: String::new(),
@@ -228,6 +250,12 @@ pub fn report_from_error(case: &IntegrationCase, message: impl Into<String>) -> 
         status: None,
         reason: None,
         early_exit: None,
+        schema: default_schema(),
+        reason_text: None,
+        artifacts: None,
+        capture: None,
+        runner: None,
+        region_stats: None,
     }
 }
 
