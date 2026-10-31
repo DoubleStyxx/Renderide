@@ -248,6 +248,7 @@ fn case_lines(report: &crate::scene_dsl::suite::SuiteReport, print_adapter: bool
             lines.push(crate::scene_dsl::quarantined_line(
                 &case.name,
                 &case.artifacts_dir,
+                case.reason.as_deref().unwrap_or(""),
             ));
             push_adapter_line(&mut lines, case, print_adapter);
         } else if crate::scene_dsl::warp_pbs_is_unexpected_pass(case) {

@@ -97,6 +97,13 @@ impl FrameResourceManager {
         self.frame_lights_for_view(view_id).len().min(MAX_LIGHTS) as u32
     }
 
+    /// Selects physically based light upload for the next pack.
+    ///
+    /// The flag is a copied bool. Packing reads it in place and does not allocate.
+    pub(crate) fn set_physically_based_lights(&mut self, enabled: bool) {
+        self.physically_based_lights = enabled;
+    }
+
     /// Fills the default main-view light scratch buffer from active render spaces.
     ///
     /// This compatibility entry point is used by unit tests and callers that do not have explicit
@@ -205,7 +212,8 @@ impl FrameResourceManager {
                 crate::backend::light_gpu::LightCookieBinding::NONE,
                 |fgpu| fgpu.assign_light_cookie(light, asset_resources),
             );
-            let mut gpu_light = gpu_light_from_resolved_with_cookie(light, cookie);
+            let mut gpu_light =
+                gpu_light_from_resolved_with_cookie(light, cookie, self.physically_based_lights);
             if !packet.render_shadows {
                 disable_gpu_light_shadows(&mut gpu_light);
             }

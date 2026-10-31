@@ -181,7 +181,9 @@ pub struct SuiteCaseReport {
     /// `quarantined` when the #216 rule covers this case. Absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
-    /// `quarantined:#216` while that quarantine applies. Absent otherwise.
+    /// `quarantined:#216` for the original flat-frame rule.
+    /// `WARP lit shading untrusted` for a negative-light case on WARP.
+    /// Absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// Timed-out harness failure, when this case has one.
@@ -200,6 +202,12 @@ pub struct SuiteCaseReport {
     /// Dropped draws on the frame the harness timed out on. `None` is not zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dropped_draws: Option<u64>,
+    /// The case finished an image comparison.
+    ///
+    /// A harness error leaves this false. The negative-light WARP rule reads it
+    /// so a tolerance result is quarantined and a spawn failure is not.
+    #[serde(default)]
+    pub image_compared: bool,
     /// `behavior` or `adapter_comparison`.
     #[serde(default = "default_behavior_gate")]
     pub gate: String,
@@ -236,6 +244,7 @@ impl SuiteCaseReport {
             dropped_draws: None,
             gate: default_behavior_gate(),
             adapter: String::new(),
+            image_compared: false,
         }
     }
 
@@ -474,13 +483,15 @@ fn report_from_outcome(outcome: CaseRunOutcome) -> SuiteCaseReport {
             .clone()
             .or_else(|| Some("case failed tolerance".to_string()))
     };
-    SuiteCaseReport::plain(
+    let mut case = SuiteCaseReport::plain(
         outcome.report.name,
         outcome.report.passed,
         outcome.layout.root,
         outcome.layout.report_json,
         error,
-    )
+    );
+    case.image_compared = outcome.report.evaluation.is_some();
+    case
 }
 
 /// Writes `suite-report.json`, including the #216 expiry warning when one is set.
