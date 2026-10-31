@@ -309,7 +309,15 @@ renderide-test check-suite --jobs 1 \
 
 with `RAYON_NUM_THREADS=1` and `RENDERIDE_LIT_SHADER_PROBE=1`. Windows also puts the matching `dxc.exe` (`2026.09.16+48d5a66.1`) on `PATH` so the probe writes `lit-production.dxil` and `lit-production.dxil.ll`. Artifacts: `warp216-debug-<label>`.
 
-Run ids, per-arm G=0 counts, float means, and the flat split are filled in after those runs finish. Rewrite 2 (Smith `max(0)` before `sqrt`) and rewrite 3 (directional `inverseSqrt`) are not compiled on a WARP branch yet. They are the follow-ups if FXC still drops channels (then the bug is not DXIL-specific) or if scalar-color does not move G=0 (then mask-7 is not the load that matters).
+Runs, started 2026-10-31 from canary `22647eae`. Each is one Linux job plus windows-1/2/3. Counts below stay blank until the artifacts are in.
+
+| Arm | Run | sha |
+| --- | --- | --- |
+| baseline | [41202573717](https://github.com/DoubleStyxx/Renderide/actions/runs/41202573717) | `da1680ea` |
+| fxc | [41202575526](https://github.com/DoubleStyxx/Renderide/actions/runs/41202575526) | `e3e8bb2e` |
+| scalar-color | [41202577341](https://github.com/DoubleStyxx/Renderide/actions/runs/41202577341) | `c7358018` |
+
+Rewrite 2 (Smith `max(0)` before `sqrt`) and rewrite 3 (directional `inverseSqrt`) are not compiled on a WARP branch yet. They are the follow-ups if FXC still drops channels (then the bug is not DXIL-specific) or if scalar-color does not move G=0 (then mask-7 is not the load that matters).
 
 ## What the WARP capture still needs
 
