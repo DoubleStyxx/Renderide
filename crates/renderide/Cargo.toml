@@ -155,6 +155,7 @@ wgpu = { version = "30.0", features = ["vulkan-portability"] }
 wgpu = { version = "30.0", features = ["static-dxc"] }
 
 [dev-dependencies]
+renderide-test = { path = "../renderide-test" }
 jobserver = "0.1"
 logger = { path = "../logger" }
 naga_oil = { version = "0.23", default-features = false }

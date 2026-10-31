@@ -45,6 +45,95 @@ pub mod spawn;
 pub use config::SceneSessionConfig;
 
 use config::SceneSessionOutcome;
+
+/// How a session replaces uploaded shaders before the golden frame.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CustomShaderAssignment {
+    /// Every uploaded material is drawn as uploaded.
+    None,
+    /// `custom_property::install_and_assign` replaces the only material.
+    PropertyUpdate,
+    /// `exotic_pair::install_and_assign` replaces both materials.
+    ExoticPair,
+    /// `warp_216_debug::install_and_assign` replaces material 0. The backdrop stays.
+    Warp216,
+}
+
+/// Shaders that remain on screen for `template` after custom-shader assignment.
+///
+/// Derived from [`build_scene_setup`] and [`custom_shader_assignment`], the same
+/// assignment `run_session` performs before capture. A material with no shader
+/// binding is the null fallback (`shaders/materials/null.wgsl`).
+pub(crate) struct MaterialDraws {
+    /// Unity shader asset filenames that are still bound at capture.
+    pub shader_assets: Vec<&'static str>,
+    /// Renderables whose material uploaded no shader.
+    pub null_fallback: bool,
+}
+
+/// Shader assets drawn by `template`, after the session's custom-shader assignment.
+pub(crate) fn material_draws(template: SessionTemplate) -> MaterialDraws {
+    let assignment = custom_shader_assignment(&template);
+    let setup = build_scene_setup(template);
+    let mut shader_assets = Vec::new();
+    let mut null_fallback = false;
+    for (index, material) in setup.materials.iter().enumerate() {
+        if assignment_skips_material(assignment, index) {
+            continue;
+        }
+        let drawn = setup
+            .scene
+            .renderables
+            .iter()
+            .any(|renderable| renderable.material_asset_id == material.asset_id);
+        if !drawn {
+            continue;
+        }
+        match material.binding.as_ref() {
+            Some(binding) => shader_assets.push(binding.shader_name),
+            None => null_fallback = true,
+        }
+    }
+    shader_assets.sort_unstable();
+    shader_assets.dedup();
+    MaterialDraws {
+        shader_assets,
+        null_fallback,
+    }
+}
+
+fn custom_shader_assignment(template: &SessionTemplate) -> CustomShaderAssignment {
+    match template {
+        SessionTemplate::CustomShaderPropertyUpdate => CustomShaderAssignment::PropertyUpdate,
+        SessionTemplate::ExoticShaderPair => CustomShaderAssignment::ExoticPair,
+        SessionTemplate::Warp216Debug { .. } => CustomShaderAssignment::Warp216,
+        SessionTemplate::Sphere
+        | SessionTemplate::Torus { .. }
+        | SessionTemplate::MultiPrimitiveUnlitGrid { .. }
+        | SessionTemplate::PbsLitMaterialMatrix
+        | SessionTemplate::ManyStaticMeshes
+        | SessionTemplate::LightsShadows
+        | SessionTemplate::AlphaCutoutMaskedQuads { .. }
+        | SessionTemplate::GltfTexturedStaticMesh { .. }
+        | SessionTemplate::CoplanarCanvasUiQuads
+        | SessionTemplate::TiltedCanvasUiQuads
+        | SessionTemplate::CanvasOffsetBiasQuad
+        | SessionTemplate::TiltedCanvasDistanceBias
+        | SessionTemplate::ShadowedCasterMove
+        | SessionTemplate::ManyShadowedPointLights
+        | SessionTemplate::DoubleBufferNothingOnSkybox
+        | SessionTemplate::NegativeLightPair { .. }
+        | SessionTemplate::SkinnedAvatars { .. } => CustomShaderAssignment::None,
+    }
+}
+
+fn assignment_skips_material(assignment: CustomShaderAssignment, index: usize) -> bool {
+    match assignment {
+        CustomShaderAssignment::None => false,
+        CustomShaderAssignment::PropertyUpdate | CustomShaderAssignment::ExoticPair => true,
+        CustomShaderAssignment::Warp216 => index == 0,
+    }
+}
 use scene_ids::{
     scene_material_id, scene_material_update_buffer_id, scene_mesh_id, scene_property_request_id,
     scene_shader_id, scene_texture_buffer_id, scene_texture_id, scene_update_batch_id,
@@ -180,9 +269,8 @@ pub(super) fn run_session(
 
     double_buffer_stack::prepare_assets(&template, &mut session.queues, &mut lockstep)?;
 
-    let property_recapture = matches!(template, SessionTemplate::CustomShaderPropertyUpdate);
-    let warp216 = matches!(template, SessionTemplate::Warp216Debug { .. });
-    let exotic_pair = matches!(template, SessionTemplate::ExoticShaderPair);
+    let assignment = custom_shader_assignment(&template);
+    let property_recapture = matches!(assignment, CustomShaderAssignment::PropertyUpdate);
     let shadow_move = matches!(template, SessionTemplate::ShadowedCasterMove);
     let setup = build_scene_setup(template);
     let _uploaded_meshes = upload_scene_meshes(
@@ -199,20 +287,23 @@ pub(super) fn run_session(
         &backing_dir,
         &setup,
     )?;
-    if property_recapture {
-        custom_property::install_and_assign(&mut session.queues, &mut lockstep, &setup)?;
-    }
-    if warp216 {
-        warp_216_debug::install_and_assign(
-            &mut session.queues,
-            &mut lockstep,
-            &prefix,
-            &backing_dir,
-            &setup,
-        )?;
-    }
-    if exotic_pair {
-        exotic_pair::install_and_assign(&mut session.queues, &mut lockstep, &setup)?;
+    match assignment {
+        CustomShaderAssignment::None => {}
+        CustomShaderAssignment::PropertyUpdate => {
+            custom_property::install_and_assign(&mut session.queues, &mut lockstep, &setup)?;
+        }
+        CustomShaderAssignment::Warp216 => {
+            warp_216_debug::install_and_assign(
+                &mut session.queues,
+                &mut lockstep,
+                &prefix,
+                &backing_dir,
+                &setup,
+            )?;
+        }
+        CustomShaderAssignment::ExoticPair => {
+            exotic_pair::install_and_assign(&mut session.queues, &mut lockstep, &setup)?;
+        }
     }
 
     let png_outcome = capture::capture_submitted_scene(

@@ -1,0 +1,584 @@
+# Reviewed exceptions for material roots with no scene-DSL golden case.
+# This file may only shrink. Every entry needs a non-empty reason or an issue link.
+# MAX_ALLOWLIST_ROOTS in crates/renderide/src/materials/material_coverage.rs
+# is the growth guard. The only allowed edit to that constant is lowering it.
+
+[[entry]]
+root = "billboardunlit"
+reason = "No scene_dsl golden draws this root. Backfill bucket: particles."
+
+[[entry]]
+root = "blur"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "blur_perobject"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "cadshader"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "channelmatrix"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "channelmatrix_perobject"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "circle"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "cubemapprojection"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "debug"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "debugchannel"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "depth_shader_playerfinder_1"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "depthprojection"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "faceexplodeshader"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "fogboxvolume"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "fresnel"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "fresnellerp"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "furfx-2.0-10layer"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "furfx-2.0-20layer"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "furfx-3.0-10layer"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "furfx-3.0-20layer"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "furfx-3.0-shell-10layer"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "furfx-3.0-shell-20layer"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "furfx-advanced-10layer"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "furfx-advanced-20layer"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "furfx-advanced-40layer"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "furfx-advanced-5layer"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "furfx-advanced-shell-10layer"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "furfx-advanced-shell-20layer"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "furfx-advanced-shell-40layer"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "furfx-advanced-shell-5layer"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "furfx-basic-10layer"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "furfx-basic-20layer"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "furfx-basic-40layer"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "furfx-basic-5layer"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "furfx-selfshadow-blend-10layer"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "furfx-selfshadow-blend-20layer"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "furfx-selfshadow-noblend-10layer"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "furfx-selfshadow-noblend-20layer"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "gamma"
+reason = "No scene_dsl golden draws this root. Backfill bucket: HDR/tonemap."
+
+[[entry]]
+root = "gamma_perobject"
+reason = "No scene_dsl golden draws this root. Backfill bucket: HDR/tonemap."
+
+[[entry]]
+root = "getdepth"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "getdepth_perobject"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "gradientskybox"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "grayscale"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "grayscale_perobject"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "hsv"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "hsv_perobject"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "invert"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "invert_perobject"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "invisible"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "legacycirclesegment"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "lut"
+reason = "No scene_dsl golden draws this root. Backfill bucket: HDR/tonemap."
+
+[[entry]]
+root = "lut_perobject"
+reason = "No scene_dsl golden draws this root. Backfill bucket: HDR/tonemap."
+
+[[entry]]
+root = "matcap"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "newunlitshader"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "nosamplers"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "overlay"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "overlayfresnel"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "overlayunlit"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "paintpbs"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbscolormask"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbscolormaskspecular"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbscolorsplat"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbscolorsplatspecular"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbsdisplace"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbsdisplaceshadow"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbsdisplacespecular"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbsdisplacespeculartransparent"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbsdisplacetransparent"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbsdistancelerp"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbsdistancelerpspecular"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbsdistancelerpspeculartransparent"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbsdistancelerptransparent"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbsdualsided"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbsdualsidedspecular"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbsdualsidedtransparent"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbsdualsidedtransparentspecular"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbsintersect"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbsintersectspecular"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbslerp"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbslerpspecular"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbsmultiuv"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbsmultiuvspecular"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbsrim"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbsrimspecular"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbsrimtransparent"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbsrimtransparentspecular"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbsrimtransparentzwrite"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbsrimtransparentzwritespecular"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbsslice"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbsslicespecular"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbsslicetransparent"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbsslicetransparentspecular"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbsspecular"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbsstencil"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbsstencilspecular"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbstriplanar"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbstriplanarspecular"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbstriplanartransparent"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbstriplanartransparentspecular"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbsvertexcolortransparent"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbsvertexcolortransparentspecular"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pbsvoronoicrystal"
+reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
+
+[[entry]]
+root = "pixelate"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "pixelate_perobject"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "polargrid"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "posterize"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "posterize_perobject"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "proceduralskybox"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "projection360"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "reflection"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "refract"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "refract_perobject"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "testblend"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "testshader"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "textunlit"
+reason = "No scene_dsl golden draws this root. Backfill bucket: text."
+
+[[entry]]
+root = "texturedebug"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "threshold"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "threshold_perobject"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "toonstandard"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "toonwater"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "ui_circlesegment"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "ui_textunlit"
+reason = "No scene_dsl golden draws this root. Backfill bucket: text."
+
+[[entry]]
+root = "unlitdistancelerp"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "unlitpolarmapping"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "uvrect"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "volumeunlit"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "voronoi"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "wireframe"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "wireframedoublesided"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "wireframeunlittransition"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "xstoon2.0"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "xstoon2.0-cutout"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "xstoon2.0-cutouta2c"
+reason = "No scene_dsl golden draws this root. Backfill bucket: MSAA."
+
+[[entry]]
+root = "xstoon2.0-cutouta2c-outlined"
+reason = "No scene_dsl golden draws this root. Backfill bucket: MSAA."
+
+[[entry]]
+root = "xstoon2.0-cutouta2cmasked"
+reason = "No scene_dsl golden draws this root. Backfill bucket: MSAA."
+
+[[entry]]
+root = "xstoon2.0-dithered"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "xstoon2.0-dithered-outlined"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "xstoon2.0-fade"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "xstoon2.0-outlined"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "xstoon2.0-transparent"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "xstoon2.0_outlined"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "xstoon2.0_wireframeoverride"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
+
+[[entry]]
+root = "xstoon2.0_wireframeoverride_a2c"
+reason = "No scene_dsl golden draws this root. Backfill bucket: MSAA."
+
+[[entry]]
+root = "xstoonstenciler"
+reason = "No scene_dsl golden draws this root. Backfill bucket: remaining."
