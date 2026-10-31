@@ -137,6 +137,9 @@ pub fn run_integration_case(
         timeout: runner.timeout,
         verbose_renderer: runner.verbose_renderer,
         physically_based,
+        scene_color_readback: template_requests_scene_color_readback(
+            &prepared_template.session_template,
+        ),
         template: prepared_template.session_template,
     };
 
@@ -154,13 +157,18 @@ pub fn run_integration_case(
 }
 
 fn template_requests_physically_based(template: &SessionTemplate) -> bool {
-    matches!(
-        template,
+    match template {
         SessionTemplate::NegativeLightPair {
             physically_based: true,
             ..
-        }
-    )
+        } => true,
+        SessionTemplate::Warp216Debug { spec } => spec.physically_based(),
+        _ => false,
+    }
+}
+
+fn template_requests_scene_color_readback(template: &SessionTemplate) -> bool {
+    matches!(template, SessionTemplate::Warp216Debug { .. })
 }
 
 fn drive_template(cfg: HostHarnessConfig) -> Result<(), HarnessError> {
@@ -264,6 +272,9 @@ fn prepare_template(
                 negative_color: *negative_color,
             },
         }),
+        CaseTemplate::Warp216Debug { spec } => Ok(PreparedTemplate {
+            session_template: SessionTemplate::Warp216Debug { spec: *spec },
+        }),
         CaseTemplate::GltfTexturedStaticMesh { path } => gltf_prepared_template(path, layout),
     }
 }
@@ -355,7 +366,9 @@ fn evaluate_and_finalize(
     let compared = report.evaluation.is_some();
     report.region_stats = Some(region_stats);
     if compared {
-        if let Err(message) = plain_capture_failure(case, &layout) {
+        if let Err(message) = plain_capture_failure(case, &layout).and_then(|()| {
+            super::warp_216_debug::scene_color_sidecar_failure(case, &layout.actual_png)
+        }) {
             report.passed = false;
             report.error = Some(match report.error.take() {
                 Some(existing) => format!("{existing}; {message}"),
@@ -502,5 +515,68 @@ mod tests {
         assert!(!outcome.layout.actual_png.exists());
         assert!(!outcome.layout.diff_png.exists());
         assert!(!outcome.layout.side_by_side_png.exists());
+    }
+
+    #[test]
+    fn warp216_report_uses_schema_v2_with_region_stats_and_early_exit() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut case =
+            crate::scene_dsl::warp_216_debug::lookup("warp216_negparity_composed").expect("case");
+        case.golden_path = temp.path().join("golden.png");
+        let output_root = temp.path().join("out");
+        let layout = CaseOutputLayout::for_case(&output_root, &case.name);
+        layout.prepare().expect("prepare layout");
+        let image = non_flat_image();
+        image.save(&case.golden_path).expect("write golden");
+        image.save(&layout.actual_png).expect("write actual");
+        let json = layout.actual_png.with_file_name("actual.scene_color.json");
+        let raw = layout
+            .actual_png
+            .with_file_name("actual.scene_color.rgba16f");
+        std::fs::write(
+            &json,
+            r#"{"format":"rgba16float","regions":[
+                {"name":"top_left","mean":[0,0,0,1],"negative":[0,0,0,0],"nan":[0,0,0,0],"inf":[0,0,0,0]},
+                {"name":"top_right","mean":[0,0,0,1],"negative":[0,0,0,0],"nan":[0,0,0,0],"inf":[0,0,0,0]},
+                {"name":"bottom_left","mean":[0,0,0,1],"negative":[0,0,0,0],"nan":[0,0,0,0],"inf":[0,0,0,0]},
+                {"name":"bottom_right","mean":[0,0,0,1],"negative":[0,0,0,0],"nan":[0,0,0,0],"inf":[0,0,0,0]}
+            ]}"#,
+        )
+        .expect("stats");
+        std::fs::write(&raw, b"R16F").expect("raw");
+        std::fs::write(
+            layout.actual_png.with_file_name("capture-stats.json"),
+            r#"{"longest_submission_stall_ms":1,"warp_readiness_budget_used":false,"early_exit":{"case":"warp216_negparity_composed","k":3,"elapsed_ms":12500,"settle_ms":4000,"k_window_ms":8500,"reason":"flat_stable"}}"#,
+        )
+        .expect("capture stats");
+
+        let outcome = evaluate_and_finalize(&case, layout).expect("finalize");
+        let bytes = std::fs::read(&outcome.layout.report_json).expect("report");
+        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+
+        assert!(outcome.report.passed);
+        assert_eq!(value["schema"], "renderide-test.v2");
+        assert_eq!(value["status"], "early-exit");
+        assert_eq!(value["reason"], "early-exit");
+        assert!(
+            value["reason_text"]
+                .as_str()
+                .is_some_and(|text| !text.is_empty())
+        );
+        assert_eq!(value["early_exit"]["settle_ms"], 4_000);
+        assert_eq!(value["capture"]["early_exit"]["k_window_ms"], 8_500);
+        assert_eq!(value["region_stats"].as_array().map(Vec::len), Some(4));
+        assert!(!template_requests_physically_based(
+            &SessionTemplate::Warp216Debug {
+                spec: crate::scene_dsl::warp_216_debug::spec_for("warp216_negparity_composed")
+                    .expect("spec"),
+            }
+        ));
+        assert!(template_requests_physically_based(
+            &SessionTemplate::Warp216Debug {
+                spec: crate::scene_dsl::warp_216_debug::spec_for("warp216_negative_composed")
+                    .expect("spec"),
+            }
+        ));
     }
 }

@@ -81,6 +81,7 @@
         "gltf-fixture",
         "image-compare",
         "unknown-case",
+        "unknown-group",
         "bench-report-missing",
         "unknown-bench-scenario",
         "suite-failed"

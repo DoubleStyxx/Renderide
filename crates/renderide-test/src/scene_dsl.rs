@@ -22,6 +22,7 @@ pub mod runner;
 pub(crate) mod side_by_side;
 pub mod suite;
 pub mod tolerance;
+pub mod warp_216_debug;
 mod warp_pbs;
 
 /// Labels matching WARP cases. The flat-exit tests use this with an injected clock.

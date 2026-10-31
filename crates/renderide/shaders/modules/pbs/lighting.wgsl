@@ -524,3 +524,147 @@ fn shade_specular_transparent_clustered(
         brdf::unity_premultiplied_alpha(s.alpha, s.one_minus_reflectivity),
     );
 }
+
+#ifdef _TERM_DEBUG
+/// Term ids for the #216 debug material. Production shaders never define `_TERM_DEBUG`.
+const DEBUG_TERM_COMPOSED: u32 = 0u;
+const DEBUG_TERM_DIFFUSE: u32 = 1u;
+const DEBUG_TERM_SPECULAR: u32 = 2u;
+const DEBUG_TERM_AMBIENT: u32 = 3u;
+const DEBUG_TERM_INDIRECT: u32 = 4u;
+const DEBUG_TERM_FRESNEL: u32 = 5u;
+const DEBUG_TERM_EMISSION: u32 = 6u;
+
+/// One lighting term from the metallic clustered sum, or the full sum when `term_id` is composed.
+///
+/// `DEBUG_TERM_COMPOSED` calls [`shade_metallic_clustered`]. The other ids partition that sum:
+/// diffuse and specular add up to `direct`, then ambient, indirect specular, and emission.
+/// Fresnel is the Schlick `F` accumulated over the same lights, not an extra addend.
+fn shade_metallic_term_debug(
+    frag_xy: vec2<f32>,
+    world_pos: vec3<f32>,
+    view_layer: u32,
+    s: surface::MetallicSurface,
+    options: ClusterLightingOptions,
+    term_id: u32,
+) -> vec3<f32> {
+    if (term_id == DEBUG_TERM_COMPOSED) {
+        return shade_metallic_clustered(frag_xy, world_pos, view_layer, s, options);
+    }
+
+    let view_dir = rg::view_dir_for_world_pos(world_pos, view_layer);
+    let shifted_normal = brdf::view_facing_normal(s.normal, view_dir);
+    let spec_f0 = brdf::metallic_f0(s.base_color, s.metallic);
+    let view_dot = clamp(dot(shifted_normal, view_dir), 0.0, 1.0);
+    let rough = brdf::filter_perceptual_roughness(s.roughness, s.normal, s.geometric_normal);
+    let compensation = direct_energy_compensation(
+        s.roughness,
+        view_dot,
+        spec_f0,
+        options.specular_highlights_enabled,
+    );
+    let glossy = rprobe::has_indirect_specular(view_layer, options.glossy_reflections_enabled);
+    let spec_energy = indirect_specular_energy(rough, view_dot, spec_f0, glossy);
+    let spec_vis = indirect_specular_visibility(view_dot, s.occlusion, rough, spec_f0, glossy);
+    let probe = rprobe::indirect_diffuse(
+        world_pos,
+        s.normal,
+        view_layer,
+        options.include_directional,
+    );
+    let ambient_term = brdf::indirect_diffuse_metallic(
+        probe,
+        s.base_color,
+        s.metallic,
+        spec_energy,
+        s.occlusion,
+        glossy,
+    );
+    let indirect_term = indirect_specular_contribution(
+        world_pos,
+        shifted_normal,
+        s.geometric_normal,
+        view_dir,
+        rough,
+        spec_energy,
+        spec_vis,
+        glossy,
+        view_layer,
+    );
+    let emission_term = select(vec3<f32>(0.0), s.emission, options.include_directional);
+    if (term_id == DEBUG_TERM_AMBIENT) {
+        return ambient_term;
+    }
+    if (term_id == DEBUG_TERM_INDIRECT) {
+        return indirect_term;
+    }
+    if (term_id == DEBUG_TERM_EMISSION) {
+        return emission_term;
+    }
+
+    var diffuse_sum = vec3<f32>(0.0);
+    var specular_sum = vec3<f32>(0.0);
+    var fresnel_sum = vec3<f32>(0.0);
+    let cluster_id = cluster_id_for_fragment(frag_xy, world_pos, view_layer);
+    let range = pcls::cluster_light_range_at(cluster_id);
+    let count = range.y;
+    if (count > 0u) {
+        var basis = brdf::DirectBrdfBasis(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 0.0, 1.0));
+        var alpha = 0.0;
+        var f90 = 0.0;
+        if (options.specular_highlights_enabled) {
+            basis = brdf::direct_brdf_basis(s.normal, view_dir);
+            alpha = brdf::direct_alpha_from_perceptual_roughness(rough);
+            f90 = brdf::f90_from_f0(spec_f0);
+        }
+        for (var i = 0u; i < count; i++) {
+            let li = pcls::cluster_light_index_from_range(range, i);
+            if (li >= rg::frame.light_count) {
+                continue;
+            }
+            let light = rg::lights[li];
+            if (!light_enabled_for_options(light.light_type, options)) {
+                continue;
+            }
+            if (options.specular_highlights_enabled) {
+                let parts = brdf::direct_metallic_term_parts(
+                    light,
+                    world_pos,
+                    s.normal,
+                    basis,
+                    alpha,
+                    f90,
+                    s.roughness,
+                    s.metallic,
+                    s.base_color,
+                    spec_f0,
+                    compensation,
+                );
+                diffuse_sum = diffuse_sum + parts.diffuse;
+                specular_sum = specular_sum + parts.specular;
+                fresnel_sum = fresnel_sum + parts.fresnel;
+            } else {
+                diffuse_sum = diffuse_sum + brdf::diffuse_only_metallic(
+                    light,
+                    world_pos,
+                    s.normal,
+                    view_dir,
+                    s.roughness,
+                    s.base_color,
+                    s.metallic,
+                );
+            }
+        }
+    }
+    if (term_id == DEBUG_TERM_DIFFUSE) {
+        return diffuse_sum;
+    }
+    if (term_id == DEBUG_TERM_SPECULAR) {
+        return specular_sum;
+    }
+    if (term_id == DEBUG_TERM_FRESNEL) {
+        return fresnel_sum;
+    }
+    return vec3<f32>(0.0);
+}
+#endif

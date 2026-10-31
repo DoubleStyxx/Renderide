@@ -293,8 +293,24 @@ impl SuiteCaseReport {
 /// When `requested` is empty, every registered case is returned. Duplicate requested names are
 /// ignored after their first occurrence so parallel execution never races on one output folder.
 pub fn select_cases(requested: &[String]) -> Result<Vec<IntegrationCase>, HarnessError> {
+    select_cases_in(requested, None)
+}
+
+/// [`select_cases`] plus an opt-in group.
+///
+/// `None` is the default registry, and a debug case name still resolves. `Some(group)`
+/// limits the pool to that group, including when `requested` is empty.
+pub fn select_cases_in(
+    requested: &[String],
+    group: Option<&str>,
+) -> Result<Vec<IntegrationCase>, HarnessError> {
+    let grouped = match group {
+        None => None,
+        Some(name) if name == super::warp_216_debug::GROUP => Some(super::warp_216_debug::cases()),
+        Some(name) => return Err(HarnessError::UnknownGroup(name.to_string())),
+    };
     if requested.is_empty() {
-        return Ok(registry());
+        return Ok(grouped.unwrap_or_else(registry));
     }
 
     let mut selected = Vec::new();
@@ -305,7 +321,12 @@ pub fn select_cases(requested: &[String]) -> Result<Vec<IntegrationCase>, Harnes
         {
             continue;
         }
-        let Some(case) = lookup(name) else {
+        let found = if let Some(pool) = &grouped {
+            pool.iter().find(|case| case.name == *name).cloned()
+        } else {
+            lookup(name).or_else(|| super::warp_216_debug::lookup(name))
+        };
+        let Some(case) = found else {
             return Err(HarnessError::UnknownCase(name.clone()));
         };
         selected.push(case);

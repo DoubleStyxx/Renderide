@@ -173,6 +173,7 @@ pub(crate) fn reason_for_error(err: &HarnessError) -> Reason {
         HarnessError::GltfFixture { .. } => "gltf-fixture",
         HarnessError::ImageCompare(_) => "image-compare",
         HarnessError::UnknownCase(_) => "unknown-case",
+        HarnessError::UnknownGroup(_) => "unknown-group",
         HarnessError::BenchReportMissing { .. } => "bench-report-missing",
         HarnessError::UnknownBenchScenario(_) => "unknown-bench-scenario",
         HarnessError::SuiteFailed { .. } => "suite-failed",
@@ -268,6 +269,7 @@ const MESSAGE_NEEDLES: &[(&str, &str)] = &[
     ("load GLB fixture", "gltf-fixture"),
     ("image-compare", "image-compare"),
     ("unknown integration case", "unknown-case"),
+    ("unknown suite group", "unknown-group"),
     ("frame bench report missing", "bench-report-missing"),
     ("unknown frame bench scenario", "unknown-bench-scenario"),
     ("headless suite failed", "suite-failed"),
@@ -331,6 +333,10 @@ const REASONS: &[(&str, &str)] = &[
     (
         "unknown-case",
         "The named integration case is not in the suite.",
+    ),
+    (
+        "unknown-group",
+        "The named suite group is not an opt-in group.",
     ),
     (
         "bench-report-missing",
@@ -445,7 +451,7 @@ mod tests {
             assert!(!codes.contains(&reason.code), "duplicate {}", reason.code);
             codes.push(reason.code);
         }
-        assert_eq!(codes.len(), 20, "one sample per HarnessError variant");
+        assert_eq!(codes.len(), 21, "one sample per HarnessError variant");
         for (_, text) in REASONS {
             assert!(!text.is_empty());
         }
@@ -524,6 +530,7 @@ mod tests {
             REASON_UNEXPECTED_PASS,
             QUARANTINE_REASON,
             REASON_EARLY_EXIT,
+            "unknown-group",
         ] {
             assert!(
                 schema["properties"]["reason"]["enum"]
@@ -692,6 +699,7 @@ mod tests {
             },
             HarnessError::ImageCompare("rank".to_string()),
             HarnessError::UnknownCase("missing".to_string()),
+            HarnessError::UnknownGroup("nope".to_string()),
             HarnessError::BenchReportMissing {
                 path: path.clone(),
                 wait,

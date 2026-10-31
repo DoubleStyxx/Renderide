@@ -25,6 +25,10 @@ pub struct SceneSessionConfig {
     /// Passed as `RENDERIDE_RENDERING__PHYSICALLY_BASED`. The harness always sets the
     /// variable so a parent-process value cannot flip the suite off the case's mode.
     pub physically_based: bool,
+    /// When `true`, the renderer writes the pre-sRGB scene-color sidecar beside the PNG.
+    ///
+    /// Only the #216 debug group sets this. The default suite leaves it false.
+    pub scene_color_readback: bool,
 }
 
 /// Result of a successful scene-session run.

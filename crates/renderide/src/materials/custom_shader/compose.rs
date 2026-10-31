@@ -316,3 +316,34 @@ fn parse_import_paths(source: &str) -> Vec<String> {
     }
     out
 }
+
+#[cfg(test)]
+mod term_debug_compose_tests {
+    use super::compose_keyword_variant_wgsl;
+
+    const DEBUG_SHADER: &str =
+        include_str!("../../../../renderide-test/src/host/scene_session/warp_216_term_debug.wgsl");
+
+    #[test]
+    fn term_debug_keyword_compiles_the_split_and_off_stays_magenta() {
+        let enabled = compose_keyword_variant_wgsl(
+            DEBUG_SHADER,
+            "warp216-term-debug",
+            false,
+            &["_TERM_DEBUG".to_string()],
+        )
+        .expect("compose with _TERM_DEBUG");
+        assert!(
+            enabled.contains("shade_metallic_term_debug")
+                || enabled.contains("direct_metallic_term_parts"),
+            "debug term function was not composed into the shader"
+        );
+        assert!(enabled.contains("0.25"));
+        let disabled =
+            compose_keyword_variant_wgsl(DEBUG_SHADER, "warp216-term-debug-off", false, &[])
+                .expect("compose without the keyword");
+        assert!(!disabled.contains("shade_metallic_term_debug"));
+        assert!(!disabled.contains("direct_metallic_term_parts"));
+        assert!(disabled.contains("1f") || disabled.contains("1.0"));
+    }
+}

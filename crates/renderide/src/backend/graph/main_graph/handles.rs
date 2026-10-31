@@ -220,7 +220,8 @@ fn create_main_graph_transient_resources(
         array_layers: TransientArrayLayers::Frame,
         // `COPY_DST` is unioned from the color-preserve pass so a depth-only or clear-none
         // camera can seed this same transient. That pass does not allocate another attachment.
-        base_usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        // `COPY_SRC` is added only while the #216 debug readback flag is on.
+        base_usage: crate::debug_scene_color::scene_color_hdr_base_usage(),
         alias: true,
     });
     let msaa = msaa_enabled.then(|| {

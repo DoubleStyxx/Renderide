@@ -73,7 +73,7 @@ fn physically_based_env(enabled: bool) -> (&'static str, &'static str) {
 
 /// Builds the renderer process arguments for one harness session.
 pub fn renderer_spawn_args(cfg: &SceneSessionConfig, queue_name: &str) -> Vec<String> {
-    vec![
+    let mut args = vec![
         "--headless".to_string(),
         "--headless-output".to_string(),
         cfg.output_path.display().to_string(),
@@ -88,7 +88,11 @@ pub fn renderer_spawn_args(cfg: &SceneSessionConfig, queue_name: &str) -> Vec<St
         "-LogLevel".to_string(),
         "debug".to_string(),
         "--ignore-config".to_string(),
-    ]
+    ];
+    if cfg.scene_color_readback {
+        args.push("--headless-scene-color-readback".to_string());
+    }
+    args
 }
 
 #[cfg(test)]
@@ -109,7 +113,24 @@ mod tests {
             timeout: Duration::from_secs(5),
             verbose_renderer: false,
             physically_based: false,
+            scene_color_readback: false,
         }
+    }
+
+    #[test]
+    fn scene_color_readback_is_absent_unless_the_debug_group_asks() {
+        let mut cfg = minimal_config();
+        assert!(
+            !renderer_spawn_args(&cfg, "queue")
+                .iter()
+                .any(|arg| { arg == "--headless-scene-color-readback" })
+        );
+        cfg.scene_color_readback = true;
+        assert!(
+            renderer_spawn_args(&cfg, "queue")
+                .iter()
+                .any(|arg| { arg == "--headless-scene-color-readback" })
+        );
     }
 
     #[test]

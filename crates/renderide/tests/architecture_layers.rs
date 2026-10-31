@@ -26,6 +26,7 @@ const ROOT_MODULES: &[&str] = &[
     "cpu_parallelism",
     "crash_context",
     "cull_contract",
+    "debug_scene_color",
     "diagnostics",
     "embedded_shaders",
     "frame_contract",

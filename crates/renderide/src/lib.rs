@@ -29,6 +29,7 @@ mod config;
 mod cpu_parallelism;
 mod crash_context;
 mod cull_contract;
+mod debug_scene_color;
 mod diagnostics;
 mod frame_contract;
 mod frame_upload_batch;

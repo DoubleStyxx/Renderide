@@ -63,12 +63,14 @@ impl<'a> HeadlessDriver<'a> {
         main_heartbeat: Option<crate::diagnostics::Heartbeat>,
         gpu_config: GpuStartupConfig,
     ) -> Result<Self, RunError> {
+        crate::debug_scene_color::set_readback_enabled(params.scene_color_readback);
         logger::info!(
-            "Headless mode: output={} size={}x{} interval_ms={}",
+            "Headless mode: output={} size={}x{} interval_ms={} scene_color_readback={}",
             params.output_path.display(),
             params.width,
             params.height,
             params.interval_ms,
+            params.scene_color_readback,
         );
         crash_context::set_target_mode(TargetMode::Headless);
         crash_context::set_render_mode(RenderMode::Headless);
