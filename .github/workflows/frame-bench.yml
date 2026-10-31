@@ -1,23 +1,24 @@
 # Manual lavapipe frame benchmark. Does not run on push or pull_request.
-# The job builds master and the selected head on one runner and gates only on
-# relative regression of cpu_frame_ms.p95. Absolute milliseconds are not a gate. The gate's
-# --abs-floor-ms (a head-minus-base median delta at or below it never flags or fails) defaults
-# to 0, off, and this job does not set it; a nonzero floor is open question O8.
+# Parity with bench-pr.yml lavapipe gate (shared scripts/ci/frame_bench_gate.py):
+# RUNS default 12 (n>=12), one reversed-order confirm, confirm-only FAIL rule, pooled
+# report-only, and the >15% base-drift guard (INCONCLUSIVE → one extra reversed confirm;
+# second drift fails closed as inconclusive: base drift). base_drift_pct and deciding_round
+# are recorded in gate.json. Absolute milliseconds are not a gate. The gate's
+# --abs-floor-ms defaults to 0, off; a nonzero floor is open question O8.
 #
 # Gate (scripts/ci/frame_bench_gate.py, taken from the ref that dispatched this workflow;
 # its docstring is the full rule). delta = (median head per-run p95 - median base per-run p95)
 # / median base per-run p95, in percent.
 # Two thresholds (percent): `flag_threshold` (default 5) picks what to re-measure,
 # `fail_threshold` (default 10) is the policy bar.
-# 1. First pass: a scenario is flagged when delta > `flag_threshold`. Nothing else: the base's
-#    run-to-run spread (15-30% per run on lavapipe) is not a threshold.
-# 2. Confirm: flagged scenarios are re-measured for `confirm_rounds` interleaved rounds. A
-#    scenario FAILs only when confirm-rounds-only delta > `fail_threshold` AND one-sided
-#    Mann-Whitney p < 0.05 with n>=12 per side. Pooled delta/p are reported but do not FAIL.
-# 3. `confirm_rounds` = 0: the first pass flags at `fail_threshold` and every flag fails; a
-#    delta between the two thresholds passes (it is under the policy bar).
-# `threshold` is a deprecated alias of `fail_threshold` (it wins when set, and lowers
-# `flag_threshold` to it if needed).
+# 1. First pass: interleaved chunks totaling `runs` (default 12). Flag when delta > flag.
+# 2. Confirm: one reversed-order confirm at n=`runs`. FAIL only on confirm-only delta >
+#    fail_threshold AND Mann-Whitney p < 0.05. Pooled is reported only.
+#    Confirm-base median drift >15% vs first-pass base → INCONCLUSIVE; one extra reversed
+#    confirm. Second drift → FAIL (inconclusive: base drift). Clean extra round decides
+#    normally (deciding_round recorded).
+# 3. `confirm_rounds` = 0: first pass flags at fail_threshold and every flag fails.
+# `threshold` is a deprecated alias of `fail_threshold`.
 # Scenarios missing on base are `base N/A`; scenarios missing on head are `head N/A, skipped`.
 # The job fails when no requested scenario exists on head.
 name: Frame bench
@@ -36,8 +37,8 @@ name: Frame bench
         required: false
         type: string
       runs:
-        description: Measured runs per scenario, per pass and per confirm round. The gate uses the median of each run's percentile.
-        default: "9"
+        description: Measured runs per scenario, per pass and per confirm round (n>=12 for Mann-Whitney). Split into interleaved chunks like bench-pr. The gate uses the median of each run's percentile.
+        default: "12"
         required: false
         type: string
       flag_threshold:
@@ -76,8 +77,8 @@ name: Frame bench
         required: false
         type: string
       confirm_rounds:
-        description: When the first pass flags a scenario, re-measure base and head this many interleaved rounds (base/head, then head/base, ...) for the flagged scenarios only, each round with `runs` runs. FAIL only if confirm-rounds-only show delta > fail_threshold AND one-sided Mann-Whitney p < 0.05 with n>=12 per side (pooled reported only). 0 skips the confirm and fails only first-pass deltas > fail_threshold.
-        default: "3"
+        description: When the first pass flags a scenario, run this many reversed-order confirm attempts at n=`runs` (default 1, matching bench-pr). FAIL only on confirm-only. A >15% base-drift on confirm yields one automatic extra confirm beyond this count (fail-closed if it drifts again). 0 skips confirm and fails only first-pass deltas > fail_threshold.
+        default: "1"
         required: false
         type: string
       threads:
@@ -274,11 +275,12 @@ jobs:
           # Each tree is measured with ITS OWN renderide-framebench binary. Reports from different
           # trees are only ever compared through the report JSON (schema 1 or 2; the gate accepts
           # both, in any mix). The gate script comes from the dispatching ref.
-          # usage: run_tree <target dir> <out json> [scenario ...]
+          # usage: run_tree <target dir> <out json> <runs> [scenario ...]
           run_tree() {
             local target="$1"
             local report="$2"
-            shift 2
+            local chunk_runs="$3"
+            shift 3
             local args=()
             local scenario
             for scenario in "$@"; do
@@ -291,7 +293,7 @@ jobs:
               "${args[@]}" \
               --warmup "$warmup" \
               --frames "$frames" \
-              --runs "$runs" \
+              --runs "$chunk_runs" \
               --timeout-seconds 600 \
               --output "$report"
           }
@@ -352,7 +354,6 @@ jobs:
             } | tee -a "$summary"
             finish 1
           fi
-          run_tree "$RUNNER_TEMP/target-head" "$out/head.json" "${head_scenarios[@]}"
 
           set +e
           build_tree "base" "$RUNNER_TEMP/target-base"
@@ -388,29 +389,43 @@ jobs:
               echo "None of the requested scenarios exist on base ref \`$BASE_REF\`."
               echo "Head was measured; relative gate skipped (base N/A)."
               echo
+              # Still measure head once for the summary (single chunk).
+              run_tree "$RUNNER_TEMP/target-head" "$out/head.json" "$runs" "${head_scenarios[@]}"
               python3 "$gate_py" --head "$out/head.json" "${head_missing_args[@]}" \
                 "${thresholds[@]}" --title "First pass (head only)" || true
             } | tee -a "$summary"
             finish 0
           fi
-          run_tree "$RUNNER_TEMP/target-base" "$out/base.json" "${base_scenarios[@]}"
+
+          half=$((runs / 2))
+          rest=$((runs - half))
 
           {
             echo "lavapipe via VK_ICD_FILENAMES=$VK_ICD_FILENAMES"
-            echo "resolution=$resolution threads=$threads runs=$runs flag_threshold=$flag_threshold% fail_threshold=$fail_threshold% confirm_rounds=$confirm_rounds"
+            echo "resolution=$resolution threads=$threads runs=$runs flag_threshold=$flag_threshold% fail_threshold=$fail_threshold% confirm_rounds=$confirm_rounds (bench-pr parity: interleaved chunks, confirm-only FAIL, base-drift guard)"
             echo "GPU timestamps are optional under lavapipe; null pass times are accepted."
             echo
           } >> "$summary"
 
+          echo "::group::First pass (interleaved chunks, base/head then base/head, n=$runs)"
+          run_tree "$RUNNER_TEMP/target-base" "$out/base-a.json" "$half" "${base_scenarios[@]}"
+          run_tree "$RUNNER_TEMP/target-head" "$out/head-a.json" "$half" "${base_scenarios[@]}"
+          run_tree "$RUNNER_TEMP/target-base" "$out/base-b.json" "$rest" "${base_scenarios[@]}"
+          run_tree "$RUNNER_TEMP/target-head" "$out/head-b.json" "$rest" "${base_scenarios[@]}"
+          echo "::endgroup::"
+
           if [[ "$confirm_rounds" -eq 0 ]]; then
-            first_title="First pass (confirm_rounds=0: flags at fail_threshold $fail_threshold% and fails)"
+            first_title="First pass (confirm_rounds=0: flags at fail_threshold $fail_threshold% and fails; n=$runs interleaved)"
           else
-            first_title="First pass"
+            first_title="First pass (n=$runs, interleaved chunks)"
           fi
           set +e
-          python3 "$gate_py" --base "$out/base.json" --head "$out/head.json" \
+          python3 "$gate_py" \
+            --base "$out/base-a.json" --base "$out/base-b.json" \
+            --head "$out/head-a.json" --head "$out/head-b.json" \
             "${head_missing_args[@]}" "${thresholds[@]}" \
-            --title "$first_title" --suspects-out "$out/suspects.txt" | tee "$out/first.md"
+            --title "$first_title" --suspects-out "$out/suspects.txt" \
+            --json-out "$out/gate-first.json" | tee "$out/first.md"
           first_status=${PIPESTATUS[0]}
           set -e
           cat "$out/first.md" >> "$summary"
@@ -420,29 +435,28 @@ jobs:
           fi
 
           gate_status="$first_status"
+          cp "$out/gate-first.json" "$out/gate.json"
+
           if [[ "$first_status" -eq 1 && "$confirm_rounds" -gt 0 ]]; then
             mapfile -t suspects < "$out/suspects.txt"
-            echo "first pass flagged: ${suspects[*]}; confirming with $confirm_rounds interleaved rounds" >&2
-            # First-pass reports plus each confirm round: the gate pools them for path (a) and uses
-            # the confirm rounds alone for path (b).
-            confirm_args=(--base "$out/base.json" --head "$out/head.json")
-            for ((round = 1; round <= confirm_rounds; round++)); do
-              # Alternate the order (base/head, head/base, ...) so slow drift on the runner
-              # does not always land on the same side.
-              if ((round % 2 == 1)); then
-                run_tree "$RUNNER_TEMP/target-base" "$out/confirm-base-$round.json" "${suspects[@]}"
-                run_tree "$RUNNER_TEMP/target-head" "$out/confirm-head-$round.json" "${suspects[@]}"
-              else
-                run_tree "$RUNNER_TEMP/target-head" "$out/confirm-head-$round.json" "${suspects[@]}"
-                run_tree "$RUNNER_TEMP/target-base" "$out/confirm-base-$round.json" "${suspects[@]}"
-              fi
-              confirm_args+=(--confirm-base "$out/confirm-base-$round.json" --confirm-head "$out/confirm-head-$round.json")
-            done
+            echo "::group::Confirm reversed-order (head/base then head/base) for: ${suspects[*]}"
+            run_tree "$RUNNER_TEMP/target-head" "$out/confirm-head-a.json" "$half" "${suspects[@]}"
+            run_tree "$RUNNER_TEMP/target-base" "$out/confirm-base-a.json" "$half" "${suspects[@]}"
+            run_tree "$RUNNER_TEMP/target-head" "$out/confirm-head-b.json" "$rest" "${suspects[@]}"
+            run_tree "$RUNNER_TEMP/target-base" "$out/confirm-base-b.json" "$rest" "${suspects[@]}"
+            echo "::endgroup::"
+
             set +e
-            python3 "$gate_py" --mode confirm "${confirm_args[@]}" "${head_missing_args[@]}" \
-              "${thresholds[@]}" \
-              --title "Confirm ($confirm_rounds interleaved rounds x $runs runs; only flagged scenarios were re-run)" \
-              | tee "$out/confirm.md"
+            python3 "$gate_py" --mode confirm \
+              --base "$out/base-a.json" --base "$out/base-b.json" \
+              --head "$out/head-a.json" --head "$out/head-b.json" \
+              --confirm-base "$out/confirm-base-a.json" --confirm-base "$out/confirm-base-b.json" \
+              --confirm-head "$out/confirm-head-a.json" --confirm-head "$out/confirm-head-b.json" \
+              "${head_missing_args[@]}" "${thresholds[@]}" \
+              --confirm-round 1 \
+              --drift-out "$out/drift-suspects.txt" \
+              --title "Confirm round 1 (reversed-order, ${confirm_rounds} x $runs; confirm-only decides FAIL; pooled reported; base-drift guard)" \
+              --json-out "$out/gate.json" | tee "$out/confirm.md"
             gate_status=${PIPESTATUS[0]}
             set -e
             cat "$out/confirm.md" >> "$summary"
@@ -450,18 +464,59 @@ jobs:
               echo "gate script error" >&2
               finish 1
             fi
+
+            # Base-drift guard: one extra reversed confirm for INCONCLUSIVE scenes only.
+            if [[ -s "$out/drift-suspects.txt" ]]; then
+              mapfile -t drift_suspects < "$out/drift-suspects.txt"
+              echo "::group::Confirm round 2 (extra after base drift) for: ${drift_suspects[*]}"
+              {
+                echo
+                echo "inconclusive: base drift on round 1 for: ${drift_suspects[*]} — running one extra reversed confirm (never a silent pass)"
+              } >> "$summary"
+              run_tree "$RUNNER_TEMP/target-head" "$out/confirm2-head-a.json" "$half" "${drift_suspects[@]}"
+              run_tree "$RUNNER_TEMP/target-base" "$out/confirm2-base-a.json" "$half" "${drift_suspects[@]}"
+              run_tree "$RUNNER_TEMP/target-head" "$out/confirm2-head-b.json" "$rest" "${drift_suspects[@]}"
+              run_tree "$RUNNER_TEMP/target-base" "$out/confirm2-base-b.json" "$rest" "${drift_suspects[@]}"
+              echo "::endgroup::"
+
+              set +e
+              python3 "$gate_py" --mode confirm \
+                --base "$out/base-a.json" --base "$out/base-b.json" \
+                --head "$out/head-a.json" --head "$out/head-b.json" \
+                --confirm-base "$out/confirm2-base-a.json" --confirm-base "$out/confirm2-base-b.json" \
+                --confirm-head "$out/confirm2-head-a.json" --confirm-head "$out/confirm2-head-b.json" \
+                "${head_missing_args[@]}" "${thresholds[@]}" \
+                --confirm-round 2 --fail-closed-drift \
+                --title "Confirm round 2 (extra after base drift; fail-closed if still drifting; deciding round stated per row)" \
+                --json-out "$out/gate-confirm2.json" | tee "$out/confirm2.md"
+              c2_status=${PIPESTATUS[0]}
+              set -e
+              cat "$out/confirm2.md" >> "$summary"
+              if [[ "$c2_status" -ge 2 ]]; then
+                echo "gate script error on confirm round 2" >&2
+                finish 1
+              fi
+              python3 "$GITHUB_WORKSPACE/tools/scripts/ci/bench_pr_merge_confirm.py" \
+                --gate1 "$out/gate.json" --gate2 "$out/gate-confirm2.json" --out "$out/gate.json"
+              gate_status=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['exit_code'])" "$out/gate.json")
+              if [[ "$gate_status" -ne 0 ]]; then
+                echo "gate after drift reconfirm: fail (see inconclusive: base drift or confirm-only FAIL above)" >> "$summary"
+              else
+                echo "gate after drift reconfirm: pass (deciding round = 2 for reconfirmed scenes)" >> "$summary"
+              fi
+            fi
           fi
 
           # Per-metric detail from head's own `renderide-framebench compare` (first pass, raw
           # fail_threshold, no spread check). Informational: its exit status is not the gate.
           {
             echo
-            echo "<details><summary>Raw per-metric compare (first pass; informational, not the gate)</summary>"
+            echo "<details><summary>Raw per-metric compare (first pass chunks; informational, not the gate)</summary>"
             echo
             taskset -c "$cpuset" \
               "$RUNNER_TEMP/target-head/release/renderide-framebench" compare \
-              --baseline "$out/base.json" \
-              --candidate "$out/head.json" \
+              --baseline "$out/base-a.json" \
+              --candidate "$out/head-a.json" \
               --threshold "$fail_threshold" || true
             echo
             echo "</details>"
@@ -472,4 +527,6 @@ jobs:
               echo "gate: fail"
             fi
           } >> "$summary"
+          # Persist gate.json next to the summary for artifact consumers.
+          cp "$out/gate.json" "$GITHUB_WORKSPACE/gate.json" 2>/dev/null || true
           finish "$gate_status"
