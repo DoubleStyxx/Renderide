@@ -1,9 +1,8 @@
 # Opt-in #216 production-lit codegen arm. Not the default CI suite.
-# Arm A: explicit LOD in the clustered light loop, under static DXC and FXC.
+# Baseline resample of the production fragment under static DXC.
 #
-# One Linux llvmpipe run and three independent Windows WARP runs. Each run
-# executes negative_light_parity, negative_light_physically_based, and
-# pbs_lit_material_matrix with RENDERIDE_LIT_SHADER_PROBE=1.
+# One Linux llvmpipe run, three Windows WARP DXC runs of the three lit cases,
+# and one FXC run of warp216_negparity_composed.
 # A docs-only commit does not match the path filter, so it does not restart this.
 
 name: WARP 216 debug
@@ -12,7 +11,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - cursor/warp-216-8a-baseline-4858
+      - cursor/warp-216-8a-dxc-rerun-4858
     paths:
       - ".github/workflows/warp-216-debug.yml"
       - ".github/actions/lavapipe/**"
@@ -46,13 +45,7 @@ jobs:
             label: windows-dxc-3
             dx12_compiler: auto
           - os: windows-latest
-            label: windows-fxc-1
-            dx12_compiler: fxc
-          - os: windows-latest
-            label: windows-fxc-2
-            dx12_compiler: fxc
-          - os: windows-latest
-            label: windows-fxc-3
+            label: windows-fxc-debug
             dx12_compiler: fxc
     env:
       RAYON_NUM_THREADS: "1"
@@ -169,10 +162,16 @@ jobs:
             bin=./target/debug/renderide-test
           fi
           lit_ec=0
-          "$bin" check-suite --jobs 1 \
-            --case negative_light_parity \
-            --case negative_light_physically_based \
-            --case pbs_lit_material_matrix || lit_ec=$?
+          if [[ "${{ matrix.dx12_compiler }}" == "fxc" ]]; then
+            # One compile of the 8d composed debug shader. Production FXC
+            # already failed X3511; this asks whether that shader does too.
+            "$bin" check-suite --jobs 1 --case warp216_negparity_composed || lit_ec=$?
+          else
+            "$bin" check-suite --jobs 1 \
+              --case negative_light_parity \
+              --case negative_light_physically_based \
+              --case pbs_lit_material_matrix || lit_ec=$?
+          fi
           {
             echo "dxc=$(command -v dxc || true)"
             echo "fxc=$(command -v fxc || true)"

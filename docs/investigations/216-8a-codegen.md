@@ -540,7 +540,9 @@ Both call `shade_metallic_clustered`. Ranked by what is in the production fragme
 2. Material `textureSampleBias` (`ts::sample_tex_2d`), including unconditional `_MainTex` and `_OcclusionMap` samples, plus parallax, detail, normal, and emission samples under keyword tests, and `discard` in `clip_standard_alpha`. The debug shader builds `MetallicSurface` from `_Color`, `_Metallic`, `_Glossiness`, and the geometric normal. No material texture, no discard. These three cases have no texture fixtures and bits `0`, so a white texel and occlusion `1` match the sampled values.
 3. Nine extra `@group(1)` textures and the `a2c=cutout` output `vec4(color, s.alpha)`. Debug writes `retain_globals_additive(vec4(color, 1.0))` and one uniform. Alpha of the white default times `_Color.a` is 1 on these cases, so A2C is a weaker suspect than (1) and (2). Not split into its own arm.
 
-Fast-math is independent of that diff. The probe DXIL for this fragment (`ps_6_7`, no `-Gis`) contains 8334 `fast` ops (`fmul fast` 3217, `fadd fast` 1415, `fcmp fast` 1240). `-Od` alone leaves them. wgpu 30's `compile_dxc` passes `-HV 2018`, `-Ges` (`DXC_ARG_ENABLE_STRICTNESS`), and `-no-warnings`. It does not pass `-Gis`.
+Fast-math is independent of that diff. The probe DXIL for this fragment (`ps_6_7`, no `-Gis`) contains 8334 `fast` ops (`fmul fast` 3217, `fadd fast` 1415, `fcmp fast` 1240). wgpu 30's `compile_dxc` passes `-HV 2018`, `-Ges` (`DXC_ARG_ENABLE_STRICTNESS`), and `-no-warnings`. It does not pass `-Gis`.
+
+The pipeline HLSL from that FXC job (naga, `force_loop_bounding`) recompiled locally with DXC `v1.9.2609` (`-T ps_6_7 -E fs_forward_base -HV 2018 -Ges`) has 8294 `fast` ops and 1240 `fcmp fast`. The same compile plus `-Gis -Od` has 0 `fast` ops and 0 `fcmp fast`. `-Od` without `-Gis` still emits `fast` (3 of 3 on a small `fmul`/`fcmp` shader). The `gis` arm patches `compile_dxc` to pass both flags, and the probe's `dxc.exe` uses the same pair so the uploaded `lit-production.dxil.ll` can be counted.
 
 ## Arms after the counter-evidence
 
