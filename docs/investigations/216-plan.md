@@ -384,3 +384,20 @@ Linux settle was 1.993–3.541 s. Linux max abs diff against the golden is 0 on 
 The 8a baseline of the full production fragment was 19/27 flat. The same three cases here (parity, physically based, `pbs_lit`) are 0/9 flat.
 
 Every case would pass with the quarantine removed. SSIM is not the miss: every WARP score is above 0.998 and no other criterion failed. The three negative-light cases are stamped `WARP lit shading untrusted` because a finished WARP comparison is quarantined. `pbs_lit_material_matrix` is `unexpected pass (WARP, #212)`. `pbs_metallic_premultiply` passes with no stamp. The quarantine lists were left in place.
+
+## #284 WARP x3
+
+[PR #284](https://github.com/DoubleStyxx/Renderide/pull/284) is still at `8dddf4ec`. The canary merges that head on top of master `b316031c`. The renderer tree is `9e6f5633`. The quarantine lists stay empty. Probes stayed off. `--scene-color-readback` was on. The only `pbs_specular*` suite case is `pbs_specular_premultiply`. There is no separate opaque specular case.
+
+Run [41240706628](https://github.com/DoubleStyxx/Renderide/actions/runs/41240706628) was cancelled before any job finished, so it is not a sample. The three samples are [41242916084](https://github.com/DoubleStyxx/Renderide/actions/runs/41242916084) (`bd54f646`), [41247827677](https://github.com/DoubleStyxx/Renderide/actions/runs/41247827677) (`ae0b0122`), and [41251091430](https://github.com/DoubleStyxx/Renderide/actions/runs/41251091430) (`dcc7da88`). Each of those commits only changes the sample comment in the debug workflow. Each run's three Windows jobs finished, and the decoded WARP pixels match across those jobs and across the three runs. The PNG file bytes are not the same.
+
+Every case passes on every run. None is flat. Channel-zero recorded no failing cell. The numbers below are the same on runs 1, 2, and 3.
+
+| Case | Result | SSIM | Max abs | Flat | Channel loss | Runs 1–3 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `pbs_specular_premultiply` | pass | 0.999870386265684 | 2 | no | none | same pixels |
+| `negative_light_parity` | pass | 0.998710541636683 | 1 | no | none | same pixels |
+| `negative_light_physically_based` | pass | 0.9987197807058692 | 1 | no | none | same pixels |
+| `negative_color_physically_based` | pass | 0.9987197807058692 | 1 | no | none | same pixels |
+| `pbs_lit_material_matrix` | pass | 0.9995011638104916 | 15 | no | none | same pixels |
+| `pbs_metallic_premultiply` | pass | 0.9996592155657708 | 1 | no | none | same pixels |
