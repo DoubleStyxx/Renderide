@@ -4,6 +4,11 @@
 //! to overwrite a golden. `check-suite` is a hidden alias of `run`. `update-suite`
 //! is a hidden alias of `run --bless` and does not pass `--force`. CI keeps
 //! calling `check-suite`.
+//!
+//! `--icd auto` uses `VK_DRIVER_FILES` or `VK_ICD_FILENAMES` when one is set, and
+//! otherwise probes lavapipe on Linux. `--backend auto` is Vulkan on Linux, DX12
+//! on Windows, and Metal on macOS. The stderr `env:` line names that choice.
+//! `--json` keeps stdout as one document.
 
 mod print;
 mod run;
@@ -34,6 +39,7 @@ pub fn run() -> ExitCode {
         notes: &finished.notes,
         human: &finished.human,
         report: finished.report.as_ref(),
+        env_line: finished.env_line.as_deref(),
     });
     if finished.exit_code == exit::EXIT_OK {
         logger::info!("renderide-test completed successfully");
@@ -139,6 +145,18 @@ pub(super) struct SuiteOpts {
     /// Print renderer processes' stdout/stderr instead of swallowing them.
     #[arg(long, default_value_t = false)]
     verbose_renderer: bool,
+    /// Vulkan ICD: `auto`, `none`, or a manifest path.
+    ///
+    /// `auto` keeps `VK_DRIVER_FILES` or `VK_ICD_FILENAMES` when set, and otherwise
+    /// probes lavapipe on Linux. An explicit variable always wins.
+    #[arg(long, default_value = "auto", value_name = "auto|none|PATH")]
+    icd: String,
+    /// Graphics backend: `auto`, `vulkan`, `dx12`, or `metal`.
+    ///
+    /// `auto` is Vulkan on Linux, DX12 on the default adapter on Windows, and Metal
+    /// on macOS. `dx12-warp` is not accepted.
+    #[arg(long, default_value = "auto", value_name = "auto|vulkan|dx12|metal")]
+    backend: String,
     /// Set when `--json` is active so the renderer child's stdout goes to stderr.
     #[arg(skip)]
     json_stdout: bool,
