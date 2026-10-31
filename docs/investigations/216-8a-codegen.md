@@ -551,4 +551,107 @@ Fast-math is independent of that diff. The probe DXIL for this fragment (`ps_6_7
 | untextured | `cursor/warp-216-8a-untextured-4858` | `sample_surface` uses uniform color, gloss, geometric normal; no `textureSampleBias`, no `discard` | Bisect (2). Lavapipe should match these three cases. |
 | gis | `cursor/warp-216-8a-gis-4858` | production fragment, patched `wgpu-hal` `compile_dxc` adds `-Gis` and `-Od` | Fast-math off. Sub-branch only. |
 
-Gradient hoist and the bounded loop are not in this set. FXC is not re-run on the bisection or `-Gis` arms: the production pipeline stays invalid there for the same `SampleCmp` (`-Gis` is a DXC flag). Results land in the next section. SSIM is not used.
+Gradient hoist and the bounded loop are not in this set. FXC is not re-run on the bisection or `-Gis` arms: the production pipeline stays invalid there for the same `SampleCmp` (`-Gis` is a DXC flag). SSIM is not used.
+
+## Results
+
+No job failed for a missing runner or a cache miss. The FXC job and the three `-Gis` Windows jobs failed because the shader or the frame failed. They were not rerun.
+
+Lavapipe `actual.scene_color.rgba16f` is byte-identical across the baseline rerun, no-premul, untextured, and `-Gis` (`byte_diff=0` on all three cases). The 8-bit PNGs differ by at most 1 code on a few hundred pixels between the rerun and the other three; the linear buffers do not. no-premul and untextured are behaviour-preserving on these cases. WARP linear buffers are not byte-identical to lavapipe. On the two arms that shade, the quadrant means match lavapipe to about 1e-4, and parity's negative count is 1787 on both.
+
+`g0`/`r0`/`b0` on a healthy parity frame are the lavapipe counts (24 / 0 / 68). Those zeros are dark pixels, not a channel wipe. A wipe is a non-flat frame whose linear mean is 0 in a channel that lavapipe keeps, or a flat frame.
+
+### Baseline rerun, static DXC, run 41208228557 (`06a88b09`)
+
+Seven of nine are flat linear black. No NaNs. This rerun did not draw a G-only wipe. The two non-flat frames are not the lavapipe image: one is about a thousand times too dim, and one has a large negative B.
+
+| Sample | Case | Flat | non_bg | g0 | r0 | b0 | NaN / neg | Settle | Linear RGB |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| dxc-1 | parity | yes | 0 | 0 | 0 | 0 | 0 / 0 | 105.3 s | `(0,0,0)` |
+| dxc-1 | physically based | yes | 0 | 0 | 0 | 0 | 0 / 0 | 106.2 s | `(0,0,0)` |
+| dxc-1 | pbs_lit | no | 12884 | 1 | 0 | 12807 | 0 / 12804 | accepted | TL `(0.002, 0.002, -0.068)`, TR `(0,0,0)`, BL `(0.005, 0.005, -0.253)`, BR `(0.009, 0.024, -1.098)` |
+| dxc-2 | parity | yes | 0 | 0 | 0 | 0 | 0 / 0 | 84.8 s | `(0,0,0)` |
+| dxc-2 | physically based | yes | 0 | 0 | 0 | 0 | 0 / 0 | 83.6 s | `(0,0,0)` |
+| dxc-2 | pbs_lit | no | 10208 | 0 | 0 | 0 | 0 / 0 | accepted | TL `(0.0003, 0.0004, 0.0007)`, TR `(0,0,0)`, BL `(0.002, 0.003, 0.006)`, BR `(0.0005, 0.0009, 0.003)` |
+| dxc-3 | parity | yes | 0 | 0 | 0 | 0 | 0 / 0 | 66.6 s | `(0,0,0)` |
+| dxc-3 | physically based | no | 10374 | 0 | 0 | 0 | 0 / 0 | accepted | about `(0.002, 0.002, 0.002)` in every quadrant |
+| dxc-3 | pbs_lit | yes | 0 | 0 | 0 | 0 | 0 / 0 | 66.0 s | `(0,0,0)` |
+
+### no-premul, static DXC, run 41208243248 (`d6ea1163`)
+
+Zero of nine are flat. Every sample matches the lavapipe means below. Parity negatives are 1787, the same count as lavapipe. `pbs_lit_material_matrix` is an unexpected pass on all three Windows jobs (the image gate passed). The other two cases stay quarantined `WARP lit shading untrusted` by policy, with these floats. Stall on the accepted captures is 149–196 ms. There is no flat-exit settle.
+
+| Sample | Case | Flat | non_bg | g0 | r0 | b0 | NaN / neg | Linear RGB (TL, TR, BL, BR) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| dxc-1, dxc-2, dxc-3 | parity | no | 9791 | 24 | 0 | 68 | 0 / 1787 | `(0.119, 0.097, 0.069)`, `(0.114, 0.092, 0.064)`, `(0.026, 0.021, 0.014)`, `(0.024, 0.018, 0.012)` |
+| dxc-1, dxc-2, dxc-3 | physically based | no | 9868 | 0 | 0 | 0 | 0 / 0 | `(0.124, 0.102, 0.074)` top, `(0.030, 0.025, 0.018)` bottom, left equals right |
+| dxc-1, dxc-2, dxc-3 | pbs_lit | no | 16949 | 0 | 2 | 5 | 0 / 0 | `(0.106, 0.077, 0.012)`, `(0.106, 0.140, 0.371)`, `(0.224, 0.017, 0.017)`, `(0.027, 0.182, 1.056)` |
+
+The three samples agree. `pbs_lit` PNG `g0` is 0–5 against lavapipe's 37 because near-zero G encodes to 0. The linear G means are the lavapipe means.
+
+### untextured, static DXC, run 41208259340 (`d72bddb9`)
+
+Same outcome as no-premul. Zero of nine are flat. The nine linear means, `non_bg`, channel-zero counts, and the parity negative count 1787 match the no-premul table and lavapipe. Stall 143–288 ms. No flat-exit settle. `pbs_lit` unexpected-passes on all three Windows jobs.
+
+### `-Gis -Od`, static DXC, run 41208415616 (`b9a32b8b`)
+
+The probe log on each Windows job is `diag-8a dxc status=0 flags=-Gis -Od dxil-fast-count=0`. Fast-math flags are gone from that DXIL. The frames are still wrong. Five of nine are flat black. The non-flat frames are grey (R=G=B) or, on dxc-3 `pbs_lit`, a G-only wipe (`r0=b0=17214`, linear R and B are 0, G is about 0.168). No NaNs, no negatives. The Windows jobs exit non-zero because those frames fail the gate. That is not an infrastructure failure.
+
+| Sample | Case | Flat | non_bg | g0 | r0 | b0 | NaN / neg | Settle | Linear RGB |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| dxc-1 | parity | no | 10374 | 0 | 0 | 0 | 0 / 0 | accepted, stall 381 ms | grey `(0.135, 0.135, 0.135)` top, `(0.081, 0.081, 0.081)` bottom |
+| dxc-1 | physically based | yes | 0 | 0 | 0 | 0 | 0 / 0 | no early exit, stall 379 ms | `(0,0,0)` |
+| dxc-1 | pbs_lit | yes | 0 | 0 | 0 | 0 | 0 / 0 | no early exit, stall 393 ms | `(0,0,0)` |
+| dxc-2 | parity | no | 10374 | 0 | 0 | 0 | 0 / 0 | accepted, stall 396 ms | same grey as dxc-1 parity |
+| dxc-2 | physically based | yes | 0 | 0 | 0 | 0 | 0 / 0 | no early exit, stall 382 ms | `(0,0,0)` |
+| dxc-2 | pbs_lit | no | 17214 | 0 | 0 | 0 | 0 / 0 | accepted, stall 385 ms | grey `(0.093)`, `(0.017)`, `(0.126)`, `(0.042)` |
+| dxc-3 | parity | yes | 0 | 0 | 0 | 0 | 0 / 0 | no early exit, stall 273 ms | `(0,0,0)` |
+| dxc-3 | physically based | yes | 0 | 0 | 0 | 0 | 0 / 0 | no early exit, stall 253 ms | `(0,0,0)` |
+| dxc-3 | pbs_lit | no | 17214 | 0 | 17214 | 17214 | 0 / 0 | accepted, stall 255 ms | G-only, about `(0, 0.168, 0)` in every quadrant |
+
+### FXC on the debug composed shader
+
+`warp216_negparity_composed` under `WGPU_DX12_COMPILER=fxc` (the `windows-fxc-debug` job of run 41208228557) does not shade. The pipeline fails with the same pair of diagnostics as production, on the debug shader's own HLSL:
+
+```text
+raster_material_shader(956,18-204): warning X3570: gradient instruction used in a loop with varying iteration, attempting to unroll the loop
+raster_material_shader(1283,5-15): error X3511: unable to unroll loop ... (42 iterations)
+raster_material_shader(2448,5-15): error X3511: forced to unroll loop, but unrolling failed.
+```
+
+Line 956 is `shadow_atlas.SampleCmp(...)`, the same `textureSampleCompare` as production line 1278. The saved scene color is linear black, NaN 0, because FXC never produced a fragment (`flat-or-unstable-frame` after 300 s). The 8d run that matched llvmpipe was static DXC. FXC rejects the debug shader, and DXC still shades it. The gradient is a red herring for the DXC failure.
+
+## Verdict
+
+no-premul and untextured both eliminate the flat-black frames and the channel wipes. Against this rerun's 7/9 flat, both arms are 0/9 flat, and all 18 of those frames carry the lavapipe means, including parity's 1787 negatives. That is not a 4/9-versus-6/9 split. No further samples.
+
+`-Gis -Od` does not. Fast flags are confirmed absent (`dxil-fast-count=0`) and dxc-3 still draws the G-only wipe. The cost of shipping it would be `-Od` (optimizations off) on every DX12 shader, without fixing WARP.
+
+The two successful arms cut different things. no-premul drops the second copy of the light loop (`shade_metallic_transparent_clustered`) and keeps material `textureSampleBias`. untextured drops material sampling and `discard`, and keeps the second light loop. Either cut is enough for these cases. The shared light-loop math is not the defect. The production fragment is large enough that DXC's compile of it is unstable on WARP.
+
+The smaller cut that still samples textures is no-premul. It is not safe to delete the premultiply call in every build: `ALPHAPREMULTIPLY` materials would lose that entry. These cases never take it (variant bits 0), which is why lavapipe stayed byte-identical. The production-shaped change is to compile that call only into the premultiply variant, so the opaque pipeline is the shader this arm ran.
+
+```diff
+--- a/crates/renderide/shaders/materials/pbsmetallic.wgsl
++++ b/crates/renderide/shaders/materials/pbsmetallic.wgsl
+@@
+-    if (alpha_premultiply_enabled()) {
+-        return plight::shade_metallic_transparent_clustered(
+-            frag_pos.xy,
+-            world_pos,
+-            view_layer,
+-            surface,
+-            options,
+-        );
+-    }
+     let color = plight::shade_metallic_clustered(
+         frag_pos.xy,
+         world_pos,
+         view_layer,
+         surface,
+         options,
+     );
+     return vec4<f32>(color, s.alpha);
+```
+
+Do not land that deletion by itself. Gate it so a premultiply variant still calls `shade_metallic_transparent_clustered`, and the default opaque variant does not. Cost of the split: one extra pipeline for premultiplied metallic materials, and the opaque pipeline loses the second light loop that this arm showed WARP cannot compile reliably. Cost of the untextured alternative, if someone took that instead: albedo, metalness, normal, occlusion, detail, and emission maps would no longer affect `pbsmetallic`. That is the wrong cut. `-Gis` is not a fix. No production PR.
