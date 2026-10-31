@@ -99,3 +99,4 @@ pub fn ensure_native_stdio_forwarded_to_logger() {
 pub fn run() -> Result<RunExit, RunError> {
     app::run()
 }
+// parity-noop-2 canary (DO NOT MERGE)
