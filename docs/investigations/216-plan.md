@@ -259,6 +259,10 @@ The 2×2 `Rgba16Float` means match llvmpipe. The largest absolute channel differ
 
 No isolated term loses G. The composed debug frame does not lose it either. The channel-zero pixels in the earlier production captures are not reproduced by this debug shader. The production lit shader is 8a, and that dump belongs to Shader.
 
+**Does the debug shader take a derivative inside the dynamic light loop? Yes.**
+
+`warp_216_term_debug.wgsl` calls `shade_metallic_term_debug`. The composed term calls `shade_metallic_clustered`. Both walk `for (var i = 0u; i < count; i++)`, with `count` taken from the cluster light range. Each iteration calls `eval_light`. That calls `cookies::multiplier`, which samples the 2D and point cookie atlases with `textureSample` (implicit LOD), and `shadows::visibility`, which samples the shadow atlas with `textureSampleCompare`. `dpdx` and `dpdy` appear only in `filter_perceptual_roughness`, and both shade functions call that once before the loop. This shader has no `fwidth`. The frames that matched llvmpipe still compile an implicit-LOD sample inside that loop.
+
 **The uniform 0.95 SSIM gap is the gate, scoring one-code quantisation of a sub-level linear error.**
 
 Measured on `warp216_constant` and `warp216_directional_composed` from run [41174993308](https://github.com/DoubleStyxx/Renderide/actions/runs/41174993308) at `04255c43`. The three WARP PNGs decode to the same pixels (the zip bytes differ). Linux is llvmpipe. The harness score is `image-compare` 0.5 `rgba_hybrid_compare`. Reimplementing that function reproduces the stored scores: constant `0.9581573030445724`, composed `0.9578630338655784`. Linux on the same goldens is `0.9966115383431317` and `0.9964522361406124`.
@@ -275,7 +279,18 @@ What the gate does with a one-code error:
 - Windows are non-overlapping 8×8. 256 divides by 8, so there is no clipped edge tile. Variance is the sum of squares, not the mean, while C1 and C2 are the usual `(0.01×255)²` and `(0.03×255)²`. On a low-contrast tile that sum is small, so a one-code phase shift moves the score. 68% of the 1024 windows are under 0.985. The windows under 0.95 have median luma variance 0.48. Dividing the same windows' variance by the pixel count scores 0.9979 and 0.9978, which would pass 0.985.
 - A constant shift of the observed mean bias (about −0.14, +0.05, −0.01 on constant) scores 1.000. The miss is not a flat tint. On row 0 of constant, R is a two-pixel-wide ramp and the WARP ramp is one column out of phase with the golden, so every other column differs by 1. The sphere core is a flat G of +1, `(137, 188, 225)` against `(137, 187, 225)`. An amplified abs-diff is those contours, not an MSAA edge and not a channel wipe. Pixel-diff already passes: max abs 2, failing fraction 0, threshold 8 and 0.03.
 
-Verdict: the floats match, the sRGB copy matches the PNG, and the 0.985 hybrid gate is tighter than one-code quantisation of that float error. The window is 8×8 and non-overlapping, and its flat-region constants do not absorb a phase-shifted ramp.
+**The one-code diff does not sit on edges.** Same run, WARP `actual.png` against the golden, gradient of golden luma (sum of absolute neighbor steps). Correlation of max channel |diff| with that gradient:
+
+| Case | Correlation | Differ, top 5% gradient | Differ, bottom 50% gradient | Share of diffs on gradient > 8 |
+| --- | --- | --- | --- | --- |
+| `warp216_constant` | 0.012 | 60.1% | 62.2% | 0.84% |
+| `warp216_directional_composed` | −0.034 | 29.2% | 46.0% | 1.35% |
+| `warp216_directional_specular_g` | −0.027 | 25.1% | 42.4% | 0.65% |
+| `warp216_directional_diffuse_g` | −0.042 | 15.3% | 40.9% | 0.59% |
+
+Pixels with gradient above 8 are 0.6–1.9% of each image. On constant, the zero-gradient pixels differ most (81%). On the three lit cases the steep pixels differ less often than the shallow ones. A derivative or LOD mismatch would collect the error on those steep pixels. This diff is spread through the shallow ramps and the flat regions.
+
+Verdict: the floats match, the sRGB copy matches the PNG, and the 0.985 hybrid gate is tighter than one-code quantisation of that float error. The window is 8×8 and non-overlapping, and its flat-region constants do not absorb a phase-shifted ramp. The error is not an edge or high-gradient pattern.
 
 Owner: Bridge for the captures, Shader for the debug group. ETA: done Oct 31. The SSIM verdict above is Oct 31.
 
