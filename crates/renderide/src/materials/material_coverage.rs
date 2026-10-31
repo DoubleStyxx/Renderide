@@ -569,7 +569,10 @@ mod tests {
             fs::write(&path, &expected)
                 .unwrap_or_else(|err| panic!("write {}: {err}", path.display()));
         }
-        let actual = fs::read_to_string(&path).unwrap_or_default();
+        // Windows CI checks the file out with CRLF. The generated text is LF.
+        let actual = fs::read_to_string(&path)
+            .unwrap_or_default()
+            .replace("\r\n", "\n");
         assert_eq!(
             actual, expected,
             "docs/testing/material-coverage.md drifted; regenerate with {REGENERATE_DOC}"
