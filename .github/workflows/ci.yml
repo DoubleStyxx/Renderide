@@ -219,7 +219,9 @@ jobs:
           rustup show active-toolchain
           active="$(rustc --version)"
           echo "$active"
-          echo "$active" | grep -F '1.99.1'
+          pin="$(python3 -c "from pathlib import Path; import sys; sys.path.insert(0, 'scripts/ci'); from check_rust_toolchain_pin import parse_pin; print(parse_pin(Path('rust-toolchain.toml').read_text()))")"
+          echo "rust-toolchain.toml pin: $pin"
+          echo "$active" | grep -F "$pin"
           cargo metadata --locked --no-deps --format-version 1 >/dev/null
 
       - name: Check Rust toolchain pin in workflows
