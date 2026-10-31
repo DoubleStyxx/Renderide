@@ -62,6 +62,9 @@ const DIRECT_QUEUE_SUBMIT_FILES: &[&str] = &[
     "src/gpu/frame_bench_queries.rs",
     // Lavapipe unit test of render-texture ping-pong. Not a frame submission.
     "src/gpu_pools/pools/render_texture_ping_pong_gpu.rs",
+    // #216 canary light-pack readback. It runs after the frame submit, only when
+    // RENDERIDE_LIGHT_PACK_PROBE is set, and is not primary frame work.
+    "src/gpu/warp_light_probe.rs",
 ];
 
 /// Returns the renderide crate directory.

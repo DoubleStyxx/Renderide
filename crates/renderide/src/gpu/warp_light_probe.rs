@@ -185,7 +185,7 @@ pub(crate) fn note_cluster(note: ClusterNote) {
 }
 
 /// Copies the stashed light buffer and the center-tile cluster column back to the CPU.
-pub(crate) fn roundtrip(device: &wgpu::Device, queue: &wgpu::Queue, adapter: &wgpu::AdapterInfo) {
+pub(crate) fn roundtrip(gpu: &crate::gpu::GpuContext, adapter: &wgpu::AdapterInfo) {
     if !armed() {
         return;
     }
@@ -200,7 +200,7 @@ pub(crate) fn roundtrip(device: &wgpu::Device, queue: &wgpu::Queue, adapter: &wg
         "{} backend={:?} vendor={:#06x} device={:#06x}",
         adapter.name, adapter.backend, adapter.vendor, adapter.device
     );
-    match read_gpu(device, queue, &snapshot) {
+    match read_gpu(gpu, &snapshot) {
         Ok(gpu) => log_roundtrip(case, &file, &adapter_label, &snapshot, &gpu),
         Err(err) => {
             logger::info!(
@@ -230,11 +230,8 @@ struct GpuRead {
     tile: (u32, u32),
 }
 
-fn read_gpu(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    snapshot: &Snapshot,
-) -> Result<GpuRead, String> {
+fn read_gpu(gpu: &crate::gpu::GpuContext, snapshot: &Snapshot) -> Result<GpuRead, String> {
+    let device = gpu.device();
     let light_bytes = light_copy_bytes(snapshot);
     let tile = center_tile(
         snapshot.viewport,
@@ -261,7 +258,13 @@ fn read_gpu(
         label: Some("diag-light-8b-readback"),
     });
     if light_bytes > 0 && light_bytes <= snapshot.lights_buffer.size() {
+        let copy_scope = crate::profiling::GpuEncoderScope::begin(
+            None,
+            "diag-light-8b::light-copy",
+            &mut encoder,
+        );
         encoder.copy_buffer_to_buffer(&snapshot.lights_buffer, 0, &staging, 0, light_bytes);
+        copy_scope.end(&mut encoder);
     }
     copy_center_column(
         &mut encoder,
@@ -272,7 +275,7 @@ fn read_gpu(
         &staging,
         light_bytes,
     );
-    queue.submit(std::iter::once(encoder.finish()));
+    gpu.queue().submit(std::iter::once(encoder.finish()));
     let bytes = map_staging(device, &staging, total)?;
     let lights = decode_lights(&bytes[..light_bytes as usize]);
     let (ranges, indices) = decode_column(&bytes, light_bytes, z_count, index_words);
@@ -334,6 +337,8 @@ fn copy_center_column(
     else {
         return;
     };
+    let copy_scope =
+        crate::profiling::GpuEncoderScope::begin(None, "diag-light-8b::cluster-copy", encoder);
     for z in 0..z_count {
         let Some(id) = local_cluster_id(
             tile,
@@ -362,6 +367,7 @@ fn copy_center_column(
             encoder.copy_buffer_to_buffer(indices, index_off, staging, index_dst, index_size);
         }
     }
+    copy_scope.end(encoder);
 }
 
 fn map_staging(
