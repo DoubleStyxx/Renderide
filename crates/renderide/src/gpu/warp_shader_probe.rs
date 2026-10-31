@@ -1,25 +1,30 @@
 //! DXIL-versus-SPIR-V note for the production lit fragment (#216 experiment 8a).
 //!
 //! Off unless `RENDERIDE_LIT_SHADER_PROBE` is `1` or `true`, and only for
-//! `negative_light_parity` and `negative_light_physically_based`. The Windows
-//! binary still links static DXC; this dump is the naga HLSL and SPIR-V of the
-//! WGSL those cases compile, plus a hash so three WARP runs can be compared.
+//! `negative_light_parity`, `negative_light_physically_based`, and
+//! `pbs_lit_material_matrix`. The Windows binary still links static DXC. This
+//! dump is the naga HLSL and SPIR-V of the WGSL those cases compile. When `dxc`
+//! or `spirv-dis` is on `PATH`, it also writes DXIL and SPIR-V disassembly.
 
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 
 use parking_lot::Mutex;
 
 const ENV: &str = "RENDERIDE_LIT_SHADER_PROBE";
-const CASES: &[&str] = &["negative_light_parity", "negative_light_physically_based"];
+const CASES: &[&str] = &[
+    "negative_light_parity",
+    "negative_light_physically_based",
+    "pbs_lit_material_matrix",
+];
 
 static ENABLED: OnceLock<bool> = OnceLock::new();
 static ARMED: AtomicBool = AtomicBool::new(false);
 static DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 static SEEN: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 
-/// Arms the probe for the two production lit cases when the env is set.
+/// Arms the probe for the production lit cases when the env is set.
 pub(crate) fn arm(path: &Path) {
     if !enabled() {
         return;
@@ -60,6 +65,10 @@ pub(crate) fn note_wgsl(source: &str) {
         if let Some(words) = note.spv.as_ref() {
             let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
             let _ = std::fs::write(dir.join("lit-production.spv"), bytes);
+            disassemble_spirv(dir);
+        }
+        if note.hlsl.is_some() {
+            compile_dxil(dir);
         }
     }
     logger::info!(
@@ -179,6 +188,90 @@ fn write_hlsl(module: &naga::Module, info: &naga::valid::ModuleInfo) -> Option<S
     Some(text)
 }
 
+/// Compiles the dumped HLSL with a `dxc` on `PATH`, using wgpu 30's DX12 flags.
+///
+/// wgpu calls DXC with `-T ps_<model>`, `-HV 2018`, `-Ges`, and `-no-warnings`,
+/// and no `-O` flag. DXC's default is `-O3`. The profile here is `ps_6_7`, which
+/// is static DXC's cap. A missing `dxc` is logged and skipped.
+fn compile_dxil(dir: &Path) {
+    let hlsl = dir.join("lit-production.hlsl");
+    let listing = dir.join("lit-production.dxil.ll");
+    let object = dir.join("lit-production.dxil");
+    let output = std::process::Command::new("dxc").arg("--version").output();
+    let version = output.ok().map(|output| {
+        let text = String::from_utf8_lossy(&output.stdout);
+        let err = String::from_utf8_lossy(&output.stderr);
+        format!("{text}{err}")
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("unparsed")
+            .to_string()
+    });
+    logger::info!(
+        "diag-8a dxc version={}",
+        version.unwrap_or_else(|| "absent".to_string())
+    );
+    let compiled = std::process::Command::new("dxc")
+        .args([
+            "-T",
+            "ps_6_7",
+            "-E",
+            "fs_forward_base",
+            "-HV",
+            "2018",
+            "-Ges",
+            "-no-warnings",
+            "-Fc",
+        ])
+        .arg(&listing)
+        .arg("-Fo")
+        .arg(&object)
+        .arg(&hlsl)
+        .output();
+    match compiled {
+        Ok(output) => {
+            let status = output.status.code().unwrap_or(-1);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let first = stderr
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("");
+            logger::info!(
+                "diag-8a dxc status={status} dxil_bytes={} listing_bytes={} stderr={first}",
+                std::fs::metadata(&object)
+                    .map(|meta| meta.len())
+                    .unwrap_or(0),
+                std::fs::metadata(&listing)
+                    .map(|meta| meta.len())
+                    .unwrap_or(0),
+            );
+        }
+        Err(err) => logger::info!("diag-8a dxc spawn failed: {err}"),
+    }
+}
+
+fn disassemble_spirv(dir: &Path) {
+    let spv = dir.join("lit-production.spv");
+    let listing = dir.join("lit-production.spv.dis");
+    let compiled = std::process::Command::new("spirv-dis")
+        .arg(&spv)
+        .arg("-o")
+        .arg(&listing)
+        .output();
+    match compiled {
+        Ok(output) => {
+            let status = output.status.code().unwrap_or(-1);
+            logger::info!(
+                "diag-8a spirv-dis status={status} bytes={}",
+                std::fs::metadata(&listing)
+                    .map(|meta| meta.len())
+                    .unwrap_or(0),
+            );
+        }
+        Err(err) => logger::info!("diag-8a spirv-dis spawn failed: {err}"),
+    }
+}
+
 fn enabled() -> bool {
     *ENABLED.get_or_init(|| {
         std::env::var(ENV).is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
@@ -212,7 +305,7 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn only_the_two_production_lit_cases_arm() {
+    fn only_the_production_lit_cases_arm() {
         assert_eq!(
             case_name(Path::new("out/negative_light_parity/actual.png")),
             Some("negative_light_parity")
@@ -220,6 +313,10 @@ mod tests {
         assert_eq!(
             case_name(Path::new("out/negative_light_physically_based/actual.png")),
             Some("negative_light_physically_based")
+        );
+        assert_eq!(
+            case_name(Path::new("out/pbs_lit_material_matrix/actual.png")),
+            Some("pbs_lit_material_matrix")
         );
         assert_eq!(
             case_name(Path::new("out/warp216_negparity_composed/actual.png")),

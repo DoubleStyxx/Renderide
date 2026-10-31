@@ -22,8 +22,8 @@ use crate::scene::textures::{alpha_rings_rgba, checker_rgba, uv_ramp_rgba};
 
 use super::cases::{CaseTemplate, IntegrationCase};
 use super::output::{
-    CaseOutputLayout, CaseReport, default_output_root, report_from_error, report_from_evaluation,
-    write_report,
+    default_output_root, report_from_error, report_from_evaluation, write_report, CaseOutputLayout,
+    CaseReport,
 };
 use super::tolerance::ToleranceEvaluation;
 
@@ -139,13 +139,14 @@ pub fn run_integration_case(
         physically_based,
         scene_color_readback: template_requests_scene_color_readback(
             &prepared_template.session_template,
-        ),
+        ) || lit_probe_wants_scene_color(&case.name),
         template: prepared_template.session_template,
     };
 
     match drive_template(harness_cfg) {
         Ok(()) => evaluate_and_finalize(case, layout),
         Err(err) => {
+            log_lit_probe_frame(case, &layout);
             let reason = super::report_v2::reason_for_error(&err);
             let mut report = report_from_error(case, format!("harness error: {err}"));
             report.reason = Some(reason.code.to_string());
@@ -169,6 +170,88 @@ fn template_requests_physically_based(template: &SessionTemplate) -> bool {
 
 fn template_requests_scene_color_readback(template: &SessionTemplate) -> bool {
     matches!(template, SessionTemplate::Warp216Debug { .. })
+}
+
+const LIT_PROBE_ENV: &str = "RENDERIDE_LIT_SHADER_PROBE";
+const LIT_PROBE_CASES: &[&str] = &[
+    "negative_light_parity",
+    "negative_light_physically_based",
+    "pbs_lit_material_matrix",
+];
+
+fn lit_probe_enabled() -> bool {
+    std::env::var(LIT_PROBE_ENV)
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
+fn lit_probe_wants_scene_color(case_name: &str) -> bool {
+    lit_probe_scene_color(case_name, lit_probe_enabled())
+}
+
+fn lit_probe_scene_color(case_name: &str, armed: bool) -> bool {
+    armed && LIT_PROBE_CASES.contains(&case_name)
+}
+
+/// Logs PNG channel-zero counts for the #216 lit probe. The clear is pixel (0, 0).
+fn log_lit_probe_frame(case: &IntegrationCase, layout: &CaseOutputLayout) {
+    if !lit_probe_enabled() {
+        return;
+    }
+    let png = &layout.actual_png;
+    if !png.exists() {
+        logger::info!("diag-8a png case={} missing", case.name);
+        return;
+    }
+    let Ok(image) = load_rgba(png) else {
+        logger::info!("diag-8a png case={} unreadable", case.name);
+        return;
+    };
+    let flat = crate::golden::is_flat_image(&image);
+    let clear = image.get_pixel(0, 0).0;
+    let mut non_bg = 0u64;
+    let mut r0 = 0u64;
+    let mut g0 = 0u64;
+    let mut b0 = 0u64;
+    for pixel in image.pixels() {
+        if pixel.0 == clear {
+            continue;
+        }
+        non_bg += 1;
+        if pixel.0[0] == 0 {
+            r0 += 1;
+        }
+        if pixel.0[1] == 0 {
+            g0 += 1;
+        }
+        if pixel.0[2] == 0 {
+            b0 += 1;
+        }
+    }
+    logger::info!(
+        "diag-8a png case={} flat={flat} non_bg={non_bg} g0={g0} r0={r0} b0={b0} clear={},{},{},{}",
+        case.name,
+        clear[0],
+        clear[1],
+        clear[2],
+        clear[3],
+    );
+    let stats = png.with_file_name(super::output::CAPTURE_STATS_FILENAME);
+    if let Ok(text) = std::fs::read_to_string(&stats) {
+        let compact: String = text
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .take(500)
+            .collect();
+        logger::info!("diag-8a capture case={} {compact}", case.name);
+    }
+    let scene = png.with_file_name("actual.scene_color.json");
+    if let Ok(text) = std::fs::read_to_string(&scene) {
+        logger::info!(
+            "diag-8a scene_color case={} bytes={}",
+            case.name,
+            text.len()
+        );
+    }
 }
 
 fn drive_template(cfg: HostHarnessConfig) -> Result<(), HarnessError> {
@@ -311,6 +394,7 @@ fn evaluate_and_finalize(
     case: &IntegrationCase,
     layout: CaseOutputLayout,
 ) -> Result<CaseRunOutcome, HarnessError> {
+    log_lit_probe_frame(case, &layout);
     if !layout.actual_png.exists() {
         let mut report = report_from_error(case, "renderer produced no PNG at actual.png");
         let _ = write_report(&layout, &mut report);
@@ -441,6 +525,18 @@ mod tests {
     }
 
     #[test]
+    fn lit_probe_scene_color_is_the_three_production_cases() {
+        assert!(lit_probe_scene_color("negative_light_parity", true));
+        assert!(lit_probe_scene_color(
+            "negative_light_physically_based",
+            true
+        ));
+        assert!(lit_probe_scene_color("pbs_lit_material_matrix", true));
+        assert!(!lit_probe_scene_color("pbs_lit_material_matrix", false));
+        assert!(!lit_probe_scene_color("warp216_negparity_composed", true));
+    }
+
+    #[test]
     fn evaluate_and_finalize_reports_flat_actual_without_tolerance_eval() {
         let temp = tempfile::tempdir().expect("tempdir");
         let output_root = temp.path().join("out");
@@ -463,13 +559,11 @@ mod tests {
 
         assert!(!outcome.report.passed);
         assert!(outcome.report.evaluation.is_none());
-        assert!(
-            outcome
-                .report
-                .error
-                .as_deref()
-                .is_some_and(|msg| msg.contains("flat single color"))
-        );
+        assert!(outcome
+            .report
+            .error
+            .as_deref()
+            .is_some_and(|msg| msg.contains("flat single color")));
     }
 
     #[test]
@@ -558,11 +652,9 @@ mod tests {
         assert_eq!(value["schema"], "renderide-test.v2");
         assert_eq!(value["status"], "early-exit");
         assert_eq!(value["reason"], "early-exit");
-        assert!(
-            value["reason_text"]
-                .as_str()
-                .is_some_and(|text| !text.is_empty())
-        );
+        assert!(value["reason_text"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty()));
         assert_eq!(value["early_exit"]["settle_ms"], 4_000);
         assert_eq!(value["capture"]["early_exit"]["k_window_ms"], 8_500);
         assert_eq!(value["region_stats"].as_array().map(Vec::len), Some(4));

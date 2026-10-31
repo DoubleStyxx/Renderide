@@ -1,15 +1,17 @@
-# Opt-in #216 negparity suite. Not the default CI suite.
+# Opt-in #216 production-lit codegen arm. Not the default CI suite.
 #
 # One Linux llvmpipe run and three independent Windows WARP runs. Each run
-# executes the 25 warp216_negparity cases, which write the scene-color sidecars.
+# executes negative_light_parity, negative_light_physically_based, and
+# pbs_lit_material_matrix with RENDERIDE_LIT_SHADER_PROBE=1.
 # A docs-only commit does not match the path filter, so it does not restart this.
 
 name: WARP 216 debug
 
 on:
+  workflow_dispatch:
   push:
     branches:
-      - cursor/warp-black-diag-bb54
+      - cursor/warp-216-8a-baseline-4858
     paths:
       - ".github/workflows/warp-216-debug.yml"
       - ".github/actions/lavapipe/**"
@@ -116,9 +118,28 @@ jobs:
       - name: Build renderer and harness
         run: cargo build --locked -p renderide -p renderide-test
 
-      - name: Run negparity cases
+      - name: Install matching dxc.exe for the lit-shader probe
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = '2026.09.16+48d5a66.1'
+          $base = "https://github.com/DouglasDwyer/mach-dxcompiler/releases/download/$tag"
+          $name = 'x86_64-windows-msvc_ReleaseFast_bin.tar.gz'
+          $stage = Join-Path $env:RUNNER_TEMP 'mach-dxcompiler\dxc-bin'
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          python .github/ci/mach_dxcompiler_curl.py --location --fail --silent --show-error -o (Join-Path $stage $name) "$base/$name"
+          tar -xzf (Join-Path $stage $name) -C $stage
+          $dxc = Get-ChildItem -Path $stage -Filter dxc.exe -Recurse | Select-Object -First 1
+          if (-not $dxc) { throw 'dxc.exe not in the release bin archive' }
+          Add-Content -Path $env:GITHUB_PATH -Value $dxc.DirectoryName
+          & $dxc.FullName --version
+
+      - name: Run production lit cases and the shader dump
         timeout-minutes: 180
         shell: bash
+        env:
+          RENDERIDE_LIT_SHADER_PROBE: "1"
         run: |
           set -uo pipefail
           if [[ "${RUNNER_OS}" == "Windows" ]]; then
@@ -126,13 +147,19 @@ jobs:
           else
             bin=./target/debug/renderide-test
           fi
-          args=(check-suite --jobs 1 --case warp216_negparity_composed)
-          for term in diffuse specular ambient indirect fresnel emission; do
-            for channel in r g b grey; do
-              args+=(--case "warp216_negparity_${term}_${channel}")
-            done
-          done
-          "$bin" "${args[@]}"
+          lit_ec=0
+          "$bin" check-suite --jobs 1 \
+            --case negative_light_parity \
+            --case negative_light_physically_based \
+            --case pbs_lit_material_matrix || lit_ec=$?
+          {
+            echo "dxc=$(command -v dxc || true)"
+            echo "fxc=$(command -v fxc || true)"
+            echo "spirv-dis=$(command -v spirv-dis || true)"
+            echo "static_dxc=wgpu feature static-dxc unless WGPU_DX12_COMPILER overrides it"
+          } > target/renderide-test-out/lit-tools.txt
+          echo "lit_shader exit=${lit_ec}"
+          exit "${lit_ec}"
 
       - name: Upload scene-color sidecars and logs
         if: always()

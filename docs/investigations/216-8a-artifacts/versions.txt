@@ -1,0 +1,18 @@
+naga 30.0.1
+wgpu 30.0.1
+wgpu-hal 30.0.1
+mach-dxcompiler-rs 0.1.6+2026.09.16-48d5a66.1
+dxc release tag 2026.09.16+48d5a66.1
+dxc strings version 3.7-v1.4.0.2274-1812-g84da60c6c-dirty
+: 1.7
+spirv-dis SPIRV-Tools v2025.1 unknown hash, 2026-05-13T06:03:38+00:00
+dump source run 41198150721 commit a364ae7f
+--- sha256 ---
+f48fa215d4733547988b30f7ee6fdf80cc21e66648e01a468dae2290d906c1dc  docs/investigations/216-8a-artifacts/fs_forward_base.ps_6_7.dxil
+a992a860e7b164b6e75055f39e0b708c5c0d4d527fa7feba0811ede85e34b418  docs/investigations/216-8a-artifacts/fs_forward_base.ps_6_7.Gis.dxil
+575f229f19d87e0c51e4ebe181a4b9b918bc882ca6fa0932ea691641ad791e6b  docs/investigations/216-8a-artifacts/fs_forward_base.ps_6_7.ll
+1fccf27a51ec04dc2e0a29fe47b815567f9957a1e98004f48ee6582d57fa7b57  docs/investigations/216-8a-artifacts/fs_forward_base.ps_6_7.Od.dxil
+490328d6a37a025a44154481fc964ab20a3a0160750511e62ab7fa3ace7491e4  docs/investigations/216-8a-artifacts/lit-production.hlsl
+c877b811f078a5d73237b7266de939b8002e7c253f9b3807d86dd067b6265c4d  docs/investigations/216-8a-artifacts/lit-production.spv
+086fa3f217b4e56e4fa7614dd0b14c9133a18064f9d61c7ac8d1e3e64364fd50  docs/investigations/216-8a-artifacts/lit-production.spv.dis
+c005f6bd487192b6de2056e01eb9dc631e00a142c7c928feaea808491e1ff8b3  docs/investigations/216-8a-artifacts/lit-production.wgsl
