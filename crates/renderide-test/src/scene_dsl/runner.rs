@@ -142,14 +142,15 @@ pub fn run_integration_case(
     match drive_template(harness_cfg) {
         Ok(()) => {
             let mut outcome = evaluate_and_finalize(case, layout)?;
-            if let Err(message) = positive_only_reference_failure(case, runner, &outcome.layout) {
+            if let Err(err) = positive_only_reference_failure(case, runner, &outcome.layout) {
                 outcome.report.passed = false;
+                let detail = err.to_string();
                 outcome.report.error = Some(match outcome.report.error.take() {
-                    Some(existing) => format!("{existing}; {message}"),
-                    None => message.clone(),
+                    Some(existing) => format!("{existing}; {detail}"),
+                    None => detail,
                 });
                 let _ = write_report(&outcome.layout, &mut outcome.report);
-                return Err(HarnessError::ImageCompare(message));
+                return Err(err);
             }
             Ok(outcome)
         }
@@ -173,11 +174,14 @@ fn template_requests_physically_based(template: &SessionTemplate) -> bool {
 
 /// Renders the physically based scene again with the negative light omitted and compares it
 /// to the case capture. Parity cases and every other template skip this check.
+///
+/// A capture failure from that spawn is returned unchanged. A pixel mismatch is
+/// [`HarnessError::ImageCompare`] and has no capture-failure kind.
 fn positive_only_reference_failure(
     case: &IntegrationCase,
     runner: &RunnerConfig,
     layout: &CaseOutputLayout,
-) -> Result<(), String> {
+) -> Result<(), HarnessError> {
     let CaseTemplate::NegativeLightPair {
         physically_based: true,
         include_negative: true,
@@ -187,10 +191,10 @@ fn positive_only_reference_failure(
         return Ok(());
     };
     if !layout.actual_png.is_file() {
-        return Err(format!(
+        return Err(HarnessError::ImageCompare(format!(
             "physically based capture missing at {}",
             layout.actual_png.display()
-        ));
+        )));
     }
 
     let reference_path = layout.root.join("positive_only.png");
@@ -209,12 +213,17 @@ fn positive_only_reference_failure(
             negative_color: false,
         },
     };
-    let mut harness = HostHarness::start(harness_cfg).map_err(|err| err.to_string())?;
-    harness.run().map_err(|err| err.to_string())?;
+    let mut harness = HostHarness::start(harness_cfg)?;
+    harness.run().map_err(reference_spawn_failure)?;
 
-    let actual = load_rgba(&layout.actual_png).map_err(|err| err.to_string())?;
-    let reference = load_rgba(&reference_path).map_err(|err| err.to_string())?;
-    let eval = case.tolerance.evaluate(&actual, &reference)?;
+    let actual =
+        load_rgba(&layout.actual_png).map_err(|err| HarnessError::ImageCompare(err.to_string()))?;
+    let reference =
+        load_rgba(&reference_path).map_err(|err| HarnessError::ImageCompare(err.to_string()))?;
+    let eval = case
+        .tolerance
+        .evaluate(&actual, &reference)
+        .map_err(HarnessError::ImageCompare)?;
     if eval.passed {
         return Ok(());
     }
@@ -225,10 +234,50 @@ fn positive_only_reference_failure(
             diff_path.display()
         );
     }
-    Err(format!(
+    Err(reference_mismatch_error(
+        eval.ssim,
+        eval.failing_pixel_fraction,
+    ))
+}
+
+/// Capture failure from the positive-only reference spawn.
+///
+/// The variant and its fields are returned as the suite sees a primary capture
+/// failure. This is not wrapped in [`HarnessError::ImageCompare`].
+fn reference_spawn_failure(err: HarnessError) -> HarnessError {
+    match err {
+        HarnessError::FlatOrUnstableFrame {
+            path,
+            wait,
+            last_pending,
+            ready_chunks,
+            pending_chunks,
+            missing_chunks,
+            frame_count,
+            frame_pending,
+            gpu_done,
+            dropped_draws,
+        } => HarnessError::FlatOrUnstableFrame {
+            path,
+            wait,
+            last_pending,
+            ready_chunks,
+            pending_chunks,
+            missing_chunks,
+            frame_count,
+            frame_pending,
+            gpu_done,
+            dropped_draws,
+        },
+        other => other,
+    }
+}
+
+/// Pixel mismatch between the physically based capture and the omitted-light render.
+fn reference_mismatch_error(ssim: Option<f64>, failing_fraction: Option<f64>) -> HarnessError {
+    HarnessError::ImageCompare(format!(
         "physically based capture does not match the same scene without the negative light \
-         (ssim={:?}, failing_fraction={:?})",
-        eval.ssim, eval.failing_pixel_fraction
+         (ssim={ssim:?}, failing_fraction={failing_fraction:?})"
     ))
 }
 
@@ -519,5 +568,126 @@ mod tests {
                 .as_deref()
                 .is_some_and(|msg| msg.contains("flat single color"))
         );
+    }
+
+    fn reference_flat_frame(frame_pending: Option<u64>, gpu_done: bool) -> HarnessError {
+        reference_spawn_failure(HarnessError::FlatOrUnstableFrame {
+            path: std::path::PathBuf::from("positive_only.png"),
+            wait: Duration::from_secs(300),
+            last_pending: frame_pending.unwrap_or(0),
+            ready_chunks: 780,
+            pending_chunks: 455,
+            missing_chunks: 0,
+            frame_count: 1235,
+            frame_pending,
+            gpu_done,
+            dropped_draws: Some(0),
+        })
+    }
+
+    fn quarantine_outcome(err: &HarnessError, warp: bool) -> crate::scene_dsl::suite::SuiteReport {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("negative_light_physically_based");
+        std::fs::create_dir_all(&root).expect("artifacts");
+        let report_json = root.join("report.json");
+        let integration = crate::scene_dsl::cases::negative_light_physically_based();
+        let case_report = report_from_error(&integration, err.to_string());
+        std::fs::write(
+            &report_json,
+            serde_json::to_string_pretty(&case_report).expect("report json"),
+        )
+        .expect("write report");
+        let case = crate::scene_dsl::suite::SuiteCaseReport::from_harness_error(
+            &integration.name,
+            root,
+            report_json,
+            err,
+        );
+        let mut report = crate::scene_dsl::suite::SuiteReport::from_cases(vec![case]);
+        crate::scene_dsl::quarantine_216::apply_quarantine(
+            &mut report,
+            std::time::SystemTime::UNIX_EPOCH,
+            move |_| warp,
+        );
+        report
+    }
+
+    #[test]
+    fn reference_spawn_flat_frame_keeps_its_kind_and_matches_only_the_216_signature() {
+        let err = reference_flat_frame(Some(0), true);
+        match &err {
+            HarnessError::FlatOrUnstableFrame {
+                path,
+                frame_pending,
+                gpu_done,
+                dropped_draws,
+                ..
+            } => {
+                assert_eq!(path, std::path::Path::new("positive_only.png"));
+                assert_eq!(*frame_pending, Some(0));
+                assert!(*gpu_done);
+                assert_eq!(*dropped_draws, Some(0));
+            }
+            other => panic!("expected FlatOrUnstableFrame, got {other:?}"),
+        }
+        let text = err.to_string();
+        assert!(
+            !text.starts_with("image-compare"),
+            "reference capture must keep its kind, got {text}"
+        );
+
+        let quarantined = quarantine_outcome(&err, true);
+        let case = &quarantined.cases[0];
+        assert_eq!(
+            case.failure_kind,
+            Some(crate::scene_dsl::suite::SuiteFailureKind::FlatOrUnstableFrame)
+        );
+        assert_eq!(case.frame_pending, Some(0));
+        assert_eq!(case.gpu_done, Some(true));
+        assert_eq!(case.dropped_draws, Some(0));
+        assert_eq!(quarantined.quarantined, 1);
+        assert_eq!(quarantined.failed, 0);
+        assert!(crate::scene_dsl::quarantine_216::case_is_quarantined(case));
+
+        let other_adapter = quarantine_outcome(&err, false);
+        assert_eq!(other_adapter.quarantined, 0);
+        assert_eq!(other_adapter.failed, 1);
+        assert!(other_adapter.cases[0].status.is_none());
+
+        let pending = quarantine_outcome(&reference_flat_frame(Some(4), true), true);
+        assert_eq!(pending.cases[0].frame_pending, Some(4));
+        assert_eq!(
+            pending.cases[0].failure_kind,
+            Some(crate::scene_dsl::suite::SuiteFailureKind::FlatOrUnstableFrame)
+        );
+        assert_eq!(pending.quarantined, 0);
+        assert_eq!(pending.failed, 1);
+
+        let not_done = quarantine_outcome(&reference_flat_frame(Some(0), false), true);
+        assert_eq!(not_done.cases[0].gpu_done, Some(false));
+        assert_eq!(not_done.quarantined, 0);
+        assert_eq!(not_done.failed, 1);
+    }
+
+    #[test]
+    fn reference_spawn_mismatch_is_an_image_compare_and_is_not_quarantined() {
+        let err = reference_mismatch_error(Some(0.834), Some(0.15));
+        assert!(matches!(err, HarnessError::ImageCompare(_)));
+        assert!(err.to_string().starts_with("image-compare:"));
+
+        let report = quarantine_outcome(&err, true);
+        assert!(report.cases[0].failure_kind.is_none());
+        assert!(report.cases[0].frame_pending.is_none());
+        assert!(report.cases[0].gpu_done.is_none());
+        assert_eq!(report.quarantined, 0);
+        assert_eq!(report.failed, 1);
+        assert!(report.cases[0].status.is_none());
+        assert!(report.cases[0].reason.is_none());
+
+        let wrapped = HarnessError::ImageCompare(reference_flat_frame(Some(0), true).to_string());
+        let wrapped_report = quarantine_outcome(&wrapped, true);
+        assert!(wrapped_report.cases[0].failure_kind.is_none());
+        assert_eq!(wrapped_report.quarantined, 0);
+        assert_eq!(wrapped_report.failed, 1);
     }
 }
