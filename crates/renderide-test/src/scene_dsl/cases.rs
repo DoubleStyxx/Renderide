@@ -578,6 +578,30 @@ mod tests {
     }
 
     #[test]
+    fn physically_based_goldens_match_the_omitted_light_reference() {
+        let reference = decoded_golden("negative_light_positive_only.png");
+        assert_eq!(
+            decoded_golden("negative_light_physically_based.png"),
+            reference,
+            "negative intensity golden differs from the omitted-light reference"
+        );
+        assert_eq!(
+            decoded_golden("negative_color_physically_based.png"),
+            reference,
+            "negative color golden differs from the omitted-light reference"
+        );
+    }
+
+    fn decoded_golden(name: &str) -> Vec<u8> {
+        let path = default_goldens_dir().join(name);
+        let image = image::open(&path)
+            .unwrap_or_else(|err| panic!("open {}: {err}", path.display()))
+            .to_rgba8();
+        assert_eq!(image.dimensions(), (256, 256), "{name}");
+        image.into_raw()
+    }
+
+    #[test]
     fn double_buffer_nothing_on_skybox_is_registered() {
         let case = lookup("double_buffer_nothing_on_skybox").expect("registered");
         assert!(matches!(
