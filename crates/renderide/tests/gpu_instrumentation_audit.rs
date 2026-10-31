@@ -19,6 +19,10 @@ const TEST_GPU_HARNESS_FILES: &[&str] = &[
 /// Files whose copy commands are covered by a caller-level GPU profiler scope.
 const PARENT_SCOPED_COPY_FILES: &[&str] = &[
     "src/app/headless/readback.rs",
+    // Debug-only #216 pre-sRGB scene-color copy. It runs only when
+    // `--headless-scene-color-readback` is set, after the PNG path has already
+    // waited for the frame submission, so it is not a profiled frame pass.
+    "src/app/headless/scene_color_dump.rs",
     "src/backend/frame_gpu/scene_snapshot.rs",
     "src/gpu/profiling/frame_bracket.rs",
     "src/occlusion/gpu/encode/staging_copy.rs",
@@ -51,6 +55,9 @@ const DRIVER_SUBMIT_HELPERS: &[&str] = &[
 /// Direct queue-submit files that are intentionally outside primary frame timing.
 const DIRECT_QUEUE_SUBMIT_FILES: &[&str] = &[
     "src/app/headless/readback.rs",
+    // Same debug readback. The submit is outside primary frame timing and is
+    // skipped entirely unless the headless scene-color flag is on.
+    "src/app/headless/scene_color_dump.rs",
     // Mesh upload staging flushes are queue-gated asset work outside primary frame submission.
     "src/backend/asset_transfers/integrator/drain.rs",
     "src/gpu/driver_thread/worker.rs",
