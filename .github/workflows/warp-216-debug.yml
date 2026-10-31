@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - cursor/warp-216-8a-baseline-4858
+      - cursor/warp-216-8a-scalar-color-4858
     paths:
       - ".github/workflows/warp-216-debug.yml"
       - ".github/actions/lavapipe/**"

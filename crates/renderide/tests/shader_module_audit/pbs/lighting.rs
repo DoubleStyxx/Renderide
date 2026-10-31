@@ -126,7 +126,8 @@ fn birp_range_fade_uses_sextic_smoothing() -> io::Result<()> {
 fn assert_birp_light_radiance_helpers(birp: &str) {
     assert!(
         birp.contains("fn light_radiance(light: ft::GpuLight) -> vec3<f32> {")
-            && birp.contains("return srgb_light_to_linear(light.color * light.intensity);"),
+            && birp.contains("let color = vec3<f32>(light.color_r, light.color_g, light.color_b);")
+            && birp.contains("return srgb_light_to_linear(color * light.intensity);"),
         "BiRP light module must apply light intensity before light color transfer conversion"
     );
     assert!(

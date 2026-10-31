@@ -46,7 +46,10 @@ fn srgb_light_to_linear(color: vec3<f32>) -> vec3<f32> {
 
 /// Linear light radiance before attenuation and Lambert/BRDF factors.
 fn light_radiance(light: ft::GpuLight) -> vec3<f32> {
-    return srgb_light_to_linear(light.color * light.intensity);
+    // Three scalars instead of a vec3 so naga's DX12 writer emits three
+    // ByteAddressBuffer.Load calls rather than one Load3 (rawBufferLoad mask 7).
+    let color = vec3<f32>(light.color_r, light.color_g, light.color_b);
+    return srgb_light_to_linear(color * light.intensity);
 }
 
 /// Unity BiRP-style direct-light scalar boost.
