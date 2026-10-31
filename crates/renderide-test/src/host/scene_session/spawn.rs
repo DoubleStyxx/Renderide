@@ -49,6 +49,7 @@ pub(super) fn spawn_renderer(
     cmd.env(SHADOW_ATLAS_PASS_LOG_ENV, "1");
     let (physically_based_key, physically_based_value) = physically_based_env(cfg.physically_based);
     cmd.env(physically_based_key, physically_based_value);
+    apply_child_env(&mut cmd, &cfg.child_env);
 
     if cfg.verbose_renderer {
         let stdout = if cfg.renderer_stdout_to_stderr {
@@ -69,6 +70,13 @@ pub(super) fn spawn_renderer(
 
     let child = cmd.spawn().map_err(HarnessError::SpawnRenderer)?;
     Ok(SpawnedRenderer { child: Some(child) })
+}
+
+/// Sets harness-selected variables on the child. Does not change this process.
+pub(super) fn apply_child_env(cmd: &mut Command, child_env: &[(String, String)]) {
+    for (key, value) in child_env {
+        cmd.env(key, value);
+    }
 }
 
 /// Environment pair that selects physically based light upload for one renderer process.
@@ -118,6 +126,7 @@ mod tests {
             timeout: Duration::from_secs(5),
             verbose_renderer: false,
             renderer_stdout_to_stderr: false,
+            child_env: Vec::new(),
             physically_based: false,
             scene_color_readback: false,
         }

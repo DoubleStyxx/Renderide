@@ -13,7 +13,13 @@
 use std::process::Command;
 
 fn bin() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_renderide-test"))
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_renderide-test"));
+    // Explicit loader variable, so these tests do not probe the host's ICD dirs.
+    cmd.env(
+        "VK_DRIVER_FILES",
+        "/usr/share/vulkan/icd.d/lvp_icd.x86_64.json",
+    );
+    cmd
 }
 
 fn output(cmd: &mut Command) -> std::process::Output {
@@ -169,6 +175,111 @@ fn bless_force_refuses_every_listed_quarantine_case() {
         assert!(skip.contains("bless refused"), "{name}: {value}");
         assert!(value["cases"][0]["blessed"].is_null(), "{name}");
     }
+}
+
+#[test]
+fn json_env_line_stays_on_stderr_and_fills_runner_icd() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().to_str().expect("utf8");
+    let output = output(
+        bin()
+            .args([
+                "run",
+                "--json",
+                "--renderer",
+                "/nonexistent/renderide",
+                "--output-root",
+                root,
+                "unlit_sphere",
+            ])
+            .env("VK_DRIVER_FILES", "/opt/icd/lvp_icd.x86_64.json")
+            .env("VK_ICD_FILENAMES", "/opt/other.json")
+            .env("RAYON_NUM_THREADS", "3"),
+    );
+    assert_eq!(
+        status(&output),
+        5,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("env:"),
+        "stdout must stay one JSON document: {stdout}"
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(value["exit_code"], 5);
+    assert_eq!(
+        value["runner"]["icd"]["path"],
+        "/opt/icd/lvp_icd.x86_64.json"
+    );
+    assert_eq!(value["runner"]["icd"]["source"], "env");
+    assert_eq!(value["runner"]["icd"]["var"], "VK_DRIVER_FILES");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("icd=/opt/icd/lvp_icd.x86_64.json (env)"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("rayon_threads=3 (env)"), "{stderr}");
+    assert!(stderr.contains("renderer="), "{stderr}");
+    assert!(stderr.contains("nonexistent"), "{stderr}");
+    assert!(!stderr.contains("dx12-warp"), "{stderr}");
+    let case: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("unlit_sphere/report.json")).expect("report"),
+    )
+    .expect("case json");
+    assert_eq!(case["runner"]["icd"]["source"], "env");
+    assert_eq!(
+        case["runner"]["icd"]["path"],
+        "/opt/icd/lvp_icd.x86_64.json"
+    );
+}
+
+#[test]
+fn icd_none_skips_the_probe_and_dx12_warp_is_usage() {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_renderide-test"));
+    cmd.args([
+        "run",
+        "--json",
+        "--icd",
+        "none",
+        "--renderer",
+        "/nonexistent/renderide",
+        "unlit_sphere",
+    ]);
+    cmd.env_remove("VK_DRIVER_FILES");
+    cmd.env_remove("VK_ICD_FILENAMES");
+    let none = output(&mut cmd);
+    assert_eq!(
+        status(&none),
+        5,
+        "{}",
+        String::from_utf8_lossy(&none.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&none.stderr);
+    assert!(stderr.contains("icd=none (none)"), "{stderr}");
+    assert!(!stderr.contains("no ICD"), "{stderr}");
+    let value: serde_json::Value = serde_json::from_slice(&none.stdout).expect("json");
+    assert!(
+        value["cases"][0]["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("renderer binary not found"),
+        "{value}"
+    );
+
+    let warp = output(bin().args(["run", "--backend", "dx12-warp", "unlit_sphere"]));
+    assert_eq!(
+        status(&warp),
+        2,
+        "{}",
+        String::from_utf8_lossy(&warp.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&warp.stderr).contains("dx12-warp"),
+        "{}",
+        String::from_utf8_lossy(&warp.stderr)
+    );
 }
 
 #[test]
