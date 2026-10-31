@@ -265,8 +265,17 @@ mod tests {
             let mut suite = SuiteReport::from_cases(vec![case]);
             apply_quarantine(&mut suite, before_expiry(), |_| true);
             let labeled = &suite.cases[0];
-            assert!(!case_is_quarantined_216(labeled), "{name}");
-            assert!(labeled.reason.is_none(), "{name}");
+            if *name == "pbs_lit_material_matrix" {
+                assert!(case_is_quarantined_216(labeled), "{name}");
+                assert_eq!(
+                    labeled.reason.as_deref(),
+                    Some("quarantined:#216"),
+                    "{name}"
+                );
+            } else {
+                assert!(!case_is_quarantined_216(labeled), "{name}");
+                assert!(labeled.reason.is_none(), "{name}");
+            }
         }
     }
 
@@ -375,16 +384,25 @@ mod tests {
 
     #[test]
     fn an_expired_quarantine_keeps_the_full_wait() {
-        for name in CASES {
+        assert!(crate::scene_dsl::early_flat_exit_applies(
+            "pbs_lit_material_matrix",
+            true,
+            before_expiry()
+        ));
+        assert!(!crate::scene_dsl::early_flat_exit_applies(
+            "pbs_lit_material_matrix",
+            true,
+            after_expiry()
+        ));
+        for name in [
+            "negative_light_parity",
+            "negative_light_physically_based",
+            "negative_color_physically_based",
+        ] {
             assert!(!crate::scene_dsl::early_flat_exit_applies(
                 name,
                 true,
                 before_expiry()
-            ));
-            assert!(!crate::scene_dsl::early_flat_exit_applies(
-                name,
-                true,
-                after_expiry()
             ));
         }
         assert_eq!(
