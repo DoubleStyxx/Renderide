@@ -2712,7 +2712,7 @@ impl MemoryPackable for VideoTextureLoad {
         packer.write_str(self.override_engine.as_deref());
         packer.write_str(self.mime_type.as_deref());
         packer.write_bool(self.is_stream);
-        packer.write(&self.audio_system_sample_rate);
+        packer.write(&(self.audio_system_sample_rate as i64));
     }
     fn unpack<P: MemoryPackerEntityPool>(
         &mut self,
