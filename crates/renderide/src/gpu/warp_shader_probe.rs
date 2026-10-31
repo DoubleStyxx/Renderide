@@ -188,11 +188,11 @@ fn write_hlsl(module: &naga::Module, info: &naga::valid::ModuleInfo) -> Option<S
     Some(text)
 }
 
-/// Compiles the dumped HLSL with a `dxc` on `PATH`, using wgpu 30's DX12 flags.
+/// Compiles the dumped HLSL with a `dxc` on `PATH`.
 ///
-/// wgpu calls DXC with `-T ps_<model>`, `-HV 2018`, `-Ges`, and `-no-warnings`,
-/// and no `-O` flag. DXC's default is `-O3`. The profile here is `ps_6_7`, which
-/// is static DXC's cap. A missing `dxc` is logged and skipped.
+/// This arm matches the patched `wgpu-hal` `compile_dxc`: `-T ps_6_7`, `-HV 2018`,
+/// `-Ges`, `-Gis`, `-Od`, and `-no-warnings`. `-Gis` is what clears DXIL `fast`.
+/// A missing `dxc` is logged and skipped.
 fn compile_dxil(dir: &Path) {
     let hlsl = dir.join("lit-production.hlsl");
     let listing = dir.join("lit-production.dxil.ll");
@@ -220,6 +220,8 @@ fn compile_dxil(dir: &Path) {
             "-HV",
             "2018",
             "-Ges",
+            "-Gis",
+            "-Od",
             "-no-warnings",
             "-Fc",
         ])
@@ -236,8 +238,11 @@ fn compile_dxil(dir: &Path) {
                 .lines()
                 .find(|line| !line.trim().is_empty())
                 .unwrap_or("");
+            let fast = std::fs::read_to_string(&listing)
+                .map(|text| text.matches(" fast").count())
+                .unwrap_or(0);
             logger::info!(
-                "diag-8a dxc status={status} dxil_bytes={} listing_bytes={} stderr={first}",
+                "diag-8a dxc status={status} flags=-Gis -Od dxil-fast-count={fast} dxil_bytes={} listing_bytes={} stderr={first}",
                 std::fs::metadata(&object)
                     .map(|meta| meta.len())
                     .unwrap_or(0),

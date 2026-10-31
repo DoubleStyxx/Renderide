@@ -294,3 +294,8 @@ single_match_else = "deny"
 float_cmp = "deny"
 too_long_first_doc_paragraph = "deny"
 manual_bit_width = "deny"
+
+# #216 sub-branch only. Appends `-Gis` and `-Od` in wgpu-hal `compile_dxc`.
+# Do not merge this patch to master.
+[patch.crates-io]
+wgpu-hal = { path = "third_party/wgpu-hal" }

@@ -45,14 +45,10 @@ fn atlas_cookie_uv(rect_index: u32, uv: vec2<f32>) -> vec2<f32> {
 }
 
 fn sample_2d_cookie(light: ft::GpuLight, uv: vec2<f32>) -> f32 {
-    // Explicit LOD. `textureSample` takes implicit derivatives, and this helper is called from
-    // the dynamic clustered-light loop. FXC then tries to unroll that loop and rejects it (X3511).
-    // LOD 0 matches the unsampled path (cookie kind none returns before this call).
-    return textureSampleLevel(
+    return textureSample(
         rg::light_cookie_2d_atlas,
         rg::light_cookie_sampler,
         atlas_cookie_uv(light.cookie_layer, wrap_cookie_uv(uv, light.cookie_reserved)),
-        0.0,
     ).r;
 }
 
@@ -123,11 +119,10 @@ fn point_cookie_multiplier(light: ft::GpuLight, world_pos: vec3<f32>) -> f32 {
     ) * inverseSqrt(len_sq);
     let face_uv = cube_face_uv(local);
     let rect_index = light.cookie_layer + u32(face_uv.z);
-    return textureSampleLevel(
+    return textureSample(
         rg::light_cookie_point_atlas,
         rg::light_cookie_sampler,
         atlas_cookie_uv(rect_index, face_uv.xy),
-        0.0,
     ).r;
 }
 
