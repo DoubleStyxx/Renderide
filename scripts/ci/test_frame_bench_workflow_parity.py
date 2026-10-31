@@ -7,8 +7,13 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-FRAME = (ROOT / ".github/workflows/frame-bench.yml").read_text(encoding="utf-8")
-BENCH = (ROOT / ".github/workflows/bench-pr.yml").read_text(encoding="utf-8")
+FRAME_PATH = ROOT / ".github/workflows/frame-bench.yml"
+BENCH_PATH = ROOT / ".github/workflows/bench-pr.yml"
+# bench-pr.yml sparse-checkouts tools/ to scripts/ci only; skip when the
+# workflow files are absent. frame-bench-gate-tests (full checkout) still runs them.
+_HAVE_WORKFLOWS = FRAME_PATH.is_file() and BENCH_PATH.is_file()
+FRAME = FRAME_PATH.read_text(encoding="utf-8") if _HAVE_WORKFLOWS else ""
+BENCH = BENCH_PATH.read_text(encoding="utf-8") if _HAVE_WORKFLOWS else ""
 
 
 def _input_default(text: str, name: str) -> str | None:
@@ -22,6 +27,13 @@ def _input_default(text: str, name: str) -> str | None:
 
 
 class FrameBenchParity(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        if not _HAVE_WORKFLOWS:
+            raise unittest.SkipTest(
+                "workflow yml absent (sparse tools checkout); covered by frame-bench-gate-tests"
+            )
+
     def test_runs_default_is_12(self) -> None:
         self.assertEqual(_input_default(FRAME, "runs"), "12")
         self.assertIn('RUNS: "12"', BENCH)
