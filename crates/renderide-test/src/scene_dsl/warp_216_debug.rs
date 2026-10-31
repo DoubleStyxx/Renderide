@@ -2,12 +2,12 @@
 //!
 //! They are not in [`super::cases::registry`] and not in the #216 quarantine, so a
 //! run reports a real pass or fail. Select them with `--group warp_216_debug` or
-//! with `--case <name>` on `check-suite` / `update-suite`.
+//! with `--case <name>` on `run` or `check-suite`.
 //!
 //! ```text
-//! renderide-test check-suite --group warp_216_debug
-//! renderide-test check-suite --case warp216_directional_diffuse_g
-//! renderide-test update-suite --case warp216_constant
+//! renderide-test run --group warp_216_debug
+//! renderide-test run --case warp216_directional_diffuse_g
+//! renderide-test run --bless --force --case warp216_constant
 //! ```
 //!
 //! Each case writes `actual.png` plus `actual.scene_color.rgba16f` and

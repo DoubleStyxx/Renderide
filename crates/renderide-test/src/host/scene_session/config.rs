@@ -20,6 +20,10 @@ pub struct SceneSessionConfig {
     pub timeout: Duration,
     /// When `true`, inherit the renderer's stdout/stderr.
     pub verbose_renderer: bool,
+    /// With `verbose_renderer`, send the child's stdout to this process's stderr.
+    ///
+    /// `--json` keeps stdout as one document.
+    pub renderer_stdout_to_stderr: bool,
     /// When `true`, the spawned renderer clamps negative light intensity to zero.
     ///
     /// Passed as `RENDERIDE_RENDERING__PHYSICALLY_BASED`. The harness always sets the

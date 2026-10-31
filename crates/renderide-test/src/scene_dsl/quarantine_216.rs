@@ -50,6 +50,24 @@ const NEGATIVE_LIGHT_CASES: &[&str] = &[
     NEGATIVE_COLOR_PHYSICALLY_BASED,
 ];
 
+/// Every #216 quarantine name, including the #212 expected-failure case.
+///
+/// [`bless_forbidden`] and [`early_flat_exit_applies`] both read this slice.
+/// A new quarantine case is added here, not as a separate bless exception.
+const QUARANTINE_CASE_NAMES: &[&str] = &[
+    PBS_LIT,
+    NEGATIVE_LIGHT_PARITY,
+    NEGATIVE_LIGHT_PHYSICALLY_BASED,
+    NEGATIVE_COLOR_PHYSICALLY_BASED,
+];
+
+/// Scene names `run --bless` must skip, even with `--force`.
+///
+/// This is the #216 quarantine list, which includes the #212 expected-failure case.
+pub fn bless_refused_scenes() -> &'static [&'static str] {
+    QUARANTINE_CASE_NAMES
+}
+
 /// PNG `tEXt` keyword. Tests write it to prove the quarantine does not read it.
 #[cfg(test)]
 const PENDING_KEYWORD: &str = "renderide_pipeline_pending";
@@ -200,6 +218,19 @@ fn expires_at() -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(QUARANTINE_216_EXPIRES_UNIX)
 }
 
+/// Why bless must not write this case's golden. `None` means bless may proceed.
+///
+/// The #212 and #216 cases are refused on every runner, not only on WARP.
+pub(crate) fn bless_forbidden(name: &str) -> Option<&'static str> {
+    if !QUARANTINE_CASE_NAMES.contains(&name) {
+        return None;
+    }
+    if name == PBS_LIT {
+        return Some("quarantined #212/#216; bless refused");
+    }
+    Some("quarantined #216; bless refused")
+}
+
 /// Whether a WARP capture of this case may end the flat-frame wait early.
 ///
 /// The four cases are the ones [`quarantine_matches`] can label. After
@@ -208,7 +239,7 @@ pub(crate) fn early_flat_exit_applies(case_name: &str, is_warp: bool, now: Syste
     if !is_warp || now >= expires_at() {
         return false;
     }
-    case_name == PBS_LIT || NEGATIVE_LIGHT_CASES.contains(&case_name)
+    QUARANTINE_CASE_NAMES.contains(&case_name)
 }
 
 fn stamp_case_report(path: &Path, reason: &str) -> std::io::Result<()> {
