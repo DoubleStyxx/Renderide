@@ -113,6 +113,36 @@ The Windows logs for both physically based captures contain `negative direct lig
 
 `6ae283f1` also passed the unlit cases in that job at SSIM about 0.999. The broken captures are the lit ones. Both physically based WARP logs say `Using static DXC for shader compilation`, scene color `Rgba16Float`, surface `Rgba8UnormSrgb`, post-processing off.
 
+## Evidence: WARP is not one outcome per case
+
+Prism: the same four #216 cases do not pick the same exit on every Windows run. Checked against the Windows artifacts.
+
+[#239](https://github.com/DoubleStyxx/Renderide/pull/239) run [41168816090](https://github.com/DoubleStyxx/Renderide/actions/runs/41168816090), head `a0d9b1816204bb5a9057d30a70082fc5ff11e427`, Windows job succeeded. CPU AMD EPYC 9V45, WARP Dx12 vendor `0x1414` device `0x008c`. Two of the four cases logged `reason=flat_stable`. The other two finished a non-flat frame and have no `early_exit`.
+
+| Case | Exit | What the artifact records |
+| --- | --- | --- |
+| `pbs_lit_material_matrix` | non-flat, `expected failure (WARP, #212)` | No `early_exit`. SSIM 0.856, fail fraction 0.155, max abs diff 255, 276 unique colors, luma range 177. PNG stabilized after 62.0651659s. |
+| `negative_light_parity` | non-flat, `WARP lit shading untrusted` | No `early_exit`. SSIM 0.833, fail fraction 0.148, max abs diff 216, 7 unique colors, luma range 31. PNG stabilized after 62.426s. |
+| `negative_light_physically_based` | `flat_stable`, k=3 | Log `settle=89.442s`, `k_window=2.016s`, `elapsed=91.4584658s`. `report.json` `settle_ms` 89442 and `elapsed_ms` 91458. |
+| `negative_color_physically_based` | `flat_stable`, k=3 | Log `settle=61.646s`, `k_window=2.005s`, `elapsed=63.6516323s`. `report.json` `settle_ms` 61646 and `elapsed_ms` 63651. |
+
+Prism's 89.4s is the settle field (`89.442s` / `settle_ms` 89442). The error string and `elapsed_ms` 91458 are that settle plus the 2.016s K window. Both figures are in the artifact. They are not two measurements of the same clock.
+
+[#236](https://github.com/DoubleStyxx/Renderide/pull/236) run [41165561110](https://github.com/DoubleStyxx/Renderide/actions/runs/41165561110), head `cbe9c49838ad6fc558f5b41c3fda2685073ea555`, same CPU and the same WARP adapter. That log has no separate settle field. All four cases are `flat_stable` with k=3. Elapsed times from the log and `early_exit.elapsed_ms`:
+
+| Case | Elapsed |
+| --- | --- |
+| `pbs_lit_material_matrix` | 63.921811s (`elapsed_ms` 63921) |
+| `negative_light_parity` | 62.3972146s (`elapsed_ms` 62397) |
+| `negative_light_physically_based` | 63.1595514s (`elapsed_ms` 63159) |
+| `negative_color_physically_based` | 68.2884134s (`elapsed_ms` 68288) |
+
+Prism's "about 60s" for the physically based case on this run is the 60s backstop. The artifact's exit is 63.1595514s. That is the number to compare with #239's 89.442s settle, and it is the whole wait, because #236 did not split settle from the K window.
+
+Same machine class, two runs, and `pbs_lit` plus `negative_light_parity` flipped from flat to non-flat. One Windows sample does not establish which exit a case takes, or how long the flat exit takes.
+
+Each WARP experiment from here, including 8a, 8c, and 8d, runs several times. Record the flat versus non-flat split and the settle-time spread. 8b's pack comparison stays one bit-level result: those bytes matched on the run that measured them. It does not say the next WARP frame will be flat.
+
 ## Hypotheses
 
 ### 1. The frame encodes no draws
@@ -204,6 +234,6 @@ Owner: Shader for the scene, Bridge for the two captures. ETA: Nov 6, after 8b's
 ## Order
 
 1. Bridge: material-bind hash (hypothesis 6). 8b and the cluster-column read are done; packing, upload, and an empty center cluster are ruled out.
-2. Bridge: FXC-versus-DXC or the DXIL dump (8a), then the pre-sRGB scene-color readback (8c).
-3. Shader: the per-term debug scene (8d). The pack is finite and the center cluster count is non-zero.
+2. Bridge: FXC-versus-DXC or the DXIL dump (8a), then the pre-sRGB scene-color readback (8c). Repeat each WARP capture and record the flat versus non-flat split and the settle-time spread.
+3. Shader: the per-term debug scene (8d). The pack is finite and the center cluster count is non-zero. The same repeat rule applies to its WARP captures.
 4. Gauge: #214 stall, after the Nov 7 color finding.
