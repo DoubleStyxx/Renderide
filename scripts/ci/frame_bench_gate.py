@@ -36,26 +36,24 @@ Decision rule:
    docs/perf-parity-plan.md section 5.1, and one slow base run would hide a real regression).
    Exit 1 when anything is flagged; `--suspects-out` lists the flagged scenarios.
 2. Confirm (`--mode confirm`): the workflow re-measures the flagged scenarios for
-   `confirm_rounds` interleaved rounds. `--base`/`--head` are the first-pass reports,
-   `--confirm-base`/`--confirm-head` the confirm rounds. A scenario FAILS when EITHER holds:
-   a. pooled: on all runs (first pass + confirm), `delta > --fail-threshold` AND a one-sided
-      Mann-Whitney U test says head is slower, `p < --alpha` (default 0.05);
-   b. confirm-only: on the confirm rounds alone, `delta > --fail-threshold` AND the same
-      one-sided Mann-Whitney U test, `p < --alpha`.
-   Path (b) keeps the confirm strict: confirm rounds that on their own reproduce a regression
-   above the bar fail even if odd first-pass runs dilute the pooled data. There is no spread
-   term anywhere.
+   `confirm_rounds` interleaved rounds at n>=12 (bench-pr uses `RUNS=12`). `--base`/`--head`
+   are the first-pass reports, `--confirm-base`/`--confirm-head` the confirm rounds.
+   A scenario FAILS only when the confirm-only path is significant:
+   confirm-only `delta > --fail-threshold` AND one-sided Mann-Whitney U `p < --alpha`
+   (default 0.05) AND each confirm side has at least 12 samples AND the ms delta is above
+   the absolute floor. Pooled (first pass + confirm) delta and p-value are still computed and
+   reported as secondary figures; pooled significance alone never FAILs, and a short confirm
+   (n<12 on either side) never FAILs. There is no spread term anywhere.
 3. No confirm (`confirm_rounds=0`): the workflow runs the first pass with
    `--flag-threshold` set to the fail threshold, so a scenario fails only when its first-pass
    `delta > fail_threshold`. A delta between the two thresholds PASSES: it is below the
    policy bar, and the flag threshold only exists to choose what to re-measure. `decide()`
    implements the same rule.
 
-Measured at the workflow defaults (`runs=9`, flag 5, fail 10, `confirm_rounds=3`; seeded noise
-model below, true value 1 ms, no abs floor, 4000 trials per point): a true 0% passes
-99.925%; a true +10% fails 47.65% (10% is the bar itself, so about 50% is expected); +12%
-fails 69.725%; +15% fails 90.0%. Flag 5 was
-chosen over 6 (+15% failed 87.875%) to reach the 90% target at the same 0% pass rate.
+Measured at the workflow defaults under the confirm-only FAIL rule (`runs=9`, flag 5, fail 10,
+`confirm_rounds=3`; seeded noise model below, true value 1 ms, no abs floor, 4000 trials per
+point): a true 0% passes 99.925%; a true +10% fails 38.675%; +12% fails 60.375%; +15% fails
+85.3%. (Previously, with pooled OR confirm-only, +15% failed 90.0%.)
 
 Known limit (tested, see test_frame_bench_gate.py): if confirm rounds add no new information
 (they repeat the first-pass runs exactly), slow base runs at or above the head median plus heavy
@@ -77,8 +75,9 @@ Rows:
 - `ok`: no regression.
 - `ok (abs floor)`: delta above the threshold in percent, but at most `--abs-floor-ms` in ms.
 - `FLAG` (first mode): delta above the flag threshold; re-measure it.
-- `FAIL (pooled)`, `FAIL (confirm-only)`, `FAIL (pooled, confirm-only)` (confirm mode): a
-  confirmed regression and the path(s) that failed it.
+- `FAIL (confirm-only)` (confirm mode): confirm-only regression (n>=12) above the fail bar
+  with Mann-Whitney p < alpha. Pooled figures are reported on the row but do not decide FAIL.
+- `ok (confirm n<12)`: confirm-only looked like a regression but a side had fewer than 12 samples.
 - `base N/A`: scenario measured on head, not defined on base. Never fails.
 - `head N/A, skipped`: scenario requested but not defined on head (`--head-missing`). Never fails.
 
@@ -332,6 +331,10 @@ def _significant_regression(
     return delta, p_value, relative and not floored, floored
 
 
+# Confirm path requires at least this many samples per side (bench-pr RUNS=12).
+CONFIRM_MIN_N = 12
+
+
 def evaluate_confirm(
     first_base: dict[str, list[float]],
     first_head: dict[str, list[float]],
@@ -341,9 +344,13 @@ def evaluate_confirm(
     head_missing: list[str],
     alpha: float = DEFAULT_ALPHA,
     abs_floor_ms: float = DEFAULT_ABS_FLOOR_MS,
+    confirm_min_n: int = CONFIRM_MIN_N,
 ) -> list[Row]:
-    """Confirm: FAIL when (a) pooled or (b) confirm-only data shows delta > fail AND MW p < alpha,
-    each path also needing its ms delta above the absolute floor."""
+    """Confirm: FAIL only when confirm-only is significant with n>=confirm_min_n per side.
+
+    Pooled delta/p are reported on the row (secondary) but never decide FAIL. A confirm-only
+    regression with fewer than confirm_min_n samples on either side is `ok (confirm n<12)`.
+    """
     pooled_base = {k: list(v) for k, v in first_base.items()}
     pooled_head = {k: list(v) for k, v in first_head.items()}
     for k, v in confirm_base.items():
@@ -353,17 +360,21 @@ def evaluate_confirm(
     both, rows = _missing_rows(pooled_base, pooled_head, head_missing)
     for name in both:
         b, h = pooled_base[name], pooled_head[name]
-        delta, p_value, pooled_fail, pooled_floor = _significant_regression(b, h, fail_threshold, alpha, abs_floor_ms)
+        delta, p_value, _pooled_fail, _pooled_floor = _significant_regression(
+            b, h, fail_threshold, alpha, abs_floor_ms
+        )
         cb, ch = confirm_base.get(name) or [], confirm_head.get(name) or []
-        c_delta, c_p, confirm_fail, confirm_floor = _significant_regression(
+        c_delta, c_p, confirm_sig, confirm_floor = _significant_regression(
             cb, ch, fail_threshold, alpha, abs_floor_ms
         )
-        paths = [label for label, hit in (("pooled", pooled_fail), ("confirm-only", confirm_fail)) if hit]
+        n_ok = len(cb) >= confirm_min_n and len(ch) >= confirm_min_n
         if delta is None:
             status = "n/a"
-        elif paths:
-            status = f"FAIL ({', '.join(paths)})"
-        elif pooled_floor or confirm_floor:
+        elif confirm_sig and n_ok:
+            status = "FAIL (confirm-only)"
+        elif confirm_sig and not n_ok:
+            status = "ok (confirm n<12)"
+        elif confirm_floor and n_ok:
             status = "ok (abs floor)"
         else:
             status = "ok"
@@ -387,11 +398,13 @@ def decide(
     fail_threshold: float,
     alpha: float = DEFAULT_ALPHA,
     abs_floor_ms: float = DEFAULT_ABS_FLOOR_MS,
+    confirm_min_n: int = CONFIRM_MIN_N,
 ) -> str:
     """Whole-gate decision for one scenario, as the workflow runs it: `pass` or `fail`.
 
     `confirm_base` / `confirm_head` are the confirm rounds. Empty means `confirm_rounds=0`:
     then the first pass runs at the fail threshold (a delta between the two thresholds passes).
+    Confirm FAIL requires confirm-only significance with at least `confirm_min_n` samples per side.
     """
     if not confirm_base and not confirm_head:
         first = evaluate_first({"s": first_base}, {"s": first_head}, fail_threshold, [], abs_floor_ms)[0]
@@ -402,7 +415,7 @@ def decide(
     row = evaluate_confirm(
         {"s": first_base}, {"s": first_head},
         {"s": [v for run in confirm_base for v in run]}, {"s": [v for run in confirm_head for v in run]},
-        fail_threshold, [], alpha, abs_floor_ms,
+        fail_threshold, [], alpha, abs_floor_ms, confirm_min_n,
     )[0]
     return "fail" if row.status.startswith("FAIL") else "pass"
 
@@ -436,9 +449,9 @@ def render(
     )
     if mode == "confirm":
         lines += [
-            "Gate: cpu_frame_ms.p95 (median of per-run p95). Confirm: FAIL when EITHER "
-            f"(a) pooled (first pass + confirm) delta > {fail_threshold:g}% AND one-sided Mann-Whitney U p < {alpha:g}, "
-            f"OR (b) confirm-rounds-only delta > {fail_threshold:g}% AND Mann-Whitney p < {alpha:g} (head slower)."
+            "Gate: cpu_frame_ms.p95 (median of per-run p95). Confirm: FAIL only when confirm-rounds-only "
+            f"delta > {fail_threshold:g}% AND one-sided Mann-Whitney U p < {alpha:g} (head slower) with "
+            f"n>={CONFIRM_MIN_N} samples per side. Pooled delta/p are reported but do not decide FAIL."
             + floor_text,
             "",
             "| scenario | base p95 ms | head p95 ms | pooled delta | pooled runs base/head | pooled MW p "

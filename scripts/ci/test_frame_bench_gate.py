@@ -58,7 +58,7 @@ def simulate(
     true_ms: float = 1.0,
     abs_floor_ms: float = gate.DEFAULT_ABS_FLOOR_MS,
 ) -> float:
-    """Fraction of trials where the whole gate (first pass + pooled confirm) fails."""
+    """Fraction of trials where the whole gate (first pass + confirm-only FAIL rule) fails."""
     rng = random.Random(seed)
     head_ms = true_ms * (1.0 + true_pct / 100.0)
     fails = 0
@@ -138,14 +138,19 @@ class GateTests(unittest.TestCase):
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             return gate.main(list(args))
 
-    def decide(self, fb, fh, cb, ch) -> str:
-        return gate.decide(fb, fh, cb, ch, FLAG, FAIL)
+    def decide(self, fb, fh, cb, ch, confirm_min_n: int = 1) -> str:
+        # Default confirm_min_n=1 so property tests with small n still exercise MW paths;
+        # production CONFIRM_MIN_N=12 is covered by dedicated n>=12 tests below.
+        return gate.decide(fb, fh, cb, ch, FLAG, FAIL, confirm_min_n=confirm_min_n)
 
-    def confirm_row(self, fb, fh, cb, ch, abs_floor_ms: float = gate.DEFAULT_ABS_FLOOR_MS) -> gate.Row:
+    def confirm_row(
+        self, fb, fh, cb, ch, abs_floor_ms: float = gate.DEFAULT_ABS_FLOOR_MS, confirm_min_n: int = 1
+    ) -> gate.Row:
         flat_cb = [v for r in cb for v in r]
         flat_ch = [v for r in ch for v in r]
         return gate.evaluate_confirm(
-            {"s": fb}, {"s": fh}, {"s": flat_cb}, {"s": flat_ch}, FAIL, [], abs_floor_ms=abs_floor_ms
+            {"s": fb}, {"s": fh}, {"s": flat_cb}, {"s": flat_ch}, FAIL, [],
+            abs_floor_ms=abs_floor_ms, confirm_min_n=confirm_min_n,
         )[0]
 
     # --- first pass and plumbing ----------------------------------------------------------
@@ -245,13 +250,14 @@ class GateTests(unittest.TestCase):
         self.assertIn("FLAG when delta > 3%", out)
         self.assertIn("fail only above 8%", out)
         # Confirm mode: the alias is the fail bar there too (+4.5% > 4, all runs slower).
-        cb = self.write("cb.json", {"s": flat(1.0)})
-        ch = self.write("ch.json", {"s": flat(1.045)})
+        # Use n=12 confirm samples so the production CONFIRM_MIN_N rule can FAIL.
+        cb = self.write("cb.json", {"s": [1.0] * 12})
+        ch = self.write("ch.json", {"s": [1.045] * 12})
         code, out, _ = self.run_gate_capture(
             "--mode", "confirm", *common, "--confirm-base", str(cb), "--confirm-head", str(ch), "--threshold", "4"
         )
         self.assertEqual(code, 1)
-        self.assertIn("FAIL (pooled, confirm-only)", out)
+        self.assertIn("FAIL (confirm-only)", out)
 
     # --- input errors (exit 2) ---------------------------------------------------------------
 
@@ -394,15 +400,16 @@ class GateTests(unittest.TestCase):
 
     # --- confirm paths --------------------------------------------------------------------
 
-    def test_path_a_alone_fails(self) -> None:
+    def test_pooled_alone_does_not_fail(self) -> None:
         # Pooled (first + 1 round): +24.5% and significant. Confirm-only: +9%, under the bar.
+        # NEW rule: pooled is report-only — must not FAIL when confirm-only is not significant.
         fb, fh = flat(1.0), flat(1.4)
         cb, ch = [flat(1.0)], [flat(1.09)]
         row = self.confirm_row(fb, fh, cb, ch)
         self.assertGreater(row.delta, FAIL)
         self.assertLessEqual(row.confirm_delta, FAIL)
-        self.assertEqual(row.status, "FAIL (pooled)")
-        self.assertEqual(self.decide(fb, fh, cb, ch), "fail")
+        self.assertEqual(row.status, "ok")
+        self.assertEqual(self.decide(fb, fh, cb, ch), "pass")
 
     def test_path_b_alone_fails(self) -> None:
         # First pass +7% (flagged). Confirm rounds alone: median +14%, every head run slower.
@@ -421,7 +428,7 @@ class GateTests(unittest.TestCase):
     def test_both_paths_fail(self) -> None:
         fb, fh = flat(1.0), flat(1.3)
         cb, ch = [flat(1.0)] * CONFIRM_ROUNDS, [flat(1.3)] * CONFIRM_ROUNDS
-        self.assertEqual(self.confirm_row(fb, fh, cb, ch).status, "FAIL (pooled, confirm-only)")
+        self.assertEqual(self.confirm_row(fb, fh, cb, ch).status, "FAIL (confirm-only)")
 
     def test_neither_path_fails(self) -> None:
         # A +20% first-pass spike that the confirm rounds do not reproduce.
@@ -432,6 +439,37 @@ class GateTests(unittest.TestCase):
         self.assertLessEqual(row.confirm_delta, FAIL)
         self.assertEqual(row.status, "ok")
         self.assertEqual(self.decide(fb, fh, cb, ch), "pass")
+
+    def test_confirm_only_significant_fails_with_n_ge_12(self) -> None:
+        # Confirm-only +14% significant with 12 samples/side; pooled diluted below the bar.
+        fb, fh = flat(1.0), flat(1.07)
+        cb = [1.0] * 12
+        ch = [1.14] * 12
+        row = gate.evaluate_confirm({"s": fb}, {"s": fh}, {"s": cb}, {"s": ch}, FAIL, [])[0]
+        self.assertEqual(row.confirm_n_base, 12)
+        self.assertEqual(row.confirm_n_head, 12)
+        self.assertGreater(row.confirm_delta, FAIL)
+        self.assertLess(row.confirm_p, gate.DEFAULT_ALPHA)
+        self.assertEqual(row.status, "FAIL (confirm-only)")
+        self.assertEqual(gate.decide(fb, fh, [cb], [ch], FLAG, FAIL), "fail")
+
+    def test_confirm_only_significant_but_n_lt_12_does_not_fail(self) -> None:
+        fb, fh = flat(1.0), flat(1.07)
+        cb = [1.0] * 11
+        ch = [1.14] * 11
+        row = gate.evaluate_confirm({"s": fb}, {"s": fh}, {"s": cb}, {"s": ch}, FAIL, [])[0]
+        self.assertEqual(row.status, "ok (confirm n<12)")
+        self.assertEqual(gate.decide(fb, fh, [cb], [ch], FLAG, FAIL), "pass")
+
+    def test_confirm_only_not_significant_passes_even_if_pooled_is(self) -> None:
+        # Same shape as pooled-alone: confirm under the bar → PASS despite pooled FAIL under old OR rule.
+        fb, fh = [1.0] * 12, [1.4] * 12
+        cb, ch = [1.0] * 12, [1.09] * 12
+        row = gate.evaluate_confirm({"s": fb}, {"s": fh}, {"s": cb}, {"s": ch}, FAIL, [])[0]
+        self.assertGreater(row.delta, FAIL)
+        self.assertLess(row.p_value, gate.DEFAULT_ALPHA)
+        self.assertLessEqual(row.confirm_delta, FAIL)
+        self.assertEqual(row.status, "ok")
 
     def test_large_delta_without_significance_passes(self) -> None:
         # Delta > bar on both paths, but the runs interleave: neither Mann-Whitney test fires.
@@ -603,27 +641,25 @@ class GateTests(unittest.TestCase):
         self.assertTrue(15.0 <= median_spread <= 30.0, median_spread)
 
     def test_simulation_at_workflow_defaults(self) -> None:
-        # runs=9, flag=5, fail=10, confirm_rounds=3; 4000 trials each, seeded (0%: seed 2,
-        # regressions: seed 1), true value 1 ms, default rule (abs floor off). Measured: 0% passes
-        # 99.925%; +10% fails 47.65% (10% is the bar itself, so ~50% is expected); +12% fails
-        # 69.725%; +15% fails 90.0%.
+        # Confirm-only FAIL rule; runs=9, flag=5, fail=10, confirm_rounds=3; 4000 trials each,
+        # seeded (0%: seed 2, regressions: seed 1), true value 1 ms, abs floor off.
+        # Measured: 0% passes 99.925%; +10% fails 38.675%; +12% fails 60.375%; +15% fails 85.3%.
         rates = {pct: simulate(pct, RUNS, CONFIRM_ROUNDS, FLAG, FAIL, trials=4000, seed=1) for pct in (10, 12, 15)}
         pass_0 = 1.0 - simulate(0.0, RUNS, CONFIRM_ROUNDS, FLAG, FAIL, trials=4000, seed=2)
         print(f"\n[sim runs={RUNS} rounds={CONFIRM_ROUNDS} flag={FLAG:g} fail={FAIL:g}] pass@0%={pass_0:.4f} "
               + " ".join(f"fail@+{k}%={v:.4f}" for k, v in rates.items()), file=sys.stderr)
         self.assertGreaterEqual(pass_0, 0.95)
         self.assertAlmostEqual(pass_0, 0.99925, places=5)
-        self.assertAlmostEqual(rates[10], 0.4765, places=5)
-        self.assertAlmostEqual(rates[12], 0.69725, places=5)
-        self.assertAlmostEqual(rates[15], 0.9000, places=5)
-        self.assertTrue(0.35 <= rates[10] <= 0.65)  # around the bar: a coin flip
+        self.assertAlmostEqual(rates[10], 0.38675, places=5)
+        self.assertAlmostEqual(rates[12], 0.60375, places=5)
+        self.assertAlmostEqual(rates[15], 0.853, places=5)
+        self.assertTrue(0.30 <= rates[10] <= 0.55)
 
     def test_simulation_at_0_2_ms_floor_off_and_on(self) -> None:
         # Why the abs floor is opt-in (O8 open): today's lavapipe scenarios run at ~0.2-0.4 ms.
         # Same noise model and seeds as above at a true 0.2 ms median, 4000 trials each.
-        # Measured: floor off (default): 0% passes 99.925%, +15% fails 90.0%, +20% fails
-        # 98.95% (the model is scale-free, so this matches 1 ms). 0.05 ms floor: 0% passes
-        # 100%, +15% fails 0.0%, +20% fails 4.8%, since a 0.05 ms floor at 0.2 ms is a 25% bar.
+        # Confirm-only rule. Floor off: 0% passes 99.925%, +15% fails 85.3%, +20% fails
+        # 98.525%. 0.05 ms floor: 0% passes 100%, +15% fails 0.0%, +20% fails 2.65%.
         def rate(pct: float, floor: float, seed: int = 1) -> float:
             return simulate(pct, RUNS, CONFIRM_ROUNDS, FLAG, FAIL, trials=4000, seed=seed, true_ms=0.2,
                             abs_floor_ms=floor)
@@ -636,11 +672,11 @@ class GateTests(unittest.TestCase):
               f"floor {FLOOR:g} ms: pass@0%={pass_0_on:.4f} fail@+15%={on[15]:.4f} fail@+20%={on[20]:.4f}",
               file=sys.stderr)
         self.assertEqual(gate.DEFAULT_ABS_FLOOR_MS, 0.0)
-        self.assertAlmostEqual(off[15], 0.9000, places=5)
-        self.assertAlmostEqual(off[20], 0.9895, places=5)
+        self.assertAlmostEqual(off[15], 0.853, places=5)
+        self.assertAlmostEqual(off[20], 0.98525, places=5)
         self.assertAlmostEqual(pass_0_off, 0.99925, places=5)
         self.assertAlmostEqual(on[15], 0.0, places=5)
-        self.assertAlmostEqual(on[20], 0.048, places=5)
+        self.assertAlmostEqual(on[20], 0.0265, places=5)
         self.assertAlmostEqual(pass_0_on, 1.0, places=5)
         self.assertGreaterEqual(off[15], 0.85)  # floor off keeps the +15% detection target
         self.assertLessEqual(on[15], 0.05)  # a 0.05 ms floor suppresses it at 0.2 ms
@@ -673,8 +709,9 @@ class GateTests(unittest.TestCase):
     def test_confirm_mode_accepts_mixed_schemas(self) -> None:
         base = self.write("b.json", {"s": flat(2.0)})
         head = self.write2("h.json", {"s": flat(2.4)})
-        cb = self.write("cb.json", {"s": [2.0, 2.01, 1.99, 2.0, 2.0]})
-        ch = self.write2("ch.json", {"s": [2.4, 2.41, 2.39, 2.4, 2.4]})
+        # n=12 so CONFIRM_MIN_N allows FAIL (confirm-only) on the +20% confirm delta.
+        cb = self.write("cb.json", {"s": [2.0] * 12})
+        ch = self.write2("ch.json", {"s": [2.4] * 12})
         code = self.run_gate("--mode", "confirm", "--base", str(base), "--head", str(head),
                              "--confirm-base", str(cb), "--confirm-head", str(ch))
         self.assertEqual(code, 1)
@@ -749,9 +786,9 @@ class GateTests(unittest.TestCase):
         big_base = [v * 10 for v in base]
         big_head = [v * 10 for v in head]  # +40%, 0.4 ms
         row = self.confirm_row(big_base, big_head, [big_base] * CONFIRM_ROUNDS, [big_head] * CONFIRM_ROUNDS, FLOOR)
-        self.assertEqual(row.status, "FAIL (pooled, confirm-only)")
+        self.assertEqual(row.status, "FAIL (confirm-only)")
         row = self.confirm_row(base, head, [base] * CONFIRM_ROUNDS, [head] * CONFIRM_ROUNDS)
-        self.assertEqual(row.status, "FAIL (pooled, confirm-only)")  # default: floor off
+        self.assertEqual(row.status, "FAIL (confirm-only)")  # default: floor off
 
     def test_abs_floor_never_hides_a_regression_above_it(self) -> None:
         # A +20% regression at 2 ms (0.4 ms) still flags and fails, with or without the floor.

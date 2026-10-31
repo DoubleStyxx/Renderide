@@ -11,8 +11,9 @@
 # noise study.
 #
 # Methodology (Gauge): n>=12, interleaved chunked first pass, one reversed-order
-# confirm round judged pooled by Mann-Whitney, RAYON_NUM_THREADS=2, taskset when
-# available, CPU governor pinned to performance when the runner allows it.
+# confirm round; FAIL decided on confirm-only Mann-Whitney (n>=12) — pooled is
+# reported only. RAYON_NUM_THREADS=2, taskset when available, CPU governor pinned
+# to performance when the runner allows it.
 name: Bench PR
 
 "on":
@@ -23,6 +24,7 @@ name: Bench PR
       - "crates/renderide-bench/**"
       - "scripts/ci/frame_bench_gate.py"
       - "scripts/ci/bench_pr_assemble.py"
+      - "scripts/ci/bench_pr_report.py"
       - ".github/workflows/bench-pr.yml"
       - ".github/actions/lavapipe/**"
 
@@ -32,7 +34,6 @@ concurrency:
 
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
   # -------------------------------------------------------------------------
@@ -282,7 +283,7 @@ jobs:
               --confirm-base "$out/confirm-base-a.json" --confirm-base "$out/confirm-base-b.json" \
               --confirm-head "$out/confirm-head-a.json" --confirm-head "$out/confirm-head-b.json" \
               --flag-threshold "$FLAG_THRESHOLD" --fail-threshold "$FAIL_THRESHOLD" \
-              --title "Confirm (reversed-order, ${CONFIRM_ROUNDS} round x $RUNS runs; pooled + confirm-only Mann-Whitney)" \
+              --title "Confirm (reversed-order, ${CONFIRM_ROUNDS} round x $RUNS runs; confirm-only decides FAIL; pooled reported)" \
               --json-out "$out/gate.json" | tee "$out/confirm.md"
             gate_status=${PIPESTATUS[0]}
             set -e
@@ -529,6 +530,9 @@ jobs:
     timeout-minutes: 10
     needs: [bench-pr, cpu-hot]
     if: always() && !cancelled()
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - name: Checkout assemble script
         uses: actions/checkout@v7
@@ -556,46 +560,19 @@ jobs:
         id: assemble
         run: |
           set -euo pipefail
-          assemble_py="$GITHUB_WORKSPACE/scripts/ci/bench_pr_assemble.py"
-          summary="$GITHUB_WORKSPACE/bench-pr-summary.md"
-          {
-            echo "# bench-pr (combined)"
-            echo
-            echo "- frame job: \`${{ needs.bench-pr.result }}\` (gate_exit=${{ needs.bench-pr.outputs.gate_exit }}, wall_time_sec=${{ needs.bench-pr.outputs.wall_time_sec }})"
-            echo "- cpu_hot job: \`${{ needs.cpu-hot.result }}\` (report-only; never gates)"
-            echo "- decision rule: \`scripts/ci/frame_bench_gate.py\` only"
-            echo
-          } > "$summary"
-
-          if [[ -f gate-art/frame-summary.md ]]; then
-            cat gate-art/frame-summary.md >> "$summary"
-            echo >> "$summary"
-          else
-            echo "_frame gate artifact missing_" >> "$summary"
-            echo >> "$summary"
-          fi
-
-          if [[ -f cpu-art/cpu-summary.md ]]; then
-            cat cpu-art/cpu-summary.md >> "$summary"
-            echo >> "$summary"
-          else
-            echo "_cpu_hot artifact missing (job may have been skipped or failed before upload)_" >> "$summary"
-            echo >> "$summary"
-          fi
-
-          cpu_args=()
-          if [[ -f cpu-art/cpu-compare.json ]]; then
-            cpu_args=(--cpu-compare cpu-art/cpu-compare.json)
-          fi
-
-          if [[ -f gate-art/gate.json ]]; then
-            python3 "$assemble_py" --gate gate-art/gate.json "${cpu_args[@]}" --out bench-compare.json
+          python3 "$GITHUB_WORKSPACE/scripts/ci/bench_pr_report.py" \
+            --gate-art gate-art \
+            --cpu-art cpu-art \
+            --summary-out "$GITHUB_WORKSPACE/bench-pr-summary.md" \
+            --compare-out "$GITHUB_WORKSPACE/bench-compare.json" \
+            --frame-job-result "${{ needs.bench-pr.result }}" \
+            --gate-exit "${{ needs.bench-pr.outputs.gate_exit }}" \
+            --wall-time-sec "${{ needs.bench-pr.outputs.wall_time_sec }}" \
+            --cpu-job-result "${{ needs.cpu-hot.result }}"
+          if [[ -f bench-compare.json ]]; then
             echo "assembled bench-compare.json"
-          else
-            echo "gate.json missing; cannot assemble bench-compare.json" >> "$summary"
           fi
-
-          cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+          cat "$GITHUB_WORKSPACE/bench-pr-summary.md" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload bench-compare.json
         if: always() && hashFiles('bench-compare.json') != ''
