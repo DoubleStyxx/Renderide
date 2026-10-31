@@ -121,19 +121,42 @@ fn translate(source: &str) -> (Option<u64>, Option<u64>, Translate) {
             );
         }
     };
-    let spv =
-        naga::back::spv::write_vec(&module, &info, &naga::back::spv::Options::default(), None).ok();
+    let processed = naga::back::pipeline_constants::process_overrides(
+        &module,
+        &info,
+        None,
+        &naga::back::PipelineConstants::default(),
+    );
+    let (module, info) = match processed {
+        Ok((module, info)) => (module, info),
+        Err(err) => {
+            return (
+                None,
+                None,
+                Translate {
+                    spv: None,
+                    hlsl: None,
+                    entries,
+                    status: format!("overrides {err}"),
+                },
+            );
+        }
+    };
+    let spv_result =
+        naga::back::spv::write_vec(&module, &info, &naga::back::spv::Options::default(), None);
+    let spv_err = spv_result.as_ref().err().map(|err| err.to_string());
+    let spv = spv_result.ok();
     let spv_hash = spv.as_ref().map(|words| {
         let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
         fnv1a64(&bytes)
     });
-    let hlsl = write_hlsl(&module, &info);
+    let hlsl = write_hlsl(module.as_ref(), info.as_ref());
     let hlsl_hash = hlsl.as_ref().map(|text| fnv1a64(text.as_bytes()));
     let status = match (&spv, &hlsl) {
         (Some(_), Some(_)) => "ok".to_string(),
-        (None, Some(_)) => "spirv failed".to_string(),
+        (None, Some(_)) => format!("spirv {}", spv_err.unwrap_or_default()),
         (Some(_), None) => "hlsl failed".to_string(),
-        (None, None) => "spirv and hlsl failed".to_string(),
+        (None, None) => format!("spirv {} hlsl failed", spv_err.unwrap_or_default()),
     };
     (
         spv_hash,

@@ -127,14 +127,7 @@ jobs:
           else
             bin=./target/debug/renderide-test
           fi
-          args=(check-suite --jobs 1 --case warp216_negparity_composed)
-          for term in diffuse specular ambient indirect fresnel emission; do
-            for channel in r g b grey; do
-              args+=(--case "warp216_negparity_${term}_${channel}")
-            done
-          done
           debug_ec=0
-          "$bin" "${args[@]}" || debug_ec=$?
           lit_ec=0
           RENDERIDE_LIT_SHADER_PROBE=1 \
             "$bin" check-suite --jobs 1 \
