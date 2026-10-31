@@ -74,6 +74,18 @@ fn coverage_cases() -> Vec<IntegrationCase> {
     cases
 }
 
+/// Builds the session for a golden case.
+///
+/// The match is exhaustive on purpose. A new [`CaseTemplate`] is a compile
+/// error here until it has an arm, so coverage cannot skip it with `_`.
+/// The material root is whatever shader [`material_draws`] finds on that
+/// session, not a second name table.
+///
+/// #284 adds one line, next to the metallic premultiply arm:
+/// `CaseTemplate::PbsSpecularPremultiply => SessionTemplate::PbsSpecularPremultiply`.
+/// That session uploads `PBSSpecular.shader`, which normalizes to `pbsspecular`.
+/// The same template also needs one `| SessionTemplate::PbsSpecularPremultiply`
+/// line in [`crate::host::scene_session`]'s non-replacing assignment group.
 fn session_template(template: &CaseTemplate) -> SessionTemplate {
     let (rgba, size) = dummy_rgba();
     match template {

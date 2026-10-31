@@ -114,6 +114,12 @@ pub(crate) fn material_draws(template: SessionTemplate) -> MaterialDraws {
     }
 }
 
+/// Which uploaded materials a session replaces with a custom shader before capture.
+///
+/// Every [`SessionTemplate`] is named. Do not use `_`: a new template that
+/// replaces its placeholder would keep that placeholder and look covered.
+/// A template that draws the shader it uploads joins the `None` group.
+/// #284 adds one line there: `| SessionTemplate::PbsSpecularPremultiply`.
 fn custom_shader_assignment(template: &SessionTemplate) -> CustomShaderAssignment {
     match template {
         SessionTemplate::CustomShaderPropertyUpdate => CustomShaderAssignment::PropertyUpdate,
