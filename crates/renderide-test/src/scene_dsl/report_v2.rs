@@ -273,6 +273,8 @@ const MESSAGE_NEEDLES: &[(&str, &str)] = &[
     ("frame bench report missing", "bench-report-missing"),
     ("unknown frame bench scenario", "unknown-bench-scenario"),
     ("headless suite failed", "suite-failed"),
+    ("channel-zero:", "channel-zero"),
+    ("region-mean:", "region-mean"),
 ];
 
 fn reason_from_code(code: &str) -> Reason {
@@ -347,6 +349,14 @@ const REASONS: &[(&str, &str)] = &[
         "The frame benchmark scenario name is unknown.",
     ),
     ("suite-failed", "One or more headless suite cases failed."),
+    (
+        "channel-zero",
+        "A golden channel that is meaningfully above zero is near 0 on most non-background pixels.",
+    ),
+    (
+        "region-mean",
+        "A 2x2 region mean differs from the golden by more than the region-stats colour limit.",
+    ),
     (REASON_OK, "The case passed."),
     (REASON_EXPECTED_FAILURE, EXPECTED_FAILURE_LABEL),
     (REASON_UNEXPECTED_PASS, UNEXPECTED_PASS_LABEL),

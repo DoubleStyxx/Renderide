@@ -249,7 +249,12 @@ fn signature_from_criteria(criteria: &[super::tolerance::CriterionResult]) -> Im
             CriterionResult::RegionNonDominant { passed: false, .. } => {
                 signature.band_failed = true;
             }
-            CriterionResult::Ssim { passed: true, .. }
+            // Region-mean and channel-zero tighten comparison. They do not
+            // count as region-color bands and they do not set `foreign_failure`,
+            // so the all-4-band #212 excuse is unchanged when they fail beside it.
+            CriterionResult::RegionMean { .. }
+            | CriterionResult::ChannelZero { .. }
+            | CriterionResult::Ssim { passed: true, .. }
             | CriterionResult::PixelDiff { passed: true, .. }
             | CriterionResult::ImageCoverage { passed: true, .. }
             | CriterionResult::RegionNonDominant { passed: true, .. } => {}
@@ -809,6 +814,38 @@ wgpu adapter selected (headless): Microsoft Basic Render Driver type=Cpu backend
             coverage(false),
             band(false)
         ]));
+    }
+
+    #[test]
+    fn channel_zero_and_region_mean_do_not_change_the_212_excuse() {
+        let mut beside = four_failed_colors();
+        beside.push(channel_zero(false));
+        beside.push(region_mean(false));
+        assert!(excused(&beside));
+        assert!(!excused(&[channel_zero(false)]));
+        assert!(!excused(&[region_mean(false)]));
+        assert!(!excused(&[channel_zero(false), region_mean(false)]));
+    }
+
+    fn channel_zero(passed: bool) -> crate::scene_dsl::tolerance::CriterionResult {
+        crate::scene_dsl::tolerance::CriterionResult::ChannelZero {
+            channel: 1,
+            column: 1,
+            row: 1,
+            golden_mean: 168.0,
+            near_zero_fraction: 0.9,
+            passed,
+        }
+    }
+
+    fn region_mean(passed: bool) -> crate::scene_dsl::tolerance::CriterionResult {
+        crate::scene_dsl::tolerance::CriterionResult::RegionMean {
+            column: 0,
+            row: 0,
+            max_channel_delta: 28.0,
+            max_mean_channel_delta: crate::scene_dsl::channel_zero::REGION_MEAN_LIMIT,
+            passed,
+        }
     }
 
     #[test]
