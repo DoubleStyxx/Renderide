@@ -99,3 +99,5 @@ pub fn ensure_native_stdio_forwarded_to_logger() {
 pub fn run() -> Result<RunExit, RunError> {
     app::run()
 }
+
+// CANARY - DO NOT MERGE: this comment selects the Rust and .NET suites.
