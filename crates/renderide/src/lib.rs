@@ -100,3 +100,4 @@ pub fn run() -> Result<RunExit, RunError> {
     app::run()
 }
 // B3 noise2-noop-5 canary (DO NOT MERGE)
+// retrigger bench-pr 20261031160555
