@@ -1,0 +1,5 @@
+# Exact rustc pin for local rustup and CI. Workflows must not float @stable / beta / nightly
+# or set a different `toolchain:` than this channel. Enforced by scripts/ci/check_rust_toolchain_pin.py.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
