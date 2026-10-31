@@ -215,10 +215,12 @@ impl Tolerance {
         let coverage_passed = coverage_criteria.iter().all(CriterionResult::passed);
         let regions_passed = region_criteria.iter().all(CriterionResult::passed);
         let colors_passed = color_criteria.iter().all(CriterionResult::passed);
-        let gates_passed = coverage_passed && regions_passed && colors_passed;
         let gates_present = !coverage_criteria.is_empty()
             || !region_criteria.is_empty()
             || !color_criteria.is_empty();
+        let configured = !comparison_criteria.is_empty() || gates_present;
+        let image_gates = super::channel_zero::apply(configured, actual, golden, &mut criteria)?;
+        let gates_passed = coverage_passed && regions_passed && colors_passed && image_gates;
         let passed = if comparison_criteria.is_empty() {
             gates_present && gates_passed
         } else {
@@ -401,6 +403,34 @@ pub enum CriterionResult {
         /// Whether the criterion passed.
         passed: bool,
     },
+    /// 2×2 [`super::region_stats`] mean compared with the golden cell.
+    RegionMean {
+        /// Column index, starting at 0.
+        column: u32,
+        /// Row index, starting at 0.
+        row: u32,
+        /// Largest absolute RGB mean gap.
+        max_channel_delta: f64,
+        /// Allowed gap. See [`super::channel_zero::REGION_MEAN_LIMIT`].
+        max_mean_channel_delta: f64,
+        /// Whether the cell stayed within the limit.
+        passed: bool,
+    },
+    /// Golden channel is present and the actual channel is near 0.
+    ChannelZero {
+        /// 0 = R, 1 = G, 2 = B.
+        channel: u8,
+        /// Column index, starting at 0.
+        column: u32,
+        /// Row index, starting at 0.
+        row: u32,
+        /// Golden non-background mean of this channel.
+        golden_mean: f64,
+        /// Fraction of non-background pixels whose actual channel is near 0.
+        near_zero_fraction: f64,
+        /// Always false. Passing cells are not recorded.
+        passed: bool,
+    },
 }
 
 impl CriterionResult {
@@ -411,7 +441,9 @@ impl CriterionResult {
             | CriterionResult::PixelDiff { passed, .. }
             | CriterionResult::ImageCoverage { passed, .. }
             | CriterionResult::RegionNonDominant { passed, .. }
-            | CriterionResult::RegionColor { passed, .. } => *passed,
+            | CriterionResult::RegionColor { passed, .. }
+            | CriterionResult::RegionMean { passed, .. }
+            | CriterionResult::ChannelZero { passed, .. } => *passed,
         }
     }
 }

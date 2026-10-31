@@ -42,6 +42,27 @@ fn torus_material_update_buffers_do_not_overlap_texture_buffer() {
 }
 
 #[test]
+fn pbs_premultiply_sets_keyword_blend_and_queue() {
+    let setup = build_scene_setup(SessionTemplate::PbsMetallicPremultiply);
+    let binding = setup.materials[0].binding.as_ref().expect("binding");
+    assert_eq!(binding.shader_name, "PBSMetallic.shader");
+    assert_eq!(
+        binding.shader_variant_bits,
+        Some(shader_variants::PBSMETALLIC_ALPHAPREMULTIPLY)
+    );
+    let floats: Vec<(&str, f32)> = binding
+        .floats
+        .iter()
+        .map(|value| (value.property_name, value.value))
+        .collect();
+    assert!(floats.contains(&("_SrcBlend", 1.0)));
+    assert!(floats.contains(&("_DstBlend", 10.0)));
+    assert!(floats.contains(&("_ZWrite", 0.0)));
+    assert!(floats.contains(&("_RenderQueue", 3000.0)));
+    assert!((binding.float4s[0].value[3] - 0.45).abs() < f32::EPSILON);
+}
+
+#[test]
 fn pbs_matrix_builds_four_materials_against_one_mesh() {
     let setup = build_scene_setup(SessionTemplate::PbsLitMaterialMatrix);
     assert_eq!(setup.meshes.len(), 1);

@@ -227,6 +227,9 @@ fn prepare_template(
         CaseTemplate::PbsLitMaterialMatrix => Ok(PreparedTemplate {
             session_template: SessionTemplate::PbsLitMaterialMatrix,
         }),
+        CaseTemplate::PbsMetallicPremultiply => Ok(PreparedTemplate {
+            session_template: SessionTemplate::PbsMetallicPremultiply,
+        }),
         CaseTemplate::AlphaCutoutMaskedQuads => {
             let mask = alpha_rings_rgba(256, 256);
             save_rgba(&mask, &layout.root.join("alpha_mask_texture.png"))?;
@@ -533,11 +536,12 @@ mod tests {
         let raw = layout
             .actual_png
             .with_file_name("actual.scene_color.rgba16f");
+        // One negative blue sample so the signed-radiance check accepts this fixture.
         std::fs::write(
             &json,
             r#"{"format":"rgba16float","regions":[
                 {"name":"top_left","mean":[0,0,0,1],"negative":[0,0,0,0],"nan":[0,0,0,0],"inf":[0,0,0,0]},
-                {"name":"top_right","mean":[0,0,0,1],"negative":[0,0,0,0],"nan":[0,0,0,0],"inf":[0,0,0,0]},
+                {"name":"top_right","mean":[0,0,0,1],"negative":[0,0,1,0],"nan":[0,0,0,0],"inf":[0,0,0,0]},
                 {"name":"bottom_left","mean":[0,0,0,1],"negative":[0,0,0,0],"nan":[0,0,0,0],"inf":[0,0,0,0]},
                 {"name":"bottom_right","mean":[0,0,0,1],"negative":[0,0,0,0],"nan":[0,0,0,0],"inf":[0,0,0,0]}
             ]}"#,

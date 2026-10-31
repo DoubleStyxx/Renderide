@@ -88,6 +88,7 @@ document, or misses a field; a head report with zero scenarios; a NaN or infinit
 base median that is 0 or negative (first pass, confirm rounds alone, or pooled).
 
 Exit status: 0 pass, 1 flagged (first) or regression (confirm), 2 usage or input error.
+`--json-out` writes a `frame-bench-gate/1` document with the same rows (used by bench-pr.yml).
 """
 
 from __future__ import annotations
@@ -496,6 +497,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--head-missing", action="append", default=[], help="requested scenario head does not define")
     parser.add_argument("--title", default="Frame bench gate")
     parser.add_argument("--suspects-out", type=Path, help="first mode: write flagged scenario names, one per line")
+    parser.add_argument(
+        "--json-out",
+        type=Path,
+        help="optional: write machine-readable rows (scenario, medians, delta, p_value, status) as JSON",
+    )
     args = parser.parse_args(argv)
     if args.legacy_threshold is not None:
         # Same as the workflow's deprecated `threshold` input.
@@ -551,6 +557,34 @@ def main(argv: list[str] | None = None) -> int:
     hit = [row.scenario for row in rows if is_failure(row.status)]
     if args.suspects_out is not None:
         args.suspects_out.write_text("".join(f"{name}\n" for name in hit), encoding="utf-8")
+    if args.json_out is not None:
+        payload = {
+            "schema": "frame-bench-gate/1",
+            "mode": args.mode,
+            "flag_threshold": args.flag_threshold,
+            "fail_threshold": args.fail_threshold,
+            "alpha": args.alpha,
+            "abs_floor_ms": args.abs_floor_ms,
+            "rows": [
+                {
+                    "scenario": r.scenario,
+                    "base": r.base,
+                    "head": r.head,
+                    "delta_pct": r.delta,
+                    "p_value": r.p_value,
+                    "n_base": r.n_base,
+                    "n_head": r.n_head,
+                    "confirm_delta_pct": r.confirm_delta,
+                    "confirm_p": r.confirm_p,
+                    "confirm_n_base": r.confirm_n_base,
+                    "confirm_n_head": r.confirm_n_head,
+                    "status": r.status,
+                }
+                for r in rows
+            ],
+            "exit_code": 1 if hit else 0,
+        }
+        args.json_out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     word = "fail" if args.mode == "confirm" else "flagged"
     print(f"result: {word if hit else 'pass'}" + (f" ({', '.join(hit)})" if hit else ""))
     return 1 if hit else 0

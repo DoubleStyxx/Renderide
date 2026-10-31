@@ -782,3 +782,45 @@ class GateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class JsonOutTests(unittest.TestCase):
+    def test_json_out_writes_rows(self):
+        base = {
+            "schema": 1,
+            "scenarios": [{
+                "name": "unlit_sphere",
+                "cpu_frame_ms": {"p95": 1.0},
+                "per_run_cpu_frame_ms_p95": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            }],
+        }
+        head = {
+            "schema": 1,
+            "scenarios": [{
+                "name": "unlit_sphere",
+                "cpu_frame_ms": {"p95": 1.2},
+                "per_run_cpu_frame_ms_p95": [1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2],
+            }],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "base.json").write_text(json.dumps(base), encoding="utf-8")
+            (root / "head.json").write_text(json.dumps(head), encoding="utf-8")
+            out = root / "gate.json"
+            code = gate.main([
+                "--base", str(root / "base.json"),
+                "--head", str(root / "head.json"),
+                "--flag-threshold", "5",
+                "--fail-threshold", "10",
+                "--json-out", str(out),
+            ])
+            self.assertEqual(code, 1)  # flagged at +20%
+            payload = json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual(payload["schema"], "frame-bench-gate/1")
+            self.assertEqual(payload["mode"], "first")
+            self.assertEqual(payload["exit_code"], 1)
+            self.assertEqual(len(payload["rows"]), 1)
+            row = payload["rows"][0]
+            self.assertEqual(row["scenario"], "unlit_sphere")
+            self.assertAlmostEqual(row["delta_pct"], 20.0, places=6)
+            self.assertEqual(row["status"], "FLAG")

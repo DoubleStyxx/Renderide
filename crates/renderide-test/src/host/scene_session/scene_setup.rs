@@ -121,6 +121,7 @@ pub(super) fn build_scene_setup(template: SessionTemplate) -> SceneSetup {
             texture_size,
         } => multi_primitive_unlit_grid_setup(checker_rgba, uv_ramp_rgba, texture_size),
         SessionTemplate::PbsLitMaterialMatrix => pbs_lit_material_matrix_setup(),
+        SessionTemplate::PbsMetallicPremultiply => pbs_metallic_premultiply_setup(),
         SessionTemplate::ManyStaticMeshes => bench_scenes::many_static_meshes_setup(),
         SessionTemplate::LightsShadows => bench_scenes::lights_shadows_setup(),
         SessionTemplate::AlphaCutoutMaskedQuads {
@@ -415,6 +416,63 @@ fn pbs_lit_material_matrix_setup() -> SceneSetup {
             camera_world_pose: transform(Vec3::new(0.0, 0.0, -4.0), Vec3::ONE, Quat::IDENTITY),
             renderables,
             lights,
+            cameras: Vec::new(),
+            skinned: Vec::new(),
+        },
+    }
+}
+
+/// Unity Standard Transparent (`_Mode` 3): keyword bit 1, `Blend One OneMinusSrcAlpha`,
+/// `_ZWrite` off, material render queue 3000.
+fn pbs_metallic_premultiply_setup() -> SceneSetup {
+    let mut material = pbs_material_for_scene(0, [0.85, 0.35, 0.2, 0.45], 0.15, 0.55)
+        .with_variant(shader_variants::PBSMETALLIC_ALPHAPREMULTIPLY);
+    if let Some(binding) = material.binding.as_mut() {
+        binding.floats.extend([
+            FloatBinding {
+                property_name: "_SrcBlend",
+                value: 1.0,
+            },
+            FloatBinding {
+                property_name: "_DstBlend",
+                value: 10.0,
+            },
+            FloatBinding {
+                property_name: "_ZWrite",
+                value: 0.0,
+            },
+            FloatBinding {
+                property_name: "_RenderQueue",
+                value: 3000.0,
+            },
+        ]);
+    }
+    SceneSetup {
+        meshes: vec![mesh_asset(
+            0,
+            generate_sphere(18, 28),
+            centered_bounds(Vec3::splat(1.05)),
+        )],
+        materials: vec![material],
+        scene: SceneSubmission {
+            camera_world_pose: transform(Vec3::new(0.0, 0.0, -3.2), Vec3::ONE, Quat::IDENTITY),
+            renderables: vec![SceneRenderable {
+                transform_id: 0,
+                pose: transform(Vec3::ZERO, Vec3::splat(0.7), Quat::IDENTITY),
+                mesh_asset_id: scene_mesh_id(0),
+                material_asset_id: scene_material_id(0),
+                sorting_order: 0,
+                shadow_cast_mode: ShadowCastMode::Off,
+            }],
+            lights: vec![SceneLight {
+                transform_id: 10,
+                pose: transform(
+                    Vec3::new(-1.5, 2.2, -1.5),
+                    Vec3::ONE,
+                    Quat::from_rotation_x(-0.65),
+                ),
+                state: directional_light([1.0, 0.92, 0.82], 1.4),
+            }],
             cameras: Vec::new(),
             skinned: Vec::new(),
         },

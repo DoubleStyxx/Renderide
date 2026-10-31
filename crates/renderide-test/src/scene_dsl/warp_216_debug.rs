@@ -394,7 +394,66 @@ pub(crate) fn scene_color_sidecar_failure(
             json_path.display()
         )
     })?;
-    validate_scene_color_json(&text)
+    validate_scene_color_json(&text)?;
+    if let CaseTemplate::Warp216Debug { spec } = case.template
+        && requires_negative_scene_color(spec)
+    {
+        require_negative_scene_color(&case.name, &text)?;
+    }
+    Ok(())
+}
+
+/// Composed, diffuse, and specular on the parity rig multiply by signed radiance.
+///
+/// Fresnel is Schlick `F`, which is not multiplied by the light. Ambient and
+/// indirect do not use the direct light. Emission is authored as 0. On lavapipe
+/// those four stay non-negative, so requiring a negative sample there would
+/// fail a correct shader.
+pub(crate) fn requires_negative_scene_color(spec: Spec) -> bool {
+    spec.rig == LightRig::NegativeParity
+        && matches!(
+            spec.term,
+            LightingTerm::Composed | LightingTerm::Diffuse | LightingTerm::Specular
+        )
+}
+
+/// `Err` when every pre-sRGB `negative` count is 0.
+///
+/// The string is the suite failure. A missing or non-integer count is the same
+/// kind of failure. This does not panic.
+pub(crate) fn require_negative_scene_color(case_name: &str, text: &str) -> Result<(), String> {
+    let value: serde_json::Value = serde_json::from_str(text)
+        .map_err(|err| format!("{case_name}: pre-sRGB scene color stats are not JSON: {err}"))?;
+    let regions = value
+        .get("regions")
+        .and_then(|region| region.as_array())
+        .ok_or_else(|| format!("{case_name}: pre-sRGB scene color stats have no regions"))?;
+    let mut total = 0u64;
+    for region in regions {
+        let name = region
+            .get("name")
+            .and_then(|name| name.as_str())
+            .unwrap_or("region");
+        let Some(counts) = region.get("negative").and_then(|counts| counts.as_array()) else {
+            return Err(format!(
+                "{case_name}: pre-sRGB region {name} is missing negative counts"
+            ));
+        };
+        for count in counts {
+            let Some(count) = count.as_u64() else {
+                return Err(format!(
+                    "{case_name}: pre-sRGB region {name} has a negative count that is not an integer"
+                ));
+            };
+            total = total.saturating_add(count);
+        }
+    }
+    if total == 0 {
+        return Err(format!(
+            "{case_name}: pre-sRGB scene color has no negative samples; signed radiance did not reach the shader"
+        ));
+    }
+    Ok(())
 }
 
 /// Checks the quadrant JSON written by the renderer.
@@ -435,8 +494,10 @@ pub(crate) fn validate_scene_color_json(text: &str) -> Result<(), String> {
 mod tests {
     use super::super::quarantine_216::apply_quarantine;
     use super::{
-        CHANNELS, GROUP, ISOLATED, LightingTerm, OutputChannel, RIGS, cases, scene_color_json_path,
-        spec_for, specs, validate_scene_color_json,
+        CHANNELS, GROUP, ISOLATED, LightingTerm, OutputChannel, RIGS, cases,
+        require_negative_scene_color, requires_negative_scene_color, scene_color_json_path,
+        scene_color_raw_path, scene_color_sidecar_failure, spec_for, specs,
+        validate_scene_color_json,
     };
     use crate::scene_dsl::cases::registry;
     use crate::scene_dsl::suite::{SuiteCaseReport, SuiteReport};
@@ -614,5 +675,89 @@ mod tests {
             scene_color_json_path(Path::new("out/case/actual.png")),
             Path::new("out/case/actual.scene_color.json")
         );
+    }
+
+    fn quadrant_json(top_right_negative: &str) -> String {
+        format!(
+            r#"{{
+                "format": "rgba16float",
+                "regions": [
+                    {{"name": "top_left", "mean": [0, 0, 0, 1], "negative": [0, 0, 0, 0], "nan": [0, 0, 0, 0], "inf": [0, 0, 0, 0]}},
+                    {{"name": "top_right", "mean": [0, 0, 0, 1], "negative": {top_right_negative}, "nan": [0, 0, 0, 0], "inf": [0, 0, 0, 0]}},
+                    {{"name": "bottom_left", "mean": [0, 0, 0, 1], "negative": [0, 0, 0, 0], "nan": [0, 0, 0, 0], "inf": [0, 0, 0, 0]}},
+                    {{"name": "bottom_right", "mean": [0, 0, 0, 1], "negative": [0, 0, 0, 0], "nan": [0, 0, 0, 0], "inf": [0, 0, 0, 0]}}
+                ]
+            }}"#
+        )
+    }
+
+    #[test]
+    fn signed_radiance_check_fails_cleanly_when_every_count_is_zero() {
+        let text = quadrant_json("[0, 0, 0, 0]");
+        let err = require_negative_scene_color("warp216_negparity_composed", &text)
+            .expect_err("zero counts fail the case");
+        assert!(err.contains("warp216_negparity_composed"), "{err}");
+        assert!(err.contains("no negative samples"), "{err}");
+        assert!(err.contains("signed radiance"), "{err}");
+    }
+
+    #[test]
+    fn signed_radiance_check_passes_when_one_channel_is_negative() {
+        let text = quadrant_json("[0, 0, 1, 0]");
+        assert!(require_negative_scene_color("warp216_negparity_diffuse_b", &text).is_ok());
+    }
+
+    #[test]
+    fn signed_radiance_check_rejects_a_non_integer_without_panicking() {
+        let text = quadrant_json("[0, 0, \"nope\", 0]");
+        let err = require_negative_scene_color("warp216_negparity_specular_g", &text)
+            .expect_err("bad count");
+        assert!(err.contains("not an integer"), "{err}");
+        assert!(err.contains("warp216_negparity_specular_g"), "{err}");
+    }
+
+    #[test]
+    fn only_signed_direct_terms_on_the_parity_rig_require_negatives() {
+        for name in [
+            "warp216_negparity_composed",
+            "warp216_negparity_diffuse_r",
+            "warp216_negparity_diffuse_g",
+            "warp216_negparity_diffuse_b",
+            "warp216_negparity_diffuse_grey",
+            "warp216_negparity_specular_r",
+            "warp216_negparity_specular_g",
+            "warp216_negparity_specular_b",
+            "warp216_negparity_specular_grey",
+        ] {
+            let spec = spec_for(name).expect(name);
+            assert!(requires_negative_scene_color(spec), "{name}");
+        }
+        for name in [
+            "warp216_negparity_fresnel_grey",
+            "warp216_negparity_ambient_r",
+            "warp216_negparity_indirect_b",
+            "warp216_negparity_emission_grey",
+            "warp216_negative_composed",
+            "warp216_constant",
+        ] {
+            let spec = spec_for(name).expect(name);
+            assert!(!requires_negative_scene_color(spec), "{name}");
+        }
+    }
+
+    #[test]
+    fn sidecar_failure_reports_a_missing_sign_and_skips_unsigned_terms() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let png = temp.path().join("actual.png");
+        let text = quadrant_json("[0, 0, 0, 0]");
+        std::fs::write(scene_color_raw_path(&png), b"R16F").expect("raw");
+        std::fs::write(scene_color_json_path(&png), &text).expect("json");
+        let composed = super::lookup("warp216_negparity_composed").expect("composed");
+        let err = scene_color_sidecar_failure(&composed, &png).expect_err("signed case");
+        assert!(err.contains("no negative samples"), "{err}");
+        let emission = super::lookup("warp216_negparity_emission_r").expect("emission");
+        assert!(scene_color_sidecar_failure(&emission, &png).is_ok());
+        let clamped = super::lookup("warp216_negative_composed").expect("clamped");
+        assert!(scene_color_sidecar_failure(&clamped, &png).is_ok());
     }
 }

@@ -219,7 +219,8 @@ pub fn write_report(layout: &CaseOutputLayout, report: &mut CaseReport) -> io::R
 /// Builds a [`CaseReport`] from the comparison evaluation.
 pub fn report_from_evaluation(case: &IntegrationCase, eval: ToleranceEvaluation) -> CaseReport {
     let passed = eval.passed;
-    base_report(case, passed, Some(eval), None)
+    let error = super::channel_zero::failure_message(&eval.criteria);
+    base_report(case, passed, Some(eval), error)
 }
 
 /// Builds a [`CaseReport`] for a case that failed before image comparison ran (e.g. renderer
