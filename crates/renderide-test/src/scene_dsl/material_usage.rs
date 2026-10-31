@@ -11,13 +11,22 @@ use crate::scene::mesh::Mesh;
 
 use super::cases::{self, CaseTemplate, IntegrationCase};
 
+/// One shader a golden case still has bound at capture.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GoldenShaderDraw {
+    /// Unity shader asset filename, such as `Unlit.shader`.
+    pub shader_asset: &'static str,
+    /// Host variant bits, when the case sets them.
+    pub variant_bits: Option<u32>,
+}
+
 /// Shaders one golden case draws, after custom-shader assignment.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GoldenCaseMaterials {
     /// [`IntegrationCase::name`].
     pub case: String,
-    /// Unity shader asset filenames still bound at capture, such as `Unlit.shader`.
-    pub shader_assets: Vec<&'static str>,
+    /// Shaders still bound at capture.
+    pub shaders: Vec<GoldenShaderDraw>,
     /// A renderable uploaded no shader, so the frame uses the null material.
     pub null_fallback: bool,
 }
@@ -35,7 +44,14 @@ pub fn golden_case_materials() -> Vec<GoldenCaseMaterials> {
             let draws = material_draws(session_template(&case.template));
             GoldenCaseMaterials {
                 case: case.name,
-                shader_assets: draws.shader_assets,
+                shaders: draws
+                    .shaders
+                    .into_iter()
+                    .map(|shader| GoldenShaderDraw {
+                        shader_asset: shader.shader_asset,
+                        variant_bits: shader.variant_bits,
+                    })
+                    .collect(),
                 null_fallback: draws.null_fallback,
             }
         })
@@ -72,6 +88,7 @@ fn session_template(template: &CaseTemplate) -> SessionTemplate {
             texture_size: size,
         },
         CaseTemplate::PbsLitMaterialMatrix => SessionTemplate::PbsLitMaterialMatrix,
+        CaseTemplate::PbsMetallicPremultiply => SessionTemplate::PbsMetallicPremultiply,
         CaseTemplate::AlphaCutoutMaskedQuads => SessionTemplate::AlphaCutoutMaskedQuads {
             mask_rgba: rgba,
             texture_size: size,
@@ -133,23 +150,33 @@ mod tests {
         };
         let sphere = by_name("unlit_sphere");
         assert!(sphere.null_fallback);
-        assert!(sphere.shader_assets.is_empty());
+        assert!(sphere.shaders.is_empty());
         assert_eq!(
-            by_name("torus_unlit_perlin").shader_assets,
+            shader_names(by_name("torus_unlit_perlin")),
             ["Unlit.shader"]
         );
         assert_eq!(
-            by_name("pbs_lit_material_matrix").shader_assets,
+            shader_names(by_name("pbs_lit_material_matrix")),
             ["PBSMetallic.shader"]
         );
+        let premultiply = by_name("pbs_metallic_premultiply");
+        assert_eq!(shader_names(premultiply), ["PBSMetallic.shader"]);
+        assert_eq!(premultiply.shaders[0].variant_bits, Some(0x0000_0002));
         assert_eq!(
-            by_name("coplanar_canvas_ui_quads").shader_assets,
+            shader_names(by_name("coplanar_canvas_ui_quads")),
             ["UI_Unlit.shader"]
         );
         assert_eq!(
-            by_name("canvas_offset_bias_quad").shader_assets,
+            shader_names(by_name("canvas_offset_bias_quad")),
             ["UI_Unlit.shader", "Unlit.shader"]
         );
+    }
+
+    fn shader_names(case: &GoldenCaseMaterials) -> Vec<&str> {
+        case.shaders
+            .iter()
+            .map(|shader| shader.shader_asset)
+            .collect()
     }
 
     #[test]
@@ -160,7 +187,7 @@ mod tests {
                 .iter()
                 .find(|case| case.case == name)
                 .unwrap_or_else(|| panic!("missing {name}"));
-            assert!(case.shader_assets.is_empty(), "{name}");
+            assert!(case.shaders.is_empty(), "{name}");
             assert!(!case.null_fallback, "{name}");
         }
     }
@@ -176,7 +203,14 @@ mod tests {
         let draws = material_draws(SessionTemplate::Warp216Debug {
             spec: sample_warp_spec(),
         });
-        assert_eq!(draws.shader_assets, ["Unlit.shader"]);
+        assert_eq!(
+            draws
+                .shaders
+                .iter()
+                .map(|shader| shader.shader_asset)
+                .collect::<Vec<_>>(),
+            ["Unlit.shader"]
+        );
         assert!(!draws.null_fallback);
     }
 

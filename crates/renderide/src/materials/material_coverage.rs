@@ -1,10 +1,10 @@
 //! Golden-case coverage for every material root the renderer ships.
 //!
 //! The authoritative root list is [`crate::embedded_shaders::COMPILED_MATERIAL_STEMS`],
-//! the build-script registry of `shaders/materials/*.wgsl`. `stem_metadata` answers
-//! queries about those stems; it does not list them. A root is the source stem:
-//! a compiled target `pbsmetallic_default` or `pbsmetallic_multiview` is the root
-//! `pbsmetallic`.
+//! the build-script registry. `stem_metadata` queries stems; it does not list them.
+//! A root strips `_default` / `_multiview`. `shaders/materials/*.wgsl` file stems are
+//! a subset: a `//#keyword` fan-out such as `pbsmetallic_alphapremultiply` is an extra
+//! shipped root.
 //!
 //! Suite cases come from [`renderide_test::scene_dsl::material_usage::golden_case_materials`],
 //! which reads the shader each case uploads. [`MAX_ALLOWLIST_ROOTS`] is the growth
@@ -244,15 +244,15 @@ fn index_draws(
                 &mut errors,
             );
         }
-        for shader in &draw.shader_assets {
+        for shader in &draw.shaders {
             covered = true;
-            let root = normalize_shader_key(shader);
+            let root = root_for_draw(shader.shader_asset, shader.variant_bits);
             record_case(
                 roots,
                 &mut cases_by_root,
                 &root,
                 &draw.case,
-                shader,
+                shader.shader_asset,
                 &mut errors,
             );
         }
@@ -268,6 +268,15 @@ fn index_draws(
     } else {
         Err(errors.join("\n"))
     }
+}
+
+fn root_for_draw(shader: &str, variant_bits: Option<u32>) -> String {
+    let base = normalize_shader_key(shader);
+    let selected = crate::materials::embedded::stem_metadata::pbsmetallic_compile_time_stem(
+        format!("{base}_default"),
+        variant_bits.unwrap_or(0),
+    );
+    material_root_from_compiled_stem(&selected).to_string()
 }
 
 fn record_case(
@@ -472,24 +481,18 @@ fn render_buckets(roots: &BTreeSet<String>, index: &CoverageIndex) -> String {
     section
 }
 
-fn assert_same_set(label_a: &str, a: &BTreeSet<String>, label_b: &str, b: &BTreeSet<String>) {
-    let only_a: Vec<&String> = a.difference(b).collect();
-    let only_b: Vec<&String> = b.difference(a).collect();
+fn assert_shader_files_are_compiled_roots(roots: &BTreeSet<String>, files: &BTreeSet<String>) {
+    let missing: Vec<&String> = files.difference(roots).collect();
     assert!(
-        only_a.is_empty() && only_b.is_empty(),
-        "{label_a} not in {label_b}: {only_a:?}\n{label_b} not in {label_a}: {only_b:?}"
+        missing.is_empty(),
+        "shader files missing from COMPILED_MATERIAL_STEMS roots: {missing:?}"
     );
 }
 
 fn live_snapshot() -> (BTreeSet<String>, CoverageIndex, Vec<AllowEntry>) {
     let roots = shipped_material_roots();
     let files = material_shader_file_stems();
-    assert_same_set(
-        "COMPILED_MATERIAL_STEMS roots",
-        &roots,
-        "shaders/materials file stems",
-        &files,
-    );
+    assert_shader_files_are_compiled_roots(&roots, &files);
     let draws = renderide_test::scene_dsl::material_usage::golden_case_materials();
     let index = index_draws(&roots, &draws).unwrap_or_else(|err| panic!("{err}"));
     let allowlist = load_allowlist(&allowlist_path()).unwrap_or_else(|err| panic!("{err}"));
@@ -526,13 +529,25 @@ mod tests {
     }
 
     #[test]
-    fn compiled_material_stems_match_shader_files() {
-        assert_same_set(
-            "COMPILED_MATERIAL_STEMS roots",
-            &shipped_material_roots(),
-            "shaders/materials file stems",
-            &material_shader_file_stems(),
+    fn shader_files_are_compiled_roots_and_keyword_fanout_is_shipped() {
+        let roots = shipped_material_roots();
+        let files = material_shader_file_stems();
+        assert_shader_files_are_compiled_roots(&roots, &files);
+        assert!(
+            roots.contains("pbsmetallic_alphapremultiply"),
+            "keyword fan-out must stay a shipped root"
         );
+        assert!(!files.contains("pbsmetallic_alphapremultiply"));
+    }
+
+    #[test]
+    fn premultiply_variant_bits_select_the_keyword_root() {
+        assert_eq!(
+            root_for_draw("PBSMetallic.shader", Some(0x0000_0002)),
+            "pbsmetallic_alphapremultiply"
+        );
+        assert_eq!(root_for_draw("PBSMetallic.shader", None), "pbsmetallic");
+        assert_eq!(root_for_draw("Unlit.shader", Some(0x0000_0200)), "unlit");
     }
 
     #[test]

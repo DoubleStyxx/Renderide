@@ -9,7 +9,7 @@ Regenerate it with:
 UPDATE_MATERIAL_COVERAGE=1 cargo test -p renderide --lib material_coverage::tests::material_coverage_doc_matches_sources -- --exact
 ```
 
-Shipped roots: 149. Covered: 4. Allowlisted: 145.
+Shipped roots: 150. Covered: 5. Allowlisted: 145.
 
 Suite cases that draw a custom shader, not a shipped material root:
 
@@ -101,6 +101,7 @@ Suite cases that draw a custom shader, not a shipped material root:
 | `pbslerp` |  | No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants). |
 | `pbslerpspecular` |  | No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants). |
 | `pbsmetallic` | `negative_color_physically_based`, `negative_light_parity`, `negative_light_physically_based`, `pbs_lit_material_matrix`, `shadowed_caster_move` |  |
+| `pbsmetallic_alphapremultiply` | `pbs_metallic_premultiply` |  |
 | `pbsmultiuv` |  | No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants). |
 | `pbsmultiuvspecular` |  | No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants). |
 | `pbsrim` |  | No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants). |

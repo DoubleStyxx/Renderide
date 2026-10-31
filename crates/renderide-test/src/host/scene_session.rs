@@ -59,14 +59,23 @@ enum CustomShaderAssignment {
     Warp216,
 }
 
+/// One shader still bound at capture, including the host variant bits.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct DrawnShader {
+    /// Unity shader asset filename, such as `PBSMetallic.shader`.
+    pub shader_asset: &'static str,
+    /// Host `_RenderideVariantBits`, when the case sets them.
+    pub variant_bits: Option<u32>,
+}
+
 /// Shaders that remain on screen for `template` after custom-shader assignment.
 ///
 /// Derived from [`build_scene_setup`] and [`custom_shader_assignment`], the same
 /// assignment `run_session` performs before capture. A material with no shader
 /// binding is the null fallback (`shaders/materials/null.wgsl`).
 pub(crate) struct MaterialDraws {
-    /// Unity shader asset filenames that are still bound at capture.
-    pub shader_assets: Vec<&'static str>,
+    /// Shaders still bound at capture.
+    pub shaders: Vec<DrawnShader>,
     /// Renderables whose material uploaded no shader.
     pub null_fallback: bool,
 }
@@ -75,7 +84,7 @@ pub(crate) struct MaterialDraws {
 pub(crate) fn material_draws(template: SessionTemplate) -> MaterialDraws {
     let assignment = custom_shader_assignment(&template);
     let setup = build_scene_setup(template);
-    let mut shader_assets = Vec::new();
+    let mut shaders = Vec::new();
     let mut null_fallback = false;
     for (index, material) in setup.materials.iter().enumerate() {
         if assignment_skips_material(assignment, index) {
@@ -90,14 +99,17 @@ pub(crate) fn material_draws(template: SessionTemplate) -> MaterialDraws {
             continue;
         }
         match material.binding.as_ref() {
-            Some(binding) => shader_assets.push(binding.shader_name),
+            Some(binding) => shaders.push(DrawnShader {
+                shader_asset: binding.shader_name,
+                variant_bits: binding.shader_variant_bits,
+            }),
             None => null_fallback = true,
         }
     }
-    shader_assets.sort_unstable();
-    shader_assets.dedup();
+    shaders.sort_unstable();
+    shaders.dedup();
     MaterialDraws {
-        shader_assets,
+        shaders,
         null_fallback,
     }
 }
@@ -111,6 +123,7 @@ fn custom_shader_assignment(template: &SessionTemplate) -> CustomShaderAssignmen
         | SessionTemplate::Torus { .. }
         | SessionTemplate::MultiPrimitiveUnlitGrid { .. }
         | SessionTemplate::PbsLitMaterialMatrix
+        | SessionTemplate::PbsMetallicPremultiply
         | SessionTemplate::ManyStaticMeshes
         | SessionTemplate::LightsShadows
         | SessionTemplate::AlphaCutoutMaskedQuads { .. }
