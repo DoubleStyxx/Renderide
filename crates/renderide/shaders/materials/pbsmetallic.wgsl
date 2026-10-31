@@ -10,7 +10,8 @@
 //! (`//#keyword`, the same naga-oil shader def as custom materials and `MULTIVIEW`). Bit 1 still
 //! selects it. The opaque target contains only `shade_metallic_clustered`. The premultiply target
 //! contains only `shade_metallic_transparent_clustered`. Blend stays host `_SrcBlend`/`_DstBlend`
-//! (Unity One / OneMinusSrcAlpha) and the material render queue stays Transparent (3000).
+//! (Unity One / OneMinusSrcAlpha). The packaged default queue is Geometry (2000).
+//! The host `_RenderQueue` supplies Transparent (3000).
 
 
 //#keyword _ALPHAPREMULTIPLY_ON

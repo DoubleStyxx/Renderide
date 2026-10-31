@@ -539,7 +539,7 @@ wgpu adapter selected (headless): llvmpipe (LLVM 20.1.2, 256 bits) type=Cpu back
     }
 
     #[test]
-    fn matching_warp_image_failure_is_excused() {
+    fn matching_warp_image_failure_is_not_excused() {
         assert!(selected_adapter_is_warp(WARP_LOG));
         assert!(!excuse(true, &image_failure()));
         assert_eq!(EXPECTED_FAILURE_LABEL, "expected failure (WARP, #212)");
