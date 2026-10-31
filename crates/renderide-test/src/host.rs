@@ -43,6 +43,8 @@ pub struct HostHarnessConfig {
     pub verbose_renderer: bool,
     /// With `verbose_renderer`, send the child's stdout to stderr so `--json` stays one document.
     pub renderer_stdout_to_stderr: bool,
+    /// Variables set on the renderer child. Inherited variables are omitted.
+    pub child_env: Vec<(String, String)>,
     /// When `true`, the renderer clamps negative light intensity to zero.
     pub physically_based: bool,
     /// When `true`, the renderer writes the pre-sRGB scene-color sidecar beside the PNG.
@@ -118,6 +120,7 @@ impl HostHarness {
             timeout: self.cfg.timeout,
             verbose_renderer: self.cfg.verbose_renderer,
             renderer_stdout_to_stderr: self.cfg.renderer_stdout_to_stderr,
+            child_env: self.cfg.child_env.clone(),
             physically_based: self.cfg.physically_based,
             scene_color_readback: self.cfg.scene_color_readback,
         };
@@ -174,6 +177,7 @@ mod harness_start_tests {
             timeout: Duration::from_secs(1),
             verbose_renderer: false,
             renderer_stdout_to_stderr: false,
+            child_env: Vec::new(),
             physically_based: false,
             scene_color_readback: false,
             template: super::SessionTemplate::Sphere,

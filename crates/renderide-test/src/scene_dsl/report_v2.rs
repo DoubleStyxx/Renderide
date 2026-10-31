@@ -3,7 +3,12 @@
 //! Existing fields stay. This module adds `schema`, `reason_text`, `artifacts`,
 //! `capture`, and `runner` (`adapter` plus `icd`). `status` and `reason` stay
 //! the quarantine fields; a v2 stamp fills them for the other outcomes too.
+//!
+//! `runner.icd` is the ICD the harness selected for the renderer child. A caller
+//! installs that selection with [`select_icd`] for the current thread. Otherwise
+//! the stamp reports the variables this process inherited.
 
+use std::cell::RefCell;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -38,8 +43,6 @@ pub(crate) const REASON_UNEXPECTED_PASS: &str = "unexpected-pass:#212";
 /// Reason for a #216 early flat exit.
 pub(crate) const REASON_EARLY_EXIT: &str = "early-exit";
 
-const VK_DRIVER_FILES: &str = "VK_DRIVER_FILES";
-const VK_ICD_FILENAMES: &str = "VK_ICD_FILENAMES";
 const FALLBACK_CODE: &str = "harness-error";
 const FALLBACK_TEXT: &str = "The case failed before a more specific reason was recorded.";
 
@@ -110,10 +113,29 @@ pub(crate) struct AdapterBlock {
 pub(crate) struct IcdBlock {
     /// Manifest path, or null when the loader uses its default search.
     pub path: Option<String>,
-    /// `env` or `loader_default`.
+    /// `env`, `auto`, `flag`, `none`, `platform`, or `loader_default`.
     pub source: String,
     /// `VK_DRIVER_FILES` or `VK_ICD_FILENAMES`, or null.
     pub var: Option<String>,
+}
+
+thread_local! {
+    static SELECTED_ICD: RefCell<Option<IcdBlock>> = const { RefCell::new(None) };
+}
+
+/// Restores the inherited ICD when dropped.
+pub(crate) struct SelectedIcdGuard;
+
+impl Drop for SelectedIcdGuard {
+    fn drop(&mut self) {
+        SELECTED_ICD.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+/// Reports `icd` from [`stamp`] on this thread until the guard drops.
+pub(crate) fn select_icd(icd: IcdBlock) -> SelectedIcdGuard {
+    SELECTED_ICD.with(|slot| *slot.borrow_mut() = Some(icd));
+    SelectedIcdGuard
 }
 
 /// Fills the v2 fields from the report already stamped with host and capture stats.
@@ -421,23 +443,15 @@ fn unavailable_adapter() -> AdapterBlock {
 }
 
 fn icd_from_env() -> IcdBlock {
-    icd_from_lookup(|key| std::env::var(key).ok())
-}
-
-fn icd_from_lookup(lookup: impl Fn(&str) -> Option<String>) -> IcdBlock {
-    for var in [VK_DRIVER_FILES, VK_ICD_FILENAMES] {
-        if let Some(path) = lookup(var).filter(|value| !value.trim().is_empty()) {
-            return IcdBlock {
-                path: Some(path),
-                source: "env".to_string(),
-                var: Some(var.to_string()),
-            };
-        }
+    let selected = SELECTED_ICD.with(|slot| slot.borrow().clone());
+    if let Some(icd) = selected {
+        return icd;
     }
+    let inherited = renderide_harness_env::inherited_icd(|key| std::env::var(key).ok());
     IcdBlock {
-        path: None,
-        source: "loader_default".to_string(),
-        var: None,
+        path: inherited.path,
+        source: inherited.source,
+        var: inherited.var,
     }
 }
 
@@ -448,6 +462,19 @@ mod tests {
 
     use super::*;
     use crate::scene_dsl::output::{CaseOutputLayout, report_from_error, write_report};
+
+    #[test]
+    fn selected_icd_overrides_the_process_environment() {
+        let _guard = select_icd(IcdBlock {
+            path: Some("/chosen/lvp.json".to_string()),
+            source: "auto".to_string(),
+            var: Some("VK_DRIVER_FILES".to_string()),
+        });
+        let icd = icd_from_env();
+        assert_eq!(icd.source, "auto");
+        assert_eq!(icd.path.as_deref(), Some("/chosen/lvp.json"));
+        assert_eq!(icd.var.as_deref(), Some("VK_DRIVER_FILES"));
+    }
 
     #[test]
     fn every_harness_error_maps_to_one_reason_with_text() {
