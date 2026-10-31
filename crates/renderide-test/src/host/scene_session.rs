@@ -87,6 +87,8 @@ pub enum SessionTemplate {
     PbsMetallicPremultiply,
     /// One PBS specular sphere with `_ALPHAPREMULTIPLY_ON`, One/OneMinusSrcAlpha, and queue 3000.
     PbsSpecularPremultiply,
+    /// One opaque PBS specular sphere. The premultiply keyword is off.
+    PbsSpecularOpaque,
     /// Frame-bench only: a 40x40 grid of 1,600 unlit draws sharing one mesh and material.
     ManyStaticMeshes,
     /// Frame-bench only: 64 lit spheres on a floor with one shadowed directional and four shadowed point lights.
@@ -244,6 +246,7 @@ fn template_label(template: &SessionTemplate) -> &'static str {
         SessionTemplate::PbsLitMaterialMatrix => "PbsLitMaterialMatrix",
         SessionTemplate::PbsMetallicPremultiply => "PbsMetallicPremultiply",
         SessionTemplate::PbsSpecularPremultiply => "PbsSpecularPremultiply",
+        SessionTemplate::PbsSpecularOpaque => "PbsSpecularOpaque",
         SessionTemplate::ManyStaticMeshes => "ManyStaticMeshes",
         SessionTemplate::LightsShadows => "LightsShadows",
         SessionTemplate::AlphaCutoutMaskedQuads { .. } => "AlphaCutoutMaskedQuads",

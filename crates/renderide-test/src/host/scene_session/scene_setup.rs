@@ -123,6 +123,7 @@ pub(super) fn build_scene_setup(template: SessionTemplate) -> SceneSetup {
         SessionTemplate::PbsLitMaterialMatrix => pbs_lit_material_matrix_setup(),
         SessionTemplate::PbsMetallicPremultiply => pbs_metallic_premultiply_setup(),
         SessionTemplate::PbsSpecularPremultiply => pbs_specular_premultiply_setup(),
+        SessionTemplate::PbsSpecularOpaque => pbs_specular_opaque_setup(),
         SessionTemplate::ManyStaticMeshes => bench_scenes::many_static_meshes_setup(),
         SessionTemplate::LightsShadows => bench_scenes::lights_shadows_setup(),
         SessionTemplate::AlphaCutoutMaskedQuads {
@@ -442,6 +443,13 @@ fn pbs_specular_premultiply_setup() -> SceneSetup {
     if let Some(binding) = material.binding.as_mut() {
         binding.floats.extend(standard_transparent_blend_floats());
     }
+    premultiply_sphere_scene(material)
+}
+
+/// Same sphere and specular color as [`pbs_specular_premultiply_setup`], with the premultiply keyword off.
+fn pbs_specular_opaque_setup() -> SceneSetup {
+    let material =
+        pbs_specular_material_for_scene(0, [0.85, 0.35, 0.2, 0.45], [0.8, 0.75, 0.65, 1.0], 0.55);
     premultiply_sphere_scene(material)
 }
 
