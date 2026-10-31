@@ -211,7 +211,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
-          toolchain: stable
+          toolchain: "1.99.1"
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
@@ -225,6 +225,7 @@ jobs:
           command -v cargo
           command -v rustup
           rustup show active-toolchain
+          rustc --version | grep -F '1.99.1'
           cargo metadata --locked --no-deps --format-version 1 >/dev/null
 
       - name: Verify release signing keys
