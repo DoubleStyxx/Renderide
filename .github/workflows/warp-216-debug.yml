@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - cursor/warp-216-8a-baseline-4858
+      - cursor/warp-216-8a-fxc-4858
     paths:
       - ".github/workflows/warp-216-debug.yml"
       - ".github/actions/lavapipe/**"
@@ -42,6 +42,8 @@ jobs:
             label: windows-3
     env:
       RAYON_NUM_THREADS: "1"
+      # wgpu 30 Dx12Compiler::Fxc. Static DXC stays the default when this is unset.
+      WGPU_DX12_COMPILER: fxc
     steps:
       - uses: actions/checkout@v7
 
