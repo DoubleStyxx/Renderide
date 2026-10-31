@@ -99,3 +99,11 @@ pub fn ensure_native_stdio_forwarded_to_logger() {
 pub fn run() -> Result<RunExit, RunError> {
     app::run()
 }
+
+#[cfg(test)]
+mod ci_canary_do_not_merge {
+    #[test]
+    fn deliberate_failure() {
+        panic!("CANARY deliberate failure for the required check");
+    }
+}
