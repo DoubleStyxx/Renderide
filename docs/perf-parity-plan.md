@@ -165,7 +165,7 @@ Thresholds are relative to master measured on the same box in the same session. 
 
 ## 9. Proposed CI perf gate
 
-Automatic PR coverage (B3): `.github/workflows/bench-pr.yml` is a non-required check on `pull_request` paths under `crates/renderide/src/**`. Same lavapipe pin and `frame_bench_gate.py` decision rule as the manual workflow, with `runs=12`, one reversed-order confirm round, report-only `cpu_hot` via `renderide-bench compare`, and a `bench-compare.json` artifact. It does not replace the manual dispatch for deeper scenes.
+Automatic PR coverage (B3): `.github/workflows/bench-pr.yml` is a non-required check on `pull_request` paths under `crates/renderide/src/**`. Same lavapipe pin and `frame_bench_gate.py` decision rule as the manual workflow, with `runs=12`, one reversed-order confirm round, and a `bench-compare.json` artifact. `cpu_hot` runs in a parallel report-only job (`--bench-arg=--quick`); a final report job merges frame + cpu into the artifact, summary, and PR comment (`if: always()`). On no-op canary #242, `renderide-bench compare` reported `exit_code` 1 for some cpu rows — noise evidence, so `cpu_hot` must not become gating without a noise study. It does not replace the manual dispatch for deeper scenes.
 
 Use the existing manual workflow (`.github/workflows/frame-bench.yml`, `workflow_dispatch` with `base_ref` / `head_ref`); it builds both refs on one runner, pins to 2 CPUs and compares medians of per-run percentiles. Proposed changes (this branch includes the workflow change, which is additive):
 

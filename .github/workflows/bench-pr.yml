@@ -1,10 +1,14 @@
-# Non-required PR frame + CPU bench compare (B3).
-# Triggers when a PR touches crates/renderide/src/**. Builds the PR base SHA and the
-# head, measures default framebench scenarios with n=12, gates with
-# scripts/ci/frame_bench_gate.py (the single decision rule), runs a reversed-order
-# confirm when the first pass flags, and adds a report-only cpu_hot compare via
-# renderide-bench (`--bench-arg=--quick`). Posts a job summary, uploads bench-compare.json, and tries to
-# upsert one PR comment (comment failure never fails the job).
+# Non-required PR frame + CPU bench compare (B3 follow-up).
+# Triggers when a PR touches crates/renderide/src/**. Two parallel jobs:
+#   - bench-pr-lavapipe: lavapipe framebench + frame_bench_gate.py (sole verdict)
+#   - bench-pr-cpuhot: report-only cpu_hot via renderide-bench (`--bench-arg=--quick`)
+# A final bench-pr-report job (if: always()) merges both into bench-compare.json,
+# the PR comment, and the job summary. cpu_hot never fails the workflow.
+#
+# Noise note: on no-op canary #242, renderide-bench compare wrote exit_code 1 for
+# some cpu_hot rows (false FAIL/FLAG under the same 5%/10% thresholds). That is
+# noise evidence, not a regression. Do not make cpu_hot gating without a dedicated
+# noise study.
 #
 # Methodology (Gauge): n>=12, interleaved chunked first pass, one reversed-order
 # confirm round judged pooled by Mann-Whitney, RAYON_NUM_THREADS=2, taskset when
@@ -31,12 +35,16 @@ permissions:
   pull-requests: write
 
 jobs:
+  # -------------------------------------------------------------------------
+  # Framebench gate (sole decision). Soft target ~16 minutes without cpu_hot.
+  # -------------------------------------------------------------------------
   bench-pr:
     name: bench-pr-lavapipe
-    # ubuntu-24.04: pinned lavapipe debs are noble builds.
     runs-on: ubuntu-24.04
-    # Soft target ~30 minutes; hard cap leaves room for a confirm round.
-    timeout-minutes: 55
+    timeout-minutes: 40
+    outputs:
+      gate_exit: ${{ steps.bench.outputs.gate_exit }}
+      wall_time_sec: ${{ steps.bench.outputs.wall_time_sec }}
     env:
       RUNS: "12"
       FLAG_THRESHOLD: "5"
@@ -108,29 +116,28 @@ jobs:
           echo "RAYON_NUM_THREADS=$THREADS" >> "$GITHUB_ENV"
           echo "RENDERIDE_LOG_TEE_TERMINAL=0" >> "$GITHUB_ENV"
 
-      - name: Measure, gate, compare
+      - name: Measure and gate
         id: bench
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
           gate_py="$GITHUB_WORKSPACE/tools/scripts/ci/frame_bench_gate.py"
-          assemble_py="$GITHUB_WORKSPACE/tools/scripts/ci/bench_pr_assemble.py"
           out="$RUNNER_TEMP/bench-pr"
           mkdir -p "$out"
-          summary="$out/summary.md"
+          summary="$out/frame-summary.md"
           start_ts=$(date +%s)
 
           {
-            echo "# bench-pr-lavapipe"
+            echo "# bench-pr-lavapipe (frame gate)"
             echo
             echo "- base: \`$BASE_SHA\`"
             echo "- head: \`$HEAD_SHA\`"
             echo "- runs=$RUNS flag=${FLAG_THRESHOLD}% fail=${FAIL_THRESHOLD}% confirm_rounds=$CONFIRM_ROUNDS (reversed-order)"
             echo "- resolution=$RESOLUTION warmup=$WARMUP frames=$FRAMES threads=$THREADS"
             echo "- lavapipe via VK_ICD_FILENAMES=$VK_ICD_FILENAMES"
+            echo "- cpu_hot runs in parallel job bench-pr-cpuhot (report-only; not this gate)"
             echo
           } > "$summary"
 
@@ -152,7 +159,7 @@ jobs:
             local tree="$1"
             local target="$2"
             CARGO_TARGET_DIR="$target" cargo build --locked --release \
-              -p renderide -p renderide-framebench -p renderide-bench \
+              -p renderide -p renderide-framebench \
               --manifest-path "$tree/Cargo.toml"
           }
 
@@ -184,7 +191,7 @@ jobs:
           }
           default_scenarios=(unlit_sphere multi_primitive_unlit)
 
-          echo "::group::Build head and base (parallel)"
+          echo "::group::Build head and base (parallel, framebench only)"
           build_tree "head" "$RUNNER_TEMP/target-head" >"$out/build-head.log" 2>&1 &
           head_build_pid=$!
           build_tree "base" "$RUNNER_TEMP/target-base" >"$out/build-base.log" 2>&1 &
@@ -216,8 +223,15 @@ jobs:
           if [[ "${#scenarios[@]}" -eq 0 ]]; then
             echo "no shared default scenarios; nothing to gate" | tee -a "$summary"
             echo "result: pass" >> "$summary"
+            echo "0" > "$out/gate_exit.txt"
+            printf '%s\n' '{"schema":"frame-bench-gate/1","mode":"first","exit_code":0,"flag_threshold":5,"fail_threshold":10,"abs_floor_ms":0,"rows":[]}' > "$out/gate.json"
             echo "gate_exit=0" >> "$GITHUB_OUTPUT"
+            end_ts=$(date +%s)
+            echo "wall_time_sec=$((end_ts - start_ts))" >> "$GITHUB_OUTPUT"
             cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+            cp "$summary" "$GITHUB_WORKSPACE/frame-summary.md"
+            cp "$out/gate.json" "$GITHUB_WORKSPACE/gate.json"
+            cp "$out/gate_exit.txt" "$GITHUB_WORKSPACE/gate_exit.txt"
             exit 0
           fi
 
@@ -225,10 +239,8 @@ jobs:
           rest=$((RUNS - half))
 
           echo "::group::First pass (interleaved chunks, base/head then base/head, n=$RUNS)"
-          # Chunk A: base then head
           run_frame "$RUNNER_TEMP/target-base" "$out/base-a.json" "$half" "${scenarios[@]}"
           run_frame "$RUNNER_TEMP/target-head" "$out/head-a.json" "$half" "${scenarios[@]}"
-          # Chunk B: base then head again (same order within the pass)
           run_frame "$RUNNER_TEMP/target-base" "$out/base-b.json" "$rest" "${scenarios[@]}"
           run_frame "$RUNNER_TEMP/target-head" "$out/head-b.json" "$rest" "${scenarios[@]}"
           echo "::endgroup::"
@@ -257,7 +269,6 @@ jobs:
           if [[ "$first_status" -eq 1 && "$CONFIRM_ROUNDS" -gt 0 ]]; then
             mapfile -t suspects < "$out/suspects.txt"
             echo "::group::Confirm reversed-order (head/base then head/base) for: ${suspects[*]}"
-            # Reversed arm order relative to the first pass.
             run_frame "$RUNNER_TEMP/target-head" "$out/confirm-head-a.json" "$half" "${suspects[@]}"
             run_frame "$RUNNER_TEMP/target-base" "$out/confirm-base-a.json" "$half" "${suspects[@]}"
             run_frame "$RUNNER_TEMP/target-head" "$out/confirm-head-b.json" "$rest" "${suspects[@]}"
@@ -284,59 +295,6 @@ jobs:
             fi
           fi
 
-          echo "::group::cpu_hot compare (report-only, --bench-arg=--quick)"
-          cpu_compare_args=()
-          if [[ -x "$RUNNER_TEMP/target-head/release/renderide-bench" && -x "$RUNNER_TEMP/target-base/release/renderide-bench" ]]; then
-            mkdir -p "$out/cpu-base" "$out/cpu-head"
-            set +e
-            (
-              cd base
-              CARGO_TARGET_DIR="$RUNNER_TEMP/target-base" \
-                "$RUNNER_TEMP/target-base/release/renderide-bench" run --suite cpu \
-                --bench-arg=--quick --output "$out/cpu-base/run.json" --json \
-                >"$out/cpu-base/stdout.json" 2>"$out/cpu-base/stderr.log"
-            )
-            cpu_base_status=$?
-            (
-              cd head
-              CARGO_TARGET_DIR="$RUNNER_TEMP/target-head" \
-                "$RUNNER_TEMP/target-head/release/renderide-bench" run --suite cpu \
-                --bench-arg=--quick --output "$out/cpu-head/run.json" --json \
-                >"$out/cpu-head/stdout.json" 2>"$out/cpu-head/stderr.log"
-            )
-            cpu_head_status=$?
-            set -e
-            if [[ "$cpu_base_status" -eq 0 && "$cpu_head_status" -eq 0 && -f "$out/cpu-base/run.json" && -f "$out/cpu-head/run.json" ]]; then
-              set +e
-              "$RUNNER_TEMP/target-head/release/renderide-bench" compare \
-                --base "$out/cpu-base/run.json" --head "$out/cpu-head/run.json" \
-                --flag-threshold "$FLAG_THRESHOLD" --fail-threshold "$FAIL_THRESHOLD" \
-                --json >"$out/cpu-compare.json"
-              set -e
-              cpu_compare_args=(--cpu-compare "$out/cpu-compare.json")
-              {
-                echo
-                echo "<details><summary>cpu_hot compare (report-only; not the gate)</summary>"
-                echo
-                echo '```json'
-                head -c 100000 "$out/cpu-compare.json" || true
-                echo
-                echo '```'
-                echo "</details>"
-              } >> "$summary"
-            else
-              echo "cpu_hot compare skipped (base_status=$cpu_base_status head_status=$cpu_head_status)" >> "$summary"
-              tail -n 40 "$out/cpu-base/stderr.log" >> "$summary" 2>/dev/null || true
-              tail -n 40 "$out/cpu-head/stderr.log" >> "$summary" 2>/dev/null || true
-            fi
-          else
-            echo "renderide-bench binary missing on base or head; cpu_hot skipped" >> "$summary"
-          fi
-          echo "::endgroup::"
-
-          python3 "$assemble_py" --gate "$out/gate.json" "${cpu_compare_args[@]}" --out "$out/bench-compare.json"
-          cp "$out/bench-compare.json" "$GITHUB_WORKSPACE/bench-compare.json"
-
           end_ts=$(date +%s)
           wall=$((end_ts - start_ts))
           {
@@ -351,12 +309,293 @@ jobs:
           cat "$summary" >> "$GITHUB_STEP_SUMMARY"
           echo "gate_exit=$gate_status" >> "$GITHUB_OUTPUT"
           echo "wall_time_sec=$wall" >> "$GITHUB_OUTPUT"
-          echo "summary_path=$summary" >> "$GITHUB_OUTPUT"
-          # Persist summary for the comment step. Assemble always exits 0 after writing
-          # bench-compare.json; the gate verdict is applied in a later step so Upload and
-          # Upsert still run on FAIL under set -e.
-          cp "$summary" "$GITHUB_WORKSPACE/bench-pr-summary.md"
+          echo "$gate_status" > "$out/gate_exit.txt"
+          # Persist for the upload step; Apply gate verdict runs after upload.
+          cp "$summary" "$GITHUB_WORKSPACE/frame-summary.md"
+          cp "$out/gate.json" "$GITHUB_WORKSPACE/gate.json"
+          cp "$out/gate_exit.txt" "$GITHUB_WORKSPACE/gate_exit.txt"
           exit 0
+
+      - name: Upload frame gate artifact
+        if: always() && hashFiles('gate.json') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-pr-gate
+          path: |
+            gate.json
+            gate_exit.txt
+            frame-summary.md
+          if-no-files-found: ignore
+
+      - name: Apply gate verdict
+        if: always()
+        run: |
+          set -euo pipefail
+          status="${{ steps.bench.outputs.gate_exit }}"
+          if [[ -z "$status" ]]; then
+            echo "Measure step did not report gate_exit (aborted before gate)" >&2
+            exit 1
+          fi
+          if [[ "$status" -eq 0 ]]; then
+            echo "gate: pass"
+          else
+            echo "gate: fail (exit $status)"
+          fi
+          exit "$status"
+
+  # -------------------------------------------------------------------------
+  # Report-only cpu_hot (parallel). Never fails the workflow.
+  # -------------------------------------------------------------------------
+  cpu-hot:
+    name: bench-pr-cpuhot
+    runs-on: ubuntu-24.04
+    # Criterion --quick still builds + samples; leave headroom.
+    timeout-minutes: 35
+    # Belt-and-suspenders: a stray non-zero must not fail the workflow.
+    continue-on-error: true
+    env:
+      FLAG_THRESHOLD: "5"
+      FAIL_THRESHOLD: "10"
+      THREADS: "2"
+    steps:
+      - name: Checkout head
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: head
+          persist-credentials: false
+
+      - name: Checkout base (full 40-char PR base SHA)
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Pin thread count
+        run: |
+          set -euo pipefail
+          echo "RAYON_NUM_THREADS=$THREADS" >> "$GITHUB_ENV"
+
+      - name: Pin CPU governor (best effort)
+        run: |
+          set -euo pipefail
+          note() { echo "cpu-governor: $*" | tee -a "$GITHUB_STEP_SUMMARY"; }
+          if [ ! -d /sys/devices/system/cpu/cpu0/cpufreq ]; then
+            note "cpufreq not present on this runner; skipping"
+            exit 0
+          fi
+          if ! command -v cpupower >/dev/null 2>&1; then
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends linux-tools-common linux-tools-generic >/dev/null 2>&1 || true
+          fi
+          if ! command -v cpupower >/dev/null 2>&1; then
+            note "cpupower unavailable; skipping"
+            exit 0
+          fi
+          if sudo cpupower frequency-set -g performance 2>/tmp/cpupower.err; then
+            note "set to performance"
+          else
+            note "could not set performance; continuing"
+          fi
+
+      - name: Measure cpu_hot (report-only)
+        id: cpu
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/cpu-hot"
+          mkdir -p "$out"
+          summary="$out/cpu-summary.md"
+          start_ts=$(date +%s)
+
+          {
+            echo "# bench-pr-cpuhot (report-only)"
+            echo
+            echo "- base: \`$BASE_SHA\`"
+            echo "- head: \`$HEAD_SHA\`"
+            echo "- suite=cpu via \`renderide-bench run --bench-arg=--quick\`"
+            echo "- not the gate; \`frame_bench_gate.py\` alone decides the workflow"
+            echo "- noise note: no-op canary #242 saw compare exit_code 1 on some cpu rows;"
+            echo "  do not make cpu_hot gating without a noise study"
+            echo
+          } > "$summary"
+
+          build_bench() {
+            local tree="$1"
+            local target="$2"
+            CARGO_TARGET_DIR="$target" cargo build --locked --release \
+              -p renderide-bench \
+              --manifest-path "$tree/Cargo.toml"
+          }
+
+          echo "::group::Build renderide-bench (base + head, parallel)"
+          build_bench "head" "$RUNNER_TEMP/target-head" >"$out/build-head.log" 2>&1 &
+          head_build_pid=$!
+          build_bench "base" "$RUNNER_TEMP/target-base" >"$out/build-base.log" 2>&1 &
+          base_build_pid=$!
+          head_build_status=0
+          base_build_status=0
+          wait "$head_build_pid" || head_build_status=$?
+          wait "$base_build_pid" || base_build_status=$?
+          echo "::endgroup::"
+          if [[ "$head_build_status" -ne 0 || "$base_build_status" -ne 0 ]]; then
+            echo "cpu_hot build failed (base=$base_build_status head=$head_build_status); skipping compare" >> "$summary"
+            tail -n 40 "$out/build-base.log" >> "$summary" 2>/dev/null || true
+            tail -n 40 "$out/build-head.log" >> "$summary" 2>/dev/null || true
+            cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+            cp "$summary" "$GITHUB_WORKSPACE/cpu-summary.md"
+            end_ts=$(date +%s)
+            echo "wall_time_sec=$((end_ts - start_ts))" >> "$GITHUB_OUTPUT"
+            # Always succeed: report-only.
+            exit 0
+          fi
+
+          mkdir -p "$out/cpu-base" "$out/cpu-head"
+          set +e
+          (
+            cd base
+            CARGO_TARGET_DIR="$RUNNER_TEMP/target-base" \
+              "$RUNNER_TEMP/target-base/release/renderide-bench" run --suite cpu \
+              --bench-arg=--quick --output "$out/cpu-base/run.json" --json \
+              >"$out/cpu-base/stdout.json" 2>"$out/cpu-base/stderr.log"
+          )
+          cpu_base_status=$?
+          (
+            cd head
+            CARGO_TARGET_DIR="$RUNNER_TEMP/target-head" \
+              "$RUNNER_TEMP/target-head/release/renderide-bench" run --suite cpu \
+              --bench-arg=--quick --output "$out/cpu-head/run.json" --json \
+              >"$out/cpu-head/stdout.json" 2>"$out/cpu-head/stderr.log"
+          )
+          cpu_head_status=$?
+          set -e
+
+          if [[ "$cpu_base_status" -eq 0 && "$cpu_head_status" -eq 0 && -f "$out/cpu-base/run.json" && -f "$out/cpu-head/run.json" ]]; then
+            set +e
+            "$RUNNER_TEMP/target-head/release/renderide-bench" compare \
+              --base "$out/cpu-base/run.json" --head "$out/cpu-head/run.json" \
+              --flag-threshold "$FLAG_THRESHOLD" --fail-threshold "$FAIL_THRESHOLD" \
+              --json >"$out/cpu-compare.json"
+            compare_status=$?
+            set -e
+            # compare may exit 1 when rows cross thresholds; that is noise on CI, not a gate.
+            echo "cpu_hot compare process exit=$compare_status (informational; ignored)" >> "$summary"
+            cp "$out/cpu-compare.json" "$GITHUB_WORKSPACE/cpu-compare.json"
+            {
+              echo
+              echo "<details><summary>cpu_hot compare (report-only; not the gate)</summary>"
+              echo
+              echo '```json'
+              head -c 100000 "$out/cpu-compare.json" || true
+              echo
+              echo '```'
+              echo "</details>"
+            } >> "$summary"
+          else
+            echo "cpu_hot compare skipped (base_status=$cpu_base_status head_status=$cpu_head_status)" >> "$summary"
+            tail -n 40 "$out/cpu-base/stderr.log" >> "$summary" 2>/dev/null || true
+            tail -n 40 "$out/cpu-head/stderr.log" >> "$summary" 2>/dev/null || true
+          fi
+
+          end_ts=$(date +%s)
+          wall=$((end_ts - start_ts))
+          echo "wall_time_sec: $wall" >> "$summary"
+          cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "wall_time_sec=$wall" >> "$GITHUB_OUTPUT"
+          cp "$summary" "$GITHUB_WORKSPACE/cpu-summary.md"
+          # Always exit 0 — cpu_hot must never fail the workflow.
+          exit 0
+
+      - name: Upload cpu_hot artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-pr-cpu
+          path: |
+            cpu-compare.json
+            cpu-summary.md
+          if-no-files-found: ignore
+
+  # -------------------------------------------------------------------------
+  # Merge gate + cpu into bench-compare.json, summary, and PR comment.
+  # -------------------------------------------------------------------------
+  report:
+    name: bench-pr-report
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [bench-pr, cpu-hot]
+    if: always() && !cancelled()
+    steps:
+      - name: Checkout assemble script
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/ci
+
+      - name: Download frame gate artifact
+        continue-on-error: true
+        uses: actions/download-artifact@v7
+        with:
+          name: bench-pr-gate
+          path: gate-art
+
+      - name: Download cpu_hot artifact
+        continue-on-error: true
+        uses: actions/download-artifact@v7
+        with:
+          name: bench-pr-cpu
+          path: cpu-art
+
+      - name: Assemble bench-compare.json and summary
+        id: assemble
+        run: |
+          set -euo pipefail
+          assemble_py="$GITHUB_WORKSPACE/scripts/ci/bench_pr_assemble.py"
+          summary="$GITHUB_WORKSPACE/bench-pr-summary.md"
+          {
+            echo "# bench-pr (combined)"
+            echo
+            echo "- frame job: \`${{ needs.bench-pr.result }}\` (gate_exit=${{ needs.bench-pr.outputs.gate_exit }}, wall_time_sec=${{ needs.bench-pr.outputs.wall_time_sec }})"
+            echo "- cpu_hot job: \`${{ needs.cpu-hot.result }}\` (report-only; never gates)"
+            echo "- decision rule: \`scripts/ci/frame_bench_gate.py\` only"
+            echo
+          } > "$summary"
+
+          if [[ -f gate-art/frame-summary.md ]]; then
+            cat gate-art/frame-summary.md >> "$summary"
+            echo >> "$summary"
+          else
+            echo "_frame gate artifact missing_" >> "$summary"
+            echo >> "$summary"
+          fi
+
+          if [[ -f cpu-art/cpu-summary.md ]]; then
+            cat cpu-art/cpu-summary.md >> "$summary"
+            echo >> "$summary"
+          else
+            echo "_cpu_hot artifact missing (job may have been skipped or failed before upload)_" >> "$summary"
+            echo >> "$summary"
+          fi
+
+          cpu_args=()
+          if [[ -f cpu-art/cpu-compare.json ]]; then
+            cpu_args=(--cpu-compare cpu-art/cpu-compare.json)
+          fi
+
+          if [[ -f gate-art/gate.json ]]; then
+            python3 "$assemble_py" --gate gate-art/gate.json "${cpu_args[@]}" --out bench-compare.json
+            echo "assembled bench-compare.json"
+          else
+            echo "gate.json missing; cannot assemble bench-compare.json" >> "$summary"
+          fi
+
+          cat "$summary" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload bench-compare.json
         if: always() && hashFiles('bench-compare.json') != ''
@@ -365,15 +604,6 @@ jobs:
           name: bench-compare
           path: bench-compare.json
           if-no-files-found: ignore
-
-      - name: Job summary trailer
-        if: always() && hashFiles('bench-pr-summary.md') != ''
-        run: |
-          set -euo pipefail
-          # Measure already wrote GITHUB_STEP_SUMMARY; re-append when that step was truncated.
-          if [[ -n "${{ steps.bench.outputs.wall_time_sec }}" ]]; then
-            echo "bench-pr wall_time_sec=${{ steps.bench.outputs.wall_time_sec }} gate_exit=${{ steps.bench.outputs.gate_exit }}" >> "$GITHUB_STEP_SUMMARY"
-          fi
 
       - name: Upsert PR comment
         if: always() && hashFiles('bench-pr-summary.md') != ''
@@ -402,19 +632,3 @@ jobs:
                 owner, repo, issue_number, body,
               });
             }
-
-      - name: Apply gate verdict
-        if: always()
-        run: |
-          set -euo pipefail
-          status="${{ steps.bench.outputs.gate_exit }}"
-          if [[ -z "$status" ]]; then
-            echo "Measure step did not report gate_exit (aborted before assemble)" >&2
-            exit 1
-          fi
-          if [[ "$status" -eq 0 ]]; then
-            echo "gate: pass"
-          else
-            echo "gate: fail (exit $status)"
-          fi
-          exit "$status"
