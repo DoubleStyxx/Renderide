@@ -1,4 +1,5 @@
 # Opt-in #216 production-lit codegen arm. Not the default CI suite.
+# Baseline resample: static DXC, production fragment, no gradient hoist.
 #
 # One Linux llvmpipe run and three independent Windows WARP runs. Each run
 # executes negative_light_parity, negative_light_physically_based, and
