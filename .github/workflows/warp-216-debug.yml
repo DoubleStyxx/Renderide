@@ -4,7 +4,7 @@
 # executes every pbs_specular* case plus the five #216 production cases.
 # Probes stay off. Scene-color readback is the float sidecar only.
 # A docs-only commit does not match the path filter, so it does not restart this.
-# Sample 1 of 3. The renderer tree is 9e6f5633.
+# Sample 2 of 3. The renderer tree is 9e6f5633.
 
 name: WARP 216 debug
 
