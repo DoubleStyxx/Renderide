@@ -48,10 +48,16 @@ pub struct RunnerConfig {
     pub interval_ms: u64,
     /// Forward the renderer's stdout/stderr when `true`.
     pub verbose_renderer: bool,
+    /// With [`Self::verbose_renderer`], send the child's stdout to stderr.
+    pub renderer_stdout_to_stderr: bool,
     /// Test-output root. Defaults to `target/renderide-test-out`.
     pub output_root: std::path::PathBuf,
     /// Copy the HDR scene-color target beside each PNG. Off unless a caller asks.
     pub scene_color_readback: bool,
+    /// ICD, backend, and Rayon choice applied to the renderer child.
+    ///
+    /// `None` leaves the child with the process environment. The CLI sets this.
+    pub harness_env: Option<renderide_harness_env::ResolvedEnv>,
 }
 
 impl RunnerConfig {
@@ -62,8 +68,10 @@ impl RunnerConfig {
             timeout: DEFAULT_CASE_TIMEOUT,
             interval_ms: DEFAULT_INTERVAL_MS,
             verbose_renderer: false,
+            renderer_stdout_to_stderr: false,
             output_root: default_output_root(),
             scene_color_readback: false,
+            harness_env: None,
         }
     }
 
@@ -123,6 +131,10 @@ pub fn run_integration_case(
     case: &IntegrationCase,
     runner: &RunnerConfig,
 ) -> Result<CaseRunOutcome, HarnessError> {
+    let _icd_guard = runner
+        .harness_env
+        .as_ref()
+        .map(|env| super::report_v2::select_icd(icd_block(env)));
     let layout = CaseOutputLayout::for_case(&runner.output_root, &case.name);
     layout.prepare().map_err(|e| {
         HarnessError::QueueOptions(format!("prepare {}: {e}", layout.root.display()))
@@ -139,6 +151,12 @@ pub fn run_integration_case(
         interval_ms: runner.interval_ms,
         timeout: runner.timeout,
         verbose_renderer: runner.verbose_renderer,
+        renderer_stdout_to_stderr: runner.renderer_stdout_to_stderr,
+        child_env: runner
+            .harness_env
+            .as_ref()
+            .map(|env| env.child_env.clone())
+            .unwrap_or_default(),
         physically_based,
         scene_color_readback: runner.scene_color_readback
             || template_requests_scene_color_readback(&prepared_template.session_template),
@@ -155,6 +173,14 @@ pub fn run_integration_case(
             let _ = write_report(&layout, &mut report);
             Err(err)
         }
+    }
+}
+
+fn icd_block(env: &renderide_harness_env::ResolvedEnv) -> super::report_v2::IcdBlock {
+    super::report_v2::IcdBlock {
+        path: env.icd_path.clone(),
+        source: env.icd_source.clone(),
+        var: env.icd_var.clone(),
     }
 }
 
@@ -323,7 +349,7 @@ fn evaluate_and_finalize(
     }
     if !case.golden_path.exists() {
         let msg = format!(
-            "golden image missing at {}; run `renderide-test update-suite --case {}` to create it",
+            "golden image missing at {}; run `renderide-test run --bless --case {}` to create it",
             case.golden_path.display(),
             case.name
         );
@@ -405,7 +431,7 @@ fn plain_capture_failure(case: &IntegrationCase, layout: &CaseOutputLayout) -> R
     }
     if !golden_path.is_file() {
         return Err(format!(
-            "plain golden missing at {}; run `renderide-test update-suite --case {}`",
+            "plain golden missing at {}; run `renderide-test run --bless --case {}`",
             golden_path.display(),
             case.name
         ));

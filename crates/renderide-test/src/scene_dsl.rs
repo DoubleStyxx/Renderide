@@ -26,9 +26,16 @@ pub mod tolerance;
 pub mod warp_216_debug;
 mod warp_pbs;
 
+/// Test-only flat-frame name. Production lists stay empty.
+#[cfg(test)]
+pub(crate) use quarantine_216::FLAT_FRAME_FIXTURE;
 /// Labels matching WARP cases. The flat-exit tests use this with an injected clock.
 #[cfg(test)]
 pub(crate) use quarantine_216::apply_quarantine;
+/// Why bless must not write this case. `None` means bless may proceed.
+pub(crate) use quarantine_216::bless_forbidden;
+/// #216 quarantine names. The production list is empty.
+pub use quarantine_216::bless_refused_scenes;
 /// Whether a suite case is the time-limited #216 quarantine and not a pass.
 pub(crate) use quarantine_216::case_is_quarantined as case_is_quarantined_216;
 /// Whether this WARP case may end a flat-frame wait before the full budget.

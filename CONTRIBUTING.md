@@ -240,11 +240,11 @@ Ordinary renderer integration tests should stay non-GPU unless they belong in th
 
 ```bash
 cargo run -p renderide-test -- check-suite
-cargo run -p renderide-test -- update-suite
+cargo run -p renderide-test -- run --bless --force
 cargo run -p renderide-test -- check-suite --case unlit_sphere
 ```
 
-Use `update-suite` only when the visual change is intentional. The flat-image gate rejects clear-only captures so a broken render cannot silently promote itself.
+Use `run --bless --force` only when the visual change is intentional. A new golden does not need `--force`. The flat-image gate rejects clear-only captures so a broken render cannot silently promote itself.
 
 If the renderer binary is not already present next to the harness, build it first with `cargo build -p renderide` or pass an explicit binary with `--renderer`.
 

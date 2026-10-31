@@ -5,6 +5,7 @@ members = [
   "crates/renderide",
   "crates/renderide-shared",
   "crates/renderide-test",
+  "crates/renderide-harness-env",
   "crates/renderide-bench",
   "crates/renderide-control-client",
   "crates/renderide-framebench",

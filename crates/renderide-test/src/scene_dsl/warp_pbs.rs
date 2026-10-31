@@ -1,15 +1,8 @@
-//! WARP-only expected failure for `pbs_lit_material_matrix`.
+//! WARP expected-failure labels for image mismatches (#212).
 //!
-//! Decided from the selected adapter's vendor `0x1414` and device `0x008c`, not from
-//! the operating system. It matches only an accepted frame whose image check failed
-//! with pending=0 and no dropped draws
-//! (https://github.com/DoubleStyxx/Renderide/issues/212). A pipeline that is not
-//! ready, a timeout, a flat or unstable frame, a positive pending count, a dropped
-//! draw, a missing case, or a crash stays a hard failure.
-//!
-//! The expected-failure label is [`EXPECTED_FAILURE_LABEL`]. The case stays
-//! `passed: false`. A real pass stays a pass and is labeled
-//! [`UNEXPECTED_PASS_LABEL`] instead of failing the suite.
+//! `pbs_lit_material_matrix` passed on WARP and is not on the case list, so a
+//! mismatch there fails the suite. The four-band region-color signature is unchanged
+//! and still decides the excuse for any name that is on the list.
 //!
 //! The excuse is the region-color signature: all 4 bands fail that criterion.
 //! SSIM, pixel diff, image coverage, and band count may fail beside it.
@@ -28,7 +21,13 @@ pub(crate) const EXPECTED_FAILURE_LABEL: &str = "expected failure (WARP, #212)";
 /// `report.json` `result` when WARP passes `pbs_lit`. The case stays a pass.
 pub(crate) const UNEXPECTED_PASS_LABEL: &str = "unexpected pass (WARP, #212)";
 
-/// Case whose WARP image mismatch is expected.
+/// Cases whose WARP image mismatch is an expected #212 failure.
+///
+/// `pbs_lit_material_matrix` is not here. It passed on all three WARP samples.
+const WARP_EXPECTED_FAILURE_CASES: &[&str] = &[];
+
+/// Kept so tests can show this name is not on [`WARP_EXPECTED_FAILURE_CASES`].
+#[cfg(test)]
 const PBS_LIT: &str = "pbs_lit_material_matrix";
 
 /// PNG `tEXt` keyword written when the renderer counts pending and dropped draws.
@@ -104,8 +103,7 @@ impl ImageSignature {
     /// Region color failed in all 4 bands, and every other failed criterion is allowed.
     ///
     /// Allowed beside that signature: SSIM, pixel diff, image coverage, and band
-    /// count. Evidence: 40088875619, 40096421641, 40097968491, 41084635804,
-    /// 41089310635, 41093531109, 41103575428, 41099685993.
+    /// count. A criterion outside that set is a foreign failure and is not excused.
     const fn is_expected_mismatch(self) -> bool {
         self.region_color_bands == 4 && self.region_color_failed == 4 && !self.foreign_failure
     }
@@ -129,10 +127,17 @@ pub(crate) fn unexpected_pass_line(name: &str, artifacts: &Path) -> String {
     )
 }
 
-/// Labels `pbs_lit` when the selected adapter is WARP and the image check failed
+/// Labels a marked case when the selected adapter is WARP and the image check failed
 /// on an accepted frame with pending=0 and no dropped draws.
+///
+/// The four-band signature is necessary. The case name also has to be in
+/// [`WARP_EXPECTED_FAILURE_CASES`]. That list is empty.
 pub(crate) fn apply_expected_failure(report: &mut SuiteReport) {
-    let Some(index) = report.cases.iter().position(|case| case.name == PBS_LIT) else {
+    let Some(index) = report
+        .cases
+        .iter()
+        .position(|case| WARP_EXPECTED_FAILURE_CASES.contains(&case.name.as_str()))
+    else {
         return;
     };
     let actual = output::actual_png_in(&report.cases[index].artifacts_dir);
@@ -174,17 +179,21 @@ pub(crate) fn apply_expected_failure(report: &mut SuiteReport) {
 }
 
 fn unexpected_pass(is_warp: bool, case: &CaseSnapshot<'_>) -> bool {
-    is_warp && case.name == PBS_LIT && case.fault == CaseFault::None
+    is_warp && marked_expected_failure(case.name) && case.fault == CaseFault::None
 }
 
 fn excuse(is_warp: bool, case: &CaseSnapshot<'_>) -> bool {
     is_warp
-        && case.name == PBS_LIT
+        && marked_expected_failure(case.name)
         && case.frame_accepted
         && case.fault == CaseFault::ImageCheck
         && case.pending == Some(0)
         && case.dropped_draws == Some(0)
         && case.signature.is_expected_mismatch()
+}
+
+fn marked_expected_failure(name: &str) -> bool {
+    WARP_EXPECTED_FAILURE_CASES.contains(&name)
 }
 
 fn snapshot_for(case: &SuiteCaseReport) -> CaseSnapshot<'_> {
@@ -530,9 +539,9 @@ wgpu adapter selected (headless): llvmpipe (LLVM 20.1.2, 256 bits) type=Cpu back
     }
 
     #[test]
-    fn matching_warp_image_failure_is_excused() {
+    fn matching_warp_image_failure_is_not_excused() {
         assert!(selected_adapter_is_warp(WARP_LOG));
-        assert!(excuse(true, &image_failure()));
+        assert!(!excuse(true, &image_failure()));
         assert_eq!(EXPECTED_FAILURE_LABEL, "expected failure (WARP, #212)");
     }
 
@@ -780,14 +789,14 @@ wgpu adapter selected (headless): Microsoft Basic Render Driver type=Cpu backend
     }
 
     fn excused(criteria: &[crate::scene_dsl::tolerance::CriterionResult]) -> bool {
-        let mut case = image_failure();
-        case.signature = signature_from_criteria(criteria);
-        excuse(true, &case)
+        signature_from_criteria(criteria).is_expected_mismatch()
     }
 
     #[test]
     fn region_color_signature_on_its_own_is_excused() {
         assert!(excused(&four_failed_colors()));
+        assert!(image_failure().signature.is_expected_mismatch());
+        assert!(!excuse(true, &image_failure()));
     }
 
     #[test]
@@ -881,7 +890,7 @@ wgpu adapter selected (headless): Microsoft Basic Render Driver type=Cpu backend
             dropped_draws: Some(0),
             signature: ImageSignature::default(),
         };
-        assert!(unexpected_pass(true, &pass));
+        assert!(!unexpected_pass(true, &pass));
         assert!(!unexpected_pass(false, &pass));
         assert!(!excuse(true, &pass));
         let mut other = pass;

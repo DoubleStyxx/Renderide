@@ -90,6 +90,33 @@ pub struct SuiteReport {
     /// while more than 48 hours remain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quarantine_warning: Option<String>,
+    /// Process exit code for this report. Matches the `renderide-test` process.
+    #[serde(default)]
+    pub exit_code: u8,
+    /// Set when the command failed before any case ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// ICD the renderer child inherited or the harness selected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner: Option<SuiteRunner>,
+}
+
+/// Runner identity on the suite JSON document.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SuiteRunner {
+    /// Vulkan ICD selection.
+    pub icd: SuiteIcd,
+}
+
+/// Vulkan ICD selection recorded on the suite report.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SuiteIcd {
+    /// Manifest path, or null when no Vulkan ICD was selected.
+    pub path: Option<String>,
+    /// `env`, `auto`, `flag`, `none`, or `platform`.
+    pub source: String,
+    /// Loader variable that supplied `path`, or null.
+    pub var: Option<String>,
 }
 
 impl SuiteReport {
@@ -105,6 +132,9 @@ impl SuiteReport {
             cases,
             summary: SUITE_READINESS_SUMMARY.to_string(),
             quarantine_warning: None,
+            exit_code: 0,
+            error: None,
+            runner: None,
         };
         report.recompute();
         report
@@ -214,6 +244,18 @@ pub struct SuiteCaseReport {
     /// Selected adapter label. Empty until the renderer log is read.
     #[serde(default)]
     pub adapter: String,
+    /// This case's exit code. Expected failures and quarantines stay 0.
+    #[serde(default)]
+    pub exit_code: u8,
+    /// `new` or `overwritten` after a bless wrote the golden.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blessed: Option<String>,
+    /// Why bless skipped this case. The case is not a failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bless_skip: Option<String>,
+    /// Region stats of a golden written by bless.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) region_stats: Option<Vec<super::region_stats::RegionStatRow>>,
 }
 
 fn default_behavior_gate() -> String {
@@ -245,6 +287,10 @@ impl SuiteCaseReport {
             gate: default_behavior_gate(),
             adapter: String::new(),
             image_compared: false,
+            exit_code: 0,
+            blessed: None,
+            bless_skip: None,
+            region_stats: None,
         }
     }
 
@@ -391,7 +437,7 @@ fn run_suite_with(
 }
 
 /// The #212 label applies to both commands. The #216 quarantine is check-suite only,
-/// so a failed `update-suite` cannot exit 0 by counting a flat frame as quarantined.
+/// so a failed `run --bless` cannot exit 0 by counting a flat frame as quarantined.
 fn apply_suite_labels(
     report: &mut SuiteReport,
     check_suite: bool,
@@ -649,19 +695,21 @@ mod tests {
     }
 
     fn quarantinable_case(dir: &Path) -> SuiteCaseReport {
-        let artifacts = dir.join("pbs_lit_material_matrix");
+        let name = crate::scene_dsl::FLAT_FRAME_FIXTURE;
+        let artifacts = dir.join(name);
         std::fs::create_dir_all(&artifacts).expect("artifacts");
         let report_json = artifacts.join("report.json");
-        let integration = crate::scene_dsl::cases::pbs_lit_material_matrix();
-        let case_report =
+        let integration = crate::scene_dsl::cases::unlit_sphere();
+        let mut case_report =
             crate::scene_dsl::output::report_from_error(&integration, "flat or unstable");
+        case_report.name = name.to_string();
         std::fs::write(
             &report_json,
             serde_json::to_string_pretty(&case_report).expect("report json"),
         )
         .expect("write report");
         let mut case = SuiteCaseReport::plain(
-            "pbs_lit_material_matrix",
+            name,
             false,
             artifacts,
             report_json,
