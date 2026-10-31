@@ -99,3 +99,4 @@ pub fn ensure_native_stdio_forwarded_to_logger() {
 pub fn run() -> Result<RunExit, RunError> {
     app::run()
 }
+// B3 noise2-noop-2 canary (DO NOT MERGE)
