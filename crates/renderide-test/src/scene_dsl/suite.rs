@@ -673,19 +673,21 @@ mod tests {
     }
 
     fn quarantinable_case(dir: &Path) -> SuiteCaseReport {
-        let artifacts = dir.join("pbs_lit_material_matrix");
+        let name = crate::scene_dsl::FLAT_FRAME_FIXTURE;
+        let artifacts = dir.join(name);
         std::fs::create_dir_all(&artifacts).expect("artifacts");
         let report_json = artifacts.join("report.json");
-        let integration = crate::scene_dsl::cases::pbs_lit_material_matrix();
-        let case_report =
+        let integration = crate::scene_dsl::cases::unlit_sphere();
+        let mut case_report =
             crate::scene_dsl::output::report_from_error(&integration, "flat or unstable");
+        case_report.name = name.to_string();
         std::fs::write(
             &report_json,
             serde_json::to_string_pretty(&case_report).expect("report json"),
         )
         .expect("write report");
         let mut case = SuiteCaseReport::plain(
-            "pbs_lit_material_matrix",
+            name,
             false,
             artifacts,
             report_json,

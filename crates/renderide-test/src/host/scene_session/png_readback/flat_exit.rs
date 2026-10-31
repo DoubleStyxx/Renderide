@@ -265,14 +265,29 @@ mod tests {
             let mut suite = SuiteReport::from_cases(vec![case]);
             apply_quarantine(&mut suite, before_expiry(), |_| true);
             let labeled = &suite.cases[0];
-            assert!(case_is_quarantined_216(labeled), "{name}");
-            let reason = if *name == "pbs_lit_material_matrix" {
-                "quarantined:#216"
-            } else {
-                "WARP lit shading untrusted"
-            };
-            assert_eq!(labeled.reason.as_deref(), Some(reason), "{name}");
+            assert!(!case_is_quarantined_216(labeled), "{name}");
+            assert!(labeled.reason.is_none(), "{name}");
         }
+
+        let fixture = crate::scene_dsl::FLAT_FRAME_FIXTURE;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let report_path = dir.path().join("report.json");
+        let integration = crate::scene_dsl::cases::unlit_sphere();
+        let mut written = crate::scene_dsl::output::report_from_error(&integration, "x");
+        written.name = fixture.to_string();
+        std::fs::write(&report_path, serde_json::to_string(&written).expect("json"))
+            .expect("report");
+        let case = SuiteCaseReport::from_harness_error(
+            fixture,
+            dir.path().to_path_buf(),
+            report_path,
+            &err,
+        );
+        let mut suite = SuiteReport::from_cases(vec![case]);
+        apply_quarantine(&mut suite, before_expiry(), |_| true);
+        let labeled = &suite.cases[0];
+        assert!(case_is_quarantined_216(labeled), "{fixture}");
+        assert_eq!(labeled.reason.as_deref(), Some("quarantined:#216"));
     }
 
     #[test]
@@ -359,6 +374,11 @@ mod tests {
                 before_expiry()
             ));
         }
+        assert!(!crate::scene_dsl::early_flat_exit_applies(
+            crate::scene_dsl::FLAT_FRAME_FIXTURE,
+            false,
+            before_expiry()
+        ));
         assert_eq!(
             flat_exit_budget(false, Duration::from_secs(300), Duration::from_secs(3)),
             Duration::from_secs(300)
@@ -380,16 +400,26 @@ mod tests {
 
     #[test]
     fn an_expired_quarantine_keeps_the_full_wait() {
-        for name in CASES {
-            assert!(crate::scene_dsl::early_flat_exit_applies(
-                name,
-                true,
-                before_expiry()
-            ));
+        assert!(crate::scene_dsl::early_flat_exit_applies(
+            crate::scene_dsl::FLAT_FRAME_FIXTURE,
+            true,
+            before_expiry()
+        ));
+        assert!(!crate::scene_dsl::early_flat_exit_applies(
+            crate::scene_dsl::FLAT_FRAME_FIXTURE,
+            true,
+            after_expiry()
+        ));
+        for name in [
+            "pbs_lit_material_matrix",
+            "negative_light_parity",
+            "negative_light_physically_based",
+            "negative_color_physically_based",
+        ] {
             assert!(!crate::scene_dsl::early_flat_exit_applies(
                 name,
                 true,
-                after_expiry()
+                before_expiry()
             ));
         }
         assert_eq!(

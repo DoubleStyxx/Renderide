@@ -83,6 +83,8 @@ pub enum SessionTemplate {
     },
     /// PBS material matrix lit by regular scene lights.
     PbsLitMaterialMatrix,
+    /// One PBS metallic sphere with `_ALPHAPREMULTIPLY_ON`, One/OneMinusSrcAlpha, and queue 3000.
+    PbsMetallicPremultiply,
     /// Frame-bench only: a 40x40 grid of 1,600 unlit draws sharing one mesh and material.
     ManyStaticMeshes,
     /// Frame-bench only: 64 lit spheres on a floor with one shadowed directional and four shadowed point lights.
@@ -238,6 +240,7 @@ fn template_label(template: &SessionTemplate) -> &'static str {
         SessionTemplate::Torus { .. } => "Torus",
         SessionTemplate::MultiPrimitiveUnlitGrid { .. } => "MultiPrimitiveUnlitGrid",
         SessionTemplate::PbsLitMaterialMatrix => "PbsLitMaterialMatrix",
+        SessionTemplate::PbsMetallicPremultiply => "PbsMetallicPremultiply",
         SessionTemplate::ManyStaticMeshes => "ManyStaticMeshes",
         SessionTemplate::LightsShadows => "LightsShadows",
         SessionTemplate::AlphaCutoutMaskedQuads { .. } => "AlphaCutoutMaskedQuads",
