@@ -224,6 +224,8 @@ base_color = mat._Color.xyz * _e42.xyz;
 
 Not the lead: the cluster-loop bounds and the `light_count` continue (same on both backends, and the tile is non-empty); scalar `max(dot, 0)` for `N·L`; a negative `pow` on the parity intensity (the linear sRGB branch is taken); half-precision; a mis-sized `select` mask on the directional light.
 
+The runs below demote suspect 2. The scalar-color arm still goes flat black on eight of nine samples, and its one lit frame is a sign change in R rather than a stuck G. Suspect 1 stays, with a sharper mechanism from the FXC log: a gradient inside the dynamic light loop. DXC compiles that loop; FXC will not; WARP's execution of the DXC loop is the thing that sometimes zeros a channel and sometimes zeros the whole sphere. The wiped channel is not stable across the three baseline samples.
+
 ## Proposed A/B rewrites
 
 Not applied on the baseline branch. The scalar-color rewrite is the one the scalar arm compiles.
