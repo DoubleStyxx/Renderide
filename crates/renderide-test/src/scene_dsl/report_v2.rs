@@ -530,6 +530,7 @@ mod tests {
             REASON_UNEXPECTED_PASS,
             QUARANTINE_REASON,
             REASON_EARLY_EXIT,
+            "unknown-group",
         ] {
             assert!(
                 schema["properties"]["reason"]["enum"]
