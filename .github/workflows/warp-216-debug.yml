@@ -1,5 +1,5 @@
 # Opt-in #216 production-lit codegen arm. Not the default CI suite.
-# Baseline resample: static DXC, production fragment, no gradient hoist.
+# Arm A: explicit LOD in the clustered light loop, under static DXC and FXC.
 #
 # One Linux llvmpipe run and three independent Windows WARP runs. Each run
 # executes negative_light_parity, negative_light_physically_based, and
@@ -35,12 +35,25 @@ jobs:
         include:
           - os: ubuntu-24.04
             label: linux
+            dx12_compiler: auto
           - os: windows-latest
-            label: windows-1
+            label: windows-dxc-1
+            dx12_compiler: auto
           - os: windows-latest
-            label: windows-2
+            label: windows-dxc-2
+            dx12_compiler: auto
           - os: windows-latest
-            label: windows-3
+            label: windows-dxc-3
+            dx12_compiler: auto
+          - os: windows-latest
+            label: windows-fxc-1
+            dx12_compiler: fxc
+          - os: windows-latest
+            label: windows-fxc-2
+            dx12_compiler: fxc
+          - os: windows-latest
+            label: windows-fxc-3
+            dx12_compiler: fxc
     env:
       RAYON_NUM_THREADS: "1"
     steps:
@@ -135,6 +148,13 @@ jobs:
           if (-not $dxc) { throw 'dxc.exe not in the release bin archive' }
           Add-Content -Path $env:GITHUB_PATH -Value $dxc.DirectoryName
           & $dxc.FullName --version
+
+      - name: Select the DX12 shader compiler
+        shell: bash
+        run: |
+          if [[ "${{ matrix.dx12_compiler }}" == "fxc" ]]; then
+            echo "WGPU_DX12_COMPILER=fxc" >> "$GITHUB_ENV"
+          fi
 
       - name: Run production lit cases and the shader dump
         timeout-minutes: 180

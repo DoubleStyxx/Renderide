@@ -104,15 +104,15 @@ const RAW_SAMPLE_EXCEPTIONS: &[RawSampleException] = &[
     },
     RawSampleException {
         label: "shaders/modules/lighting/light_cookies.wgsl",
-        builtin: "textureSample",
+        builtin: "textureSampleLevel",
         texture: "rg::light_cookie_2d_atlas",
-        reason: "lighting atlas resource, not a host material texture",
+        reason: "clustered light loop cannot take implicit derivatives; cookie LOD is explicit",
     },
     RawSampleException {
         label: "shaders/modules/lighting/light_cookies.wgsl",
-        builtin: "textureSample",
+        builtin: "textureSampleLevel",
         texture: "rg::light_cookie_point_atlas",
-        reason: "lighting atlas resource, not a host material texture",
+        reason: "clustered light loop cannot take implicit derivatives; cookie LOD is explicit",
     },
     RawSampleException {
         label: "shaders/modules/material/sample.wgsl",

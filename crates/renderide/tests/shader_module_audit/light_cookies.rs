@@ -6,7 +6,7 @@ use super::*;
 fn light_cookie_atlas_sampling_uses_scalar_red_channel() -> io::Result<()> {
     let lighting = source_file(manifest_dir().join("shaders/modules/lighting/light_cookies.wgsl"))?;
     for required in [
-        "textureSample(\n        rg::light_cookie_2d_atlas,",
+        "textureSampleLevel(\n        rg::light_cookie_2d_atlas,",
         "atlas_cookie_uv(light.cookie_layer, wrap_cookie_uv(uv, light.cookie_reserved))",
         "wrap_cookie_uv(uv, light.cookie_reserved)",
         "atlas_cookie_uv(rect_index, face_uv.xy)",
