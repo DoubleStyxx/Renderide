@@ -432,14 +432,123 @@ A WGSL `for (i < 32u)` does not reach FXC as a 32-iteration loop. wgpu 30 sets `
 | baseline resample | static DXC | [41205727909](https://github.com/DoubleStyxx/Renderide/actions/runs/41205727909) | `b660d424` |
 | A explicit LOD | static DXC and FXC | [41205954817](https://github.com/DoubleStyxx/Renderide/actions/runs/41205954817) | `360331b1` |
 
-Counts for these two runs are filled in when the jobs finish. The earlier broken push `16dec2f1` ([41205754209](https://github.com/DoubleStyxx/Renderide/actions/runs/41205754209)) still passes a level argument to `textureSampleCompareLevel` and fails shader compose. Ignore it.
+Both runs finished. The earlier push `16dec2f1` ([41205754209](https://github.com/DoubleStyxx/Renderide/actions/runs/41205754209)) still passes a level argument to `textureSampleCompareLevel` and fails shader compose. Ignore it.
+
+Lavapipe PNGs for arm A are byte-identical to the baseline resample (`byte_diff=0` on all three cases, 262144 bytes for the 256² frames and 409600 for the 320² frame). All three Linux reports are `status=pass`. The explicit LOD does not change these scenes, which never execute the cookie or shadow sample.
+
+### Baseline resample, static DXC, run 41205727909
+
+Seven of nine are flat linear black. Settle on those is 104–193 s.
+
+| Sample | Case | Flat | non_bg | g0 | r0 | b0 | Linear RGB means | Settle |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| windows-1 | all three | yes | 0 | 0 | 0 | 0 | `(0, 0, 0)` | 131.1 s, 110.1 s, 130.9 s |
+| windows-2 | parity, physically based | yes | 0 | 0 | 0 | 0 | `(0, 0, 0)` | 104.9 s, 108.3 s |
+| windows-2 | pbs_lit | no | 8622 | 8622 | 8622 | 0 | TL `(0, 0, 0.109)`, TR `(0, 0, 0.168)`, BL and BR `(0, 0, 0)`. No NaN, no negative. | accepted |
+| windows-3 | parity, physically based | yes | 0 | 0 | 0 | 0 | `(0, 0, 0)` | 160.5 s, 193.3 s |
+| windows-3 | pbs_lit | no | 12273 | 4242 | 3584 | 3561 | mixed, including negatives (16909 negative channel-samples). Not one stuck channel. | accepted |
+
+Together with the first baseline (5/9 flat, one green-only frame), the static-DXC failure is still a coin flip between a black sphere and a frame that keeps only some channels. No NaNs in the quadrant means.
+
+### Arm A, static DXC, run 41205954817
+
+Six of nine are flat linear black.
+
+| Sample | Case | Flat | non_bg | g0 | r0 | b0 | Linear RGB | NaN / neg | Settle |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| dxc-1 | all three | yes | 0 | 0 | 0 | 0 | `(0, 0, 0)` | 0 / 0 | 85.4 s, 86.0 s, 86.8 s |
+| dxc-2 | parity | yes | 0 | 0 | 0 | 0 | `(0, 0, 0)` | 0 / 0 | 63.4 s |
+| dxc-2 | physically based | no | 3354 | 0 | 0 | 0 | about `(-0.045, -0.042, -0.036)` and `(0.009, 0.009, 0.007)` | 0 / 15216 | accepted |
+| dxc-2 | pbs_lit | yes | 0 | 0 | 0 | 0 | `(0, 0, 0)` | 0 / 0 | 63.6 s |
+| dxc-3 | parity | yes | 0 | 0 | 0 | 0 | `(0, 0, 0)` | 0 / 0 | 70.3 s |
+| dxc-3 | physically based | no | 108 | 0 | 0 | 0 | top half about `(-0.057, -0.052, -0.045)`, bottom `(0, 0, 0)` | 0 / 14472 | accepted |
+| dxc-3 | pbs_lit | no | 8661 | 1 | 7 | 0 | includes `(-0.018, 0.026, 0.196)` and `(0.001, 0.002, 0.007)` | 0 / 17523 | accepted |
+
+The PNG `g0=0` on the non-flat rows is not a healthy frame. The linear values are negative, and sRGB encode turns those into 0. Explicit LOD did not stop the black frames or the nonsense signs.
+
+### Arm A, FXC, same run
+
+All three Windows jobs failed (`windows-fxc-1`, `windows-fxc-2`, `windows-fxc-3`). `windows-fxc-1` logs `Using FXC for shader compilation`, then a 10 s main-thread watchdog hang while naga's HLSL is still being logged, then `FATAL: Windows exception (code=0xC0000374)` (heap corruption) about 59 s in. There is no `X3511` in that log. The PNGs are linear black because the renderer died during compile (`asset-ack-timeout`, renderer exited). This is not a shaded FXC frame. Removing the implicit samples did not produce a usable FXC pipeline on WARP in these three samples.
+
+### Production fix
+
+Not indicated. Arm A is behaviour-preserving on lavapipe and is not a WARP fix. Arm B cannot reach FXC as a bounded loop while wgpu injects the `u32::MAX` countdown. The diff that was run, and should not be treated as the fix, is:
+
+```diff
+--- a/crates/renderide/shaders/modules/lighting/light_cookies.wgsl
++++ b/crates/renderide/shaders/modules/lighting/light_cookies.wgsl
+@@
+-    return textureSample(
++    return textureSampleLevel(
+         rg::light_cookie_2d_atlas,
+         rg::light_cookie_sampler,
+         atlas_cookie_uv(light.cookie_layer, wrap_cookie_uv(uv, light.cookie_reserved)),
++        0.0,
+     ).r;
+```
+
+The point-cookie `textureSample` becomes `textureSampleLevel(..., 0.0)` the same way. The shadow compare becomes `textureSampleCompareLevel` with no extra level argument (naga 30 forces LOD 0).
+
+```diff
+--- a/crates/renderide/shaders/modules/lighting/shadows.wgsl
++++ b/crates/renderide/shaders/modules/lighting/shadows.wgsl
+@@
+-    return textureSampleCompare(
++    return textureSampleCompareLevel(
+         rg::shadow_atlas,
+         rg::shadow_sampler,
+         atlas_uv(shadow_view, local_uv),
+         layer,
+-        compare_depth
++        compare_depth,
+     );
+```
 
 The pipeline DXIL is the `IDxcBlob` from `GetOutput(DXC_OUT_OBJECT)` in `wgpu-hal` `compile_dxc`, stored as `CompiledShader::Dxc` and never written to disk. Capturing it means a debug write of that blob next to the existing HLSL dump inside wgpu-hal, or a D3D12 shader-tracing tool. There is no wgpu 30 device flag that dumps it. Not added here.
 
-## What a later WARP capture still needs
+## FXC's X3570 is `SampleCmp`, and the debug shader has the same call
 
-These three runs already have the PNG channel counts, the linear quadrant means, the flat split, and the settle times. They do not have:
+Run [41202575526](https://github.com/DoubleStyxx/Renderide/actions/runs/41202575526) (`e3e8bb2e`, `WGPU_DX12_COMPILER=fxc`) logs the production fragment `fs_forward_base`. The HLSL FXC compiled is the naga dump in that job's renderer log (`Naga generated shader for "fs_forward_base"`), not the probe's default-options `lit-production.hlsl` (different line numbers). The diagnostic is only this line, repeated for each unroll attempt:
 
-- The DXIL wgpu submitted to WARP. The probe container matches offline `ps_6_7`, but that compile is a second `dxc.exe` on the naga HLSL, not `ID3D12` pipeline DXIL. A device shader model below 6.7 would still differ. Logging `private_caps.shader_model` on the WARP adapter would close that.
-- A DXC-versus-FXC shading pair. FXC never produced a fragment, so a black FXC frame is not evidence about fast-math.
-- Rewrite 2 or a loop-bound / gradient hoist, which are the remaining A/Bs. Do not judge those by SSIM either.
+```text
+raster_material_shader(1278,19-205): warning X3570: gradient instruction used in a loop with varying iteration, attempting to unroll the loop
+raster_material_shader(1605,5-15): error X3511: unable to unroll loop, loop does not appear to terminate in a timely manner (41 iterations) or unrolled loop is too large
+raster_material_shader(2757,5-15): error X3511: forced to unroll loop, but unrolling failed.
+```
+
+Line 1278, columns 19–205, is the `SampleCmp` expression inside `sample_shadow_compare`:
+
+```hlsl
+float _e7_1 = shadow_atlas.SampleCmp(shadow_sampler, float3(_e4, layer), compare_depth);
+```
+
+That is `textureSampleCompare` in `shaders/modules/lighting/shadows.wgsl` (`sample_shadow_compare`). The cookie `Sample` calls are earlier (lines 1019 and 1090) and FXC does not name them. `ddx`/`ddy` of the shading normal are lines 1699–1700, outside these loops.
+
+Line 1605 is `while(true)` in `visibility`, the shadow-view loop, after naga's `uint2(4294967295u, 4294967295u)` countdown. Line 2757 is `while(true)` in `direct_metallic_clustered`, the clustered light loop. FXC tries to unroll both because the inlined `SampleCmp` is a gradient op. The "(41 iterations)" figure is FXC's unroll limit, not a source trip count.
+
+`warp_216_term_debug.wgsl` with `_TERM_DEBUG` calls `shade_metallic_term_debug`. The composed id returns `shade_metallic_clustered`, which calls the same `eval_light` → `cookies::multiplier` / `shadows::visibility`. `dpdx`/`dpdy` stay in `filter_perceptual_roughness`, before the loop. There is no `fwidth`. So the debug composed path contains the same `SampleCmp` in the same dynamic loop. On run [41174993308](https://github.com/DoubleStyxx/Renderide/actions/runs/41174993308) that shader matches llvmpipe within 6.32e-4 on static DXC / WARP, with no channel drop (`216-plan.md`). A gradient in the loop does not by itself break WARP under DXC. Arm A already removed the implicit samples and the black frames stayed (6/9 flat). No further gradient arm.
+
+Arm B stays unbuilt. `force_loop_bounding: true` in wgpu 30 rewrites every loop to `while(true)` plus the `u32::MAX` countdown before FXC sees it, so a WGSL `for (i < 32u)` is not a 32-iteration loop.
+
+Whether FXC also rejects the debug shader is a separate compile. The 8d run used static DXC, not FXC. The rerun branch runs `warp216_negparity_composed` once under `WGPU_DX12_COMPILER=fxc` to record that.
+
+## What production has that the debug composed path does not
+
+Both call `shade_metallic_clustered`. Ranked by what is in the production fragment and not on the debug path:
+
+1. A second copy of the light loop. `fs_forward_base` also calls `shade_metallic_transparent_clustered` when `ALPHAPREMULTIPLY` is set. These cases use variant bits `0`, so the branch is not taken, but the function is still compiled. The debug composed id returns before its own term-split loop; production compiles both lighting entries.
+2. Material `textureSampleBias` (`ts::sample_tex_2d`), including unconditional `_MainTex` and `_OcclusionMap` samples, plus parallax, detail, normal, and emission samples under keyword tests, and `discard` in `clip_standard_alpha`. The debug shader builds `MetallicSurface` from `_Color`, `_Metallic`, `_Glossiness`, and the geometric normal. No material texture, no discard. These three cases have no texture fixtures and bits `0`, so a white texel and occlusion `1` match the sampled values.
+3. Nine extra `@group(1)` textures and the `a2c=cutout` output `vec4(color, s.alpha)`. Debug writes `retain_globals_additive(vec4(color, 1.0))` and one uniform. Alpha of the white default times `_Color.a` is 1 on these cases, so A2C is a weaker suspect than (1) and (2). Not split into its own arm.
+
+Fast-math is independent of that diff. The probe DXIL for this fragment (`ps_6_7`, no `-Gis`) contains 8334 `fast` ops (`fmul fast` 3217, `fadd fast` 1415, `fcmp fast` 1240). `-Od` alone leaves them. wgpu 30's `compile_dxc` passes `-HV 2018`, `-Ges` (`DXC_ARG_ENABLE_STRICTNESS`), and `-no-warnings`. It does not pass `-Gis`.
+
+## Arms after the counter-evidence
+
+| Arm | Branch | Shader / compiler | Why |
+| --- | --- | --- | --- |
+| baseline rerun | `cursor/warp-216-8a-dxc-rerun-4858` | production fragment, static DXC, 3 samples | Flat rate against the 5/9 baseline. One FXC job compiles the debug composed case. |
+| no-premul | `cursor/warp-216-8a-no-premul-4858` | drop `shade_metallic_transparent_clustered` | Bisect (1). Lavapipe should be byte-identical at bits 0. |
+| untextured | `cursor/warp-216-8a-untextured-4858` | `sample_surface` uses uniform color, gloss, geometric normal; no `textureSampleBias`, no `discard` | Bisect (2). Lavapipe should match these three cases. |
+| gis | `cursor/warp-216-8a-gis-4858` | production fragment, patched `wgpu-hal` `compile_dxc` adds `-Gis` and `-Od` | Fast-math off. Sub-branch only. |
+
+Gradient hoist and the bounded loop are not in this set. FXC is not re-run on the bisection or `-Gis` arms: the production pipeline stays invalid there for the same `SampleCmp` (`-Gis` is a DXC flag). Results land in the next section. SSIM is not used.
