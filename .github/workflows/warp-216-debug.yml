@@ -1,9 +1,8 @@
 # Opt-in #216 production-lit codegen arm. Not the default CI suite.
-# Arm A: explicit LOD in the clustered light loop, under static DXC and FXC.
+# Bisect: production fragment without the premultiplied lighting entry.
 #
-# One Linux llvmpipe run and three independent Windows WARP runs. Each run
-# executes negative_light_parity, negative_light_physically_based, and
-# pbs_lit_material_matrix with RENDERIDE_LIT_SHADER_PROBE=1.
+# Static DXC, three WARP samples, plus lavapipe. FXC is omitted: SampleCmp
+# is still in the light loop, so the pipeline stays invalid there.
 # A docs-only commit does not match the path filter, so it does not restart this.
 
 name: WARP 216 debug
@@ -12,7 +11,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - cursor/warp-216-8a-baseline-4858
+      - cursor/warp-216-8a-no-premul-4858
     paths:
       - ".github/workflows/warp-216-debug.yml"
       - ".github/actions/lavapipe/**"
@@ -45,15 +44,6 @@ jobs:
           - os: windows-latest
             label: windows-dxc-3
             dx12_compiler: auto
-          - os: windows-latest
-            label: windows-fxc-1
-            dx12_compiler: fxc
-          - os: windows-latest
-            label: windows-fxc-2
-            dx12_compiler: fxc
-          - os: windows-latest
-            label: windows-fxc-3
-            dx12_compiler: fxc
     env:
       RAYON_NUM_THREADS: "1"
     steps:

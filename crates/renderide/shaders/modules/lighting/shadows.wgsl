@@ -142,15 +142,12 @@ fn atlas_uv(shadow_view: ft::GpuShadowView, local_uv: vec2<f32>) -> vec2<f32> {
 }
 
 fn sample_shadow_compare(shadow_view: ft::GpuShadowView, local_uv: vec2<f32>, layer: i32, compare_depth: f32) -> f32 {
-    // Explicit LOD. `textureSampleCompare` takes implicit derivatives, and `visibility` is called
-    // from the dynamic clustered-light loop. WGSL has no compare-grad form. LOD 0 matches the
-    // unsampled path (`shadow_view_count == 0` returns before this call).
-    return textureSampleCompareLevel(
+    return textureSampleCompare(
         rg::shadow_atlas,
         rg::shadow_sampler,
         atlas_uv(shadow_view, local_uv),
         layer,
-        compare_depth,
+        compare_depth
     );
 }
 

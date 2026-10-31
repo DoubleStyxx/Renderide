@@ -271,15 +271,9 @@ fn fs_forward_base(
         specular_highlights_enabled(),
         glossy_reflections_enabled(),
     );
-    if (alpha_premultiply_enabled()) {
-        return plight::shade_metallic_transparent_clustered(
-            frag_pos.xy,
-            world_pos,
-            view_layer,
-            surface,
-            options,
-        );
-    }
+    // #216 bisect. The debug composed path calls shade_metallic_clustered once.
+    // Variant bits are 0 on the lit cases, so ALPHAPREMULTIPLY is off and this
+    // does not change the color. It drops the second compiled copy of the light loop.
     let color = plight::shade_metallic_clustered(
         frag_pos.xy,
         world_pos,
