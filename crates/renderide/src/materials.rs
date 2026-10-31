@@ -77,6 +77,8 @@ mod cache;
 pub(crate) mod custom_shader;
 pub(crate) mod embedded;
 pub(crate) mod host_data;
+#[cfg(test)]
+mod material_coverage;
 mod material_passes;
 mod null_pipeline;
 mod pipeline_build_error;
