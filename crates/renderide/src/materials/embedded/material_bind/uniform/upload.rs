@@ -190,7 +190,15 @@ fn diag_log_material_bytes(
     dynamic_offset: u32,
     variant_bits: Option<u32>,
 ) {
-    if !crate::gpu::warp_black_diag::frame_log_armed() {
+    let frame_log = crate::gpu::warp_black_diag::frame_log_armed();
+    let bind_probe = crate::gpu::warp_material_bind_probe::armed();
+    if !frame_log && !bind_probe {
+        return;
+    }
+    if bind_probe {
+        crate::gpu::warp_material_bind_probe::note_uniform(stem, dynamic_offset, bytes);
+    }
+    if !frame_log {
         return;
     }
     let fields = layout

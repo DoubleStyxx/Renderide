@@ -361,11 +361,14 @@ fn bind_material_packet_if_changed(
         MaterialGroup1Binding::Empty => {
             rpass.set_bind_group(1, resources.empty_bg, &[]);
             crate::gpu::warp_black_diag::note_group1_binding(false, None);
+            if crate::gpu::warp_material_bind_probe::armed() {
+                crate::gpu::warp_material_bind_probe::note_bind(batch_cursor, None, "empty", 0);
+            }
         }
         MaterialGroup1Binding::Embedded {
+            bind_key,
             bind_group,
             uniform_dynamic_offset,
-            ..
         } => {
             if let Some(offset) = uniform_dynamic_offset {
                 rpass.set_bind_group(1, bind_group.as_ref(), &[*offset]);
@@ -373,6 +376,14 @@ fn bind_material_packet_if_changed(
                 rpass.set_bind_group(1, bind_group.as_ref(), &[]);
             }
             crate::gpu::warp_black_diag::note_group1_binding(true, *uniform_dynamic_offset);
+            if crate::gpu::warp_material_bind_probe::armed() {
+                crate::gpu::warp_material_bind_probe::note_bind(
+                    batch_cursor,
+                    *uniform_dynamic_offset,
+                    &format!("{bind_key:?}"),
+                    std::sync::Arc::as_ptr(bind_group) as usize,
+                );
+            }
         }
     }
     state.bound_batch_cursor = Some(batch_cursor);

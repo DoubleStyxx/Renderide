@@ -77,6 +77,7 @@ fn readback_color_texture(
     crate::gpu::warp_black_diag::log_readback_colors(&tight);
     probe_second_readback(gpu, color_texture, &layout, &tight);
     crate::gpu::warp_light_probe::roundtrip(gpu, gpu.adapter_info());
+    crate::gpu::warp_material_bind_probe::log_summary();
 
     if crate::debug_scene_color::readback_enabled()
         && let Err(err) = super::scene_color_dump::write_scene_color_sidecars(gpu, output_path)

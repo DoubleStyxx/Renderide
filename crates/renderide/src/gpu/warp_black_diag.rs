@@ -198,7 +198,10 @@ pub(crate) fn adapter_is_warp(info: &wgpu::AdapterInfo) -> bool {
 /// Records the selected adapter and, on WARP, arms the distinctive capture clear.
 pub(crate) fn configure_for_adapter(info: &wgpu::AdapterInfo) {
     let warp = adapter_is_warp(info);
-    if warp {
+    // The scene-color readback compares WARP to a black-clear golden. The magenta
+    // probe would dominate those quadrant means, so that capture keeps production black.
+    let debug_readback = crate::debug_scene_color::readback_enabled();
+    if warp && !debug_readback {
         DISTINCTIVE_CLEAR.store(true, Ordering::Release);
     }
     logger::info!(

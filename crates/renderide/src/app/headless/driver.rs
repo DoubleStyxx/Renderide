@@ -74,6 +74,7 @@ impl<'a> HeadlessDriver<'a> {
         );
         crate::gpu::warp_black_diag::arm_frame_log(&params.output_path);
         crate::gpu::warp_light_probe::arm(&params.output_path);
+        crate::gpu::warp_material_bind_probe::arm(&params.output_path);
         crash_context::set_target_mode(TargetMode::Headless);
         crash_context::set_render_mode(RenderMode::Headless);
 
