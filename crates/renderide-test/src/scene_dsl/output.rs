@@ -150,8 +150,18 @@ pub struct EarlyExit {
     pub case: String,
     /// Consecutive flat readbacks required.
     pub k: u32,
-    /// Milliseconds from the start of the capture wait.
+    /// Milliseconds from the start of the capture wait. Settle plus K-window.
     pub elapsed_ms: u64,
+    /// Milliseconds from the wait start to the first settled flat frame.
+    ///
+    /// Zero on reports written before this field existed.
+    #[serde(default)]
+    pub settle_ms: u64,
+    /// Milliseconds from the first settled flat frame to the exit.
+    ///
+    /// Zero on reports written before this field existed.
+    #[serde(default)]
+    pub k_window_ms: u64,
     /// `flat_stable` when K identical settled frames were seen.
     pub reason: String,
 }
@@ -342,6 +352,34 @@ mod tests {
         assert_eq!(json["early_exit"]["case"], "pbs_lit_material_matrix");
         assert_eq!(json["early_exit"]["k"], 3);
         assert_eq!(json["early_exit"]["elapsed_ms"], 12_500);
+        assert_eq!(json["early_exit"]["settle_ms"], 0);
+        assert_eq!(json["early_exit"]["k_window_ms"], 0);
         assert_eq!(json["early_exit"]["reason"], "flat_stable");
+    }
+
+    #[test]
+    fn report_splits_settle_time_from_the_k_window() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let case = crate::scene_dsl::cases::unlit_sphere();
+        let layout = CaseOutputLayout::for_case(dir.path(), &case.name);
+        layout.prepare().expect("prepare");
+        let stats = layout.actual_png.with_file_name(CAPTURE_STATS_FILENAME);
+        std::fs::write(
+            &stats,
+            r#"{"longest_submission_stall_ms":1,"warp_readiness_budget_used":true,"early_exit":{"case":"pbs_lit_material_matrix","k":3,"elapsed_ms":12500,"settle_ms":4000,"k_window_ms":8500,"reason":"flat_stable"}}"#,
+        )
+        .expect("sidecar");
+        let mut report = report_from_error(&case, "boom");
+        write_report(&layout, &mut report).expect("write report");
+        let bytes = std::fs::read(&layout.report_json).expect("read report");
+        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("parse json");
+        assert_eq!(json["early_exit"]["settle_ms"], 4_000);
+        assert_eq!(json["early_exit"]["k_window_ms"], 8_500);
+        assert_eq!(json["early_exit"]["elapsed_ms"], 12_500);
+        assert_eq!(
+            json["early_exit"]["settle_ms"].as_u64().unwrap_or(0)
+                + json["early_exit"]["k_window_ms"].as_u64().unwrap_or(0),
+            12_500
+        );
     }
 }

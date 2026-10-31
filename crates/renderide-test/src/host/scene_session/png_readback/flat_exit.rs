@@ -31,6 +31,13 @@ pub(super) const QUARANTINE_FLAT_BACKSTOP: Duration = Duration::from_secs(60);
 /// `flat_stable` when K identical settled frames were seen.
 pub(super) const FLAT_STABLE_REASON: &str = "flat_stable";
 
+/// Pass to [`flat_exit_budget`] for the ceiling that is not the 60s cap.
+///
+/// [`super::arm_flat_backstop`] uses this until the first settled flat frame.
+/// A frame that is still compiling keeps the full WARP budget. The 60s cap
+/// starts only after that settled frame.
+pub(super) const NOT_THE_FLAT_BACKSTOP: bool = false;
+
 /// Budget for one capture wait.
 ///
 /// `applies` is a quarantined WARP case before the #216 expiry. Anything else
@@ -117,6 +124,34 @@ impl FlatExitWatch {
         self.last_counted_presented = None;
         self.last_pixels = None;
     }
+}
+
+/// Splits a finished wait into settle time and K-window time.
+///
+/// Settle time is the wait start until the first settled flat frame.
+/// K-window time is that frame until the exit. `k_window` is the time since
+/// the first settled flat frame. A window longer than `elapsed` is clamped.
+pub(super) fn split_exit_ms(elapsed: Duration, k_window: Duration) -> (u64, u64) {
+    let elapsed_ms = duration_ms(elapsed);
+    let k_window_ms = duration_ms(k_window).min(elapsed_ms);
+    (elapsed_ms.saturating_sub(k_window_ms), k_window_ms)
+}
+
+/// Log line for a #216 early exit, with settle time and K-window time apart.
+pub(super) fn early_exit_log_line(
+    case_name: &str,
+    k: u32,
+    settle: Duration,
+    k_window: Duration,
+    elapsed: Duration,
+) -> String {
+    format!(
+        "Session: quarantine #216 early exit case={case_name} k={k} settle={settle:?} k_window={k_window:?} elapsed={elapsed:?} reason={FLAT_STABLE_REASON}"
+    )
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Pending 0, GPU-done, and no dropped draws. That is the #216 flat signature.
@@ -272,9 +307,47 @@ mod tests {
             QUARANTINE_FLAT_BACKSTOP
         );
         assert_eq!(
-            flat_exit_budget(false, Duration::from_secs(300), Duration::from_secs(3)),
+            flat_exit_budget(
+                NOT_THE_FLAT_BACKSTOP,
+                Duration::from_secs(300),
+                Duration::from_secs(3)
+            ),
             Duration::from_secs(300)
         );
+    }
+
+    #[test]
+    fn the_pre_settle_ceiling_is_the_full_warp_budget() {
+        let warp = Duration::from_secs(300);
+        let floor = Duration::from_secs(3);
+        assert_eq!(flat_exit_budget(NOT_THE_FLAT_BACKSTOP, warp, floor), warp);
+        assert_eq!(
+            flat_exit_budget(true, warp, floor),
+            QUARANTINE_FLAT_BACKSTOP
+        );
+    }
+
+    #[test]
+    fn settle_time_and_k_window_split_the_wait() {
+        let elapsed = Duration::from_millis(12_500);
+        let k_window = Duration::from_millis(8_500);
+        assert_eq!(split_exit_ms(elapsed, k_window), (4_000, 8_500));
+        assert_eq!(split_exit_ms(elapsed, Duration::ZERO), (12_500, 0));
+        assert_eq!(split_exit_ms(elapsed, Duration::from_secs(30)), (0, 12_500));
+        let (settle_ms, k_window_ms) = split_exit_ms(elapsed, k_window);
+        let line = early_exit_log_line(
+            "pbs_lit_material_matrix",
+            QUARANTINE_FLAT_READBACKS,
+            Duration::from_millis(settle_ms),
+            Duration::from_millis(k_window_ms),
+            elapsed,
+        );
+        assert!(line.contains("case=pbs_lit_material_matrix"), "{line}");
+        assert!(line.contains("k=3"), "{line}");
+        assert!(line.contains("settle=4s"), "{line}");
+        assert!(line.contains("k_window=8.5s"), "{line}");
+        assert!(line.contains("elapsed=12.5s"), "{line}");
+        assert!(line.contains("reason=flat_stable"), "{line}");
     }
 
     #[test]
