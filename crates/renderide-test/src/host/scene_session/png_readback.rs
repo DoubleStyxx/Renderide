@@ -234,6 +234,7 @@ fn rgba8_image(output: &png::OutputInfo, buf: &[u8]) -> Option<image::RgbaImage>
 struct DecodedFrame {
     readiness: FrameReadiness,
     pending_text: Option<String>,
+    image: Option<image::RgbaImage>,
 }
 
 fn read_frame_readiness(path: &Path) -> DecodedFrame {
@@ -249,18 +250,20 @@ fn read_frame_readiness(path: &Path) -> DecodedFrame {
         .text(SUBMIT_STALL_TEXT_KEYWORD)
         .and_then(|text| text.trim().parse::<u64>().ok())
         .unwrap_or(0);
+    let flat = decoded
+        .image
+        .as_ref()
+        .is_some_and(crate::golden::is_flat_image);
     DecodedFrame {
         readiness: FrameReadiness {
             gpu_done,
             pending,
             dropped_draws,
-            flat: decoded
-                .image
-                .as_ref()
-                .is_some_and(crate::golden::is_flat_image),
+            flat,
             stall_ms,
         },
         pending_text,
+        image: decoded.image,
     }
 }
 
@@ -298,10 +301,12 @@ pub(super) fn run_lockstep_until_png_stable(
             .unwrap_or(wait_started),
         decided: false,
         used: false,
+        flat_backstop: false,
         deadline: wait_started + wait_timing.overall_timeout.max(deadline_floor),
     };
     let mut progress = CaptureProgress::default();
     let mut settle = GpuFrameSettle::default();
+    let case_name = case_name_from_output(output_path);
     let mut stats = CaptureStatsWriter::new(
         output_path.with_file_name(crate::scene_dsl::output::CAPTURE_STATS_FILENAME),
     );
@@ -312,6 +317,14 @@ pub(super) fn run_lockstep_until_png_stable(
             &wait_timing,
             wait_started,
             deadline_floor,
+            &mut warp,
+        );
+        progress.flat_armed = arm_flat_backstop(
+            &case_name,
+            &wait_timing,
+            wait_started,
+            deadline_floor,
+            &progress,
             &mut warp,
         );
         stats.sync(settle.longest_stall_ms(), warp.used);
@@ -333,7 +346,7 @@ pub(super) fn run_lockstep_until_png_stable(
             state.observe(now, read_png_observation(output_path)),
             PngStabilityVerdict::Stable
         ) {
-            if settle_stable_frame(
+            match settle_stable_frame(
                 output_path,
                 &wait_timing,
                 &mut state,
@@ -342,28 +355,33 @@ pub(super) fn run_lockstep_until_png_stable(
                 &mut stats,
                 warp.used,
             ) {
-                return Ok(SceneSessionOutcome {
-                    png_path: output_path.to_path_buf(),
-                });
+                StableStep::Accept => {
+                    return Ok(SceneSessionOutcome {
+                        png_path: output_path.to_path_buf(),
+                    });
+                }
+                StableStep::EarlyExit => {
+                    return finish_flat_early_exit(
+                        output_path,
+                        &case_name,
+                        wait_started,
+                        &settle,
+                        &mut stats,
+                        warp.used,
+                        &progress,
+                    );
+                }
+                StableStep::Continue => {}
             }
             std::thread::sleep(timing::POLL_INTERVAL);
             continue;
         }
 
-        if last_log_at.elapsed() >= timing::LOG_INTERVAL {
-            let now = Instant::now();
-            logger::info!(
-                "Session: still waiting for fresh PNG (elapsed={:?}, scene_window_open={}, last_mtime={:?})",
-                wait_timing.scene_submit_instant.elapsed(),
-                state.render_window_open(now),
-                state.last_seen_mtime()
-            );
-            last_log_at = now;
-        }
+        log_still_waiting(&mut last_log_at, &wait_timing, &state);
         std::thread::sleep(timing::POLL_INTERVAL);
     }
 
-    let wait = reported_wait(wait_timing.overall_timeout, warp.used, deadline_floor);
+    let wait = capture_wait(&warp, wait_started, &wait_timing, deadline_floor);
     stats.sync(settle.longest_stall_ms(), warp.used);
     timeout_outcome(
         output_path,
@@ -386,11 +404,26 @@ struct CaptureProgress {
     compiling_or_skipped_logged: bool,
     gpu_not_done_logged: bool,
     settle_hold_logged: bool,
+    /// The #216 flat-frame counter is active for this wait.
+    flat_armed: bool,
+    /// First settled flat frame. The 60s backstop is measured from here.
+    settled_flat_at: Option<Instant>,
+    flat_watch: flat_exit::FlatExitWatch,
     last_observed: Option<ObservedSettleState>,
     chunks: ObservedChunks,
 }
 
-/// Returns true when this stable PNG is the settled capture.
+/// What one stable PNG does to the capture wait.
+enum StableStep {
+    /// This frame is not the capture. Keep polling.
+    Continue,
+    /// Two settled non-flat frames were accepted.
+    Accept,
+    /// K identical settled flat readbacks ended a #216 wait.
+    EarlyExit,
+}
+
+/// Returns how this stable PNG affects the capture.
 fn settle_stable_frame(
     output_path: &Path,
     wait_timing: &PngStabilityWaitTiming,
@@ -399,10 +432,10 @@ fn settle_stable_frame(
     settle: &mut GpuFrameSettle,
     stats: &mut CaptureStatsWriter,
     warp_used: bool,
-) -> bool {
+) -> StableStep {
     let Some(mtime) = state.last_seen_mtime() else {
         state.reject_candidate();
-        return false;
+        return StableStep::Continue;
     };
     let decoded = read_frame_readiness(output_path);
     let _ = note_stable_frame(
@@ -422,20 +455,38 @@ fn settle_stable_frame(
         progress,
     );
     stats.sync(settle.longest_stall_ms(), warp_used);
+    if flat_exit::frame_is_settled(&decoded.readiness)
+        && decoded
+            .image
+            .as_ref()
+            .is_some_and(crate::golden::is_flat_image)
+        && progress.settled_flat_at.is_none()
+    {
+        progress.settled_flat_at = Some(Instant::now());
+    }
+    if progress.flat_armed
+        && progress.flat_watch.observe(
+            mtime,
+            flat_exit::frame_is_settled(&decoded.readiness),
+            decoded.image.as_ref(),
+        ) == flat_exit::FlatExit::Exit
+    {
+        return StableStep::EarlyExit;
+    }
     if decision == SettleDecision::Accept {
         logger::info!(
             "Session: fresh PNG stabilized at {} after {:?}",
             output_path.display(),
             wait_timing.scene_submit_instant.elapsed()
         );
-        return true;
+        return StableStep::Accept;
     }
     if decision == SettleDecision::Hold && !progress.settle_hold_logged {
         logger::info!("Session: GPU-completed frame recorded; waiting for a later settled frame");
         progress.settle_hold_logged = true;
     }
     state.reject_candidate();
-    false
+    StableStep::Continue
 }
 
 fn timeout_outcome(
@@ -446,23 +497,13 @@ fn timeout_outcome(
     flat_candidate_seen: bool,
     last_observed: Option<ObservedSettleState>,
 ) -> Result<SceneSessionOutcome, HarnessError> {
-    let (frame_pending, gpu_done, dropped_draws) = match last_observed {
-        Some(observed) => (observed.pending, observed.gpu_done, observed.dropped_draws),
-        None => (None, false, None),
-    };
     match classify_capture_timeout(chunks, pending_pipeline_seen, flat_candidate_seen) {
-        CaptureTimeout::FlatOrUnstable => Err(HarnessError::FlatOrUnstableFrame {
-            path: PathBuf::from(output_path),
+        CaptureTimeout::FlatOrUnstable => Err(flat_or_unstable_error(
+            output_path,
             wait,
-            last_pending: chunks.last_pending.unwrap_or(0),
-            ready_chunks: chunks.ready,
-            pending_chunks: chunks.pending,
-            missing_chunks: chunks.missing,
-            frame_count: chunks.frames,
-            frame_pending,
-            gpu_done,
-            dropped_draws,
-        }),
+            chunks,
+            last_observed,
+        )),
         CaptureTimeout::PipelineNotReady => Err(HarnessError::PipelineNotReady {
             path: PathBuf::from(output_path),
             wait,
@@ -481,11 +522,37 @@ fn timeout_outcome(
     }
 }
 
+fn flat_or_unstable_error(
+    output_path: &Path,
+    wait: Duration,
+    chunks: &ObservedChunks,
+    last_observed: Option<ObservedSettleState>,
+) -> HarnessError {
+    let (frame_pending, gpu_done, dropped_draws) = match last_observed {
+        Some(observed) => (observed.pending, observed.gpu_done, observed.dropped_draws),
+        None => (None, false, None),
+    };
+    HarnessError::FlatOrUnstableFrame {
+        path: PathBuf::from(output_path),
+        wait,
+        last_pending: chunks.last_pending.unwrap_or(0),
+        ready_chunks: chunks.ready,
+        pending_chunks: chunks.pending,
+        missing_chunks: chunks.missing,
+        frame_count: chunks.frames,
+        frame_pending,
+        gpu_done,
+        dropped_draws,
+    }
+}
+
 /// Deadline state for one capture wait. WARP extends it once, from `wait_started`.
 struct WarpBudgetWatch {
     last_check: Instant,
     decided: bool,
     used: bool,
+    /// This wait is a quarantined WARP case still inside the #216 expiry.
+    flat_backstop: bool,
     deadline: Instant,
 }
 
@@ -650,6 +717,7 @@ struct CaptureStatsWriter {
     path: PathBuf,
     longest_submission_stall_ms: u64,
     warp_readiness_budget_used: bool,
+    early_exit: Option<crate::scene_dsl::output::EarlyExit>,
 }
 
 impl CaptureStatsWriter {
@@ -658,7 +726,12 @@ impl CaptureStatsWriter {
             path,
             longest_submission_stall_ms: 0,
             warp_readiness_budget_used: false,
+            early_exit: None,
         }
+    }
+
+    fn set_early_exit(&mut self, early_exit: crate::scene_dsl::output::EarlyExit) {
+        self.early_exit = Some(early_exit);
     }
 
     fn sync(&mut self, stall_ms: u64, warp_budget_used: bool) {
@@ -669,10 +742,18 @@ impl CaptureStatsWriter {
 
 impl Drop for CaptureStatsWriter {
     fn drop(&mut self) {
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "longest_submission_stall_ms": self.longest_submission_stall_ms,
             "warp_readiness_budget_used": self.warp_readiness_budget_used,
         });
+        if let Some(early_exit) = &self.early_exit {
+            payload["early_exit"] = serde_json::json!({
+                "case": early_exit.case,
+                "k": early_exit.k,
+                "elapsed_ms": early_exit.elapsed_ms,
+                "reason": early_exit.reason,
+            });
+        }
         let Ok(json) = serde_json::to_string_pretty(&payload) else {
             return;
         };
@@ -746,6 +827,106 @@ fn classify_capture_timeout(
     }
     CaptureTimeout::Missing
 }
+
+fn log_still_waiting(
+    last_log_at: &mut Instant,
+    wait_timing: &PngStabilityWaitTiming,
+    state: &PngStabilityState,
+) {
+    if last_log_at.elapsed() < timing::LOG_INTERVAL {
+        return;
+    }
+    let now = Instant::now();
+    logger::info!(
+        "Session: still waiting for fresh PNG (elapsed={:?}, scene_window_open={}, last_mtime={:?})",
+        wait_timing.scene_submit_instant.elapsed(),
+        state.render_window_open(now),
+        state.last_seen_mtime()
+    );
+    *last_log_at = now;
+}
+
+fn capture_wait(
+    warp: &WarpBudgetWatch,
+    wait_started: Instant,
+    wait_timing: &PngStabilityWaitTiming,
+    deadline_floor: Duration,
+) -> Duration {
+    if warp.flat_backstop {
+        wait_started.elapsed().max(deadline_floor)
+    } else {
+        reported_wait(wait_timing.overall_timeout, warp.used, deadline_floor)
+    }
+}
+
+fn arm_flat_backstop(
+    case_name: &str,
+    wait_timing: &PngStabilityWaitTiming,
+    wait_started: Instant,
+    deadline_floor: Duration,
+    progress: &CaptureProgress,
+    warp: &mut WarpBudgetWatch,
+) -> bool {
+    let applies =
+        warp.used && crate::scene_dsl::early_flat_exit_applies(case_name, true, SystemTime::now());
+    if !applies {
+        return false;
+    }
+    let Some(started) = progress.settled_flat_at else {
+        return true;
+    };
+    let warp_cap = wait_started
+        + flat_exit::flat_exit_budget(
+            false,
+            gpu_ready::warp_readiness_budget(true, wait_timing.overall_timeout),
+            deadline_floor,
+        );
+    let backstop = started + flat_exit::QUARANTINE_FLAT_BACKSTOP;
+    warp.deadline = backstop.min(warp_cap);
+    warp.flat_backstop = true;
+    true
+}
+
+fn finish_flat_early_exit(
+    output_path: &Path,
+    case_name: &str,
+    wait_started: Instant,
+    settle: &GpuFrameSettle,
+    stats: &mut CaptureStatsWriter,
+    warp_used: bool,
+    progress: &CaptureProgress,
+) -> Result<SceneSessionOutcome, HarnessError> {
+    let elapsed = wait_started.elapsed();
+    logger::info!(
+        "Session: quarantine #216 early exit case={case_name} k={} elapsed={elapsed:?} reason={}",
+        flat_exit::QUARANTINE_FLAT_READBACKS,
+        flat_exit::FLAT_STABLE_REASON
+    );
+    stats.set_early_exit(crate::scene_dsl::output::EarlyExit {
+        case: case_name.to_string(),
+        k: flat_exit::QUARANTINE_FLAT_READBACKS,
+        elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+        reason: flat_exit::FLAT_STABLE_REASON.to_string(),
+    });
+    stats.sync(settle.longest_stall_ms(), warp_used);
+    Err(flat_or_unstable_error(
+        output_path,
+        elapsed,
+        &progress.chunks,
+        progress.last_observed,
+    ))
+}
+
+fn case_name_from_output(output_path: &Path) -> String {
+    output_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+mod flat_exit;
 
 #[cfg(test)]
 mod tests;
