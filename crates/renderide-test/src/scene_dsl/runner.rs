@@ -168,7 +168,12 @@ fn template_requests_physically_based(template: &SessionTemplate) -> bool {
 }
 
 fn template_requests_scene_color_readback(template: &SessionTemplate) -> bool {
-    matches!(template, SessionTemplate::Warp216Debug { .. })
+    match template {
+        SessionTemplate::Warp216Debug { .. }
+        | SessionTemplate::PbsLitMaterialMatrix
+        | SessionTemplate::NegativeLightPair { .. } => true,
+        _ => false,
+    }
 }
 
 fn drive_template(cfg: HostHarnessConfig) -> Result<(), HarnessError> {
@@ -432,6 +437,30 @@ fn plain_capture_failure(case: &IntegrationCase, layout: &CaseOutputLayout) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quarantined_lit_cases_request_scene_color_readback() {
+        assert!(template_requests_scene_color_readback(
+            &SessionTemplate::PbsLitMaterialMatrix
+        ));
+        assert!(template_requests_scene_color_readback(
+            &SessionTemplate::NegativeLightPair {
+                physically_based: false,
+                include_negative: true,
+                negative_color: false,
+            }
+        ));
+        assert!(template_requests_scene_color_readback(
+            &SessionTemplate::NegativeLightPair {
+                physically_based: true,
+                include_negative: true,
+                negative_color: true,
+            }
+        ));
+        assert!(!template_requests_scene_color_readback(
+            &SessionTemplate::Sphere
+        ));
+    }
 
     fn non_flat_image() -> image::RgbaImage {
         let mut img = image::RgbaImage::new(8, 8);
