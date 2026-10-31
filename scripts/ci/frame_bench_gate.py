@@ -44,6 +44,12 @@ Decision rule:
    the absolute floor. Pooled (first pass + confirm) delta and p-value are still computed and
    reported as secondary figures; pooled significance alone never FAILs, and a short confirm
    (n<12 on either side) never FAILs. There is no spread term anywhere.
+   Base-drift guard: if the confirm-round base median drifts more than `BASE_DRIFT_PCT` (15%)
+   from the first-pass base median (absolute relative percent), the scenario is
+   `INCONCLUSIVE (base drift)` and the workflow runs ONE extra reversed confirm round.
+   A second drifting (or still-inconclusive) round FAILS closed as
+   `FAIL (inconclusive: base drift)` — never a silent pass. A clean extra round is decided
+   on that round's confirm-only result alone (`deciding_round` recorded).
 3. No confirm (`confirm_rounds=0`): the workflow runs the first pass with
    `--flag-threshold` set to the fail threshold, so a scenario fails only when its first-pass
    `delta > fail_threshold`. A delta between the two thresholds PASSES: it is below the
@@ -78,6 +84,8 @@ Rows:
 - `FAIL (confirm-only)` (confirm mode): confirm-only regression (n>=12) above the fail bar
   with Mann-Whitney p < alpha. Pooled figures are reported on the row but do not decide FAIL.
 - `ok (confirm n<12)`: confirm-only looked like a regression but a side had fewer than 12 samples.
+- `INCONCLUSIVE (base drift)`: confirm base median drifted >15% vs first-pass base; needs one extra confirm round (not a pass).
+- `FAIL (inconclusive: base drift)`: extra confirm also drifted (or remained inconclusive); fail-closed.
 - `base N/A`: scenario measured on head, not defined on base. Never fails.
 - `head N/A, skipped`: scenario requested but not defined on head (`--head-missing`). Never fails.
 
@@ -128,6 +136,12 @@ class Row:
     confirm_p: float | None = None
     confirm_n_base: int = 0
     confirm_n_head: int = 0
+    # Absolute relative %: |confirm_base_med - first_base_med| / first_base_med * 100.
+    base_drift_pct: float | None = None
+    # Which confirm attempt produced this row (1 = first confirm, 2 = extra after drift).
+    confirm_round: int = 1
+    # Which confirm round's confirm-only result decides PASS/FAIL (None if inconclusive).
+    deciding_round: int | None = None
 
 
 class InputError(ValueError):
@@ -333,6 +347,19 @@ def _significant_regression(
 
 # Confirm path requires at least this many samples per side (bench-pr RUNS=12).
 CONFIRM_MIN_N = 12
+# Absolute relative %: |confirm_base_med - first_base_med| / first_base_med * 100.
+BASE_DRIFT_PCT = 15.0
+
+
+def base_drift_percent(first_base: list[float], confirm_base: list[float]) -> float | None:
+    """Absolute relative drift of confirm-base median vs first-pass base median, in percent."""
+    if not first_base or not confirm_base:
+        return None
+    fb = statistics.median(first_base)
+    if fb <= 0:
+        return None
+    cb = statistics.median(confirm_base)
+    return abs(cb - fb) / fb * 100.0
 
 
 def evaluate_confirm(
@@ -345,11 +372,18 @@ def evaluate_confirm(
     alpha: float = DEFAULT_ALPHA,
     abs_floor_ms: float = DEFAULT_ABS_FLOOR_MS,
     confirm_min_n: int = CONFIRM_MIN_N,
+    drift_threshold: float = BASE_DRIFT_PCT,
+    fail_closed_drift: bool = False,
+    confirm_round: int = 1,
 ) -> list[Row]:
     """Confirm: FAIL only when confirm-only is significant with n>=confirm_min_n per side.
 
     Pooled delta/p are reported on the row (secondary) but never decide FAIL. A confirm-only
     regression with fewer than confirm_min_n samples on either side is `ok (confirm n<12)`.
+
+    Base drift: if confirm-base median drifts more than `drift_threshold` % from the first-pass
+    base median, status is `INCONCLUSIVE (base drift)` (or `FAIL (inconclusive: base drift)` when
+    `fail_closed_drift` is set — used for the extra confirm attempt). Drifting rows never pass.
     """
     pooled_base = {k: list(v) for k, v in first_base.items()}
     pooled_head = {k: list(v) for k, v in first_head.items()}
@@ -364,29 +398,64 @@ def evaluate_confirm(
             b, h, fail_threshold, alpha, abs_floor_ms
         )
         cb, ch = confirm_base.get(name) or [], confirm_head.get(name) or []
+        fb_samples = first_base.get(name) or []
+        drift = base_drift_percent(fb_samples, cb)
         c_delta, c_p, confirm_sig, confirm_floor = _significant_regression(
             cb, ch, fail_threshold, alpha, abs_floor_ms
         )
         n_ok = len(cb) >= confirm_min_n and len(ch) >= confirm_min_n
+        drifted = drift is not None and drift > drift_threshold
+        deciding: int | None
         if delta is None:
             status = "n/a"
+            deciding = None
+        elif drifted:
+            status = (
+                "FAIL (inconclusive: base drift)"
+                if fail_closed_drift
+                else "INCONCLUSIVE (base drift)"
+            )
+            deciding = None
         elif confirm_sig and n_ok:
             status = "FAIL (confirm-only)"
+            deciding = confirm_round
         elif confirm_sig and not n_ok:
             status = "ok (confirm n<12)"
+            deciding = confirm_round
         elif confirm_floor and n_ok:
             status = "ok (abs floor)"
+            deciding = confirm_round
         else:
             status = "ok"
+            deciding = confirm_round
         rows.append(
-            Row(name, statistics.median(b), statistics.median(h), delta, p_value, len(b), len(h), status,
-                c_delta, c_p, len(cb), len(ch))
+            Row(
+                name,
+                statistics.median(b),
+                statistics.median(h),
+                delta,
+                p_value,
+                len(b),
+                len(h),
+                status,
+                c_delta,
+                c_p,
+                len(cb),
+                len(ch),
+                drift,
+                confirm_round,
+                deciding,
+            )
         )
     return _order(rows)
 
 
 def is_failure(status: str) -> bool:
-    return status.startswith("FAIL") or status == "FLAG"
+    return status.startswith("FAIL") or status == "FLAG" or status.startswith("INCONCLUSIVE")
+
+
+def is_inconclusive_drift(status: str) -> bool:
+    return status.startswith("INCONCLUSIVE (base drift)")
 
 
 def decide(
@@ -399,12 +468,17 @@ def decide(
     alpha: float = DEFAULT_ALPHA,
     abs_floor_ms: float = DEFAULT_ABS_FLOOR_MS,
     confirm_min_n: int = CONFIRM_MIN_N,
+    confirm_base_2: list[list[float]] | None = None,
+    confirm_head_2: list[list[float]] | None = None,
+    drift_threshold: float = BASE_DRIFT_PCT,
 ) -> str:
     """Whole-gate decision for one scenario, as the workflow runs it: `pass` or `fail`.
 
     `confirm_base` / `confirm_head` are the confirm rounds. Empty means `confirm_rounds=0`:
     then the first pass runs at the fail threshold (a delta between the two thresholds passes).
     Confirm FAIL requires confirm-only significance with at least `confirm_min_n` samples per side.
+    On base drift, an optional second confirm round (`confirm_base_2` / `confirm_head_2`) is
+    evaluated fail-closed; without it, drift fails closed.
     """
     if not confirm_base and not confirm_head:
         first = evaluate_first({"s": first_base}, {"s": first_head}, fail_threshold, [], abs_floor_ms)[0]
@@ -416,7 +490,19 @@ def decide(
         {"s": first_base}, {"s": first_head},
         {"s": [v for run in confirm_base for v in run]}, {"s": [v for run in confirm_head for v in run]},
         fail_threshold, [], alpha, abs_floor_ms, confirm_min_n,
+        drift_threshold=drift_threshold, fail_closed_drift=False, confirm_round=1,
     )[0]
+    if is_inconclusive_drift(row.status):
+        if confirm_base_2 is None or confirm_head_2 is None:
+            return "fail"
+        row2 = evaluate_confirm(
+            {"s": first_base}, {"s": first_head},
+            {"s": [v for run in confirm_base_2 for v in run]},
+            {"s": [v for run in confirm_head_2 for v in run]},
+            fail_threshold, [], alpha, abs_floor_ms, confirm_min_n,
+            drift_threshold=drift_threshold, fail_closed_drift=True, confirm_round=2,
+        )[0]
+        return "fail" if is_failure(row2.status) else "pass"
     return "fail" if row.status.startswith("FAIL") else "pass"
 
 
@@ -451,18 +537,23 @@ def render(
         lines += [
             "Gate: cpu_frame_ms.p95 (median of per-run p95). Confirm: FAIL only when confirm-rounds-only "
             f"delta > {fail_threshold:g}% AND one-sided Mann-Whitney U p < {alpha:g} (head slower) with "
-            f"n>={CONFIRM_MIN_N} samples per side. Pooled delta/p are reported but do not decide FAIL."
+            f"n>={CONFIRM_MIN_N} samples per side. Pooled delta/p are reported but do not decide FAIL. "
+            f"Confirm-base median drift > {BASE_DRIFT_PCT:g}% vs first-pass base → inconclusive "
+            "(one extra confirm; second drift fails closed as inconclusive: base drift)."
             + floor_text,
             "",
             "| scenario | base p95 ms | head p95 ms | pooled delta | pooled runs base/head | pooled MW p "
-            "| confirm-only delta | confirm runs base/head | confirm-only MW p | status |",
-            "|---|---|---|---|---|---|---|---|---|---|",
+            "| confirm-only delta | confirm runs base/head | confirm-only MW p | base drift % "
+            "| confirm round | deciding round | status |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
         ]
         for r in rows:
+            drift_s = "n/a" if r.base_drift_pct is None else f"{r.base_drift_pct:.2f}%"
+            dec_s = "n/a" if r.deciding_round is None else str(r.deciding_round)
             lines.append(
                 f"| {r.scenario} | {fmt_ms(r.base)} | {fmt_ms(r.head)} | {fmt_pct(r.delta)} | {r.n_base}/{r.n_head} "
                 f"| {fmt_p(r.p_value)} | {fmt_pct(r.confirm_delta)} | {r.confirm_n_base}/{r.confirm_n_head} "
-                f"| {fmt_p(r.confirm_p)} | {r.status} |"
+                f"| {fmt_p(r.confirm_p)} | {drift_s} | {r.confirm_round} | {dec_s} | {r.status} |"
             )
     else:
         lines += [
@@ -500,6 +591,22 @@ def main(argv: list[str] | None = None) -> int:
         help="deprecated alias of --fail-threshold; lowers --flag-threshold to it if larger",
     )
     parser.add_argument("--mode", choices=("first", "confirm"), default="first", help="first pass or confirm")
+    parser.add_argument(
+        "--fail-closed-drift",
+        action="store_true",
+        help="confirm: treat base drift as FAIL (inconclusive: base drift) instead of INCONCLUSIVE",
+    )
+    parser.add_argument(
+        "--confirm-round",
+        type=int,
+        default=1,
+        help="confirm attempt number recorded on rows (1=first confirm, 2=extra after drift)",
+    )
+    parser.add_argument(
+        "--drift-out",
+        type=Path,
+        help="confirm mode: write scenario names with INCONCLUSIVE (base drift), one per line",
+    )
     parser.add_argument("--alpha", type=float, default=DEFAULT_ALPHA, help="confirm: Mann-Whitney one-sided level")
     parser.add_argument(
         "--abs-floor-ms",
@@ -559,6 +666,8 @@ def main(argv: list[str] | None = None) -> int:
         rows = evaluate_confirm(
             base, head, confirm_base, confirm_head, args.fail_threshold, args.head_missing, args.alpha,
             args.abs_floor_ms,
+            fail_closed_drift=args.fail_closed_drift,
+            confirm_round=args.confirm_round,
         )
     else:
         rows = evaluate_first(base, head, args.flag_threshold, args.head_missing, args.abs_floor_ms)
@@ -570,6 +679,9 @@ def main(argv: list[str] | None = None) -> int:
     hit = [row.scenario for row in rows if is_failure(row.status)]
     if args.suspects_out is not None:
         args.suspects_out.write_text("".join(f"{name}\n" for name in hit), encoding="utf-8")
+    if args.drift_out is not None:
+        drifted = [row.scenario for row in rows if is_inconclusive_drift(row.status)]
+        args.drift_out.write_text("".join(f"{name}\n" for name in drifted), encoding="utf-8")
     if args.json_out is not None:
         payload = {
             "schema": "frame-bench-gate/1",
@@ -578,6 +690,8 @@ def main(argv: list[str] | None = None) -> int:
             "fail_threshold": args.fail_threshold,
             "alpha": args.alpha,
             "abs_floor_ms": args.abs_floor_ms,
+            "base_drift_pct_threshold": BASE_DRIFT_PCT,
+            "confirm_round": args.confirm_round if args.mode == "confirm" else None,
             "rows": [
                 {
                     "scenario": r.scenario,
@@ -591,6 +705,9 @@ def main(argv: list[str] | None = None) -> int:
                     "confirm_p": r.confirm_p,
                     "confirm_n_base": r.confirm_n_base,
                     "confirm_n_head": r.confirm_n_head,
+                    "base_drift_pct": r.base_drift_pct,
+                    "confirm_round": r.confirm_round,
+                    "deciding_round": r.deciding_round,
                     "status": r.status,
                 }
                 for r in rows
