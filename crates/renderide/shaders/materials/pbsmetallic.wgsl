@@ -6,9 +6,14 @@
 //! this render path has one forward color target, not shadow-map, G-buffer, or lightmapping targets.
 //!
 //! Froox variant bits populate `_RenderideVariantBits`; this shader decodes PBSMetallic's
-//! shader-specific keyword bits locally.
+//! shader-specific keyword bits locally. `_ALPHAPREMULTIPLY_ON` is the one compile-time keyword
+//! (`//#keyword`, the same naga-oil shader def as custom materials and `MULTIVIEW`). Bit 1 still
+//! selects it. The opaque target contains only `shade_metallic_clustered`. The premultiply target
+//! contains only `shade_metallic_transparent_clustered`. Blend stays host `_SrcBlend`/`_DstBlend`
+//! (Unity One / OneMinusSrcAlpha) and the material render queue stays Transparent (3000).
 
 
+//#keyword _ALPHAPREMULTIPLY_ON
 //#texture_default _MainTex white
 //#texture_default _MetallicGlossMap white
 //#texture_default _BumpMap bump
@@ -114,10 +119,6 @@ fn pbs_kw(mask: u32) -> bool {
 
 fn alpha_test_enabled() -> bool {
     return pbs_kw(PBSMETALLIC_KW_ALPHATEST_ON);
-}
-
-fn alpha_premultiply_enabled() -> bool {
-    return pbs_kw(PBSMETALLIC_KW_ALPHAPREMULTIPLY_ON);
 }
 
 fn specular_highlights_enabled() -> bool {
@@ -271,15 +272,15 @@ fn fs_forward_base(
         specular_highlights_enabled(),
         glossy_reflections_enabled(),
     );
-    if (alpha_premultiply_enabled()) {
-        return plight::shade_metallic_transparent_clustered(
-            frag_pos.xy,
-            world_pos,
-            view_layer,
-            surface,
-            options,
-        );
-    }
+#ifdef _ALPHAPREMULTIPLY_ON
+    return plight::shade_metallic_transparent_clustered(
+        frag_pos.xy,
+        world_pos,
+        view_layer,
+        surface,
+        options,
+    );
+#else
     let color = plight::shade_metallic_clustered(
         frag_pos.xy,
         world_pos,
@@ -288,4 +289,5 @@ fn fs_forward_base(
         options,
     );
     return vec4<f32>(color, s.alpha);
+#endif
 }

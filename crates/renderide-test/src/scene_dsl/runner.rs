@@ -227,6 +227,9 @@ fn prepare_template(
         CaseTemplate::PbsLitMaterialMatrix => Ok(PreparedTemplate {
             session_template: SessionTemplate::PbsLitMaterialMatrix,
         }),
+        CaseTemplate::PbsMetallicPremultiply => Ok(PreparedTemplate {
+            session_template: SessionTemplate::PbsMetallicPremultiply,
+        }),
         CaseTemplate::AlphaCutoutMaskedQuads => {
             let mask = alpha_rings_rgba(256, 256);
             save_rgba(&mask, &layout.root.join("alpha_mask_texture.png"))?;

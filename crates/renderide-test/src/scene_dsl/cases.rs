@@ -55,6 +55,8 @@ pub enum CaseTemplate {
     MultiPrimitiveUnlitGrid,
     /// Four PBS metallic spheres that vary color, metallic, glossiness, and regular lights.
     PbsLitMaterialMatrix,
+    /// One premultiplied PBS metallic sphere (`_ALPHAPREMULTIPLY_ON`, blend One/OneMinusSrcAlpha, queue 3000).
+    PbsMetallicPremultiply,
     /// Overlapping alpha-test quads using a generated binary mask texture and scalar cutoff.
     AlphaCutoutMaskedQuads,
     /// Optional textured static mesh imported from a GLB fixture.
@@ -180,6 +182,21 @@ pub fn pbs_lit_material_matrix() -> IntegrationCase {
             tolerance
         },
         template: CaseTemplate::PbsLitMaterialMatrix,
+    }
+}
+
+/// Premultiplied PBS metallic sphere. The variant bit, blend factors, and render queue match
+/// Unity Standard's Transparent mode (`_ALPHAPREMULTIPLY_ON`, One / OneMinusSrcAlpha, queue 3000).
+pub fn pbs_metallic_premultiply() -> IntegrationCase {
+    IntegrationCase {
+        name: "pbs_metallic_premultiply".to_string(),
+        description:
+            "One PBS metallic sphere with _ALPHAPREMULTIPLY_ON, Blend One OneMinusSrcAlpha, ZWrite off, and render queue 3000."
+                .to_string(),
+        golden_path: default_goldens_dir().join("pbs_metallic_premultiply.png"),
+        resolution: (256, 256),
+        tolerance: visual_tolerance(0.78, 56, 0.22, 18, 24, 0.06),
+        template: CaseTemplate::PbsMetallicPremultiply,
     }
 }
 
@@ -451,6 +468,7 @@ pub fn registry() -> Vec<IntegrationCase> {
         torus_unlit_perlin(),
         multi_primitive_unlit_grid(),
         pbs_lit_material_matrix(),
+        pbs_metallic_premultiply(),
         negative_light_parity(),
         negative_light_physically_based(),
         negative_color_physically_based(),
