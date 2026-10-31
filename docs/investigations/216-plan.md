@@ -23,7 +23,7 @@ Gauge's frame gate passed in run [41229982534](https://github.com/DoubleStyxx/Re
 
 Follow-up: a `pbsspecular.wgsl` single-light-loop split in a separate PR, with its own WARP ×3 check.
 
-Master confirmation: the first master CI run containing `a39d0306` is [41236074782](https://github.com/DoubleStyxx/Renderide/actions/runs/41236074782). The Windows suite result for the four formerly quarantined cases plus `pbs_metallic_premultiply` is pending.
+Master confirmation: the first master CI run containing `a39d0306` is [41236074782](https://github.com/DoubleStyxx/Renderide/actions/runs/41236074782), and it is green. On Windows WARP all five cases pass, with no quarantine, no expected-failure stamp, and no untrusted stamp. None of them is flat, and none loses a channel. `negative_light_parity`, `negative_light_physically_based`, `negative_color_physically_based`, and `pbs_metallic_premultiply` have max abs diff 1. `pbs_lit_material_matrix` passes on its adapter-comparison gate with max abs diff 15, and its RGB means match the golden (largest region-color channel delta 2.11; every 2×2 region-mean cell is under 0.02). The Windows suite is 16/16 with 0 quarantined. Linux lavapipe passes all five.
 
 ## What those samples already show
 
