@@ -106,6 +106,11 @@ struct SuiteOpts {
     /// Print renderer processes' stdout/stderr instead of swallowing them.
     #[arg(long, default_value_t = false)]
     verbose_renderer: bool,
+    /// Copy the HDR scene-color target beside each case PNG. Off by default.
+    ///
+    /// This is the #216 float sidecar, not a light, material, or shader probe.
+    #[arg(long, default_value_t = false)]
+    scene_color_readback: bool,
 }
 
 fn dispatch(cli: Cli) -> Result<(), HarnessError> {
@@ -182,6 +187,7 @@ fn suite_config_from_opts(opts: &SuiteOpts) -> Result<SuiteConfig, HarnessError>
     runner.timeout = Duration::from_secs(opts.timeout_seconds);
     runner.interval_ms = opts.interval_ms;
     runner.verbose_renderer = opts.verbose_renderer;
+    runner.scene_color_readback = opts.scene_color_readback;
     runner.output_root = opts.output_root.clone().unwrap_or_else(default_output_root);
 
     let jobs = opts

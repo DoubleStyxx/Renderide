@@ -1,8 +1,9 @@
-# Opt-in #216 negparity suite. Not the default CI suite.
+# #265 WARP re-check. Not the default CI suite.
 #
 # One Linux llvmpipe run and three independent Windows WARP runs. Each run
-# executes the 25 warp216_negparity cases, which write the scene-color sidecars.
-# A docs-only commit does not match the path filter, so it does not restart this.
+# executes the four #216 production cases, which include the #212 pbs_lit case,
+# plus pbs_metallic_premultiply. Probes stay off. Scene-color readback is the
+# float sidecar only. A docs-only commit does not match the path filter.
 
 name: WARP 216 debug
 
@@ -116,7 +117,7 @@ jobs:
       - name: Build renderer and harness
         run: cargo build --locked -p renderide -p renderide-test
 
-      - name: Run negparity cases
+      - name: Run the #265 production cases
         timeout-minutes: 180
         shell: bash
         run: |
@@ -126,13 +127,12 @@ jobs:
           else
             bin=./target/debug/renderide-test
           fi
-          args=(check-suite --jobs 1 --case warp216_negparity_composed)
-          for term in diffuse specular ambient indirect fresnel emission; do
-            for channel in r g b grey; do
-              args+=(--case "warp216_negparity_${term}_${channel}")
-            done
-          done
-          "$bin" "${args[@]}"
+          "$bin" check-suite --jobs 1 --scene-color-readback \
+            --case negative_light_parity \
+            --case negative_light_physically_based \
+            --case negative_color_physically_based \
+            --case pbs_lit_material_matrix \
+            --case pbs_metallic_premultiply
 
       - name: Upload scene-color sidecars and logs
         if: always()

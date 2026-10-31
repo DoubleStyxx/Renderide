@@ -50,6 +50,8 @@ pub struct RunnerConfig {
     pub verbose_renderer: bool,
     /// Test-output root. Defaults to `target/renderide-test-out`.
     pub output_root: std::path::PathBuf,
+    /// Copy the HDR scene-color target beside each PNG. Off unless a caller asks.
+    pub scene_color_readback: bool,
 }
 
 impl RunnerConfig {
@@ -61,6 +63,7 @@ impl RunnerConfig {
             interval_ms: DEFAULT_INTERVAL_MS,
             verbose_renderer: false,
             output_root: default_output_root(),
+            scene_color_readback: false,
         }
     }
 
@@ -137,9 +140,8 @@ pub fn run_integration_case(
         timeout: runner.timeout,
         verbose_renderer: runner.verbose_renderer,
         physically_based,
-        scene_color_readback: template_requests_scene_color_readback(
-            &prepared_template.session_template,
-        ),
+        scene_color_readback: runner.scene_color_readback
+            || template_requests_scene_color_readback(&prepared_template.session_template),
         template: prepared_template.session_template,
     };
 
