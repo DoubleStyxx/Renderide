@@ -26,6 +26,9 @@ pub mod tolerance;
 pub mod warp_216_debug;
 mod warp_pbs;
 
+/// Test-only flat-frame name. Production lists stay empty.
+#[cfg(test)]
+pub(crate) use quarantine_216::FLAT_FRAME_FIXTURE;
 /// Labels matching WARP cases. The flat-exit tests use this with an injected clock.
 #[cfg(test)]
 pub(crate) use quarantine_216::apply_quarantine;

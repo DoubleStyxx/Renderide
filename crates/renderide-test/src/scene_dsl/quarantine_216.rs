@@ -1,8 +1,9 @@
 //! Time-limited quarantine for WARP lit captures (#216).
 //!
-//! The negative-light cases are no longer on the list: they match lavapipe on WARP.
-//! `pbs_lit_material_matrix` is still the flat-frame rule. With an empty negative-light
-//! list the matcher, expiry, and tests stay in place.
+//! The case list is empty. The negative-light cases and `pbs_lit_material_matrix`
+//! matched lavapipe on WARP (`pbs_lit_material_matrix` was non-flat on all three
+//! samples). The matcher, expiry, and tests stay. Tests exercise the flat-frame
+//! rule with `FLAT_FRAME_FIXTURE`, which production never emits.
 //!
 //! <https://github.com/DoubleStyxx/Renderide/issues/216>
 
@@ -33,12 +34,17 @@ pub(crate) const QUARANTINE_REASON: &str = "quarantined:#216";
 /// Reason for a negative-light case quarantined on WARP.
 pub(crate) const WARP_LIT_SHADING_UNTRUSTED: &str = "WARP lit shading untrusted";
 
-/// `pbs_lit_material_matrix` still uses the flat-frame rule.
-const PBS_LIT: &str = "pbs_lit_material_matrix";
+/// Flat-frame cases. Empty: `pbs_lit_material_matrix` was non-flat on WARP.
+const FLAT_FRAME_CASES: &[&str] = &[];
 
 /// Empty. `negative_light_parity`, `negative_light_physically_based`, and
 /// `negative_color_physically_based` matched lavapipe on WARP and are not quarantined.
 const NEGATIVE_LIGHT_CASES: &[&str] = &[];
+
+/// Test-only name. Production never emits it, so the empty lists still exercise
+/// the flat-frame rule, the expiry, and the stamp path.
+#[cfg(test)]
+pub(crate) const FLAT_FRAME_FIXTURE: &str = "quarantine_216_flat_fixture";
 
 /// PNG `tEXt` keyword. Tests write it to prove the quarantine does not read it.
 #[cfg(test)]
@@ -132,7 +138,7 @@ fn label_case(
     true
 }
 
-/// `pbs_lit` matches only the flat frame. A negative-light case also matches a finished comparison.
+/// A flat-frame case matches only the flat frame. A negative-light case also matches a finished comparison.
 ///
 /// `None` pending or dropped draws is not zero. A harness error other than that flat frame
 /// does not match. The expiry is applied by the caller.
@@ -140,11 +146,27 @@ fn quarantine_matches(is_warp: bool, case: &SuiteCaseReport) -> bool {
     if !is_warp {
         return false;
     }
-    if case.name == PBS_LIT {
+    if is_flat_frame_case(&case.name) {
         return flat_frame_signature(case);
     }
     NEGATIVE_LIGHT_CASES.contains(&case.name.as_str())
         && (flat_frame_signature(case) || case.image_compared)
+}
+
+/// Production names on [`FLAT_FRAME_CASES`], plus the test fixture.
+fn is_flat_frame_case(name: &str) -> bool {
+    if FLAT_FRAME_CASES.contains(&name) {
+        return true;
+    }
+    #[cfg(test)]
+    {
+        name == FLAT_FRAME_FIXTURE
+    }
+    #[cfg(not(test))]
+    {
+        let _ = name;
+        false
+    }
 }
 
 fn flat_frame_signature(case: &SuiteCaseReport) -> bool {
@@ -192,13 +214,13 @@ fn expires_at() -> SystemTime {
 
 /// Whether a WARP capture of this case may end the flat-frame wait early.
 ///
-/// The four cases are the ones [`quarantine_matches`] can label. After
+/// The names are the ones [`quarantine_matches`] can label. After
 /// [`expires_at`] the capture keeps the full WARP budget and fails closed.
 pub(crate) fn early_flat_exit_applies(case_name: &str, is_warp: bool, now: SystemTime) -> bool {
     if !is_warp || now >= expires_at() {
         return false;
     }
-    case_name == PBS_LIT || NEGATIVE_LIGHT_CASES.contains(&case_name)
+    is_flat_frame_case(case_name) || NEGATIVE_LIGHT_CASES.contains(&case_name)
 }
 
 fn stamp_case_report(path: &Path, reason: &str) -> std::io::Result<()> {
