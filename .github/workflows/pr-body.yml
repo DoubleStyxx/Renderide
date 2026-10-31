@@ -1,0 +1,46 @@
+# Fails a pull request whose body is missing ## Verification evidence or
+# ## Pillars advanced, or still has the template placeholder markers.
+# The check reads pull_request.body from the Actions event payload
+# (GITHUB_EVENT_PATH). It does not call the GitHub API.
+#
+# Job name: pr-body. Add that name to the `required` aggregator in
+# https://github.com/DoubleStyxx/Renderide/pull/277. This workflow does not
+# edit that branch. No rust-toolchain step: the script is Python 3 stdlib.
+# actions/checkout is pinned by SHA the same way as nightly.yml and release.yml.
+name: PR body
+
+"on":
+  pull_request:
+    types: [opened, edited, synchronize]
+  push:
+    branches: [master]
+    paths:
+      - ".github/workflows/pr-body.yml"
+      - "scripts/ci/check_pr_body.py"
+      - "scripts/ci/test_check_pr_body.py"
+      - ".github/pull_request_template.md"
+
+concurrency:
+  group: pr-body-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pr-body:
+    name: pr-body
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Unit tests
+        run: python3 -m unittest discover -s scripts/ci -p 'test_check_pr_body.py' -v
+
+      - name: Lint pull request body
+        if: github.event_name == 'pull_request'
+        run: python3 scripts/ci/check_pr_body.py --event "$GITHUB_EVENT_PATH"
