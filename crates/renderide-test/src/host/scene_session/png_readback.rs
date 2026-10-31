@@ -751,6 +751,8 @@ impl Drop for CaptureStatsWriter {
                 "case": early_exit.case,
                 "k": early_exit.k,
                 "elapsed_ms": early_exit.elapsed_ms,
+                "settle_ms": early_exit.settle_ms,
+                "k_window_ms": early_exit.k_window_ms,
                 "reason": early_exit.reason,
             });
         }
@@ -877,7 +879,7 @@ fn arm_flat_backstop(
     };
     let warp_cap = wait_started
         + flat_exit::flat_exit_budget(
-            false,
+            flat_exit::NOT_THE_FLAT_BACKSTOP,
             gpu_ready::warp_readiness_budget(true, wait_timing.overall_timeout),
             deadline_floor,
         );
@@ -897,15 +899,27 @@ fn finish_flat_early_exit(
     progress: &CaptureProgress,
 ) -> Result<SceneSessionOutcome, HarnessError> {
     let elapsed = wait_started.elapsed();
+    let since_settled = progress
+        .settled_flat_at
+        .map(|settled| settled.elapsed())
+        .unwrap_or(Duration::ZERO);
+    let (settle_ms, k_window_ms) = flat_exit::split_exit_ms(elapsed, since_settled);
     logger::info!(
-        "Session: quarantine #216 early exit case={case_name} k={} elapsed={elapsed:?} reason={}",
-        flat_exit::QUARANTINE_FLAT_READBACKS,
-        flat_exit::FLAT_STABLE_REASON
+        "{}",
+        flat_exit::early_exit_log_line(
+            case_name,
+            flat_exit::QUARANTINE_FLAT_READBACKS,
+            Duration::from_millis(settle_ms),
+            Duration::from_millis(k_window_ms),
+            elapsed,
+        )
     );
     stats.set_early_exit(crate::scene_dsl::output::EarlyExit {
         case: case_name.to_string(),
         k: flat_exit::QUARANTINE_FLAT_READBACKS,
         elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+        settle_ms,
+        k_window_ms,
         reason: flat_exit::FLAT_STABLE_REASON.to_string(),
     });
     stats.sync(settle.longest_stall_ms(), warp_used);

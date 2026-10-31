@@ -38,7 +38,13 @@ pub enum LightRig {
     /// One point light and no directional. Empty clusters leave this black.
     Point,
     /// Positive directional plus the negative directional from `negative_light_physically_based`.
+    ///
+    /// The renderer clamp is on, so the negative intensity does not reach the shader.
     NegativePair,
+    /// Same lights as [`Self::NegativePair`], with the physically based clamp off.
+    ///
+    /// Intensity `-1.45` is uploaded. That is the #216 parity setting.
+    NegativeParity,
     /// That same positive directional, without the negative light.
     PositiveOnly,
     /// No lights. Used by the constant-colour control.
@@ -160,6 +166,7 @@ impl LightRig {
             Self::Directional => "directional",
             Self::Point => "point",
             Self::NegativePair => "negative",
+            Self::NegativeParity => "negparity",
             Self::PositiveOnly => "positive",
             Self::None => "none",
         }
@@ -175,6 +182,13 @@ impl Spec {
     /// `_Channel` for this capture.
     pub(crate) const fn channel_id(self) -> f32 {
         self.channel.id()
+    }
+
+    /// Whether the renderer clamps radiance before the shader.
+    ///
+    /// The parity rig leaves the clamp off so intensity `-1.45` reaches the GPU.
+    pub(crate) const fn physically_based(self) -> bool {
+        !matches!(self.rig, LightRig::NegativeParity)
     }
 
     /// Stable case name.
@@ -194,11 +208,12 @@ impl Spec {
     }
 }
 
-const RIGS: [LightRig; 4] = [
+const RIGS: [LightRig; 5] = [
     LightRig::Directional,
     LightRig::Point,
     LightRig::NegativePair,
     LightRig::PositiveOnly,
+    LightRig::NegativeParity,
 ];
 
 const ISOLATED: [LightingTerm; 6] = [
@@ -281,8 +296,13 @@ fn description(spec: Spec) -> String {
         (_, [false, false, true]) => "signal in B; R and G authored 0".to_string(),
         _ => "signal follows the term selector".to_string(),
     };
+    let clamp = if spec.physically_based() {
+        "Physically based clamp is on."
+    } else {
+        "Physically based clamp is off, so intensity -1.45 reaches the shader."
+    };
     format!(
-        "WARP #216 term probe ({} / {}). {signal}. Float readback is actual.scene_color.json. {}",
+        "WARP #216 term probe ({} / {}). {signal}. Float readback is actual.scene_color.json. {} {clamp}",
         spec.rig.slug(),
         spec.term.slug(),
         term_source(spec.term)
@@ -530,7 +550,17 @@ mod tests {
         assert!(names.contains(&"warp216_directional_composed".to_string()));
         assert!(names.contains(&"warp216_point_composed".to_string()));
         assert!(names.contains(&"warp216_negative_composed".to_string()));
+        assert!(names.contains(&"warp216_negparity_composed".to_string()));
+        assert!(names.contains(&"warp216_negparity_diffuse_g".to_string()));
+        assert!(names.contains(&"warp216_negparity_specular_grey".to_string()));
         assert!(names.contains(&"warp216_positive_composed".to_string()));
+        let parity = spec_for("warp216_negparity_diffuse_r").expect("parity");
+        assert!(!parity.physically_based());
+        assert!(
+            spec_for("warp216_negative_composed")
+                .expect("clamped")
+                .physically_based()
+        );
         assert!(names.contains(&"warp216_constant".to_string()));
         assert!(names.contains(&"warp216_directional_diffuse_g".to_string()));
         assert!(names.contains(&"warp216_point_fresnel_grey".to_string()));
