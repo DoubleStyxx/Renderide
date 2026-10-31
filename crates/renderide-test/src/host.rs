@@ -43,6 +43,8 @@ pub struct HostHarnessConfig {
     pub verbose_renderer: bool,
     /// When `true`, the renderer clamps negative light intensity to zero.
     pub physically_based: bool,
+    /// When `true`, the renderer writes the pre-sRGB scene-color sidecar beside the PNG.
+    pub scene_color_readback: bool,
     /// Procedural geometry template the harness should upload (sphere by default for the
     /// historical CLI flow).
     pub template: SessionTemplate,
@@ -114,6 +116,7 @@ impl HostHarness {
             timeout: self.cfg.timeout,
             verbose_renderer: self.cfg.verbose_renderer,
             physically_based: self.cfg.physically_based,
+            scene_color_readback: self.cfg.scene_color_readback,
         };
         logger::info!(
             "Harness: starting scene session (output_path={})",
@@ -168,6 +171,7 @@ mod harness_start_tests {
             timeout: Duration::from_secs(1),
             verbose_renderer: false,
             physically_based: false,
+            scene_color_readback: false,
             template: super::SessionTemplate::Sphere,
         }
     }

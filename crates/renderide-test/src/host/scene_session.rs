@@ -33,6 +33,7 @@ mod gpu_ready;
 mod negative_light;
 mod scene_setup;
 mod shadowed_caster;
+mod warp_216_debug;
 
 pub use bench_drive::{BenchDriveConfig, drive_bench};
 pub mod png_readback;
@@ -123,6 +124,11 @@ pub enum SessionTemplate {
     /// Normal Skybox camera with a higher-depth double-buffered Nothing camera on one texture.
     /// The main view displays that texture.
     DoubleBufferNothingOnSkybox,
+    /// #216 term-isolation sphere. The spec selects the rig, term, and channel.
+    Warp216Debug {
+        /// Term, channel, and light rig.
+        spec: crate::scene_dsl::warp_216_debug::Spec,
+    },
     /// PBS sphere, one positive directional, and an optional negative directional.
     NegativeLightPair {
         /// Spawns the renderer with physically based light upload.
@@ -175,6 +181,7 @@ pub(super) fn run_session(
     double_buffer_stack::prepare_assets(&template, &mut session.queues, &mut lockstep)?;
 
     let property_recapture = matches!(template, SessionTemplate::CustomShaderPropertyUpdate);
+    let warp216 = matches!(template, SessionTemplate::Warp216Debug { .. });
     let exotic_pair = matches!(template, SessionTemplate::ExoticShaderPair);
     let shadow_move = matches!(template, SessionTemplate::ShadowedCasterMove);
     let setup = build_scene_setup(template);
@@ -194,6 +201,15 @@ pub(super) fn run_session(
     )?;
     if property_recapture {
         custom_property::install_and_assign(&mut session.queues, &mut lockstep, &setup)?;
+    }
+    if warp216 {
+        warp_216_debug::install_and_assign(
+            &mut session.queues,
+            &mut lockstep,
+            &prefix,
+            &backing_dir,
+            &setup,
+        )?;
     }
     if exotic_pair {
         exotic_pair::install_and_assign(&mut session.queues, &mut lockstep, &setup)?;
@@ -236,6 +252,7 @@ fn template_label(template: &SessionTemplate) -> &'static str {
         SessionTemplate::ManyShadowedPointLights => "ManyShadowedPointLights",
         SessionTemplate::DoubleBufferNothingOnSkybox => "DoubleBufferNothingOnSkybox",
         SessionTemplate::NegativeLightPair { .. } => "NegativeLightPair",
+        SessionTemplate::Warp216Debug { .. } => "Warp216Debug",
         SessionTemplate::SkinnedAvatars { .. } => "SkinnedAvatars",
     }
 }

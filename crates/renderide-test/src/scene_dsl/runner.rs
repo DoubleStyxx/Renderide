@@ -136,6 +136,9 @@ pub fn run_integration_case(
         timeout: runner.timeout,
         verbose_renderer: runner.verbose_renderer,
         physically_based,
+        scene_color_readback: template_requests_scene_color_readback(
+            &prepared_template.session_template,
+        ),
         template: prepared_template.session_template,
     };
 
@@ -155,8 +158,12 @@ fn template_requests_physically_based(template: &SessionTemplate) -> bool {
         SessionTemplate::NegativeLightPair {
             physically_based: true,
             ..
-        }
+        } | SessionTemplate::Warp216Debug { .. }
     )
+}
+
+fn template_requests_scene_color_readback(template: &SessionTemplate) -> bool {
+    matches!(template, SessionTemplate::Warp216Debug { .. })
 }
 
 fn drive_template(cfg: HostHarnessConfig) -> Result<(), HarnessError> {
@@ -260,6 +267,9 @@ fn prepare_template(
                 negative_color: *negative_color,
             },
         }),
+        CaseTemplate::Warp216Debug { spec } => Ok(PreparedTemplate {
+            session_template: SessionTemplate::Warp216Debug { spec: *spec },
+        }),
         CaseTemplate::GltfTexturedStaticMesh { path } => gltf_prepared_template(path, layout),
     }
 }
@@ -340,7 +350,9 @@ fn evaluate_and_finalize(
                 );
             }
             let mut report = report_from_evaluation(case, eval);
-            if let Err(message) = plain_capture_failure(case, &layout) {
+            if let Err(message) = plain_capture_failure(case, &layout).and_then(|()| {
+                super::warp_216_debug::scene_color_sidecar_failure(case, &layout.actual_png)
+            }) {
                 report.passed = false;
                 report.error = Some(match report.error.take() {
                     Some(existing) => format!("{existing}; {message}"),

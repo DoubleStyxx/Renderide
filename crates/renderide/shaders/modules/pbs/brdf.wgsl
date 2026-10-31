@@ -636,3 +636,45 @@ fn diffuse_only_specular(
     let l_dot_h = clamp(dot(ls.l, h), 0.0, 1.0);
     return base_color * one_minus_reflectivity * fd_burley(n_dot_v, n_dot_l, l_dot_h, roughness) * signed_light_radiance(light, ls.attenuation, n_dot_l);
 }
+
+#ifdef _TERM_DEBUG
+/// Split of [`direct_radiance_metallic_prepared`] for the #216 term-isolation shader.
+///
+/// Compiled only when a custom material defines `_TERM_DEBUG`. Production PBS shaders do not.
+struct DirectMetallicTermParts {
+    diffuse: vec3<f32>,
+    specular: vec3<f32>,
+    fresnel: vec3<f32>,
+}
+
+fn direct_metallic_term_parts(
+    light: ft::GpuLight,
+    world_pos: vec3<f32>,
+    shading_normal: vec3<f32>,
+    basis: DirectBrdfBasis,
+    alpha: f32,
+    f90: f32,
+    diffuse_roughness: f32,
+    metallic: f32,
+    base_color: vec3<f32>,
+    f0: vec3<f32>,
+    energy_compensation: vec3<f32>,
+) -> DirectMetallicTermParts {
+    let ls = eval_light(light, world_pos, shading_normal);
+    let direct_lobe = eval_direct_specular_lobe_prepared(basis, ls.l, alpha, f0, f90, energy_compensation);
+    if direct_lobe.n_dot_l <= 0.0 {
+        return DirectMetallicTermParts(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
+    }
+
+    let diffuse_color = base_color * (1.0 - metallic);
+    let fd = diffuse_color
+        * direct_diffuse_fresnel_transmission(direct_lobe.f, f0)
+        * fd_burley(direct_lobe.n_dot_v, direct_lobe.n_dot_l, direct_lobe.l_dot_h, diffuse_roughness);
+    let radiance = signed_light_radiance(light, ls.attenuation, direct_lobe.n_dot_l);
+    return DirectMetallicTermParts(
+        fd * radiance,
+        direct_lobe.specular_brdf * radiance,
+        direct_lobe.f,
+    );
+}
+#endif

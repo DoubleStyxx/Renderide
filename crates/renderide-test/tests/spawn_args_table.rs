@@ -48,6 +48,7 @@ fn spawn_args_table_covers_release_and_dev_paths() {
             timeout: Duration::from_secs(5),
             verbose_renderer: false,
             physically_based: false,
+            scene_color_readback: false,
         };
         let args = renderer_spawn_args(&cfg, queue);
 

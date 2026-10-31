@@ -13,7 +13,8 @@ pub mod exit_code {
     pub const OK: u8 = 0;
     /// Compare: at least one gated metric regressed.
     pub const REGRESSION: u8 = 1;
-    /// Usage or input error: a bad flag value, an unknown scenario, or an unusable compare input.
+    /// Usage or input error: a bad flag value, an unknown scenario or suite group, or an
+    /// unusable compare input.
     /// clap also exits 2 for flags it rejects itself.
     pub const USAGE: u8 = 2;
     /// The renderer ran but produced no usable measurement (timeout, crash, bad raw report).
@@ -87,7 +88,9 @@ fn harness_exit_code(err: &HarnessError) -> u8 {
         HarnessError::RendererBinaryMissing(_)
         | HarnessError::SpawnRenderer(_)
         | HarnessError::Io(_) => exit_code::ENVIRONMENT,
-        HarnessError::UnknownBenchScenario(_) | HarnessError::UnknownCase(_) => exit_code::USAGE,
+        HarnessError::UnknownBenchScenario(_)
+        | HarnessError::UnknownCase(_)
+        | HarnessError::UnknownGroup(_) => exit_code::USAGE,
         HarnessError::QueueOptions(_)
         | HarnessError::HandshakeTimeout(_)
         | HarnessError::AssetAckTimeout(..)
@@ -175,6 +178,8 @@ mod tests {
             BenchError::Harness(Box::new(HarnessError::UnknownBenchScenario(
                 "nope".to_string(),
             ))),
+            BenchError::Harness(Box::new(HarnessError::UnknownCase("nope".to_string()))),
+            BenchError::Harness(Box::new(HarnessError::UnknownGroup("nope".to_string()))),
         ] {
             assert_eq!(err.run_exit_code(), exit_code::USAGE, "{err}");
             assert_eq!(err.kind(), "usage");

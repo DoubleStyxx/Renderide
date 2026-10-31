@@ -78,6 +78,12 @@ fn readback_color_texture(
     probe_second_readback(gpu, color_texture, &layout, &tight);
     crate::gpu::warp_light_probe::roundtrip(gpu, gpu.adapter_info());
 
+    if crate::debug_scene_color::readback_enabled()
+        && let Err(err) = super::scene_color_dump::write_scene_color_sidecars(gpu, output_path)
+    {
+        logger::warn!("scene-color debug readback failed: {err}");
+    }
+
     write_png_atomically(
         &tight,
         layout.width,
@@ -207,7 +213,9 @@ fn submit_texture_to_buffer_copy(
 }
 
 /// Waits until work already submitted on this queue has finished on the GPU.
-fn confirm_frame_submission_done(gpu: &GpuContext) -> Result<Duration, HeadlessReadbackError> {
+pub(super) fn confirm_frame_submission_done(
+    gpu: &GpuContext,
+) -> Result<Duration, HeadlessReadbackError> {
     let started = Instant::now();
     let (sender, receiver) = std::sync::mpsc::channel();
     gpu.queue().on_submitted_work_done(move || {
@@ -250,7 +258,7 @@ fn confirm_frame_submission_done(gpu: &GpuContext) -> Result<Duration, HeadlessR
     }
 }
 
-fn await_buffer_map(
+pub(super) fn await_buffer_map(
     slice: wgpu::BufferSlice<'_>,
     device: &wgpu::Device,
 ) -> Result<(), HeadlessReadbackError> {

@@ -15,7 +15,7 @@ use clap::{Parser, Subcommand};
 use crate::error::HarnessError;
 use crate::scene_dsl::output::default_output_root;
 use crate::scene_dsl::runner::RunnerConfig;
-use crate::scene_dsl::suite::{SuiteConfig, run_suite, select_cases, update_suite};
+use crate::scene_dsl::suite::{SuiteConfig, run_suite, select_cases_in, update_suite};
 
 /// CLI entry point.
 pub fn run() -> ExitCode {
@@ -78,9 +78,16 @@ struct SuiteOpts {
     /// Use the release-mode renderer binary (`target/release/renderide-renderer`).
     #[arg(long, default_value_t = false, conflicts_with = "dev_fast")]
     release: bool,
-    /// Case name to run. Repeat to run a subset; omitted means every registered case.
+    /// Case name to run. Repeat to run a subset; omitted means every case in the
+    /// selected group, or every registered case when `--group` is omitted.
+    ///
+    /// Names from the opt-in `warp_216_debug` group resolve here without `--group`.
     #[arg(long = "case", value_name = "NAME")]
     case: Vec<String>,
+    /// Opt-in case group. `warp_216_debug` is the #216 lighting-term set and is not
+    /// part of the default registry.
+    #[arg(long = "group", value_name = "NAME")]
+    group: Option<String>,
     /// Maximum number of cases to run concurrently.
     ///
     /// Defaults to the selected case count, capped at the machine's available parallelism, so a
@@ -165,7 +172,7 @@ fn default_suite_jobs(case_count: usize) -> usize {
 }
 
 fn suite_config_from_opts(opts: &SuiteOpts) -> Result<SuiteConfig, HarnessError> {
-    let cases = select_cases(&opts.case)?;
+    let cases = select_cases_in(&opts.case, opts.group.as_deref())?;
     let case_count = cases.len();
     let renderer_path = match &opts.renderer {
         Some(p) => p.clone(),
