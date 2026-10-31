@@ -1,19 +1,13 @@
 //! Runner identity recorded in schema-2 reports: OS, CPU model, Vulkan ICD and Rayon threads.
 //!
-//! This module only *reports* what the renderer child will inherit. It never selects an ICD
-//! and never mutates the process environment (`std::env::set_var` is unsafe in edition 2024).
-//!
-//! TODO(T3): swap [`detect`] for the shared environment helper from Bridge's T3
-//! (`renderide-harness-env`: lavapipe probe, `--icd`, `RAYON_NUM_THREADS` child default, the
-//! stderr `env:` line). Keep the [`RunnerInfo`] JSON shape; T3 may add `"auto"` as an
-//! [`IcdInfo::source`] value when it starts selecting lavapipe itself.
+//! This module only *reports* what the process already inherited. Lavapipe selection,
+//! `--icd`, and the golden harness `RAYON_NUM_THREADS=1` default live in
+//! `renderide-harness-env`. An unset Rayon variable here still means one worker per CPU,
+//! which is the benchmark record. B1 can call [`renderide_harness_env::resolve`] when a
+//! bench child should use that policy. This module never calls `std::env::set_var`.
 
 use serde::{Deserialize, Serialize};
 
-/// Vulkan loader variable that wins when both are set (loader 1.3.234+).
-const VK_DRIVER_FILES: &str = "VK_DRIVER_FILES";
-/// Older loader variable, still honoured when `VK_DRIVER_FILES` is unset.
-const VK_ICD_FILENAMES: &str = "VK_ICD_FILENAMES";
 /// Rayon's global pool size override, inherited by the renderer child.
 const RAYON_NUM_THREADS: &str = "RAYON_NUM_THREADS";
 
@@ -80,19 +74,11 @@ pub(crate) fn from_lookup(
 }
 
 fn icd_from_lookup(lookup: &impl Fn(&str) -> Option<String>) -> IcdInfo {
-    for var in [VK_DRIVER_FILES, VK_ICD_FILENAMES] {
-        if let Some(path) = lookup(var).filter(|value| !value.trim().is_empty()) {
-            return IcdInfo {
-                path: Some(path),
-                source: "env".to_string(),
-                var: Some(var.to_string()),
-            };
-        }
-    }
+    let icd = renderide_harness_env::inherited_icd(lookup);
     IcdInfo {
-        path: None,
-        source: "loader_default".to_string(),
-        var: None,
+        path: icd.path,
+        source: icd.source,
+        var: icd.var,
     }
 }
 

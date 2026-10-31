@@ -22,6 +22,8 @@ pub(super) struct Presentation<'a> {
     pub human: &'a [String],
     /// Suite report printed as the only stdout document when `json` is set.
     pub report: Option<&'a SuiteReport>,
+    /// `env:` line. Always stderr, with no prefix, so stdout stays the suite text or one JSON document.
+    pub env_line: Option<&'a str>,
 }
 
 /// A failure before command dispatch, written to stderr.
@@ -31,6 +33,9 @@ pub(super) fn startup_error(message: &str) {
 
 /// Writes the command result.
 pub(super) fn emit(presentation: &Presentation<'_>) {
+    if let Some(line) = presentation.env_line {
+        eprintln!("{line}");
+    }
     if presentation.deprecation {
         eprintln!("renderide-test: `check-suite` is deprecated; use `run`. Output is unchanged.");
     }
