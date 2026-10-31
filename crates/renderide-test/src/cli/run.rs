@@ -39,6 +39,8 @@ pub(super) struct Finished {
     pub human: Vec<String>,
     /// Suite report, present for `run`.
     pub report: Option<SuiteReport>,
+    /// Stderr `env:` line, printed with no prefix.
+    pub env_line: Option<String>,
 }
 
 pub(super) fn list_command(json: bool, group: Option<&str>) -> Finished {
@@ -52,6 +54,7 @@ pub(super) fn list_command(json: bool, group: Option<&str>) -> Finished {
         notes: Vec::new(),
         human: Vec::new(),
         report: None,
+        env_line: None,
     }
 }
 
@@ -98,7 +101,14 @@ pub(super) fn run_command(flags: RunFlags<'_>) -> Finished {
     if let Some(finished) = fixture_finished(json, deprecation) {
         return finished;
     }
-    let config = match suite_config(opts, cases) {
+    let harness = match resolve_harness(opts) {
+        Ok(env) => env,
+        Err(StartError::Usage(message)) => return usage(json, deprecation, &message),
+        Err(StartError::Environment(message)) => {
+            return environment_failure(json, deprecation, &message);
+        }
+    };
+    let config = match suite_config(opts, cases, harness) {
         Ok(config) => config,
         Err(err) => return usage(json, deprecation, &err.to_string()),
     };
@@ -123,7 +133,8 @@ fn check_suite(config: &SuiteConfig, json: bool, repeat: u32, deprecation: bool)
             mark_flaky(&mut first.report, &again.report, &mut notes);
         }
     }
-    finalize(first, json, deprecation, notes, "passed", true)
+    let env_line = env_line_for(config, &mut first.report);
+    finalize(first, json, deprecation, notes, "passed", true, env_line)
 }
 
 fn bless_suite(config: &SuiteConfig, json: bool, force: bool, deprecation: bool) -> Finished {
@@ -141,14 +152,23 @@ fn bless_suite(config: &SuiteConfig, json: bool, force: bool, deprecation: bool)
         }
         cases.push(report);
     }
-    let outcome = SuiteRunOutcome {
+    let mut outcome = SuiteRunOutcome {
         report: SuiteReport::from_cases(cases),
         report_path: config
             .runner
             .output_root
             .join(crate::scene_dsl::suite::SUITE_REPORT_FILENAME),
     };
-    finalize(outcome, json, deprecation, notes, "blessed", false)
+    let env_line = env_line_for(config, &mut outcome.report);
+    finalize(
+        outcome,
+        json,
+        deprecation,
+        notes,
+        "blessed",
+        false,
+        env_line,
+    )
 }
 
 fn bless_one(
@@ -312,6 +332,7 @@ fn finalize(
     notes: Vec<String>,
     result_label: &str,
     print_adapter: bool,
+    env_line: Option<String>,
 ) -> Finished {
     exit::stamp(&mut outcome.report);
     if let Some(root) = outcome.report_path.parent()
@@ -327,6 +348,7 @@ fn finalize(
         notes,
         human,
         report: Some(outcome.report),
+        env_line,
     }
 }
 
@@ -341,7 +363,85 @@ fn usage(json: bool, deprecation: bool, message: &str) -> Finished {
         notes: vec![message.to_string()],
         human: Vec::new(),
         report: Some(report),
+        env_line: None,
     }
+}
+
+fn environment_failure(json: bool, deprecation: bool, message: &str) -> Finished {
+    let mut report = SuiteReport::from_cases(Vec::new());
+    report.error = Some(message.to_string());
+    report.exit_code = exit::EXIT_ENVIRONMENT;
+    Finished {
+        exit_code: exit::EXIT_ENVIRONMENT,
+        json,
+        deprecation,
+        notes: vec![message.to_string()],
+        human: Vec::new(),
+        report: Some(report),
+        env_line: None,
+    }
+}
+
+fn env_line_for(config: &SuiteConfig, report: &mut SuiteReport) -> Option<String> {
+    let env = config.runner.harness_env.as_ref()?;
+    report.runner = Some(crate::scene_dsl::suite::SuiteRunner {
+        icd: crate::scene_dsl::suite::SuiteIcd {
+            path: env.icd_path.clone(),
+            source: env.icd_source.clone(),
+            var: env.icd_var.clone(),
+        },
+    });
+    let mut shown = env.clone();
+    shown.adapter = adapter_name(report);
+    Some(shown.line())
+}
+
+fn adapter_name(report: &SuiteReport) -> String {
+    report
+        .cases
+        .iter()
+        .find_map(|case| {
+            let label = case.adapter.trim();
+            if label.is_empty() {
+                return None;
+            }
+            let name = label.split(" type=").next().unwrap_or(label).trim();
+            (!name.is_empty()).then(|| name.to_string())
+        })
+        .unwrap_or_else(|| "unavailable".to_string())
+}
+
+enum StartError {
+    Usage(String),
+    Environment(String),
+}
+
+fn resolve_harness(opts: &SuiteOpts) -> Result<renderide_harness_env::ResolvedEnv, StartError> {
+    let icd = renderide_harness_env::parse_icd_mode(&opts.icd).map_err(StartError::Usage)?;
+    let backend =
+        renderide_harness_env::parse_backend_mode(&opts.backend).map_err(StartError::Usage)?;
+    let renderer = match &opts.renderer {
+        Some(path) => path.display().to_string(),
+        None => super::resolve_renderer_path(super::BuildProfile::from_flags(
+            opts.release,
+            opts.dev_fast,
+        ))
+        .display()
+        .to_string(),
+    };
+    let cpu = crate::scene_dsl::host_info::cpu_model();
+    let roots = renderide_harness_env::default_icd_roots();
+    let input = renderide_harness_env::ResolveInput {
+        search_roots: &roots,
+        os: std::env::consts::OS,
+        icd: &icd,
+        backend,
+        renderer: &renderer,
+        cpu: &cpu,
+        adapter: "unavailable",
+    };
+    renderide_harness_env::resolve(&input, |key| std::env::var(key).ok(), |path| path.is_file())
+        .map_err(|err| StartError::Environment(err.to_string()))
 }
 
 fn stamp_adapter_gate(outcome: &mut SuiteRunOutcome) {
@@ -373,6 +473,7 @@ fn stamp_adapter_gate(outcome: &mut SuiteRunOutcome) {
 fn suite_config(
     opts: &SuiteOpts,
     cases: Vec<IntegrationCase>,
+    harness: renderide_harness_env::ResolvedEnv,
 ) -> Result<SuiteConfig, HarnessError> {
     let case_count = cases.len();
     let renderer_path = match &opts.renderer {
@@ -388,6 +489,7 @@ fn suite_config(
     runner.verbose_renderer = opts.verbose_renderer;
     runner.renderer_stdout_to_stderr = opts.verbose_renderer && opts.json_stdout;
     runner.output_root = opts.output_root.clone().unwrap_or_else(default_output_root);
+    runner.harness_env = Some(harness);
     let jobs = opts
         .jobs
         .unwrap_or_else(|| super::default_suite_jobs(case_count))
@@ -507,6 +609,7 @@ fn fixture_finished(json: bool, deprecation: bool) -> Option<Finished> {
             Vec::new(),
             "passed",
             false,
+            None,
         ))
     }
     #[cfg(not(all(debug_assertions, feature = "test-cli-fixture")))]
@@ -540,6 +643,8 @@ fn fixture_report(kind: &str) -> SuiteReport {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     #[test]
@@ -596,6 +701,32 @@ mod tests {
             );
             assert!(note.unwrap_or_default().contains("bless refused"), "{name}");
         }
+    }
+
+    #[test]
+    fn missing_lavapipe_exits_5() {
+        let mode = renderide_harness_env::IcdMode::Auto;
+        let roots = [PathBuf::from("/tmp/renderide-no-icd")];
+        let input = renderide_harness_env::ResolveInput {
+            search_roots: &roots,
+            os: "linux",
+            icd: &mode,
+            backend: renderide_harness_env::BackendMode::Auto,
+            renderer: "target/debug/renderide-renderer",
+            cpu: "cpu",
+            adapter: "unavailable",
+        };
+        let err = renderide_harness_env::resolve(&input, |_| None, |_| false).expect_err("missing");
+        let finished = environment_failure(true, false, &err.to_string());
+        assert_eq!(finished.exit_code, exit::EXIT_ENVIRONMENT);
+        let report = finished.report.expect("report");
+        assert_eq!(report.exit_code, exit::EXIT_ENVIRONMENT);
+        let error = report.error.clone().unwrap_or_default();
+        assert!(error.contains("no ICD"), "{error}");
+        assert!(error.contains("lavapipe"), "{error}");
+        assert!(finished.notes.iter().any(|note| note.contains("no ICD")));
+        let document = serde_json::to_string(&report).expect("json");
+        serde_json::from_str::<serde_json::Value>(&document).expect("one document");
     }
 
     #[test]

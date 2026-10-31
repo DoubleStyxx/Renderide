@@ -96,6 +96,27 @@ pub struct SuiteReport {
     /// Set when the command failed before any case ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// ICD the renderer child inherited or the harness selected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner: Option<SuiteRunner>,
+}
+
+/// Runner identity on the suite JSON document.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SuiteRunner {
+    /// Vulkan ICD selection.
+    pub icd: SuiteIcd,
+}
+
+/// Vulkan ICD selection recorded on the suite report.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SuiteIcd {
+    /// Manifest path, or null when no Vulkan ICD was selected.
+    pub path: Option<String>,
+    /// `env`, `auto`, `flag`, `none`, or `platform`.
+    pub source: String,
+    /// Loader variable that supplied `path`, or null.
+    pub var: Option<String>,
 }
 
 impl SuiteReport {
@@ -113,6 +134,7 @@ impl SuiteReport {
             quarantine_warning: None,
             exit_code: 0,
             error: None,
+            runner: None,
         };
         report.recompute();
         report
@@ -673,19 +695,21 @@ mod tests {
     }
 
     fn quarantinable_case(dir: &Path) -> SuiteCaseReport {
-        let artifacts = dir.join("pbs_lit_material_matrix");
+        let name = crate::scene_dsl::FLAT_FRAME_FIXTURE;
+        let artifacts = dir.join(name);
         std::fs::create_dir_all(&artifacts).expect("artifacts");
         let report_json = artifacts.join("report.json");
-        let integration = crate::scene_dsl::cases::pbs_lit_material_matrix();
-        let case_report =
+        let integration = crate::scene_dsl::cases::unlit_sphere();
+        let mut case_report =
             crate::scene_dsl::output::report_from_error(&integration, "flat or unstable");
+        case_report.name = name.to_string();
         std::fs::write(
             &report_json,
             serde_json::to_string_pretty(&case_report).expect("report json"),
         )
         .expect("write report");
         let mut case = SuiteCaseReport::plain(
-            "pbs_lit_material_matrix",
+            name,
             false,
             artifacts,
             report_json,
