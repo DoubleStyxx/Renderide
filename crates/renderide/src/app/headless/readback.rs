@@ -85,6 +85,12 @@ fn readback_color_texture(
         logger::warn!("scene-color debug readback failed: {err}");
     }
 
+    if crate::debug_scene_color::readback_enabled()
+        && let Err(err) = super::scene_color_dump::write_scene_color_sidecars(gpu, output_path)
+    {
+        logger::warn!("scene-color debug readback failed: {err}");
+    }
+
     write_png_atomically(
         &tight,
         layout.width,
