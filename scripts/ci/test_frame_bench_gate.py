@@ -887,16 +887,17 @@ class BaseDriftGuardTests(unittest.TestCase):
         self.assertEqual(row2.status, "ok")
         self.assertEqual(row2.deciding_round, 2)
 
-    def test_drift_then_clean_extra_round_fail(self) -> None:
+    def test_drift_then_one_clean_fail_needs_second_confirm(self) -> None:
         fb = [1.0] * 12
         fh = [1.2] * 12
         cb1 = [1.20] * 12
         ch1 = [1.30] * 12
         cb2 = [1.02] * 12  # clean
         ch2 = [1.20] * 12  # confirm-only +~18% significant → FAIL
+        # One drift-clean FAIL after drift must NOT fail the gate yet (#271 FP mode).
         self.assertEqual(
             gate.decide(fb, fh, [cb1], [ch1], FLAG, FAIL, confirm_base_2=[cb2], confirm_head_2=[ch2]),
-            "fail",
+            "need_confirm",
         )
         row2 = gate.evaluate_confirm(
             {"s": fb}, {"s": fh}, {"s": cb2}, {"s": ch2}, FAIL, [],
@@ -905,7 +906,59 @@ class BaseDriftGuardTests(unittest.TestCase):
         self.assertEqual(row2.status, "FAIL (confirm-only)")
         self.assertEqual(row2.deciding_round, 2)
 
-    def test_drift_twice_fails_closed_with_inconclusive_reason(self) -> None:
+    def test_drift_then_two_consecutive_clean_fails(self) -> None:
+        fb = [1.0] * 12
+        fh = [1.2] * 12
+        cb1 = [1.20] * 12
+        ch1 = [1.30] * 12
+        cb2 = [1.02] * 12
+        ch2 = [1.20] * 12  # clean FAIL
+        cb3 = [1.01] * 12
+        ch3 = [1.18] * 12  # second consecutive clean FAIL
+        self.assertEqual(
+            gate.decide(
+                fb, fh, [cb1], [ch1], FLAG, FAIL,
+                confirm_base_2=[cb2], confirm_head_2=[ch2],
+                confirm_base_3=[cb3], confirm_head_3=[ch3],
+            ),
+            "fail",
+        )
+        detail = gate.decide_detail(
+            fb, fh, [cb1], [ch1], FLAG, FAIL,
+            confirm_base_2=[cb2], confirm_head_2=[ch2],
+            confirm_base_3=[cb3], confirm_head_3=[ch3],
+        )
+        self.assertEqual(detail.deciding_round, 3)
+        self.assertIn("two consecutive", detail.reason)
+
+    def test_drift_then_clean_fail_then_clean_pass_is_rerun(self) -> None:
+        fb = [1.0] * 12
+        fh = [1.2] * 12
+        cb1 = [1.20] * 12
+        ch1 = [1.30] * 12
+        cb2 = [1.02] * 12
+        ch2 = [1.20] * 12  # clean FAIL
+        cb3 = [1.01] * 12
+        ch3 = [1.05] * 12  # clean ok → disagreement
+        self.assertEqual(
+            gate.decide(
+                fb, fh, [cb1], [ch1], FLAG, FAIL,
+                confirm_base_2=[cb2], confirm_head_2=[ch2],
+                confirm_base_3=[cb3], confirm_head_3=[ch3],
+            ),
+            "rerun",
+        )
+        self.assertEqual(
+            gate.decide(
+                fb, fh, [cb1], [ch1], FLAG, FAIL,
+                confirm_base_2=[cb2], confirm_head_2=[ch2],
+                confirm_base_3=[cb3], confirm_head_3=[ch3],
+                after_rerun=True,
+            ),
+            "unstable",
+        )
+
+    def test_drift_twice_requests_rerun_or_unstable(self) -> None:
         fb = [1.0] * 12
         fh = [1.2] * 12
         cb1 = [1.20] * 12
@@ -914,7 +967,14 @@ class BaseDriftGuardTests(unittest.TestCase):
         ch2 = [1.40] * 12
         self.assertEqual(
             gate.decide(fb, fh, [cb1], [ch1], FLAG, FAIL, confirm_base_2=[cb2], confirm_head_2=[ch2]),
-            "fail",
+            "rerun",
+        )
+        self.assertEqual(
+            gate.decide(
+                fb, fh, [cb1], [ch1], FLAG, FAIL,
+                confirm_base_2=[cb2], confirm_head_2=[ch2], after_rerun=True,
+            ),
+            "unstable",
         )
         row2 = gate.evaluate_confirm(
             {"s": fb}, {"s": fh}, {"s": cb2}, {"s": ch2}, FAIL, [],
@@ -922,7 +982,7 @@ class BaseDriftGuardTests(unittest.TestCase):
         )[0]
         self.assertEqual(row2.status, "FAIL (inconclusive: base drift)")
         self.assertIsNone(row2.deciding_round)
-        # Render must state the inconclusive reason.
+        # Render must state the inconclusive reason on the row.
         out = gate.render([row2], "t", FLAG, FAIL, mode="confirm")
         self.assertIn("inconclusive: base drift", out)
         self.assertIn("base drift %", out)
@@ -944,6 +1004,52 @@ class BaseDriftGuardTests(unittest.TestCase):
         self.assertIn("base drift %", out)
         self.assertIn("deciding round", out)
         self.assertIn("confirm round", out)
+
+
+
+class PostDriftPolicyTests(unittest.TestCase):
+    """Prism two-clean-FAIL policy, independent of sample synthesis."""
+
+    def test_no_drift_fail(self) -> None:
+        r = gate.post_drift_policy(["fail"])
+        self.assertEqual(r.verdict, "fail")
+
+    def test_no_drift_pass(self) -> None:
+        r = gate.post_drift_policy(["pass"])
+        self.assertEqual(r.verdict, "pass")
+
+    def test_drift_then_pass(self) -> None:
+        r = gate.post_drift_policy(["drift", "pass"])
+        self.assertEqual(r.verdict, "pass")
+
+    def test_drift_then_one_fail_needs_confirm(self) -> None:
+        r = gate.post_drift_policy(["drift", "fail"])
+        self.assertEqual(r.verdict, "need_confirm")
+
+    def test_drift_then_two_fails(self) -> None:
+        r = gate.post_drift_policy(["drift", "fail", "fail"])
+        self.assertEqual(r.verdict, "fail")
+        self.assertEqual(r.deciding_round, 3)
+
+    def test_drift_fail_pass_rerun(self) -> None:
+        r = gate.post_drift_policy(["drift", "fail", "pass"])
+        self.assertEqual(r.verdict, "rerun")
+
+    def test_drift_fail_pass_after_rerun_unstable(self) -> None:
+        r = gate.post_drift_policy(["drift", "fail", "pass"], after_rerun=True)
+        self.assertEqual(r.verdict, "unstable")
+
+    def test_recurring_drift_rerun(self) -> None:
+        r = gate.post_drift_policy(["drift", "drift"])
+        self.assertEqual(r.verdict, "rerun")
+
+    def test_recurring_drift_after_rerun_unstable(self) -> None:
+        r = gate.post_drift_policy(["drift", "drift"], after_rerun=True)
+        self.assertEqual(r.verdict, "unstable")
+
+    def test_drift_only_without_extra_fails_closed(self) -> None:
+        r = gate.post_drift_policy(["drift"])
+        self.assertEqual(r.verdict, "fail")
 
 
 class MergeConfirmTests(unittest.TestCase):
@@ -993,7 +1099,66 @@ class MergeConfirmTests(unittest.TestCase):
         self.assertEqual(by["mpu"]["base_drift_pct_round1"], 20.0)
         self.assertEqual(by["mpu"]["base_drift_rounds"][0]["round"], 1)
         self.assertEqual(by["mpu"]["base_drift_rounds"][1]["base_drift_pct"], 3.0)
+        # unlit failed on round 1 with no drift → whole-gate fail (no-drift path).
         self.assertEqual(by["unlit"]["status"], "FAIL (confirm-only)")
+        self.assertEqual(out["gate_action"], "fail")
+        self.assertEqual(out["exit_code"], 1)
+
+    def test_merge_drift_then_one_clean_fail_needs_confirm(self) -> None:
+        import bench_pr_merge_confirm as merge
+
+        g1 = {
+            "schema": "frame-bench-gate/1",
+            "mode": "confirm",
+            "confirm_round": 1,
+            "exit_code": 1,
+            "rows": [
+                {
+                    "scenario": "mpu",
+                    "status": "INCONCLUSIVE (base drift)",
+                    "base_drift_pct": 79.0,
+                    "confirm_round": 1,
+                    "deciding_round": None,
+                },
+            ],
+        }
+        g2 = {
+            "schema": "frame-bench-gate/1",
+            "mode": "confirm",
+            "confirm_round": 2,
+            "exit_code": 1,
+            "rows": [
+                {
+                    "scenario": "mpu",
+                    "status": "FAIL (confirm-only)",
+                    "base_drift_pct": 3.0,
+                    "confirm_round": 2,
+                    "deciding_round": 2,
+                    "confirm_delta_pct": 46.0,
+                }
+            ],
+        }
+        out = merge.merge_confirm_gates(g1, g2)
+        self.assertEqual(out["gate_action"], "need_confirm")
+        self.assertEqual(out["exit_code"], 5)
+
+    def test_merge_two_clean_fails_after_drift(self) -> None:
+        import bench_pr_merge_confirm as merge
+
+        g1 = {
+            "confirm_round": 1,
+            "rows": [{"scenario": "mpu", "status": "INCONCLUSIVE (base drift)", "base_drift_pct": 20.0, "confirm_round": 1}],
+        }
+        g2 = {
+            "confirm_round": 2,
+            "rows": [{"scenario": "mpu", "status": "FAIL (confirm-only)", "base_drift_pct": 3.0, "confirm_round": 2, "deciding_round": 2}],
+        }
+        g3 = {
+            "confirm_round": 3,
+            "rows": [{"scenario": "mpu", "status": "FAIL (confirm-only)", "base_drift_pct": 2.0, "confirm_round": 3, "deciding_round": 3}],
+        }
+        out = merge.merge_confirm_gates([g1, g2, g3])
+        self.assertEqual(out["gate_action"], "fail")
         self.assertEqual(out["exit_code"], 1)
 
 

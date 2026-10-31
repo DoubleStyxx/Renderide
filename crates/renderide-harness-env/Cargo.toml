@@ -1,0 +1,15 @@
+[package]
+name = "renderide-harness-env"
+version = "0.1.0"
+edition = "2024"
+description = "ICD, backend, and Rayon defaults for a renderer child process."
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+tempfile = "3.27"
+
+[lints]
+workspace = true

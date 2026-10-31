@@ -24,6 +24,8 @@ pub struct SceneSessionConfig {
     ///
     /// `--json` keeps stdout as one document.
     pub renderer_stdout_to_stderr: bool,
+    /// ICD, backend, and Rayon variables applied with `Command::env` on the child.
+    pub child_env: Vec<(String, String)>,
     /// When `true`, the spawned renderer clamps negative light intensity to zero.
     ///
     /// Passed as `RENDERIDE_RENDERING__PHYSICALLY_BASED`. The harness always sets the

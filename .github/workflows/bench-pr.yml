@@ -12,9 +12,11 @@
 #
 # Methodology (Gauge): n>=12, interleaved chunked first pass, one reversed-order
 # confirm round; FAIL decided on confirm-only Mann-Whitney (n>=12) — pooled is
-# reported only. Confirm-base median drift >15% vs first-pass base → one extra
-# confirm; second drift fails closed (inconclusive: base drift). RAYON_NUM_THREADS=2,
-# taskset when available, CPU governor pinned to performance when the runner allows it.
+# reported only. Confirm-base median drift >15% vs first-pass base → post-drift
+# policy: FAIL only if two consecutive drift-clean confirms both FAIL; disagreement
+# or recurring drift → full gate rerun once; still unstable → inconclusive: unstable
+# runner (distinct from perf FAIL). RAYON_NUM_THREADS=2, taskset when available,
+# CPU governor pinned to performance when the runner allows it.
 name: Bench PR
 
 "on":
@@ -27,6 +29,7 @@ name: Bench PR
       - "scripts/ci/bench_pr_assemble.py"
       - "scripts/ci/bench_pr_report.py"
       - "scripts/ci/bench_pr_merge_confirm.py"
+      - "scripts/ci/bench_pr_force_unstable.py"
       - ".github/workflows/bench-pr.yml"
       - ".github/actions/lavapipe/**"
 
@@ -240,6 +243,9 @@ jobs:
             exit 0
           fi
 
+          # Full-gate attempt loop: original + at most one rerun on post-drift disagreement/recurring drift.
+          after_rerun=0
+          for gate_attempt in 1 2; do
           half=$((RUNS / 2))
           rest=$((RUNS - half))
 
@@ -293,6 +299,7 @@ jobs:
               --json-out "$out/gate.json" | tee "$out/confirm.md"
             gate_status=${PIPESTATUS[0]}
             set -e
+            cp "$out/gate.json" "$out/gate-confirm1.json"
             cat "$out/confirm.md" >> "$summary"
             if [[ "$gate_status" -ge 2 ]]; then
               echo "gate script error" >&2
@@ -301,13 +308,16 @@ jobs:
               exit 1
             fi
 
-            # Base-drift guard: one extra reversed confirm for INCONCLUSIVE scenes only.
+            # Base-drift guard (Prism post-drift policy): after round-1 drift, FAIL only if
+            # two consecutive drift-clean confirms both FAIL. Round 2 always; round 3 when
+            # round 2 is a single clean FAIL. Recurring drift / disagreement → gate_action=rerun
+            # (handled by the attempt loop below).
             if [[ -s "$out/drift-suspects.txt" ]]; then
               mapfile -t drift_suspects < "$out/drift-suspects.txt"
               echo "::group::Confirm round 2 (extra after base drift) for: ${drift_suspects[*]}"
               {
                 echo
-                echo "inconclusive: base drift on round 1 for: ${drift_suspects[*]} — running one extra reversed confirm (never a silent pass)"
+                echo "inconclusive: base drift on round 1 for: ${drift_suspects[*]} — running extra reversed confirm(s) under two-clean-FAIL policy"
               } >> "$summary"
               run_frame "$RUNNER_TEMP/target-head" "$out/confirm2-head-a.json" "$half" "${drift_suspects[@]}"
               run_frame "$RUNNER_TEMP/target-base" "$out/confirm2-base-a.json" "$half" "${drift_suspects[@]}"
@@ -323,7 +333,7 @@ jobs:
                 --confirm-head "$out/confirm2-head-a.json" --confirm-head "$out/confirm2-head-b.json" \
                 --flag-threshold "$FLAG_THRESHOLD" --fail-threshold "$FAIL_THRESHOLD" \
                 --confirm-round 2 --fail-closed-drift \
-                --title "Confirm round 2 (extra after base drift; fail-closed if still drifting; deciding round stated per row)" \
+                --title "Confirm round 2 (extra after base drift; two-clean-FAIL policy; deciding round stated per row)" \
                 --json-out "$out/gate-confirm2.json" | tee "$out/confirm2.md"
               c2_status=${PIPESTATUS[0]}
               set -e
@@ -334,16 +344,107 @@ jobs:
                 cat "$summary" >> "$GITHUB_STEP_SUMMARY"
                 exit 1
               fi
-              python3 "$GITHUB_WORKSPACE/tools/scripts/ci/bench_pr_merge_confirm.py" \
-                --gate1 "$out/gate.json" --gate2 "$out/gate-confirm2.json" --out "$out/gate.json"
-              gate_status=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['exit_code'])" "$out/gate.json")
-              if [[ "$gate_status" -ne 0 ]]; then
-                echo "gate after drift reconfirm: fail (see inconclusive: base drift or confirm-only FAIL above)" >> "$summary"
-              else
-                echo "gate after drift reconfirm: pass (deciding round = 2 for reconfirmed scenes)" >> "$summary"
+              merge_args=(--gate "$out/gate-confirm1.json" --gate "$out/gate-confirm2.json" --out "$out/gate.json")
+              if [[ "${after_rerun:-0}" -eq 1 ]]; then
+                merge_args+=(--after-rerun)
               fi
+              python3 "$GITHUB_WORKSPACE/tools/scripts/ci/bench_pr_merge_confirm.py" "${merge_args[@]}"
+              gate_action=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('gate_action','fail'))" "$out/gate.json")
+              gate_status=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['exit_code'])" "$out/gate.json")
+              echo "gate after confirm round 2: action=$gate_action exit=$gate_status" >> "$summary"
+
+              if [[ "$gate_action" == "need_confirm" ]]; then
+                echo "::group::Confirm round 3 (second drift-clean confirm after one clean FAIL) for: ${drift_suspects[*]}"
+                {
+                  echo
+                  echo "post-drift: one drift-clean FAIL on round 2 — running confirm round 3 (need two consecutive clean FAILs to FAIL)"
+                } >> "$summary"
+                run_frame "$RUNNER_TEMP/target-head" "$out/confirm3-head-a.json" "$half" "${drift_suspects[@]}"
+                run_frame "$RUNNER_TEMP/target-base" "$out/confirm3-base-a.json" "$half" "${drift_suspects[@]}"
+                run_frame "$RUNNER_TEMP/target-head" "$out/confirm3-head-b.json" "$rest" "${drift_suspects[@]}"
+                run_frame "$RUNNER_TEMP/target-base" "$out/confirm3-base-b.json" "$rest" "${drift_suspects[@]}"
+                echo "::endgroup::"
+
+                set +e
+                python3 "$gate_py" --mode confirm \
+                  --base "$out/base-a.json" --base "$out/base-b.json" \
+                  --head "$out/head-a.json" --head "$out/head-b.json" \
+                  --confirm-base "$out/confirm3-base-a.json" --confirm-base "$out/confirm3-base-b.json" \
+                  --confirm-head "$out/confirm3-head-a.json" --confirm-head "$out/confirm3-head-b.json" \
+                  --flag-threshold "$FLAG_THRESHOLD" --fail-threshold "$FAIL_THRESHOLD" \
+                  --confirm-round 3 --fail-closed-drift \
+                  --title "Confirm round 3 (second drift-clean confirm; two-clean-FAIL policy)" \
+                  --json-out "$out/gate-confirm3.json" | tee "$out/confirm3.md"
+                c3_status=${PIPESTATUS[0]}
+                set -e
+                cat "$out/confirm3.md" >> "$summary"
+                if [[ "$c3_status" -ge 2 ]]; then
+                  echo "gate script error on confirm round 3" >&2
+                  echo "gate_exit=1" >> "$GITHUB_OUTPUT"
+                  cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+                  exit 1
+                fi
+                merge_args=(--gate "$out/gate-confirm1.json" --gate "$out/gate-confirm2.json" --gate "$out/gate-confirm3.json" --out "$out/gate.json")
+                if [[ "${after_rerun:-0}" -eq 1 ]]; then
+                  merge_args+=(--after-rerun)
+                fi
+                python3 "$GITHUB_WORKSPACE/tools/scripts/ci/bench_pr_merge_confirm.py" "${merge_args[@]}"
+                gate_action=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('gate_action','fail'))" "$out/gate.json")
+                gate_status=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['exit_code'])" "$out/gate.json")
+                echo "gate after confirm round 3: action=$gate_action exit=$gate_status" >> "$summary"
+              fi
+            else
+              merge_args=(--gate "$out/gate-confirm1.json" --out "$out/gate.json")
+              if [[ "${after_rerun:-0}" -eq 1 ]]; then
+                merge_args+=(--after-rerun)
+              fi
+              python3 "$GITHUB_WORKSPACE/tools/scripts/ci/bench_pr_merge_confirm.py" "${merge_args[@]}"
+              gate_action=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('gate_action','fail'))" "$out/gate.json")
+              gate_status=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['exit_code'])" "$out/gate.json")
             fi
           fi
+
+          # Resolve post-drift gate_action for this attempt.
+          if [[ -f "$out/gate.json" ]]; then
+            gate_action=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('gate_action',''))" "$out/gate.json" 2>/dev/null || echo "")
+            raw_exit=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('exit_code',1))" "$out/gate.json" 2>/dev/null || echo "$gate_status")
+          else
+            gate_action=""
+            raw_exit="$gate_status"
+          fi
+          if [[ "$gate_action" == "rerun" && "$gate_attempt" -eq 1 ]]; then
+            {
+              echo
+              echo "post-drift policy: disagreement or recurring drift → full gate rerun once (attempt 1→2)"
+            } >> "$summary"
+            after_rerun=1
+            continue
+          fi
+          if [[ "$gate_action" == "rerun" && "$gate_attempt" -eq 2 ]]; then
+            python3 "$GITHUB_WORKSPACE/tools/scripts/ci/bench_pr_force_unstable.py" "$out/gate.json"
+            gate_action=unstable
+            raw_exit=1
+          fi
+          if [[ "$gate_action" == "need_confirm" ]]; then
+            echo "post-drift: need_confirm left unresolved → inconclusive: unstable runner" >> "$summary"
+            gate_action=unstable
+            raw_exit=1
+          fi
+          if [[ "$gate_action" == "unstable" ]]; then
+            gate_status=1
+            echo "gate: inconclusive: unstable runner (distinct from perf FAIL)" >> "$summary"
+          elif [[ "$gate_action" == "pass" || "$raw_exit" -eq 0 ]]; then
+            gate_status=0
+          elif [[ "$gate_action" == "fail" || "$raw_exit" -eq 1 ]]; then
+            gate_status=1
+          else
+            gate_status=0
+            if [[ "$raw_exit" -ne 0 ]]; then
+              gate_status=1
+            fi
+          fi
+          break
+          done
 
           end_ts=$(date +%s)
           wall=$((end_ts - start_ts))
@@ -351,6 +452,8 @@ jobs:
             echo
             if [[ "$gate_status" -eq 0 ]]; then
               echo "gate: pass"
+            elif [[ "${gate_action:-}" == "unstable" ]]; then
+              echo "gate: inconclusive: unstable runner"
             else
               echo "gate: fail"
             fi
@@ -388,9 +491,19 @@ jobs:
           fi
           if [[ "$status" -eq 0 ]]; then
             echo "gate: pass"
-          else
-            echo "gate: fail (exit $status)"
+            exit 0
           fi
+          reason=""
+          action=""
+          if [[ -f gate.json ]]; then
+            reason=$(python3 -c "import json; g=json.load(open('gate.json')); print(g.get('verdict_reason') or '')" 2>/dev/null || true)
+            action=$(python3 -c "import json; g=json.load(open('gate.json')); print(g.get('gate_action') or '')" 2>/dev/null || true)
+            if [[ "$action" == "unstable" ]]; then
+              echo "gate: inconclusive: unstable runner (exit $status) ${reason}"
+              exit "$status"
+            fi
+          fi
+          echo "gate: fail (exit $status) ${reason}"
           exit "$status"
 
   # -------------------------------------------------------------------------
