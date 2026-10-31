@@ -7,6 +7,10 @@ edition = "2024"
 name = "renderide_shared"
 path = "src/lib.rs"
 
+[[bin]]
+name = "roundtrip"
+path = "src/bin/roundtrip.rs"
+
 [dependencies]
 bytemuck = { version = "1.25", features = ["derive"] }
 glam = { version = "0.34", features = ["bytemuck"] }

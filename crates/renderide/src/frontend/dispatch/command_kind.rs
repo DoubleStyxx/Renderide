@@ -100,6 +100,8 @@ pub(crate) fn classify_renderer_command(cmd: &RendererCommand) -> RendererComman
         RendererCommand::SetRenderTextureFormat(_) => ("SetRenderTextureFormat", Running),
         RendererCommand::RenderTextureResult(_) => ("RenderTextureResult", Running),
         RendererCommand::UnloadRenderTexture(_) => ("UnloadRenderTexture", Running),
+        RendererCommand::RenderTextureReadbackTask(_) => ("RenderTextureReadbackTask", Running),
+        RendererCommand::RenderTextureReadbackResult(_) => ("RenderTextureReadbackResult", Running),
         RendererCommand::SetDesktopTextureProperties(_) => ("SetDesktopTextureProperties", Running),
         RendererCommand::DesktopTexturePropertiesUpdate(_) => {
             ("DesktopTexturePropertiesUpdate", Running)

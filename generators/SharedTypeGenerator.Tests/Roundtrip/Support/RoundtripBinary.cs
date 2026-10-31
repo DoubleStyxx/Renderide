@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using SharedTypeGenerator.Logging;
+using SharedTypeGenerator.Tests.Support;
 using Xunit;
 
 namespace SharedTypeGenerator.Tests.Roundtrip.Support;
@@ -21,16 +22,24 @@ public static class RoundtripBinary
         if (repoRoot == null)
             return null;
 
-        string debugPath = System.IO.Path.Combine(repoRoot, "target", "debug", DefaultBinaryName);
-        string devFastPath = System.IO.Path.Combine(repoRoot, "target", "dev-fast", DefaultBinaryName);
-        string releasePath = System.IO.Path.Combine(repoRoot, "target", "release", DefaultBinaryName);
-
-        if (File.Exists(debugPath))
+        string? debugPath = FirstExistingBinary(repoRoot, "debug");
+        if (debugPath != null)
             return debugPath;
-        if (File.Exists(devFastPath))
+        string? devFastPath = FirstExistingBinary(repoRoot, "dev-fast");
+        if (devFastPath != null)
             return devFastPath;
-        if (File.Exists(releasePath))
-            return releasePath;
+        return FirstExistingBinary(repoRoot, "release");
+    }
+
+    /// <summary>Returns <paramref name="profile"/>'s <c>roundtrip</c> binary, including the Windows <c>.exe</c> name.</summary>
+    private static string? FirstExistingBinary(string repoRoot, string profile)
+    {
+        string basePath = System.IO.Path.Combine(repoRoot, "target", profile, DefaultBinaryName);
+        if (File.Exists(basePath))
+            return basePath;
+        string exePath = basePath + ".exe";
+        if (File.Exists(exePath))
+            return exePath;
         return null;
     }
 
@@ -62,12 +71,7 @@ public static class RoundtripBinary
         && Directory.Exists(System.IO.Path.Combine(dir, "crates", "renderide"));
 
     /// <summary>Returns <see langword="true"/> when <c>CI</c> is <c>true</c> or <c>1</c>.</summary>
-    public static bool IsCiEnvironment()
-    {
-        string? ci = Environment.GetEnvironmentVariable("CI");
-        return string.Equals(ci, "true", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(ci, "1", StringComparison.Ordinal);
-    }
+    public static bool IsCiEnvironment() => RenderiteSharedDllLocator.IsCiEnvironment();
 
     /// <summary>Skips the test locally when <paramref name="binaryPath"/> is null; throws when CI requires the binary.</summary>
     /// <param name="binaryPath">Resolved path from <see cref="TryFind"/>.</param>
@@ -79,11 +83,11 @@ public static class RoundtripBinary
         if (IsCiEnvironment())
         {
             throw new InvalidOperationException(
-                "Roundtrip binary is required when CI=true. From the repository root run: cargo build -p renderide --bin roundtrip");
+                "Roundtrip binary is required when CI=true. From the repository root run: cargo build -p renderide-shared --bin roundtrip");
         }
 
         Skip.If(true,
-            "Roundtrip binary not found under target/debug, target/dev-fast, or target/release. From the repository root run: cargo build -p renderide --bin roundtrip");
+            "Roundtrip binary not found under target/debug, target/dev-fast, or target/release. From the repository root run: cargo build -p renderide-shared --bin roundtrip");
     }
 
     /// <summary>Runs <c>roundtrip &lt;typeName&gt; &lt;input&gt; &lt;output&gt;</c> with redirected stdout/stderr and a timeout.</summary>
