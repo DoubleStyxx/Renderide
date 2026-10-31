@@ -136,91 +136,20 @@ fn smoothness_from_albedo_alpha() -> bool {
     return pbs_kw(PBSMETALLIC_KW_SMOOTHNESS_TEXTURE_ALBEDO_CHANNEL_A);
 }
 
-fn sample_surface(uv0: vec2<f32>, uv1: vec2<f32>, world_pos: vec3<f32>, world_n: vec3<f32>, world_t: vec4<f32>, view_layer: u32) -> SurfaceData {
-    let uv_base = uvu::apply_st(uv0, mat._MainTex_ST);
-    let uv_main = pstd::apply_parallax(
-        uv_base,
-        pbs_kw(PBSMETALLIC_KW_PARALLAXMAP),
-        mat._Parallax,
-        world_pos,
-        world_n,
-        world_t,
-        view_layer,
-        _ParallaxMap,
-        _ParallaxMap_sampler,
-        mat._ParallaxMap_LodBias,
-    );
-    let uv_detail = pdet::detail_uv(uv0, uv1, mat._UVSec, mat._DetailAlbedoMap_ST);
-
-    let albedo_sample = ts::sample_tex_2d(_MainTex, _MainTex_sampler, uv_main, mat._MainTex_LodBias);
-    let base_alpha = pstd::standard_alpha(mat._Color.a, albedo_sample.a, smoothness_from_albedo_alpha());
-    pstd::clip_standard_alpha(base_alpha, mat._Cutoff, alpha_test_enabled());
-
-    var base_color = mat._Color.rgb * albedo_sample.rgb;
-
-    var metallic = mat._Metallic;
-    var smoothness = mat._Glossiness;
-    let smoothness_scale = mat._GlossMapScale;
-    if (metallic_gloss_map_enabled()) {
-        let mg = ts::sample_tex_2d(_MetallicGlossMap, _MetallicGlossMap_sampler, uv_main, mat._MetallicGlossMap_LodBias);
-        metallic = mg.r;
-        smoothness = mg.a * smoothness_scale;
-    }
-    if (smoothness_from_albedo_alpha()) {
-        smoothness = albedo_sample.a * smoothness_scale;
-    }
-    metallic = clamp(metallic, 0.0, 1.0);
-    let roughness = pstd::roughness_from_smoothness(smoothness);
-
-    let occlusion_sample = ts::sample_tex_2d(_OcclusionMap, _OcclusionMap_sampler, uv_main, mat._OcclusionMap_LodBias).g;
-    let occlusion = pstd::occlusion_from_sample(occlusion_sample, mat._OcclusionStrength);
-
-    let detail_enabled = pbs_kw(PBSMETALLIC_KW_DETAIL_MULX2);
-    let detail_mask = pdet::sample_detail_mask(
-        detail_enabled,
-        _DetailMask,
-        _DetailMask_sampler,
-        uv_main,
-        mat._DetailMask_LodBias,
-    );
-    base_color = pdet::apply_detail_albedo(
-        base_color,
-        detail_enabled,
-        detail_mask,
-        _DetailAlbedoMap,
-        _DetailAlbedoMap_sampler,
-        uv_detail,
-        mat._DetailAlbedoMap_LodBias,
-    );
-
-    let n = pstd::sample_world_normal(
-        pbs_kw(PBSMETALLIC_KW_NORMALMAP),
-        detail_enabled,
-        detail_mask,
-        _BumpMap,
-        _BumpMap_sampler,
-        uv_main,
-        mat._BumpMap_LodBias,
-        mat._BumpScale,
-        _DetailNormalMap,
-        _DetailNormalMap_sampler,
-        uv_detail,
-        mat._DetailNormalMap_LodBias,
-        mat._DetailNormalMapScale,
-        world_n,
-        world_t,
-        normalize(world_n),
-    );
-
-    let emission = pstd::sample_emission(
-        pbs_kw(PBSMETALLIC_KW_EMISSION),
-        mat._EmissionColor.rgb,
-        _EmissionMap,
-        _EmissionMap_sampler,
-        uv_main,
-        mat._EmissionMap_LodBias,
-    );
-
+fn sample_surface(_uv0: vec2<f32>, _uv1: vec2<f32>, _world_pos: vec3<f32>, world_n: vec3<f32>, _world_t: vec4<f32>, _view_layer: u32) -> SurfaceData {
+    // #216 bisect toward warp_216_term_debug. That composed path never samples a
+    // material texture and never discards. These lit cases use variant bits 0 and
+    // the white texture defaults, so albedo (1,1,1,1), occlusion 1, a geometric
+    // normal, and emission 0 match the sampled surface. The texture globals stay
+    // declared so the reflected bind group still lines up with //#texture_default.
+    let albedo = vec4<f32>(1.0, 1.0, 1.0, 1.0);
+    let base_alpha = pstd::standard_alpha(mat._Color.a, albedo.a, false);
+    let base_color = mat._Color.rgb * albedo.rgb;
+    let metallic = clamp(mat._Metallic, 0.0, 1.0);
+    let roughness = pstd::roughness_from_smoothness(mat._Glossiness);
+    let occlusion = pstd::occlusion_from_sample(1.0, mat._OcclusionStrength);
+    let n = normalize(world_n);
+    let emission = vec3<f32>(0.0);
     return SurfaceData(base_color, base_alpha, metallic, roughness, occlusion, n, emission);
 }
 
