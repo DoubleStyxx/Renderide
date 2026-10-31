@@ -341,7 +341,7 @@ jobs:
                 cat "$summary" >> "$GITHUB_STEP_SUMMARY"
                 exit 1
               fi
-              python3 "$GITHUB_WORKSPACE/scripts/ci/bench_pr_merge_confirm.py" \
+              python3 "$GITHUB_WORKSPACE/tools/scripts/ci/bench_pr_merge_confirm.py" \
                 --gate1 "$out/gate.json" --gate2 "$out/gate-confirm2.json" --out "$out/gate.json"
               gate_status=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['exit_code'])" "$out/gate.json")
               if [[ "$gate_status" -ne 0 ]]; then
