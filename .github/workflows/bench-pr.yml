@@ -30,6 +30,7 @@ name: Bench PR
       - "scripts/ci/bench_pr_report.py"
       - "scripts/ci/bench_pr_merge_confirm.py"
       - "scripts/ci/bench_pr_force_unstable.py"
+      - "scripts/ci/bench_pr_echo_verdict.py"
       - ".github/workflows/bench-pr.yml"
       - ".github/actions/lavapipe/**"
 
@@ -352,6 +353,7 @@ jobs:
               gate_action=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('gate_action','fail'))" "$out/gate.json")
               gate_status=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['exit_code'])" "$out/gate.json")
               echo "gate after confirm round 2: action=$gate_action exit=$gate_status" >> "$summary"
+              python3 "$GITHUB_WORKSPACE/tools/scripts/ci/bench_pr_echo_verdict.py" "$out/gate.json" >> "$summary"
 
               if [[ "$gate_action" == "need_confirm" ]]; then
                 echo "::group::Confirm round 3 (second drift-clean confirm after one clean FAIL) for: ${drift_suspects[*]}"
@@ -392,6 +394,7 @@ jobs:
                 gate_action=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('gate_action','fail'))" "$out/gate.json")
                 gate_status=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['exit_code'])" "$out/gate.json")
                 echo "gate after confirm round 3: action=$gate_action exit=$gate_status" >> "$summary"
+              python3 "$GITHUB_WORKSPACE/tools/scripts/ci/bench_pr_echo_verdict.py" "$out/gate.json" >> "$summary"
               fi
             else
               merge_args=(--gate "$out/gate-confirm1.json" --out "$out/gate.json")
@@ -456,6 +459,9 @@ jobs:
               echo "gate: inconclusive: unstable runner"
             else
               echo "gate: fail"
+            fi
+            if [[ -f "$out/gate.json" ]]; then
+              python3 "$GITHUB_WORKSPACE/tools/scripts/ci/bench_pr_echo_verdict.py" "$out/gate.json"
             fi
             echo "wall_time_sec: $wall"
           } >> "$summary"
