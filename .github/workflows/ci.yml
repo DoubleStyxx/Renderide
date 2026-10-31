@@ -17,6 +17,8 @@ name: CI
       - "Cargo.toml"
       - "Generators.sln"
       - "clippy.toml"
+      - "rust-toolchain.toml"
+      - "scripts/ci/**"
       - "crates/**"
       - "generators/**"
       - "third_party/**"
@@ -30,6 +32,8 @@ name: CI
       - "Cargo.toml"
       - "Generators.sln"
       - "clippy.toml"
+      - "rust-toolchain.toml"
+      - "scripts/ci/**"
       - "crates/**"
       - "generators/**"
       - "third_party/**"
@@ -185,8 +189,9 @@ jobs:
           sudo cp "$gsttmp"/root/usr/lib/*/gstreamer-1.0/libgstmpegtsdemux.so "$plugindir/"
           rm -rf "$gsttmp"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
+          toolchain: "1.99.1"
           components: rustfmt, clippy
 
       - name: Enable sccache (Windows)
@@ -212,7 +217,16 @@ jobs:
           command -v cargo
           command -v rustup
           rustup show active-toolchain
+          active="$(rustc --version)"
+          echo "$active"
+          pin="$(python3 -c "from pathlib import Path; import sys; sys.path.insert(0, 'scripts/ci'); from check_rust_toolchain_pin import parse_pin; print(parse_pin(Path('rust-toolchain.toml').read_text()))")"
+          echo "rust-toolchain.toml pin: $pin"
+          echo "$active" | grep -F "$pin"
           cargo metadata --locked --no-deps --format-version 1 >/dev/null
+
+      - name: Check Rust toolchain pin in workflows
+        shell: bash
+        run: python3 scripts/ci/check_rust_toolchain_pin.py
 
       - name: Check formatting
         run: cargo fmt --all -- --check
