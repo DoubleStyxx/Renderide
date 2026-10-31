@@ -427,7 +427,7 @@ impl FrameGpuResources {
         device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),
             size: (MAX_LIGHTS * size_of::<GpuLight>()) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            usage: crate::gpu::warp_light_probe::storage_usage(),
             mapped_at_creation: false,
         })
     }
@@ -793,6 +793,7 @@ impl FrameGpuResources {
             uploads.write_buffer(lights_buffer, 0, &zero);
         }
         crate::gpu::warp_black_diag_probe::log_lights(&lights[..n]);
+        crate::gpu::warp_light_probe::note_cpu_upload(lights_buffer, &lights[..n]);
     }
 }
 

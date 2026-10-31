@@ -76,6 +76,7 @@ fn readback_color_texture(
     readback.unmap();
     crate::gpu::warp_black_diag::log_readback_colors(&tight);
     probe_second_readback(gpu, color_texture, &layout, &tight);
+    crate::gpu::warp_light_probe::roundtrip(gpu.device(), gpu.queue(), gpu.adapter_info());
 
     write_png_atomically(
         &tight,
