@@ -190,7 +190,15 @@ Owner: Bridge. ETA: done Oct 31.
 
 Candidate causes, each with its own experiment. Findings note Nov 7.
 
-**8a. DXC codegen. Handed to Shader.** Bridge is not starting another FXC-versus-DXC or DXIL-versus-SPIR-V capture. Dumps already taken in this run stay as artifacts. They are listed here and not interpreted.
+**8a. DXC codegen. Concluded.** Fast-math and the in-loop gradient are ruled out. The remaining suspect is DXC/WARP instability on the full production fragment. The next step is an `ALPHAPREMULTIPLY` compile-time split in production, with a WARP 3-sample re-check before any quarantine is lifted. That production PR is pending and is not this change. Writeup: [`216-8a-codegen.md` at `29a914f1`](https://github.com/DoubleStyxx/Renderide/blob/29a914f173fed356903358a3229a5448d4cff450/docs/investigations/216-8a-codegen.md).
+
+Fast-math is ruled out. `-Gis -Od` on static DXC ([41208415616](https://github.com/DoubleStyxx/Renderide/actions/runs/41208415616), `b9a32b8b`) logged `dxil-fast-count=0` and was still 5/9 flat, including a G-only wipe on `pbs_lit_material_matrix` (linear R and B at 0, G about 0.168).
+
+Gradients are ruled out. FXC's `X3570` names `shadow_atlas.SampleCmp` inside the dynamic light loop. The 8d debug shader contains that same `textureSampleCompare`, and static DXC shades it within 6.32e-4 of llvmpipe ([41174993308](https://github.com/DoubleStyxx/Renderide/actions/runs/41174993308)). FXC rejects the debug shader with the same `X3570`/`X3511` pair (job `windows-fxc-debug` of [41208228557](https://github.com/DoubleStyxx/Renderide/actions/runs/41208228557)). The explicit-LOD arm, which replaced those implicit samples, was 6/9 flat ([41205954817](https://github.com/DoubleStyxx/Renderide/actions/runs/41205954817), `360331b1`).
+
+Both cuts of the production fragment were 0/9 flat, and the linear means matched lavapipe, including parity's 1787 negatives. no-premul drops the second light loop (`shade_metallic_transparent_clustered`) and keeps material sampling ([41208243248](https://github.com/DoubleStyxx/Renderide/actions/runs/41208243248), `d6ea1163`). untextured drops material `textureSampleBias` and `discard` and keeps the second loop ([41208259340](https://github.com/DoubleStyxx/Renderide/actions/runs/41208259340), `d72bddb9`). The baseline rerun of the full fragment was 7/9 flat ([41208228557](https://github.com/DoubleStyxx/Renderide/actions/runs/41208228557), `06a88b09`). With the earlier baselines (5/9 on [41202573717](https://github.com/DoubleStyxx/Renderide/actions/runs/41202573717) and 7/9 on [41205727909](https://github.com/DoubleStyxx/Renderide/actions/runs/41205727909)) that is 19/27 flat. Lavapipe `rgba16f` stayed byte-identical across these arms. The likely cause is DXC/WARP instability with the full production fragment, not the shared light-loop math.
+
+The handoff dumps from this canary stay below. They were the start of 8a, not the conclusion.
 
 | Run | Job | Files |
 | --- | --- | --- |
@@ -202,7 +210,7 @@ Candidate causes, each with its own experiment. Findings note Nov 7.
 | same run | windows-1 `124524822330`, windows-2 `124524822170` | `lit-production.wgsl` only, under both production cases, plus `lit-tools.txt`. Artifacts `warp216-debug-windows-1` and `warp216-debug-windows-2`. |
 | same run | windows-3 `124524822273` | `lit-production.wgsl` only, under both production cases, plus `lit-tools.txt`. Artifact `warp216-debug-windows-3`. |
 
-Owner: Shader, from Oct 31. The Nov 5 Bridge capture is withdrawn.
+Owner: Shader. Concluded Oct 31. The Nov 5 Bridge capture stayed withdrawn.
 
 **8b. Swizzle or packing. Ruled out.**
 
@@ -223,7 +231,7 @@ Position and range bits match across the two adapters as well (`pbs_lit` light 0
 
 Packing and upload are not the WARP failure. The storage buffer the shader reads has the same floats llvmpipe shades correctly.
 
-- **8a** is Shader's, for a consumer that is not this debug shader. A DXC bug in the upload itself is closed. The dumps above are the handoff.
+- **8a** is concluded above. Fast-math and the in-loop gradient are ruled out. A DXC bug in the upload itself stays closed.
 - **8c** and **8d** are measured on the debug group below.
 
 Owner: Bridge. ETA: done Oct 31.
@@ -257,7 +265,7 @@ The 2×2 `Rgba16Float` means match llvmpipe. The largest absolute channel differ
 | emission | those four | 0 of 3 | matches, and both sides are at 0 |
 | constant `(0.25, 0.5, 0.75)` | none | 0 of 3 | matches |
 
-No isolated term loses G. The composed debug frame does not lose it either. The channel-zero pixels in the earlier production captures are not reproduced by this debug shader. The production lit shader is 8a, and that dump belongs to Shader.
+No isolated term loses G. The composed debug frame does not lose it either. The channel-zero pixels in the earlier production captures are not reproduced by this debug shader. 8a concluded that the production fragment is the unstable compile, and the next step is the `ALPHAPREMULTIPLY` split.
 
 **Does the debug shader take a derivative inside the dynamic light loop? Yes.**
 
@@ -333,6 +341,6 @@ Verdict: the clamp-off intensity reaches WARP. The float frame matches llvmpipe,
 
 ## Order
 
-1. Shader: read the 8a dumps listed above. Bridge is not running another production-shader capture.
-2. 8b, 8c, 8d (unsigned group and negparity), hypothesis 5, and hypothesis 6 are recorded above. The 0.95 SSIM gap is the gate.
+1. Production: compile `shade_metallic_transparent_clustered` only into the `ALPHAPREMULTIPLY` variant, so the opaque `pbsmetallic` fragment matches the no-premul arm. PR pending. Re-check that pipeline with 3 WARP samples before any #216 quarantine is lifted.
+2. 8a is concluded (fast-math ruled out, gradients ruled out, full fragment unstable on DXC/WARP). 8b, 8c, 8d (unsigned group and negparity), hypothesis 5, and hypothesis 6 are recorded above. The 0.95 SSIM gap is the gate.
 3. Gauge: #214 stall, after the Nov 7 color finding.
