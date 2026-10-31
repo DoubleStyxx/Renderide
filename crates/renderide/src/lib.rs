@@ -99,3 +99,5 @@ pub fn ensure_native_stdio_forwarded_to_logger() {
 pub fn run() -> Result<RunExit, RunError> {
     app::run()
 }
+
+// CANARY - DO NOT MERGE: cancel the suite jobs so required fails closed.
