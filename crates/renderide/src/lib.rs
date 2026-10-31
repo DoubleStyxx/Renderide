@@ -1,4 +1,5 @@
 //! Renderide renderer process entry points.
+//! CANARY noise-noop-4 DO NOT MERGE.
 //!
 //! The supported external API intentionally stays small: [`run`] starts the renderer process,
 //! [`RunExit`] reports normal process exits, [`RunError`] reports fatal startup failures, and
