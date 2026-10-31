@@ -540,13 +540,26 @@ mod tests {
     }
 
     #[test]
-    fn bless_refuses_quarantined_cases_before_capture() {
-        let case = crate::scene_dsl::cases::pbs_lit_material_matrix();
+    fn bless_force_refuses_every_quarantine_and_expected_failure_case() {
         let runner = RunnerConfig::with_defaults("/nonexistent/renderide");
-        let (report, note) = bless_one(&case, &runner, true);
-        assert!(report.passed);
-        assert!(report.bless_skip.as_deref().unwrap_or("").contains("#216"));
-        assert!(note.unwrap_or_default().contains("bless refused"));
-        assert!(!case.golden_path.exists() || report.blessed.is_none());
+        let names = crate::scene_dsl::bless_refused_scenes();
+        assert!(
+            names.len() >= 4,
+            "the #216 list and the #212 case must both be present"
+        );
+        for name in names {
+            let case = crate::scene_dsl::cases::lookup(name)
+                .unwrap_or_else(|| panic!("{name} is quarantined but not registered"));
+            let (report, note) = bless_one(&case, &runner, true);
+            let skip = report.bless_skip.as_deref().unwrap_or("");
+            assert!(report.passed, "{name}");
+            assert!(report.blessed.is_none(), "{name} was blessed: {report:?}");
+            assert!(skip.contains("bless refused"), "{name}: {skip}");
+            assert!(skip.contains("#216"), "{name}: {skip}");
+            if *name == "pbs_lit_material_matrix" {
+                assert!(skip.contains("#212"), "{name}: {skip}");
+            }
+            assert!(note.unwrap_or_default().contains("bless refused"), "{name}");
+        }
     }
 }

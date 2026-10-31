@@ -140,31 +140,28 @@ fn fixture_unstable_exits_6() {
 }
 
 #[test]
-fn bless_refuses_a_quarantined_case() {
-    let output = output(bin().args([
-        "run",
-        "--json",
-        "--bless",
-        "--force",
-        "pbs_lit_material_matrix",
-    ]));
-    assert_eq!(
-        status(&output),
-        0,
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("bless refused"), "{stderr}");
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
-    assert_eq!(value["exit_code"], 0);
-    assert!(
-        value["cases"][0]["bless_skip"]
-            .as_str()
-            .unwrap_or("")
-            .contains("#216"),
-        "{value}"
-    );
+fn bless_force_refuses_every_quarantine_and_expected_failure_case() {
+    let names = renderide_test::scene_dsl::bless_refused_scenes();
+    assert!(names.len() >= 4, "{names:?}");
+    for name in names {
+        let output = output(bin().args(["run", "--json", "--bless", "--force", name]));
+        assert_eq!(
+            status(&output),
+            0,
+            "{name}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("bless refused"), "{name}: {stderr}");
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+        assert_eq!(value["exit_code"], 0, "{name}");
+        let skip = value["cases"][0]["bless_skip"].as_str().unwrap_or("");
+        assert!(skip.contains("#216"), "{name}: {value}");
+        assert!(value["cases"][0]["blessed"].is_null(), "{name}");
+        if *name == "pbs_lit_material_matrix" {
+            assert!(skip.contains("#212"), "{name}: {value}");
+        }
+    }
 }
 
 #[test]

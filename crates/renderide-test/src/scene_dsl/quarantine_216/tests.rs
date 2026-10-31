@@ -142,6 +142,29 @@ fn expiry_constant_is_the_utc_instant_named_in_the_ruling() {
 }
 
 #[test]
+fn bless_refusal_tracks_the_quarantine_and_expected_failure_names() {
+    let now = before_expiry();
+    for case in crate::scene_dsl::cases::registry() {
+        let listed = early_flat_exit_applies(&case.name, true, now);
+        assert_eq!(
+            listed,
+            bless_forbidden(&case.name).is_some(),
+            "{}",
+            case.name
+        );
+    }
+    for name in NEGATIVE_LIGHT_CASES {
+        assert!(
+            QUARANTINE_CASE_NAMES.contains(name),
+            "{name} is on the #216 list but --bless would not refuse it"
+        );
+    }
+    assert!(QUARANTINE_CASE_NAMES.contains(&PBS_LIT));
+    let expected_failure = bless_forbidden(PBS_LIT).expect("pbs_lit");
+    assert!(expected_failure.contains("#212"), "{expected_failure}");
+}
+
+#[test]
 fn warp_flat_frame_is_quarantined_before_expiry_and_fails_after() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut report = SuiteReport::from_cases(vec![
