@@ -29,6 +29,8 @@ class PatternTests(unittest.TestCase):
             "Cargo.toml",
             "Generators.sln",
             "clippy.toml",
+            "rust-toolchain.toml",
+            "scripts/ci/check_rust_toolchain_pin.py",
             "crates/renderide/src/lib.rs",
             "crates/renderide-test/src/scene_dsl.rs",
             "generators/SharedTypeGenerator/Program.cs",

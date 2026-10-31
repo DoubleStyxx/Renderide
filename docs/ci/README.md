@@ -57,7 +57,7 @@ The decision logic is `.github/ci/required_check.py` and `.github/ci/ci_paths.py
 
 Applicability lives in `SUITE_PATTERNS` in `.github/ci/ci_paths.py`. The list is the historical `ci.yml` trigger, plus `.github/ci/**` and the exact path `docs/testing/material-coverage.md`.
 
-The historical patterns are `.github/workflows/ci.yml`, `.github/actions/lavapipe/**`, `.taplo.toml`, `Cargo.lock`, `Cargo.toml`, `Generators.sln`, `clippy.toml`, `crates/**`, `generators/**`, `third_party/**`, and `RenderideMod/Shaders/**`.
+The historical patterns are `.github/workflows/ci.yml`, `.github/actions/lavapipe/**`, `.taplo.toml`, `Cargo.lock`, `Cargo.toml`, `Generators.sln`, `clippy.toml`, `rust-toolchain.toml`, `scripts/ci/**`, `crates/**`, `generators/**`, `third_party/**`, and `RenderideMod/Shaders/**`. `rust-toolchain.toml` and `scripts/ci/**` came in with the rustc 1.99.1 pin; they stay suite paths so a pin-only change is not a path skip.
 
 `.github/ci/**` is the scripts the suite jobs run and this gate. A change there runs the suites the gate judges.
 

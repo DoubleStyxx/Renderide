@@ -16,6 +16,7 @@ path = "src/main.rs"
 test-cli-fixture = []
 
 [dependencies]
+renderide-harness-env = { path = "../renderide-harness-env" }
 renderide-shared = { path = "../renderide-shared" }
 logger = { path = "../logger" }
 clap = { version = "4.6", features = ["derive"] }

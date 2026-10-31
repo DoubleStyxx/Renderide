@@ -3531,11 +3531,19 @@ name = "renderide-framebench"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "renderide-harness-env",
  "renderide-test",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "renderide-harness-env"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
 ]
 
 [[package]]
@@ -3568,6 +3576,7 @@ dependencies = [
  "mimalloc",
  "png",
  "rayon",
+ "renderide-harness-env",
  "renderide-shared",
  "serde",
  "serde_json",

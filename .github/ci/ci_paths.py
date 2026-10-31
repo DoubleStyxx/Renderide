@@ -36,6 +36,8 @@ SUITE_PATTERNS: tuple[str, ...] = (
     "Cargo.toml",
     "Generators.sln",
     "clippy.toml",
+    "rust-toolchain.toml",
+    "scripts/ci/**",
     "crates/**",
     "generators/**",
     "third_party/**",
