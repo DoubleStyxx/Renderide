@@ -322,7 +322,7 @@ fn evaluate_and_finalize(
     }
     if !case.golden_path.exists() {
         let msg = format!(
-            "golden image missing at {}; run `renderide-test update-suite --case {}` to create it",
+            "golden image missing at {}; run `renderide-test run --bless --case {}` to create it",
             case.golden_path.display(),
             case.name
         );
@@ -404,7 +404,7 @@ fn plain_capture_failure(case: &IntegrationCase, layout: &CaseOutputLayout) -> R
     }
     if !golden_path.is_file() {
         return Err(format!(
-            "plain golden missing at {}; run `renderide-test update-suite --case {}`",
+            "plain golden missing at {}; run `renderide-test run --bless --case {}`",
             golden_path.display(),
             case.name
         ));

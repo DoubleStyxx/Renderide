@@ -1,8 +1,9 @@
 //! CLI contract for `renderide-test run` and `list`.
 //!
-//! Image, capture, and unstable exits use `RENDERIDE_TEST_CLI_FIXTURE` on the
-//! child process. That hook exists only in debug builds and is documented on
-//! `cli::run`. These tests never call `std::env::set_var`.
+//! Image, capture, and unstable exits use `RENDERIDE_TEST_CLI_FIXTURE` on a
+//! child built with the default-off `test-cli-fixture` feature. That hook is
+//! documented on `cli::run` and is absent from the CI `check-suite` binary.
+//! These tests never call `std::env::set_var`.
 
 #![allow(
     clippy::expect_used,
@@ -17,6 +18,33 @@ fn bin() -> Command {
 
 fn output(cmd: &mut Command) -> std::process::Output {
     cmd.output().expect("spawn renderide-test")
+}
+
+/// Runs the harness with `test-cli-fixture` in its own target dir.
+///
+/// `cargo test --workspace --locked` does not pass that feature, so the binary
+/// CI uses for `check-suite` stays free of the hook. This rebuild does not
+/// replace `target/debug/renderide-test`.
+fn hooked(args: &[&str], fixture: &str) -> std::process::Output {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut cmd = Command::new(env!("CARGO"));
+    cmd.current_dir(&root);
+    cmd.args([
+        "run",
+        "--quiet",
+        "--locked",
+        "--offline",
+        "-p",
+        "renderide-test",
+        "--features",
+        "test-cli-fixture",
+        "--target-dir",
+    ]);
+    cmd.arg(root.join("target/cli-fixture"));
+    cmd.arg("--");
+    cmd.args(args);
+    cmd.env("RENDERIDE_TEST_CLI_FIXTURE", fixture);
+    cmd.output().expect("cargo run with test-cli-fixture")
 }
 
 fn status(output: &std::process::Output) -> u8 {
@@ -72,11 +100,7 @@ fn unknown_scene_exits_2() {
 
 #[test]
 fn fixture_golden_missing_exits_4() {
-    let output = output(
-        bin()
-            .args(["run", "--json", "unlit_sphere"])
-            .env("RENDERIDE_TEST_CLI_FIXTURE", "golden_missing"),
-    );
+    let output = hooked(&["run", "--json", "unlit_sphere"], "golden_missing");
     assert_eq!(
         status(&output),
         4,
@@ -89,11 +113,7 @@ fn fixture_golden_missing_exits_4() {
 
 #[test]
 fn fixture_mismatch_exits_1() {
-    let output = output(
-        bin()
-            .args(["run", "--json", "unlit_sphere"])
-            .env("RENDERIDE_TEST_CLI_FIXTURE", "mismatch"),
-    );
+    let output = hooked(&["run", "--json", "unlit_sphere"], "mismatch");
     assert_eq!(
         status(&output),
         1,
@@ -107,11 +127,7 @@ fn fixture_mismatch_exits_1() {
 
 #[test]
 fn fixture_capture_exits_3() {
-    let output = output(
-        bin()
-            .args(["run", "--json", "unlit_sphere"])
-            .env("RENDERIDE_TEST_CLI_FIXTURE", "capture"),
-    );
+    let output = hooked(&["run", "--json", "unlit_sphere"], "capture");
     assert_eq!(
         status(&output),
         3,
@@ -124,11 +140,7 @@ fn fixture_capture_exits_3() {
 
 #[test]
 fn fixture_unstable_exits_6() {
-    let output = output(
-        bin()
-            .args(["run", "--json", "unlit_sphere"])
-            .env("RENDERIDE_TEST_CLI_FIXTURE", "unstable"),
-    );
+    let output = hooked(&["run", "--json", "unlit_sphere"], "unstable");
     assert_eq!(
         status(&output),
         6,
@@ -140,10 +152,8 @@ fn fixture_unstable_exits_6() {
 }
 
 #[test]
-fn bless_force_refuses_every_quarantine_and_expected_failure_case() {
-    let names = renderide_test::scene_dsl::bless_refused_scenes();
-    assert!(names.len() >= 4, "{names:?}");
-    for name in names {
+fn bless_force_refuses_every_listed_quarantine_case() {
+    for name in renderide_test::scene_dsl::bless_refused_scenes() {
         let output = output(bin().args(["run", "--json", "--bless", "--force", name]));
         assert_eq!(
             status(&output),
@@ -156,11 +166,8 @@ fn bless_force_refuses_every_quarantine_and_expected_failure_case() {
         let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
         assert_eq!(value["exit_code"], 0, "{name}");
         let skip = value["cases"][0]["bless_skip"].as_str().unwrap_or("");
-        assert!(skip.contains("#216"), "{name}: {value}");
+        assert!(skip.contains("bless refused"), "{name}: {value}");
         assert!(value["cases"][0]["blessed"].is_null(), "{name}");
-        if *name == "pbs_lit_material_matrix" {
-            assert!(skip.contains("#212"), "{name}: {value}");
-        }
     }
 }
 

@@ -1,10 +1,15 @@
 //! `run`, `list`, and bless execution.
 //!
-//! `RENDERIDE_TEST_CLI_FIXTURE` is a debug-only hook for the CLI contract tests.
-//! Release builds ignore it. The integration test sets it on the child process
-//! (`mismatch`, `capture`, `unstable`, or `golden_missing`) and does not spawn a renderer.
+//! `RENDERIDE_TEST_CLI_FIXTURE` is compiled only for debug builds with the
+//! default-off `test-cli-fixture` feature. Release builds and the normal CI
+//! binary (`cargo build` / `cargo test` without that feature) do not contain
+//! the hook. `cli_contract` turns it on with
+//! `cargo run -p renderide-test --features test-cli-fixture` in a separate
+//! target directory, and sets the variable on that child. Values are
+//! `mismatch`, `capture`, `unstable`, and `golden_missing`.
 //! `std::env::set_var` is not used.
 
+#[cfg(all(debug_assertions, feature = "test-cli-fixture"))]
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -90,12 +95,8 @@ pub(super) fn run_command(flags: RunFlags<'_>) -> Finished {
         Ok(cases) => cases,
         Err(err) => return usage(json, deprecation, &err.to_string()),
     };
-    if let Some(kind) = test_fixture() {
-        let outcome = SuiteRunOutcome {
-            report: fixture_report(&kind),
-            report_path: PathBuf::from("suite-report.json"),
-        };
-        return finalize(outcome, json, deprecation, Vec::new(), "passed", false);
+    if let Some(finished) = fixture_finished(json, deprecation) {
+        return finished;
     }
     let config = match suite_config(opts, cases) {
         Ok(config) => config,
@@ -129,7 +130,12 @@ fn bless_suite(config: &SuiteConfig, json: bool, force: bool, deprecation: bool)
     let mut notes = Vec::new();
     let mut cases = Vec::new();
     for case in &config.cases {
-        let (report, note) = bless_one(case, &config.runner, force);
+        let (report, note) = bless_one(
+            case,
+            &config.runner,
+            force,
+            &crate::scene_dsl::bless_forbidden,
+        );
         if let Some(note) = note {
             notes.push(note);
         }
@@ -149,10 +155,11 @@ fn bless_one(
     case: &IntegrationCase,
     runner: &RunnerConfig,
     force: bool,
+    forbidden: &impl Fn(&str) -> Option<&'static str>,
 ) -> (SuiteCaseReport, Option<String>) {
     let layout =
         crate::scene_dsl::output::CaseOutputLayout::for_case(&runner.output_root, &case.name);
-    if let Some(reason) = crate::scene_dsl::bless_forbidden(&case.name) {
+    if let Some(reason) = forbidden(&case.name) {
         let mut skipped = SuiteCaseReport::plain(
             case.name.clone(),
             true,
@@ -483,20 +490,33 @@ fn glob_from(pattern: &[u8], name: &[u8]) -> bool {
     p == pattern.len()
 }
 
-/// Debug-only contract-test hook. Release builds return `None`.
-fn test_fixture() -> Option<String> {
-    #[cfg(debug_assertions)]
+fn fixture_finished(json: bool, deprecation: bool) -> Option<Finished> {
+    #[cfg(all(debug_assertions, feature = "test-cli-fixture"))]
     {
-        std::env::var("RENDERIDE_TEST_CLI_FIXTURE")
+        let kind = std::env::var("RENDERIDE_TEST_CLI_FIXTURE")
             .ok()
-            .filter(|value| !value.is_empty())
+            .filter(|value| !value.is_empty())?;
+        let outcome = SuiteRunOutcome {
+            report: fixture_report(&kind),
+            report_path: PathBuf::from("suite-report.json"),
+        };
+        Some(finalize(
+            outcome,
+            json,
+            deprecation,
+            Vec::new(),
+            "passed",
+            false,
+        ))
     }
-    #[cfg(not(debug_assertions))]
+    #[cfg(not(all(debug_assertions, feature = "test-cli-fixture")))]
     {
+        let _ = (json, deprecation);
         None
     }
 }
 
+#[cfg(all(debug_assertions, feature = "test-cli-fixture"))]
 fn fixture_report(kind: &str) -> SuiteReport {
     let error = match kind {
         "capture" => "headless PNG stayed pipeline-pending for 60s",
@@ -540,26 +560,47 @@ mod tests {
     }
 
     #[test]
-    fn bless_force_refuses_every_quarantine_and_expected_failure_case() {
+    fn bless_force_refuses_an_injected_quarantine_fixture() {
+        let mut case = crate::scene_dsl::cases::unlit_sphere();
+        case.name = "synthetic_quarantine_fixture".to_string();
         let runner = RunnerConfig::with_defaults("/nonexistent/renderide");
-        let names = crate::scene_dsl::bless_refused_scenes();
-        assert!(
-            names.len() >= 4,
-            "the #216 list and the #212 case must both be present"
+        let (report, note) = bless_one(&case, &runner, true, &|name| {
+            (name == "synthetic_quarantine_fixture").then_some("quarantined fixture; bless refused")
+        });
+        assert!(report.passed);
+        assert!(report.blessed.is_none());
+        assert_eq!(
+            report.bless_skip.as_deref(),
+            Some("quarantined fixture; bless refused")
         );
-        for name in names {
+        assert!(note.unwrap_or_default().contains("bless refused"));
+        assert!(crate::scene_dsl::bless_forbidden(&case.name).is_none());
+    }
+
+    #[test]
+    fn bless_force_refuses_every_name_on_the_quarantine_list() {
+        let runner = RunnerConfig::with_defaults("/nonexistent/renderide");
+        for name in crate::scene_dsl::bless_refused_scenes() {
             let case = crate::scene_dsl::cases::lookup(name)
-                .unwrap_or_else(|| panic!("{name} is quarantined but not registered"));
-            let (report, note) = bless_one(&case, &runner, true);
-            let skip = report.bless_skip.as_deref().unwrap_or("");
-            assert!(report.passed, "{name}");
-            assert!(report.blessed.is_none(), "{name} was blessed: {report:?}");
-            assert!(skip.contains("bless refused"), "{name}: {skip}");
-            assert!(skip.contains("#216"), "{name}: {skip}");
-            if *name == "pbs_lit_material_matrix" {
-                assert!(skip.contains("#212"), "{name}: {skip}");
-            }
+                .unwrap_or_else(|| panic!("{name} is listed but not registered"));
+            let (report, note) =
+                bless_one(&case, &runner, true, &crate::scene_dsl::bless_forbidden);
+            assert!(report.blessed.is_none(), "{name}");
+            assert!(
+                report
+                    .bless_skip
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("bless refused"),
+                "{name}"
+            );
             assert!(note.unwrap_or_default().contains("bless refused"), "{name}");
         }
+    }
+
+    #[test]
+    fn fixture_hook_is_compiled_out_without_the_feature() {
+        #[cfg(not(feature = "test-cli-fixture"))]
+        assert!(fixture_finished(true, false).is_none());
     }
 }

@@ -1,7 +1,9 @@
 //! Command-line interface for the golden-image harness.
 //!
-//! `run` is the supported command. `check-suite` is a hidden alias of `run` and
-//! `update-suite` is a hidden alias of `run --bless`. CI keeps calling `check-suite`.
+//! `run` is the supported command. Bless with `run --bless`, and add `--force`
+//! to overwrite a golden. `check-suite` is a hidden alias of `run`. `update-suite`
+//! is a hidden alias of `run --bless` and does not pass `--force`. CI keeps
+//! calling `check-suite`.
 
 mod print;
 mod run;

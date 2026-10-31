@@ -10,6 +10,11 @@ path = "src/lib.rs"
 name = "renderide-test"
 path = "src/main.rs"
 
+[features]
+# Compiled into debug builds only when this is enabled. `cli_contract` turns it
+# on for a separate target dir. The CI `check-suite` binary does not.
+test-cli-fixture = []
+
 [dependencies]
 renderide-shared = { path = "../renderide-shared" }
 logger = { path = "../logger" }

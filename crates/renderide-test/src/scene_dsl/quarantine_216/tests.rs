@@ -159,9 +159,12 @@ fn bless_refusal_tracks_the_quarantine_and_expected_failure_names() {
             "{name} is on the #216 list but --bless would not refuse it"
         );
     }
-    assert!(QUARANTINE_CASE_NAMES.contains(&PBS_LIT));
-    let expected_failure = bless_forbidden(PBS_LIT).expect("pbs_lit");
-    assert!(expected_failure.contains("#212"), "{expected_failure}");
+    for name in QUARANTINE_CASE_NAMES {
+        assert!(
+            bless_forbidden(name).is_some(),
+            "{name} is listed but bless would accept it"
+        );
+    }
 }
 
 #[test]

@@ -415,7 +415,7 @@ fn run_suite_with(
 }
 
 /// The #212 label applies to both commands. The #216 quarantine is check-suite only,
-/// so a failed `update-suite` cannot exit 0 by counting a flat frame as quarantined.
+/// so a failed `run --bless` cannot exit 0 by counting a flat frame as quarantined.
 fn apply_suite_labels(
     report: &mut SuiteReport,
     check_suite: bool,
