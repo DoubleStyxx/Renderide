@@ -1,7 +1,13 @@
 # Builds the Rust workspace and the .NET generator solution on all major desktop OSes.
 name: CI
 
-# Path filters omit the mod project. It references FrooxEngine.dll and
+# The trigger has no path filter. A filter on pull_request or push never
+# creates check runs, so a required check stays pending. The `changes` job
+# (.github/ci/ci_paths.py) decides whether the Rust and .NET suites apply.
+# Those jobs skip from their own `if` when the diff does not match. `required`
+# always runs and is the status check to require.
+#
+# The mod project stays out of the suite. It references FrooxEngine.dll and
 # Renderite.Shared.dll from a Resonite install. Those assemblies are proprietary
 # and are not on hosted runners, so CI does not build RenderideMod.csproj.
 # `RenderideMod/Shaders/**` is included: Rust `include_str!` compiles those WGSL
@@ -9,31 +15,7 @@ name: CI
 "on":
   push:
     branches: [master]
-    paths:
-      - ".github/workflows/ci.yml"
-      - ".github/actions/lavapipe/**"
-      - ".taplo.toml"
-      - "Cargo.lock"
-      - "Cargo.toml"
-      - "Generators.sln"
-      - "clippy.toml"
-      - "crates/**"
-      - "generators/**"
-      - "third_party/**"
-      - "RenderideMod/Shaders/**"
   pull_request:
-    paths:
-      - ".github/workflows/ci.yml"
-      - ".github/actions/lavapipe/**"
-      - ".taplo.toml"
-      - "Cargo.lock"
-      - "Cargo.toml"
-      - "Generators.sln"
-      - "clippy.toml"
-      - "crates/**"
-      - "generators/**"
-      - "third_party/**"
-      - "RenderideMod/Shaders/**"
   workflow_dispatch:
 
 # Concurrency is set on each job. A workflow-wide cancel-in-progress group
@@ -53,8 +35,38 @@ env:
   DOTNET_NOLOGO: "1"
 
 jobs:
+  # Always runs. Publishes suites=true or suites=false. A diff that cannot be
+  # read publishes true, so the suites run instead of being skipped.
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      suites: ${{ steps.detect.outputs.suites }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Test path and required-check scripts
+        run: python3 -m unittest discover -s .github/ci -p 'test_*.py' -v
+
+      - name: Detect suite paths
+        id: detect
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: python3 .github/ci/ci_paths.py
+
   rust:
     name: Rust / ${{ matrix.os }}
+    needs: changes
+    if: needs.changes.outputs.suites == 'true'
     runs-on: ${{ matrix.os }}
     concurrency:
       group: ci-${{ github.workflow }}-rust-${{ matrix.os }}-${{ github.ref }}
@@ -310,6 +322,8 @@ jobs:
 
   dotnet:
     name: .NET / ${{ matrix.os }}
+    needs: changes
+    if: needs.changes.outputs.suites == 'true'
     runs-on: ${{ matrix.os }}
     concurrency:
       group: ci-${{ github.workflow }}-dotnet-${{ matrix.os }}-${{ github.ref }}
@@ -359,8 +373,11 @@ jobs:
   macos-capacity:
     name: macOS capacity
     runs-on: ubuntu-latest
-    if: always()
-    needs: rust
+    needs: [changes, rust]
+    # Run after an applicable Rust matrix even when that matrix failed or was
+    # cancelled. Stay skipped when the path filter skipped Rust: `always()`
+    # alone would start this note on a docs-only pull request.
+    if: always() && needs.changes.outputs.suites == 'true'
     permissions:
       actions: read
       contents: read
@@ -370,3 +387,24 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 .github/ci/macos_capacity_note.py
+
+  # Always reports. Success only when every applicable suite job succeeded.
+  # A skipped suite job is success only when `changes` said the suites do not
+  # apply. failure and cancelled always fail. See .github/ci/required_check.py.
+  required:
+    name: required
+    needs: [changes, rust, dotnet, macos-capacity]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Evaluate required jobs
+        env:
+          NEEDS_JSON: ${{ toJson(needs) }}
+        run: python3 .github/ci/required_check.py
