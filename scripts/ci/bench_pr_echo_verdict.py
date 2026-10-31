@@ -20,12 +20,29 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     path = Path(args[0])
     g = json.loads(path.read_text(encoding="utf-8"))
-    print(
-        gate.format_summary_verdict(
-            str(g.get("gate_action") or ""),
-            str(g.get("verdict_reason") or ""),
-        )
-    )
+    action = str(g.get("gate_action") or "").strip()
+    reason = str(g.get("verdict_reason") or "").strip()
+    # First-pass-only gate.json has no gate_action; derive from exit_code/mode.
+    if not action:
+        raw_exit = g.get("exit_code")
+        exit_code = 1 if raw_exit is None else int(raw_exit)
+        mode = str(g.get("mode") or "")
+        if exit_code == 0:
+            action = "pass"
+            reason = reason or (
+                "first pass clear (no confirm)" if mode == "first" else "gate clear"
+            )
+        else:
+            action = "fail"
+            reason = reason or (
+                "first pass FLAG with confirm_rounds=0"
+                if mode == "first"
+                else "gate fail"
+            )
+        g["gate_action"] = action
+        g["verdict_reason"] = reason
+        path.write_text(json.dumps(g, indent=2) + "\n", encoding="utf-8")
+    print(gate.format_summary_verdict(action, reason))
     return 0
 
 
