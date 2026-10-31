@@ -369,6 +369,7 @@ fn stamp_outcome(path: &Path, passed: bool, label: &str) -> std::io::Result<()> 
     report.passed = passed;
     report.error = (!passed).then(|| label.to_string());
     report.result = Some(label.to_string());
+    super::report_v2::assign_outcome(&mut report);
     let json = serde_json::to_string_pretty(&report)
         .map_err(|err| std::io::Error::other(format!("serialize report: {err}")))?;
     fs::write(path, json)

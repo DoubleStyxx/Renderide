@@ -93,7 +93,8 @@ pub fn renderer_next_to_current_exe() -> Option<std::path::PathBuf> {
 }
 
 /// Outcome of [`run_integration_case`]. The report has been written to disk regardless of
-/// whether the case passed; failed comparisons additionally produce `diff.png`.
+/// whether the case passed. Once both images load, `diff.png` and `side_by_side.png`
+/// are written too.
 #[derive(Debug)]
 pub struct CaseRunOutcome {
     /// Per-case output paths.
@@ -142,7 +143,10 @@ pub fn run_integration_case(
     match drive_template(harness_cfg) {
         Ok(()) => evaluate_and_finalize(case, layout),
         Err(err) => {
+            let reason = super::report_v2::reason_for_error(&err);
             let mut report = report_from_error(case, format!("harness error: {err}"));
+            report.reason = Some(reason.code.to_string());
+            report.reason_text = Some(reason.text.to_string());
             let _ = write_report(&layout, &mut report);
             Err(err)
         }
@@ -318,45 +322,52 @@ fn evaluate_and_finalize(
 
     let actual = load_rgba(&layout.actual_png)?;
     let golden = load_rgba(&case.golden_path)?;
+    let region_stats = super::region_stats::compare(&actual, &golden);
+    if let Err(err) = super::side_by_side::write_pair(
+        &golden,
+        &actual,
+        &layout.diff_png,
+        &layout.side_by_side_png,
+    ) {
+        logger::warn!(
+            "runner: failed to write diff and side-by-side for {}: {err}",
+            case.name
+        );
+    }
     if let Err(e) = crate::golden::reject_flat_image(&actual, &layout.actual_png) {
         let mut report = report_from_error(case, e.to_string());
+        report.region_stats = Some(region_stats);
         let _ = write_report(&layout, &mut report);
         return Ok(CaseRunOutcome { layout, report });
     }
     if let Err(e) = crate::golden::reject_flat_image(&golden, &case.golden_path) {
         let mut report = report_from_error(case, e.to_string());
+        report.region_stats = Some(region_stats);
         let _ = write_report(&layout, &mut report);
         return Ok(CaseRunOutcome { layout, report });
     }
 
-    match case.tolerance.evaluate(&actual, &golden) {
-        Ok(eval) => {
-            if !eval.passed
-                && let Err(e) = write_diff_image(&actual, &golden, &layout.diff_png)
-            {
-                logger::warn!(
-                    "runner: failed to write diff PNG at {}: {e}",
-                    layout.diff_png.display()
-                );
-            }
-            let mut report = report_from_evaluation(case, eval);
-            if let Err(message) = plain_capture_failure(case, &layout) {
-                report.passed = false;
-                report.error = Some(match report.error.take() {
-                    Some(existing) => format!("{existing}; {message}"),
-                    None => message,
-                });
-            }
-            write_report(&layout, &mut report)
-                .map_err(|e| HarnessError::QueueOptions(format!("write report: {e}")))?;
-            Ok(CaseRunOutcome { layout, report })
+    let evaluated = case.tolerance.evaluate(&actual, &golden);
+    let mut report = match evaluated {
+        Ok(eval) => report_from_evaluation(case, eval),
+        Err(msg) => report_from_error(case, format!("tolerance evaluate: {msg}")),
+    };
+    let compared = report.evaluation.is_some();
+    report.region_stats = Some(region_stats);
+    if compared {
+        if let Err(message) = plain_capture_failure(case, &layout) {
+            report.passed = false;
+            report.error = Some(match report.error.take() {
+                Some(existing) => format!("{existing}; {message}"),
+                None => message,
+            });
         }
-        Err(msg) => {
-            let mut report = report_from_error(case, format!("tolerance evaluate: {msg}"));
-            let _ = write_report(&layout, &mut report);
-            Ok(CaseRunOutcome { layout, report })
-        }
+        write_report(&layout, &mut report)
+            .map_err(|e| HarnessError::QueueOptions(format!("write report: {e}")))?;
+    } else {
+        let _ = write_report(&layout, &mut report);
     }
+    Ok(CaseRunOutcome { layout, report })
 }
 
 /// Compares the pre-update `plain.png` when this case records two frames.
@@ -446,5 +457,27 @@ mod tests {
                 .as_deref()
                 .is_some_and(|msg| msg.contains("flat single color"))
         );
+    }
+
+    #[test]
+    fn passing_compare_writes_diff_and_a_side_by_side_three_times_as_wide() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let output_root = temp.path().join("out");
+        let layout = CaseOutputLayout::for_case(&output_root, "unlit_sphere");
+        layout.prepare().expect("prepare layout");
+        let mut case = crate::scene_dsl::cases::unlit_sphere();
+        case.golden_path = temp.path().join("unlit_sphere.png");
+        let image = non_flat_image();
+        image.save(&case.golden_path).expect("write golden");
+        image.save(&layout.actual_png).expect("write actual");
+
+        let outcome = evaluate_and_finalize(&case, layout).expect("finalize");
+
+        assert!(outcome.report.passed);
+        assert!(outcome.layout.diff_png.is_file());
+        let side = image::open(&outcome.layout.side_by_side_png)
+            .expect("side by side")
+            .to_rgba8();
+        assert_eq!(side.dimensions(), (image.width() * 3, image.height()));
     }
 }
