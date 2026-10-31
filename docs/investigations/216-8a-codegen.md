@@ -309,20 +309,61 @@ renderide-test check-suite --jobs 1 \
 
 with `RAYON_NUM_THREADS=1` and `RENDERIDE_LIT_SHADER_PROBE=1`. Windows also puts the matching `dxc.exe` (`2026.09.16+48d5a66.1`) on `PATH` so the probe writes `lit-production.dxil` and `lit-production.dxil.ll`. Artifacts: `warp216-debug-<label>`.
 
-Runs, started 2026-10-31 from canary `22647eae`. Each is one Linux job plus windows-1/2/3. Counts below stay blank until the artifacts are in.
+All three runs finished. `diag-8a png` counts non-background pixels against the black clear at `(0,0)`. A flat black frame therefore reports `non_bg=0`. That is the whole image at linear 0, including the sphere, which is what `actual.scene_color.json` shows (every quadrant mean `(0, 0, 0, 1)`, no NaN). The Windows probe's `lit-production.hlsl` sha256 is `490328d6…` and its `lit-production.dxil` sha256 is `f48fa215…`, the same bytes as the offline `ps_6_7` container. That DXIL is the probe's own `dxc -T ps_6_7` of the naga HLSL. It is not the blob the GPU ran: wgpu compiles again inside the device, and the FXC jobs still wrote this DXC container because `dxc.exe` was on `PATH`.
 
-| Arm | Run | sha |
-| --- | --- | --- |
-| baseline | [41202573717](https://github.com/DoubleStyxx/Renderide/actions/runs/41202573717) | `da1680ea` |
-| fxc | [41202575526](https://github.com/DoubleStyxx/Renderide/actions/runs/41202575526) | `e3e8bb2e` |
-| scalar-color | [41202577341](https://github.com/DoubleStyxx/Renderide/actions/runs/41202577341) | `c7358018` |
+| Arm | Run | sha | Compiler log |
+| --- | --- | --- | --- |
+| baseline | [41202573717](https://github.com/DoubleStyxx/Renderide/actions/runs/41202573717) | `da1680ea` | `Using static DXC` |
+| fxc | [41202575526](https://github.com/DoubleStyxx/Renderide/actions/runs/41202575526) | `e3e8bb2e` | `Using FXC`, then `error X3511` |
+| scalar-color | [41202577341](https://github.com/DoubleStyxx/Renderide/actions/runs/41202577341) | `c7358018` | `Using static DXC` |
 
-Rewrite 2 (Smith `max(0)` before `sqrt`) and rewrite 3 (directional `inverseSqrt`) are not compiled on a WARP branch yet. They are the follow-ups if FXC still drops channels (then the bug is not DXIL-specific) or if scalar-color does not move G=0 (then mask-7 is not the load that matters).
+PNG `g0` / `r0` / `b0` are counts of non-background pixels whose channel is 0. Flat rows are linear-black scene color, so those counts are 0 because there is no non-background pixel. Settle is the flat-exit `settle_ms`. Non-flat rows were accepted by settle and then quarantined `WARP lit shading untrusted` (the OR image gate can still pass; that is not the result).
 
-## What the WARP capture still needs
+### Baseline, static DXC
 
-- The three samples per arm above, including flat versus non-flat and settle time. `4bd5eef0` / run 41145831835 is the G=0 baseline. `6ae283f1` / run 41150822333 was a different commit and a warm tint, not a second sample of that binary.
-- `diag-8a dxc status=0` and the sha256 of `lit-production.dxil` next to `f48fa215…` (ps_6_7) or `28c68493…` (ps_6_6). A mismatch means the device shader model was not the one assumed here.
-- The FXC log line, so a green FXC frame is not actually static DXC.
-- `actual.scene_color.json` quadrant means (NaN / negative / mean per channel) beside the PNG G=0 count. The PNG count is after the sRGB encode. The float sidecar is the scene color.
-- Do not treat SSIM as the result.
+| Sample | Case | Flat | non_bg | g0 | r0 | b0 | Scene-color means (TL, TR, BL, BR), RGB | Settle |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| windows-1 | parity | no | 10374 | 0 | 0 | 0 | all quadrants about `(0.115, 0.005, 0.005)` down to `(0.068, 0.002, 0.002)` | accepted |
+| windows-1 | physically based | yes | 0 | 0 | 0 | 0 | `(0, 0, 0)` | 139.2 s |
+| windows-1 | pbs_lit | yes | 0 | 0 | 0 | 0 | `(0, 0, 0)` | 143.1 s |
+| windows-2 | parity | yes | 0 | 0 | 0 | 0 | `(0, 0, 0)` | 102.0 s |
+| windows-2 | physically based | no | 8426 | 0 | 0 | 0 | about `(0.002, 0.002, 0.002)` in every quadrant | accepted |
+| windows-2 | pbs_lit | no | 10208 | 0 | 0 | 0 | TL `(0.0003, 0.0004, 0.0007)`, TR `(0, 0, 0)`, BL `(0.002, 0.003, 0.006)`, BR `(0.0005, 0.0009, 0.003)` | accepted |
+| windows-3 | parity | yes | 0 | 0 | 0 | 0 | `(0, 0, 0)` | 86.9 s |
+| windows-3 | physically based | no | 10374 | 0 | 10374 | 10374 | TL `(0, 0.135, 0)`, TR `(0, 0.162, 0)`, BL `(0, 0.081, 0)`, BR `(0, 0.097, 0)` | accepted |
+| windows-3 | pbs_lit | yes | 0 | 0 | 0 | 0 | `(0, 0, 0)` | 90.0 s |
+
+Five of nine are flat black. The `4bd5eef0` ratio (4824/4932 pixels with G=0) did not repeat. The channel that dies moved: windows-3's physically based frame has R and B exactly 0 in the linear means and G alive, and every one of the 10374 non-background PNG pixels has R=0 and B=0. No NaNs in those means. The other non-flat frames keep all three channels, but the physically based and `pbs_lit` ones are about a thousand times dimmer than windows-1 parity.
+
+### FXC
+
+All nine case-samples (three windows jobs, three cases) are flat linear black, settle 27–35 s. The log is `Using FXC for shader compilation`, then:
+
+```text
+error X3511: unable to unroll loop, loop does not appear to terminate in a timely manner (41 iterations)
+error X3511: forced to unroll loop, but unrolling failed.
+```
+
+preceded by `warning X3570: gradient instruction used in a loop with varying iteration`. The pipeline `embedded_raster_material__pbsmetallic_default__forward__…__fs_forward_base` is invalid, so nothing is shaded. FXC is trying to unroll the dynamic light loop because a gradient (`SampleBias` for cookies, shadows, or material maps reached from that loop) is inside it, and naga's `u32::MAX` countdown does not look like a timely bound. This arm does not compare shading. It shows FXC cannot build this fragment.
+
+### Scalar color, static DXC
+
+| Sample | Case | Flat | non_bg | g0 | r0 | b0 | Scene-color RGB | Settle |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| windows-1 | parity | yes | 0 | 0 | 0 | 0 | `(0, 0, 0)` | 103.8 s |
+| windows-1 | physically based | no | 10374 | 0 | 4093 | 0 | TL `(-0.028, 0.004, 0.004)`, TR `(0.037, 0.004, 0.004)`, BL `(-0.018, 0.002, 0.002)`, BR `(0.024, 0.002, 0.002)` | accepted |
+| windows-1 | pbs_lit | yes | 0 | 0 | 0 | 0 | `(0, 0, 0)` | 125.2 s |
+| windows-2 | all three | yes | 0 | 0 | 0 | 0 | `(0, 0, 0)` | 86.9 s, 85.8 s, 87.6 s |
+| windows-3 | all three | yes | 0 | 0 | 0 | 0 | `(0, 0, 0)` | 101.6 s, 100.1 s, 106.1 s |
+
+Eight of nine are flat black. The one lit frame is not the green-only wipe. Its linear R changes sign across the sphere (negative on the left, positive on the right) while G and B stay small and positive, and 4093 of 10374 PNG pixels have R=0 because negative linear R encodes as 0. No NaNs. Splitting the color `Load3` did not remove the black frames and did not reproduce a stable channel. It is not the fix.
+
+Rewrite 2 (Smith `max(0)` before `sqrt`) and rewrite 3 (directional `inverseSqrt`) were not run. The FXC failure says the next compile experiment is the gradient inside the dynamic light loop plus the `u32::MAX` bound, not another color-load shape. A WARP A/B that hoists the gradient out of that loop, or that gives the loop a real small bound FXC can unroll, would be the first arm on which FXC and DXC can both shade. `-Gis` is still not selectable in wgpu 30.
+
+## What a later WARP capture still needs
+
+These three runs already have the PNG channel counts, the linear quadrant means, the flat split, and the settle times. They do not have:
+
+- The DXIL wgpu submitted to WARP. The probe container matches offline `ps_6_7`, but that compile is a second `dxc.exe` on the naga HLSL, not `ID3D12` pipeline DXIL. A device shader model below 6.7 would still differ. Logging `private_caps.shader_model` on the WARP adapter would close that.
+- A DXC-versus-FXC shading pair. FXC never produced a fragment, so a black FXC frame is not evidence about fast-math.
+- Rewrite 2 or a loop-bound / gradient hoist, which are the remaining A/Bs. Do not judge those by SSIM either.
