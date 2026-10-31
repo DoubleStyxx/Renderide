@@ -200,6 +200,17 @@ fn expires_at() -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(QUARANTINE_216_EXPIRES_UNIX)
 }
 
+/// Whether a WARP capture of this case may end the flat-frame wait early.
+///
+/// The four cases are the ones [`quarantine_matches`] can label. After
+/// [`expires_at`] the capture keeps the full WARP budget and fails closed.
+pub(crate) fn early_flat_exit_applies(case_name: &str, is_warp: bool, now: SystemTime) -> bool {
+    if !is_warp || now >= expires_at() {
+        return false;
+    }
+    case_name == PBS_LIT || NEGATIVE_LIGHT_CASES.contains(&case_name)
+}
+
 fn stamp_case_report(path: &Path, reason: &str) -> std::io::Result<()> {
     let bytes = fs::read(path)?;
     let mut report: CaseReport = serde_json::from_slice(&bytes)
@@ -207,6 +218,7 @@ fn stamp_case_report(path: &Path, reason: &str) -> std::io::Result<()> {
     report.passed = false;
     report.status = Some(QUARANTINE_STATUS.to_string());
     report.reason = Some(reason.to_string());
+    super::report_v2::assign_outcome(&mut report);
     let json = serde_json::to_string_pretty(&report)
         .map_err(|err| std::io::Error::other(format!("serialize report: {err}")))?;
     fs::write(path, json)

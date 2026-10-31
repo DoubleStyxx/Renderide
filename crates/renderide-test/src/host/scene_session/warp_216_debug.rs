@@ -54,7 +54,9 @@ const DEBUG_WGSL: &str = include_str!("warp_216_term_debug.wgsl");
 /// Sphere, gradient backdrop, and the rig selected by `spec`.
 pub(super) fn scene_setup(spec: Spec) -> SceneSetup {
     let mut setup = match spec.rig {
-        LightRig::NegativePair => negative_light::scene_setup(true, false),
+        LightRig::NegativePair | LightRig::NegativeParity => {
+            negative_light::scene_setup(true, false)
+        }
         LightRig::PositiveOnly => negative_light::scene_setup(false, false),
         LightRig::Directional => lit_setup(vec![directional_scene_light()]),
         LightRig::Point => lit_setup(vec![point_scene_light()]),
@@ -337,7 +339,14 @@ mod tests {
             channel: OutputChannel::Raw,
         });
         assert_eq!(negative.scene.lights.len(), 2);
-        assert!(negative.scene.lights[1].state.intensity < 0.0);
+        assert_eq!(negative.scene.lights[1].state.intensity, -1.45);
+        let parity = scene_setup(Spec {
+            rig: LightRig::NegativeParity,
+            term: LightingTerm::Composed,
+            channel: OutputChannel::Raw,
+        });
+        assert_eq!(parity.scene.lights.len(), 2);
+        assert_eq!(parity.scene.lights[1].state.intensity, -1.45);
         let positive = scene_setup(Spec {
             rig: LightRig::PositiveOnly,
             term: LightingTerm::Composed,

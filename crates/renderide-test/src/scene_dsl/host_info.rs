@@ -104,6 +104,14 @@ fn command_stdout(program: &str, args: &[&str]) -> Option<String> {
 }
 
 fn adapter_for_output(output_png: &Path) -> String {
+    renderer_log_for_output(output_png)
+        .as_deref()
+        .and_then(adapter_from_renderer_log)
+        .unwrap_or_else(|| "unavailable".to_string())
+}
+
+/// Newest renderer log that names `output_png` and has a selected-adapter line.
+pub(crate) fn renderer_log_for_output(output_png: &Path) -> Option<String> {
     let needle = format!("Headless mode: output={}", output_png.display());
     let mut best: Option<(std::time::SystemTime, String)> = None;
     for dir in renderer_log_dirs() {
@@ -111,30 +119,34 @@ fn adapter_for_output(output_png: &Path) -> String {
             continue;
         };
         for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("log") {
-                continue;
-            }
-            let Ok(text) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            if !text.contains(&needle) {
-                continue;
-            }
-            let Some(adapter) = adapter_from_renderer_log(&text) else {
-                continue;
-            };
-            let modified = entry
-                .metadata()
-                .and_then(|meta| meta.modified())
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-            if best.as_ref().is_none_or(|(time, _)| modified >= *time) {
-                best = Some((modified, adapter));
-            }
+            consider_log(&entry, &needle, &mut best);
         }
     }
-    best.map(|(_, adapter)| adapter)
-        .unwrap_or_else(|| "unavailable".to_string())
+    best.map(|(_, text)| text)
+}
+
+fn consider_log(
+    entry: &std::fs::DirEntry,
+    needle: &str,
+    best: &mut Option<(std::time::SystemTime, String)>,
+) {
+    let path = entry.path();
+    if path.extension().and_then(|ext| ext.to_str()) != Some("log") {
+        return;
+    }
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    if !text.contains(needle) || adapter_from_renderer_log(&text).is_none() {
+        return;
+    }
+    let modified = entry
+        .metadata()
+        .and_then(|meta| meta.modified())
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    if best.as_ref().is_none_or(|(time, _)| modified >= *time) {
+        *best = Some((modified, text));
+    }
 }
 
 fn renderer_log_dirs() -> Vec<PathBuf> {
