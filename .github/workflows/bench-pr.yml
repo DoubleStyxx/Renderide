@@ -1,3 +1,9 @@
+# TEMPORARY noise-collection variant (gauge/b3-gate-noise-collect).
+# Always runs a reversed-order confirm at n=RUNS for EVERY scenario (even when the
+# first pass is ok), uploads raw framebench JSON samples, and skips cpu_hot to keep
+# wall time near the frame-only budget. Gate verdict still uses the CURRENT
+# (old) OR rule. DO NOT MERGE to master.
+#
 # Non-required PR frame + CPU bench compare (B3).
 # Triggers when a PR touches crates/renderide/src/**. Builds the PR base SHA and the
 # head, measures default framebench scenarios with n=12, gates with
@@ -254,88 +260,71 @@ jobs:
           gate_status="$first_status"
           cp "$out/gate-first.json" "$out/gate.json"
 
-          if [[ "$first_status" -eq 1 && "$CONFIRM_ROUNDS" -gt 0 ]]; then
-            mapfile -t suspects < "$out/suspects.txt"
-            echo "::group::Confirm reversed-order (head/base then head/base) for: ${suspects[*]}"
-            # Reversed arm order relative to the first pass.
-            run_frame "$RUNNER_TEMP/target-head" "$out/confirm-head-a.json" "$half" "${suspects[@]}"
-            run_frame "$RUNNER_TEMP/target-base" "$out/confirm-base-a.json" "$half" "${suspects[@]}"
-            run_frame "$RUNNER_TEMP/target-head" "$out/confirm-head-b.json" "$rest" "${suspects[@]}"
-            run_frame "$RUNNER_TEMP/target-base" "$out/confirm-base-b.json" "$rest" "${suspects[@]}"
+          # NOISE COLLECTION: always run one reversed-order confirm at n=RUNS for
+          # every scenario, even when the first pass is ok, so old/new rules can be
+          # judged offline on identical samples.
+          if [[ "$CONFIRM_ROUNDS" -gt 0 ]]; then
+            echo "::group::Confirm reversed-order (ALWAYS, noise collection) for: ${scenarios[*]}"
+            run_frame "$RUNNER_TEMP/target-head" "$out/confirm-head-a.json" "$half" "${scenarios[@]}"
+            run_frame "$RUNNER_TEMP/target-base" "$out/confirm-base-a.json" "$half" "${scenarios[@]}"
+            run_frame "$RUNNER_TEMP/target-head" "$out/confirm-head-b.json" "$rest" "${scenarios[@]}"
+            run_frame "$RUNNER_TEMP/target-base" "$out/confirm-base-b.json" "$rest" "${scenarios[@]}"
             echo "::endgroup::"
 
-            set +e
-            python3 "$gate_py" --mode confirm \
-              --base "$out/base-a.json" --base "$out/base-b.json" \
-              --head "$out/head-a.json" --head "$out/head-b.json" \
-              --confirm-base "$out/confirm-base-a.json" --confirm-base "$out/confirm-base-b.json" \
-              --confirm-head "$out/confirm-head-a.json" --confirm-head "$out/confirm-head-b.json" \
-              --flag-threshold "$FLAG_THRESHOLD" --fail-threshold "$FAIL_THRESHOLD" \
-              --title "Confirm (reversed-order, ${CONFIRM_ROUNDS} round x $RUNS runs; pooled + confirm-only Mann-Whitney)" \
-              --json-out "$out/gate.json" | tee "$out/confirm.md"
-            gate_status=${PIPESTATUS[0]}
-            set -e
-            cat "$out/confirm.md" >> "$summary"
-            if [[ "$gate_status" -ge 2 ]]; then
-              echo "gate script error" >&2
-              echo "gate_exit=1" >> "$GITHUB_OUTPUT"
-              cat "$summary" >> "$GITHUB_STEP_SUMMARY"
-              exit 1
+            # OLD rule verdict: only apply confirm-mode gate when first pass flagged.
+            # When first pass was ok, gate_status stays 0 (pass) even though we collected confirm data.
+            if [[ "$first_status" -eq 1 ]]; then
+              set +e
+              python3 "$gate_py" --mode confirm \
+                --base "$out/base-a.json" --base "$out/base-b.json" \
+                --head "$out/head-a.json" --head "$out/head-b.json" \
+                --confirm-base "$out/confirm-base-a.json" --confirm-base "$out/confirm-base-b.json" \
+                --confirm-head "$out/confirm-head-a.json" --confirm-head "$out/confirm-head-b.json" \
+                --flag-threshold "$FLAG_THRESHOLD" --fail-threshold "$FAIL_THRESHOLD" \
+                --title "Confirm (reversed-order, ${CONFIRM_ROUNDS} round x $RUNS runs; OLD OR rule)" \
+                --json-out "$out/gate.json" | tee "$out/confirm.md"
+              gate_status=${PIPESTATUS[0]}
+              set -e
+              cat "$out/confirm.md" >> "$summary"
+              if [[ "$gate_status" -ge 2 ]]; then
+                echo "gate script error" >&2
+                echo "gate_exit=1" >> "$GITHUB_OUTPUT"
+                cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+                exit 1
+              fi
+            else
+              {
+                echo
+                echo "Confirm data collected for offline noise study (first pass ok; OLD rule does not consult confirm)."
+              } >> "$summary"
             fi
           fi
 
-          echo "::group::cpu_hot compare (report-only, --bench-arg=--quick)"
+          echo "::group::cpu_hot skipped (noise-collection branch)"
+          echo "cpu_hot skipped on gauge/b3-gate-noise-collect to keep wall near frame-only budget" >> "$summary"
           cpu_compare_args=()
-          if [[ -x "$RUNNER_TEMP/target-head/release/renderide-bench" && -x "$RUNNER_TEMP/target-base/release/renderide-bench" ]]; then
-            mkdir -p "$out/cpu-base" "$out/cpu-head"
-            set +e
-            (
-              cd base
-              CARGO_TARGET_DIR="$RUNNER_TEMP/target-base" \
-                "$RUNNER_TEMP/target-base/release/renderide-bench" run --suite cpu \
-                --bench-arg=--quick --output "$out/cpu-base/run.json" --json \
-                >"$out/cpu-base/stdout.json" 2>"$out/cpu-base/stderr.log"
-            )
-            cpu_base_status=$?
-            (
-              cd head
-              CARGO_TARGET_DIR="$RUNNER_TEMP/target-head" \
-                "$RUNNER_TEMP/target-head/release/renderide-bench" run --suite cpu \
-                --bench-arg=--quick --output "$out/cpu-head/run.json" --json \
-                >"$out/cpu-head/stdout.json" 2>"$out/cpu-head/stderr.log"
-            )
-            cpu_head_status=$?
-            set -e
-            if [[ "$cpu_base_status" -eq 0 && "$cpu_head_status" -eq 0 && -f "$out/cpu-base/run.json" && -f "$out/cpu-head/run.json" ]]; then
-              set +e
-              "$RUNNER_TEMP/target-head/release/renderide-bench" compare \
-                --base "$out/cpu-base/run.json" --head "$out/cpu-head/run.json" \
-                --flag-threshold "$FLAG_THRESHOLD" --fail-threshold "$FAIL_THRESHOLD" \
-                --json >"$out/cpu-compare.json"
-              set -e
-              cpu_compare_args=(--cpu-compare "$out/cpu-compare.json")
-              {
-                echo
-                echo "<details><summary>cpu_hot compare (report-only; not the gate)</summary>"
-                echo
-                echo '```json'
-                head -c 100000 "$out/cpu-compare.json" || true
-                echo
-                echo '```'
-                echo "</details>"
-              } >> "$summary"
-            else
-              echo "cpu_hot compare skipped (base_status=$cpu_base_status head_status=$cpu_head_status)" >> "$summary"
-              tail -n 40 "$out/cpu-base/stderr.log" >> "$summary" 2>/dev/null || true
-              tail -n 40 "$out/cpu-head/stderr.log" >> "$summary" 2>/dev/null || true
-            fi
-          else
-            echo "renderide-bench binary missing on base or head; cpu_hot skipped" >> "$summary"
-          fi
           echo "::endgroup::"
 
           python3 "$assemble_py" --gate "$out/gate.json" "${cpu_compare_args[@]}" --out "$out/bench-compare.json"
           cp "$out/bench-compare.json" "$GITHUB_WORKSPACE/bench-compare.json"
+          # Stage raw samples for offline old/new rule evaluation.
+          mkdir -p "$GITHUB_WORKSPACE/raw-samples"
+          for f in base-a.json base-b.json head-a.json head-b.json \
+                   confirm-base-a.json confirm-base-b.json confirm-head-a.json confirm-head-b.json \
+                   gate-first.json gate.json first.md; do
+            [[ -f "$out/$f" ]] && cp "$out/$f" "$GITHUB_WORKSPACE/raw-samples/$f" || true
+          done
+          {
+            echo "base_sha=$BASE_SHA"
+            echo "head_sha=$HEAD_SHA"
+            echo "runs=$RUNS"
+            echo "flag=$FLAG_THRESHOLD"
+            echo "fail=$FAIL_THRESHOLD"
+            echo "confirm_rounds=$CONFIRM_ROUNDS"
+            echo "gate_status=$gate_status"
+            echo "collected_at_unix=$(date +%s)"
+          } > "$GITHUB_WORKSPACE/raw-samples/meta.env"
+
 
           end_ts=$(date +%s)
           wall=$((end_ts - start_ts))
@@ -364,6 +353,14 @@ jobs:
         with:
           name: bench-compare
           path: bench-compare.json
+          if-no-files-found: ignore
+
+      - name: Upload raw samples (noise study)
+        if: always() && hashFiles('raw-samples/**') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-pr-raw-samples
+          path: raw-samples/
           if-no-files-found: ignore
 
       - name: Job summary trailer
