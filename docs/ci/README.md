@@ -55,11 +55,13 @@ The decision logic is `.github/ci/required_check.py` and `.github/ci/ci_paths.py
 
 ## Path patterns
 
-Applicability lives in `SUITE_PATTERNS` in `.github/ci/ci_paths.py`. The list is the historical `ci.yml` trigger, plus `.github/ci/**`.
+Applicability lives in `SUITE_PATTERNS` in `.github/ci/ci_paths.py`. The list is the historical `ci.yml` trigger, plus `.github/ci/**` and the exact path `docs/testing/material-coverage.md`.
 
 The historical patterns are `.github/workflows/ci.yml`, `.github/actions/lavapipe/**`, `.taplo.toml`, `Cargo.lock`, `Cargo.toml`, `Generators.sln`, `clippy.toml`, `crates/**`, `generators/**`, `third_party/**`, and `RenderideMod/Shaders/**`.
 
-`.github/ci/**` is the addition. That directory is the curl shim the Windows Rust job runs, the macOS capacity note, and this gate. A change there runs the suites the gate judges. `docs/**`, CodeQL, and bench-pr still do not.
+`.github/ci/**` is the scripts the suite jobs run and this gate. A change there runs the suites the gate judges.
+
+`docs/testing/material-coverage.md` is included as that exact path, not as `docs/**`. The gate treats a path skip as success, so a docs-only edit of material coverage would go green if this path were missing. Neighboring docs files, CodeQL, and bench-pr still do not select the suite. `test_material_coverage_doc_alone_selects_suite` is the fixture: a diff whose only path is that file publishes `suites=true`.
 
 Patterns are either an exact root path or `dir/**` (that directory and its files). A rename counts both the old and the new path, so moving a file out of `crates/` still selects the suites. Do not put a `paths` filter back on the workflow trigger.
 

@@ -73,6 +73,21 @@ class PatternTests(unittest.TestCase):
         )
         self.assertTrue(ci_paths.diff_selects_suites(ci_paths.paths_from_name_status_z(blob)))
 
+    def test_material_coverage_doc_alone_selects_suite(self) -> None:
+        # A path-skipped suite is a required success. This file must not take
+        # that path, even when it is the only change in the diff.
+        path = "docs/testing/material-coverage.md"
+        self.assertIn(path, ci_paths.SUITE_PATTERNS)
+        self.assertTrue(ci_paths.path_selects_suite(path))
+        self.assertFalse(ci_paths.path_selects_suite("docs/testing/other.md"))
+        self.assertFalse(ci_paths.path_selects_suite("docs/ci/README.md"))
+        blob = b"M\0docs/testing/material-coverage.md\0"
+        paths = ci_paths.paths_from_name_status_z(blob)
+        self.assertEqual(paths, [path])
+        self.assertTrue(ci_paths.diff_selects_suites(paths))
+        self.assertEqual(ci_paths.suites_output("pull_request", paths), "true")
+        self.assertEqual(ci_paths.suites_output("push", paths), "true")
+
     def test_docs_only_name_status_does_not_select(self) -> None:
         blob = b"M\0docs/ci/README.md\0A\0README.md\0"
         paths = ci_paths.paths_from_name_status_z(blob)
