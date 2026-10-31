@@ -1,10 +1,8 @@
-//! Time-limited quarantine for WARP lit captures (#216).
+//! Retired #216 quarantine.
 //!
-//! `pbs_lit_material_matrix` still matches only a flat frame. The three negative-light
-//! cases are quarantined on WARP for any tolerance result, and for that same flat
-//! frame, with reason [`WARP_LIT_SHADING_UNTRUSTED`]. A harness error that is not
-//! that flat frame stays a failure. After [`QUARANTINE_216_EXPIRES`] a match fails
-//! closed. Whoever fixes #216 removes the expiry and this rule in that pull request.
+//! The four lit cases now match lavapipe on WARP: non-flat scene color, no channel
+//! wipe, and an accepted image check. [`apply_quarantine`] no longer relabels them.
+//! A flat frame or a failed comparison fails the suite.
 //!
 //! <https://github.com/DoubleStyxx/Renderide/issues/216>
 
@@ -13,7 +11,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use super::output::{self, CaseReport};
-use super::suite::{SuiteCaseReport, SuiteFailureKind, SuiteReport};
+use super::suite::{SuiteCaseReport, SuiteReport};
 
 /// UTC expiry of the #216 quarantine.
 ///
@@ -34,9 +32,6 @@ pub(crate) const QUARANTINE_REASON: &str = "quarantined:#216";
 
 /// Reason for a negative-light case quarantined on WARP.
 pub(crate) const WARP_LIT_SHADING_UNTRUSTED: &str = "WARP lit shading untrusted";
-
-/// `pbs_lit_material_matrix`, the original case this quarantine covers.
-const PBS_LIT: &str = "pbs_lit_material_matrix";
 
 /// Negative-light cases covered by the same rule, by exact name.
 const NEGATIVE_LIGHT_PARITY: &str = "negative_light_parity";
@@ -147,21 +142,8 @@ fn label_case(
 /// `None` pending or dropped draws is not zero. A harness error other than that flat frame
 /// does not match. The expiry is applied by the caller.
 fn quarantine_matches(is_warp: bool, case: &SuiteCaseReport) -> bool {
-    if !is_warp {
-        return false;
-    }
-    if case.name == PBS_LIT {
-        return flat_frame_signature(case);
-    }
-    NEGATIVE_LIGHT_CASES.contains(&case.name.as_str())
-        && (flat_frame_signature(case) || case.image_compared)
-}
-
-fn flat_frame_signature(case: &SuiteCaseReport) -> bool {
-    case.failure_kind == Some(SuiteFailureKind::FlatOrUnstableFrame)
-        && case.frame_pending == Some(0)
-        && case.dropped_draws == Some(0)
-        && case.gpu_done == Some(true)
+    let _ = (is_warp, case);
+    false
 }
 
 fn quarantine_reason(case: &SuiteCaseReport) -> &'static str {
@@ -205,10 +187,8 @@ fn expires_at() -> SystemTime {
 /// The four cases are the ones [`quarantine_matches`] can label. After
 /// [`expires_at`] the capture keeps the full WARP budget and fails closed.
 pub(crate) fn early_flat_exit_applies(case_name: &str, is_warp: bool, now: SystemTime) -> bool {
-    if !is_warp || now >= expires_at() {
-        return false;
-    }
-    case_name == PBS_LIT || NEGATIVE_LIGHT_CASES.contains(&case_name)
+    let _ = (case_name, is_warp, now);
+    false
 }
 
 fn stamp_case_report(path: &Path, reason: &str) -> std::io::Result<()> {

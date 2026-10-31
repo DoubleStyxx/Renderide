@@ -675,15 +675,15 @@ mod tests {
     }
 
     #[test]
-    fn quarantine_applies_on_check_suite_and_not_on_update_suite() {
+    fn flat_lit_frame_fails_check_suite_after_the_216_lift() {
         let now = SystemTime::UNIX_EPOCH;
         let check_dir = tempfile::tempdir().expect("check dir");
         let mut check = SuiteReport::from_cases(vec![quarantinable_case(check_dir.path())]);
         apply_suite_labels(&mut check, true, now, |_| true);
-        assert_eq!(check.quarantined, 1);
-        assert_eq!(check.failed, 0);
-        assert!(check.passed());
-        assert_eq!(check.cases[0].status.as_deref(), Some("quarantined"));
+        assert_eq!(check.quarantined, 0);
+        assert_eq!(check.failed, 1);
+        assert!(!check.passed());
+        assert!(check.cases[0].status.is_none());
 
         let update_dir = tempfile::tempdir().expect("update dir");
         let mut update = SuiteReport::from_cases(vec![quarantinable_case(update_dir.path())]);

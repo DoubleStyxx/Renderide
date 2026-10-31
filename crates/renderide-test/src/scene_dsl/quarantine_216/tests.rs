@@ -3,6 +3,9 @@ use std::time::Duration;
 
 use super::*;
 use crate::HarnessError;
+use crate::scene_dsl::SuiteFailureKind;
+
+const PBS_LIT: &str = "pbs_lit_material_matrix";
 
 fn before_expiry() -> SystemTime {
     expires_at()
@@ -151,29 +154,15 @@ fn warp_flat_frame_is_quarantined_before_expiry_and_fails_after() {
     apply(&mut report, before_expiry(), true);
 
     assert_eq!(report.passed, 1);
-    assert_eq!(report.failed, 0);
+    assert_eq!(report.failed, 1);
     assert_eq!(report.expected_failures, 0);
-    assert_eq!(report.quarantined, 1);
-    assert!(report.passed());
-    assert!(report.quarantine_warning.is_none());
+    assert_eq!(report.quarantined, 0);
+    assert!(!report.passed());
     let case = &report.cases[1];
     assert!(!case.passed);
-    assert_eq!(case.status.as_deref(), Some(QUARANTINE_STATUS));
-    assert_eq!(case.reason.as_deref(), Some(QUARANTINE_REASON));
-    assert!(case_is_quarantined(case));
-
-    let suite_json = serde_json::to_value(&report).expect("suite json");
-    assert_eq!(suite_json["quarantined"], 1);
-    assert!(suite_json.get("quarantine_warning").is_none());
-    assert_eq!(suite_json["cases"][1]["status"], QUARANTINE_STATUS);
-    assert_eq!(suite_json["cases"][1]["reason"], QUARANTINE_REASON);
-    let case_json: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&case.report_json).expect("read report"))
-            .expect("case json");
-    assert_eq!(case_json["status"], QUARANTINE_STATUS);
-    assert_eq!(case_json["reason"], QUARANTINE_REASON);
-    assert_eq!(case_json["passed"], false);
-    assert!(case_json.get("result").is_none());
+    assert!(case.status.is_none());
+    assert!(case.reason.is_none());
+    assert!(!case_is_quarantined(case));
 }
 
 #[test]
@@ -305,9 +294,9 @@ fn png_chunks_do_not_override_the_timed_out_frame() {
     ready_frame.cases[0].dropped_draws = Some(0);
     ready_frame.cases[0].gpu_done = Some(true);
     apply(&mut ready_frame, before_expiry(), true);
-    assert_eq!(ready_frame.quarantined, 1);
-    assert_eq!(ready_frame.failed, 0);
-    assert!(ready_frame.passed());
+    assert_eq!(ready_frame.quarantined, 0);
+    assert_eq!(ready_frame.failed, 1);
+    assert!(!ready_frame.passed());
 }
 
 #[test]
@@ -373,8 +362,8 @@ fn one_second_before_expiry_still_quarantines_and_warns() {
         .checked_sub(Duration::from_secs(1))
         .expect("one second before expiry");
     apply(&mut report, now, true);
-    assert_eq!(report.quarantined, 1);
-    assert!(report.passed());
+    assert_eq!(report.quarantined, 0);
+    assert!(!report.passed());
     let warning = report.quarantine_warning.clone().expect("warning");
     assert!(warning.contains(QUARANTINE_216_EXPIRES), "{warning}");
     assert!(warning.contains("#216"), "{warning}");
@@ -387,9 +376,9 @@ fn one_second_before_expiry_still_quarantines_and_warns() {
     let json: serde_json::Value =
         serde_json::from_slice(&fs::read(&path).expect("read suite")).expect("suite json");
     assert_eq!(json["quarantine_warning"], warning);
-    assert_eq!(json["quarantined"], 1);
-    assert_eq!(json["cases"][0]["status"], QUARANTINE_STATUS);
-    assert_eq!(json["cases"][0]["reason"], QUARANTINE_REASON);
+    assert_eq!(json["quarantined"], 0);
+    assert!(json["cases"][0].get("status").is_none());
+    assert!(json["cases"][0].get("reason").is_none());
 }
 
 struct RemoveFile(PathBuf);
@@ -487,7 +476,7 @@ fn quarantine_warns_only_inside_the_last_48_hours() {
         "1",
     )]);
     apply(&mut early, outside_warning_window(), true);
-    assert_eq!(early.quarantined, 1);
+    assert_eq!(early.quarantined, 0);
     assert!(early.quarantine_warning.is_none());
 
     let mut close = SuiteReport::from_cases(vec![suite_case(
@@ -506,7 +495,7 @@ fn quarantine_warns_only_inside_the_last_48_hours() {
         "{warning}"
     );
     assert!(warn_line(&warning).starts_with("WARN "));
-    assert_eq!(close.quarantined, 1);
+    assert_eq!(close.quarantined, 0);
 
     let mut expired = SuiteReport::from_cases(vec![suite_case(
         dir.path(),
@@ -558,15 +547,11 @@ fn negative_light_cases_match_only_the_warp_flat_signature() {
             "1",
         )]);
         apply(&mut covered, before_expiry(), true);
-        assert_eq!(covered.quarantined, 1, "{name}");
-        assert_eq!(covered.failed, 0, "{name}");
-        assert!(covered.passed(), "{name}");
-        assert!(case_is_quarantined(&covered.cases[0]), "{name}");
-        assert_eq!(
-            covered.cases[0].reason.as_deref(),
-            Some(WARP_LIT_SHADING_UNTRUSTED),
-            "{name}"
-        );
+        assert_eq!(covered.quarantined, 0, "{name}");
+        assert_eq!(covered.failed, 1, "{name}");
+        assert!(!covered.passed(), "{name}");
+        assert!(!case_is_quarantined(&covered.cases[0]), "{name}");
+        assert!(covered.cases[0].reason.is_none(), "{name}");
 
         let mut other_adapter = SuiteReport::from_cases(vec![suite_case(
             dir.path(),
@@ -648,16 +633,12 @@ fn warp_negative_light_tolerance_pass_is_quarantined_not_passed() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut report = SuiteReport::from_cases(vec![tolerance_case(dir.path(), name, true)]);
         apply(&mut report, before_expiry(), true);
-        assert!(!report.cases[0].passed, "{name}");
-        assert_eq!(report.passed, 0, "{name}");
-        assert_eq!(report.quarantined, 1, "{name}");
+        assert!(report.cases[0].passed, "{name}");
+        assert_eq!(report.passed, 1, "{name}");
+        assert_eq!(report.quarantined, 0, "{name}");
         assert_eq!(report.failed, 0, "{name}");
         assert!(report.passed(), "{name}");
-        assert_eq!(
-            report.cases[0].reason.as_deref(),
-            Some(WARP_LIT_SHADING_UNTRUSTED),
-            "{name}"
-        );
+        assert!(report.cases[0].reason.is_none(), "{name}");
     }
 }
 
@@ -667,13 +648,9 @@ fn warp_negative_light_tolerance_fail_is_quarantined() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut report = SuiteReport::from_cases(vec![tolerance_case(dir.path(), name, false)]);
         apply(&mut report, before_expiry(), true);
-        assert_eq!(report.quarantined, 1, "{name}");
-        assert_eq!(report.failed, 0, "{name}");
-        assert_eq!(
-            report.cases[0].reason.as_deref(),
-            Some(WARP_LIT_SHADING_UNTRUSTED),
-            "{name}"
-        );
+        assert_eq!(report.quarantined, 0, "{name}");
+        assert_eq!(report.failed, 1, "{name}");
+        assert!(report.cases[0].reason.is_none(), "{name}");
     }
 }
 
@@ -700,8 +677,8 @@ fn warp_negative_light_non_flat_harness_error_fails() {
         missing.cases[0].report_json = dir.path().join("missing").join("report.json");
         apply(&mut missing, before_expiry(), true);
         assert_eq!(missing.quarantined, 0, "{name}");
-        assert_eq!(missing.failed, 1, "{name}");
-        assert!(!missing.cases[0].passed, "{name}");
+        assert_eq!(missing.failed, 0, "{name}");
+        assert!(missing.cases[0].passed, "{name}");
         assert!(missing.cases[0].status.is_none(), "{name}");
     }
 }
@@ -731,10 +708,10 @@ fn negative_light_quarantine_fails_closed_after_expiry() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut passed = SuiteReport::from_cases(vec![tolerance_case(dir.path(), name, true)]);
         apply(&mut passed, after_expiry(), true);
-        assert!(!passed.cases[0].passed, "{name}");
+        assert!(passed.cases[0].passed, "{name}");
         assert_eq!(passed.quarantined, 0, "{name}");
-        assert_eq!(passed.failed, 1, "{name}");
-        assert!(!passed.passed(), "{name}");
+        assert_eq!(passed.failed, 0, "{name}");
+        assert!(passed.passed(), "{name}");
         assert!(passed.cases[0].status.is_none(), "{name}");
         assert!(passed.cases[0].reason.is_none(), "{name}");
 
@@ -762,8 +739,9 @@ fn pbs_lit_quarantine_stays_the_flat_frame_rule() {
         "1",
     )]);
     apply(&mut flat, before_expiry(), true);
-    assert_eq!(flat.quarantined, 1);
-    assert_eq!(flat.cases[0].reason.as_deref(), Some(QUARANTINE_REASON));
+    assert_eq!(flat.quarantined, 0);
+    assert_eq!(flat.failed, 1);
+    assert!(flat.cases[0].reason.is_none());
 
     let mut passed = SuiteReport::from_cases(vec![tolerance_case(dir.path(), PBS_LIT, true)]);
     apply(&mut passed, before_expiry(), true);

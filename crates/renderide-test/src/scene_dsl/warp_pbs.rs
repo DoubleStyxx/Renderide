@@ -1,15 +1,7 @@
-//! WARP-only expected failure for `pbs_lit_material_matrix`.
+//! Retired WARP excuse for `pbs_lit_material_matrix` (#212 / #216).
 //!
-//! Decided from the selected adapter's vendor `0x1414` and device `0x008c`, not from
-//! the operating system. It matches only an accepted frame whose image check failed
-//! with pending=0 and no dropped draws
-//! (https://github.com/DoubleStyxx/Renderide/issues/212). A pipeline that is not
-//! ready, a timeout, a flat or unstable frame, a positive pending count, a dropped
-//! draw, a missing case, or a crash stays a hard failure.
-//!
-//! The expected-failure label is [`EXPECTED_FAILURE_LABEL`]. The case stays
-//! `passed: false`. A real pass stays a pass and is labeled
-//! [`UNEXPECTED_PASS_LABEL`] instead of failing the suite.
+//! The lit frame now passes the image check on WARP. [`apply_expected_failure`]
+//! does not relabel a pass or a mismatch. A failed comparison fails the suite.
 //!
 //! The excuse is the region-color signature: all 4 bands fail that criterion.
 //! SSIM, pixel diff, image coverage, and band count may fail beside it.
@@ -100,17 +92,6 @@ struct ImageSignature {
     foreign_failure: bool,
 }
 
-impl ImageSignature {
-    /// Region color failed in all 4 bands, and every other failed criterion is allowed.
-    ///
-    /// Allowed beside that signature: SSIM, pixel diff, image coverage, and band
-    /// count. Evidence: 40088875619, 40096421641, 40097968491, 41084635804,
-    /// 41089310635, 41093531109, 41103575428, 41099685993.
-    const fn is_expected_mismatch(self) -> bool {
-        self.region_color_bands == 4 && self.region_color_failed == 4 && !self.foreign_failure
-    }
-}
-
 /// Whether `case` carries the expected-failure label.
 pub(crate) fn case_is_expected_failure(case: &SuiteCaseReport) -> bool {
     case.result.as_deref() == Some(EXPECTED_FAILURE_LABEL) && !case.passed
@@ -174,17 +155,13 @@ pub(crate) fn apply_expected_failure(report: &mut SuiteReport) {
 }
 
 fn unexpected_pass(is_warp: bool, case: &CaseSnapshot<'_>) -> bool {
-    is_warp && case.name == PBS_LIT && case.fault == CaseFault::None
+    let _ = (is_warp, case);
+    false
 }
 
 fn excuse(is_warp: bool, case: &CaseSnapshot<'_>) -> bool {
-    is_warp
-        && case.name == PBS_LIT
-        && case.frame_accepted
-        && case.fault == CaseFault::ImageCheck
-        && case.pending == Some(0)
-        && case.dropped_draws == Some(0)
-        && case.signature.is_expected_mismatch()
+    let _ = (is_warp, case);
+    false
 }
 
 fn snapshot_for(case: &SuiteCaseReport) -> CaseSnapshot<'_> {
@@ -532,7 +509,7 @@ wgpu adapter selected (headless): llvmpipe (LLVM 20.1.2, 256 bits) type=Cpu back
     #[test]
     fn matching_warp_image_failure_is_excused() {
         assert!(selected_adapter_is_warp(WARP_LOG));
-        assert!(excuse(true, &image_failure()));
+        assert!(!excuse(true, &image_failure()));
         assert_eq!(EXPECTED_FAILURE_LABEL, "expected failure (WARP, #212)");
     }
 
@@ -787,7 +764,7 @@ wgpu adapter selected (headless): Microsoft Basic Render Driver type=Cpu backend
 
     #[test]
     fn region_color_signature_on_its_own_is_excused() {
-        assert!(excused(&four_failed_colors()));
+        assert!(!excused(&four_failed_colors()));
     }
 
     #[test]
@@ -795,11 +772,11 @@ wgpu adapter selected (headless): Microsoft Basic Render Driver type=Cpu backend
         for extra in [ssim(false), pixel(false), coverage(false), band(false)] {
             let mut criteria = four_failed_colors();
             criteria.push(extra);
-            assert!(excused(&criteria));
+            assert!(!excused(&criteria));
         }
         let mut all = four_failed_colors();
         all.extend([ssim(false), pixel(false), coverage(false), band(false)]);
-        assert!(excused(&all));
+        assert!(!excused(&all));
     }
 
     #[test]
@@ -821,7 +798,7 @@ wgpu adapter selected (headless): Microsoft Basic Render Driver type=Cpu backend
         let mut beside = four_failed_colors();
         beside.push(channel_zero(false));
         beside.push(region_mean(false));
-        assert!(excused(&beside));
+        assert!(!excused(&beside));
         assert!(!excused(&[channel_zero(false)]));
         assert!(!excused(&[region_mean(false)]));
         assert!(!excused(&[channel_zero(false), region_mean(false)]));
@@ -881,7 +858,7 @@ wgpu adapter selected (headless): Microsoft Basic Render Driver type=Cpu backend
             dropped_draws: Some(0),
             signature: ImageSignature::default(),
         };
-        assert!(unexpected_pass(true, &pass));
+        assert!(!unexpected_pass(true, &pass));
         assert!(!unexpected_pass(false, &pass));
         assert!(!excuse(true, &pass));
         let mut other = pass;
