@@ -99,3 +99,11 @@ pub fn ensure_native_stdio_forwarded_to_logger() {
 pub fn run() -> Result<RunExit, RunError> {
     app::run()
 }
+
+// CANARY - DO NOT MERGE: cancel the suite jobs so required fails closed.
+
+// CANARY - DO NOT MERGE: second push cancels the previous suite jobs via concurrency.
+
+// CANARY - DO NOT MERGE: third push, the second run never left the queue.
+
+// CANARY - DO NOT MERGE: concurrency cancel while required is polling.
