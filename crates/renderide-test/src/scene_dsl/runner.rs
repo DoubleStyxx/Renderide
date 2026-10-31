@@ -480,4 +480,27 @@ mod tests {
             .to_rgba8();
         assert_eq!(side.dimensions(), (image.width() * 3, image.height()));
     }
+
+    #[test]
+    fn a_case_with_no_image_omits_artifact_names() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let output_root = temp.path().join("out");
+        let layout = CaseOutputLayout::for_case(&output_root, "unlit_sphere");
+        layout.prepare().expect("prepare layout");
+        let mut case = crate::scene_dsl::cases::unlit_sphere();
+        case.golden_path = temp.path().join("missing-golden.png");
+
+        let outcome = evaluate_and_finalize(&case, layout).expect("finalize");
+
+        let bytes = std::fs::read(&outcome.layout.report_json).expect("report");
+        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert!(
+            json.get("artifacts").is_none(),
+            "no image loaded, so artifact names stay absent: {json}"
+        );
+        assert!(outcome.report.artifacts.is_none());
+        assert!(!outcome.layout.actual_png.exists());
+        assert!(!outcome.layout.diff_png.exists());
+        assert!(!outcome.layout.side_by_side_png.exists());
+    }
 }

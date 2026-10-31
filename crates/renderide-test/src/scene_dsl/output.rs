@@ -210,7 +210,7 @@ pub fn write_report(layout: &CaseOutputLayout, report: &mut CaseReport) -> io::R
     if early_exit.is_some() {
         report.early_exit = early_exit;
     }
-    super::report_v2::stamp(report, &layout.actual_png);
+    super::report_v2::stamp(report, layout);
     let json = serde_json::to_string_pretty(report)
         .map_err(|e| io::Error::other(format!("serialize report: {e}")))?;
     std::fs::write(&layout.report_json, json)

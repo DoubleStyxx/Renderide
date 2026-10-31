@@ -21,7 +21,6 @@
     "status",
     "reason",
     "reason_text",
-    "artifacts",
     "capture",
     "runner"
   ],
@@ -88,16 +87,62 @@
       ]
     },
     "reason_text": { "type": "string", "minLength": 1 },
-    "early_exit": { "type": "object" },
+    "early_exit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["case", "k", "elapsed_ms", "settle_ms", "k_window_ms", "reason"],
+      "properties": {
+        "case": { "type": "string" },
+        "k": { "type": "integer", "minimum": 0 },
+        "elapsed_ms": { "type": "integer", "minimum": 0 },
+        "settle_ms": { "type": "integer", "minimum": 0 },
+        "k_window_ms": { "type": "integer", "minimum": 0 },
+        "reason": { "type": "string", "minLength": 1 }
+      }
+    },
     "artifacts": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["actual", "golden", "diff", "side_by_side"],
       "properties": {
         "actual": { "type": "string" },
         "golden": { "type": "string" },
         "diff": { "type": "string" },
         "side_by_side": { "type": "string" }
+      }
+    },
+    "region_stats": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "column",
+          "row",
+          "x",
+          "y",
+          "width",
+          "height",
+          "mean",
+          "variance",
+          "non_dominant",
+          "mean_delta",
+          "variance_delta",
+          "non_dominant_delta"
+        ],
+        "properties": {
+          "column": { "type": "integer", "minimum": 0 },
+          "row": { "type": "integer", "minimum": 0 },
+          "x": { "type": "integer", "minimum": 0 },
+          "y": { "type": "integer", "minimum": 0 },
+          "width": { "type": "integer", "minimum": 0 },
+          "height": { "type": "integer", "minimum": 0 },
+          "mean": { "type": "array", "minItems": 4, "maxItems": 4, "items": { "type": "number" } },
+          "variance": { "type": "array", "minItems": 4, "maxItems": 4, "items": { "type": "number" } },
+          "non_dominant": { "type": "integer", "minimum": 0 },
+          "mean_delta": { "type": "number", "minimum": 0 },
+          "variance_delta": { "type": "number", "minimum": 0 },
+          "non_dominant_delta": { "type": "integer", "minimum": 0 }
+        }
       }
     },
     "capture": {
@@ -107,7 +152,19 @@
       "properties": {
         "longest_submission_stall_ms": { "type": "integer", "minimum": 0 },
         "warp_readiness_budget_used": { "type": "boolean" },
-        "early_exit": { "type": "object" }
+        "early_exit": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["case", "k", "elapsed_ms", "settle_ms", "k_window_ms", "reason"],
+          "properties": {
+            "case": { "type": "string" },
+            "k": { "type": "integer", "minimum": 0 },
+            "elapsed_ms": { "type": "integer", "minimum": 0 },
+            "settle_ms": { "type": "integer", "minimum": 0 },
+            "k_window_ms": { "type": "integer", "minimum": 0 },
+            "reason": { "type": "string", "minLength": 1 }
+          }
+        }
       }
     },
     "runner": {

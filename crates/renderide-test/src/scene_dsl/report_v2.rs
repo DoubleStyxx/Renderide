@@ -52,17 +52,21 @@ pub(crate) struct Reason {
     pub text: &'static str,
 }
 
-/// Conventional artifact filenames. Old path fields on the layout stay.
+/// Artifact filenames that were actually written. A missing file is omitted.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ArtifactNames {
-    /// Captured PNG.
-    pub actual: String,
-    /// Golden copy.
-    pub golden: String,
-    /// Diff image. Always written once both images load.
-    pub diff: String,
-    /// `golden | actual | diff`.
-    pub side_by_side: String,
+    /// Captured PNG, when `actual.png` is on disk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual: Option<String>,
+    /// Golden copy, when `golden.png` is on disk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub golden: Option<String>,
+    /// Diff image, when `diff.png` is on disk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
+    /// `golden | actual | diff`, when `side_by_side.png` is on disk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub side_by_side: Option<String>,
 }
 
 /// Capture facts copied next to the flat top-level fields.
@@ -113,10 +117,14 @@ pub(crate) struct IcdBlock {
 }
 
 /// Fills the v2 fields from the report already stamped with host and capture stats.
-pub(crate) fn stamp(report: &mut CaseReport, actual_png: &Path) {
+///
+/// `capture.early_exit` is the same record as the top-level field, including
+/// settle time and K-window time. Artifact names are included only for files
+/// that exist in `layout`.
+pub(crate) fn stamp(report: &mut CaseReport, layout: &super::output::CaseOutputLayout) {
     report.schema = SCHEMA.to_string();
     assign_outcome(report);
-    report.artifacts = Some(standard_artifacts());
+    report.artifacts = written_artifacts(layout);
     report.capture = Some(CaptureBlock {
         longest_submission_stall_ms: report.longest_submission_stall_ms,
         warp_readiness_budget_used: report.warp_readiness_budget_used,
@@ -124,7 +132,7 @@ pub(crate) fn stamp(report: &mut CaseReport, actual_png: &Path) {
     });
     report.runner = Some(RunnerBlock {
         cpu_model: report.cpu_model.clone(),
-        adapter: adapter_block(actual_png),
+        adapter: adapter_block(&layout.actual_png),
         icd: icd_from_env(),
     });
 }
@@ -351,13 +359,25 @@ const REASONS: &[(&str, &str)] = &[
     (FALLBACK_CODE, FALLBACK_TEXT),
 ];
 
-fn standard_artifacts() -> ArtifactNames {
-    ArtifactNames {
-        actual: "actual.png".to_string(),
-        golden: "golden.png".to_string(),
-        diff: "diff.png".to_string(),
-        side_by_side: super::side_by_side::SIDE_BY_SIDE_FILENAME.to_string(),
-    }
+fn written_artifacts(layout: &super::output::CaseOutputLayout) -> Option<ArtifactNames> {
+    let names = ArtifactNames {
+        actual: name_if_present(&layout.actual_png, "actual.png"),
+        golden: name_if_present(&layout.golden_png_copy, "golden.png"),
+        diff: name_if_present(&layout.diff_png, "diff.png"),
+        side_by_side: name_if_present(
+            &layout.side_by_side_png,
+            super::side_by_side::SIDE_BY_SIDE_FILENAME,
+        ),
+    };
+    let any = names.actual.is_some()
+        || names.golden.is_some()
+        || names.diff.is_some()
+        || names.side_by_side.is_some();
+    any.then_some(names)
+}
+
+fn name_if_present(path: &Path, name: &str) -> Option<String> {
+    path.is_file().then(|| name.to_string())
 }
 
 fn adapter_block(actual_png: &Path) -> AdapterBlock {
@@ -467,6 +487,7 @@ mod tests {
         let layout = CaseOutputLayout::for_case(dir.path(), &case.name);
         layout.prepare().expect("prepare");
         let mut report = report_from_error(&case, "golden image not found at missing.png");
+        report.region_stats = Some(vec![sample_region()]);
         write_report(&layout, &mut report).expect("write");
         let bytes = std::fs::read(&layout.report_json).expect("read");
         let value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
@@ -478,6 +499,10 @@ mod tests {
         assert_eq!(value["schema"], SCHEMA);
         assert_eq!(value["reason"], "golden-missing");
         assert!(!value["reason_text"].as_str().unwrap_or("").is_empty());
+        assert!(value.get("artifacts").is_none(), "no image was written");
+        assert_eq!(value["region_stats"][0]["column"], 0);
+        assert_eq!(value["region_stats"][0]["non_dominant"], 3);
+        assert!(schema["properties"].get("region_stats").is_some());
         assert!(value["runner"]["adapter"]["vendor"].is_null());
         assert!(value["runner"]["adapter"]["device"].is_null());
         assert!(value["runner"]["icd"]["source"].is_string());
@@ -518,12 +543,58 @@ mod tests {
         report
     }
 
+    #[test]
+    fn v2_early_exit_keeps_settle_time_and_the_k_window() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let case = crate::scene_dsl::cases::unlit_sphere();
+        let layout = CaseOutputLayout::for_case(dir.path(), &case.name);
+        layout.prepare().expect("prepare");
+        let mut report = report_from_error(&case, "flat or unstable frame");
+        report.early_exit = Some(sample_exit());
+        write_report(&layout, &mut report).expect("write");
+        let bytes = std::fs::read(&layout.report_json).expect("read");
+        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        let parsed: CaseReport = serde_json::from_slice(&bytes).expect("round trip parse");
+        let again = serde_json::to_value(&parsed).expect("round trip write");
+        assert_eq!(value, again);
+        assert_required(&schema_document(), &value);
+        for slot in ["early_exit", "capture"] {
+            let exit = if slot == "capture" {
+                &value["capture"]["early_exit"]
+            } else {
+                &value[slot]
+            };
+            assert_eq!(exit["settle_ms"], 4_000, "{slot}");
+            assert_eq!(exit["k_window_ms"], 8_500, "{slot}");
+            assert_eq!(exit["elapsed_ms"], 12_500, "{slot}");
+        }
+    }
+
     fn sample_exit() -> EarlyExit {
         EarlyExit {
             case: "pbs_lit_material_matrix".to_string(),
             k: 3,
-            elapsed_ms: 1000,
+            elapsed_ms: 12_500,
+            settle_ms: 4_000,
+            k_window_ms: 8_500,
             reason: "flat_stable".to_string(),
+        }
+    }
+
+    fn sample_region() -> super::super::region_stats::RegionStatRow {
+        super::super::region_stats::RegionStatRow {
+            column: 0,
+            row: 1,
+            x: 0,
+            y: 2,
+            width: 4,
+            height: 4,
+            mean: [1.0, 2.0, 3.0, 4.0],
+            variance: [0.0, 0.0, 0.0, 0.0],
+            non_dominant: 3,
+            mean_delta: 0.0,
+            variance_delta: 0.0,
+            non_dominant_delta: 0,
         }
     }
 
@@ -554,6 +625,14 @@ mod tests {
             };
             if child.is_object() {
                 assert_required(child_schema, child);
+            } else if let Some(items) = child.as_array()
+                && let Some(item_schema) = child_schema.get("items")
+            {
+                for item in items {
+                    if item.is_object() {
+                        assert_required(item_schema, item);
+                    }
+                }
             }
         }
     }
