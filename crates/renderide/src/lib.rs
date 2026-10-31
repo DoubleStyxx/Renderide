@@ -103,3 +103,5 @@ pub fn run() -> Result<RunExit, RunError> {
 // CANARY - DO NOT MERGE: cancel the suite jobs so required fails closed.
 
 // CANARY - DO NOT MERGE: second push cancels the previous suite jobs via concurrency.
+
+// CANARY - DO NOT MERGE: third push, the second run never left the queue.
