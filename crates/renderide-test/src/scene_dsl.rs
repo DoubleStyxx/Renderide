@@ -21,8 +21,13 @@ pub mod suite;
 pub mod tolerance;
 mod warp_pbs;
 
+/// Labels matching WARP cases. The flat-exit tests use this with an injected clock.
+#[cfg(test)]
+pub(crate) use quarantine_216::apply_quarantine;
 /// Whether a suite case is the time-limited #216 quarantine and not a pass.
 pub(crate) use quarantine_216::case_is_quarantined as case_is_quarantined_216;
+/// Whether this WARP case may end a flat-frame wait before the full budget.
+pub(crate) use quarantine_216::early_flat_exit_applies;
 /// Loud `QUARANTINED` line for one quarantined case.
 pub(crate) use quarantine_216::quarantined_line;
 /// Loud `WARN` line while the #216 quarantine is inside its last 48 hours.
