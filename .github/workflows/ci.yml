@@ -6,6 +6,13 @@ name: CI
 # and are not on hosted runners, so CI does not build RenderideMod.csproj.
 # `RenderideMod/Shaders/**` is included: Rust `include_str!` compiles those WGSL
 # files into the renderer and the headless golden suite.
+#
+# The material-coverage cargo test also reads `docs/testing/material-coverage.md`.
+# These filters are on the workflow trigger. A miss skips the workflow and
+# creates no check runs, so that gate never runs. This file has no `required`
+# job. The open aggregator in #277 uses `if: always()` and treats a skipped
+# suite as success only when path detection said the suites do not apply, so a
+# coverage input missing from the pattern list would still go green.
 "on":
   push:
     branches: [master]
@@ -21,6 +28,7 @@ name: CI
       - "generators/**"
       - "third_party/**"
       - "RenderideMod/Shaders/**"
+      - "docs/testing/material-coverage.md"
   pull_request:
     paths:
       - ".github/workflows/ci.yml"
@@ -34,6 +42,7 @@ name: CI
       - "generators/**"
       - "third_party/**"
       - "RenderideMod/Shaders/**"
+      - "docs/testing/material-coverage.md"
   workflow_dispatch:
 
 # Concurrency is set on each job. A workflow-wide cancel-in-progress group
