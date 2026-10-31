@@ -3,7 +3,7 @@
 # head, measures default framebench scenarios with n=12, gates with
 # scripts/ci/frame_bench_gate.py (the single decision rule), runs a reversed-order
 # confirm when the first pass flags, and adds a report-only cpu_hot compare via
-# renderide-bench. Posts a job summary, uploads bench-compare.json, and tries to
+# renderide-bench (`--bench-arg=--quick`). Posts a job summary, uploads bench-compare.json, and tries to
 # upsert one PR comment (comment failure never fails the job).
 #
 # Methodology (Gauge): n>=12, interleaved chunked first pass, one reversed-order
@@ -58,7 +58,7 @@ jobs:
             .github/actions/lavapipe
 
       - name: Self-test gate script
-        run: python3 -m unittest discover -s tools/scripts/ci -p 'test_frame_bench_gate.py' -v
+        run: python3 -m unittest discover -s tools/scripts/ci -p 'test_*.py' -v
 
       - name: Install pinned lavapipe
         timeout-minutes: 10
@@ -284,7 +284,7 @@ jobs:
             fi
           fi
 
-          echo "::group::cpu_hot compare (report-only, --quick)"
+          echo "::group::cpu_hot compare (report-only, --bench-arg=--quick)"
           cpu_compare_args=()
           if [[ -x "$RUNNER_TEMP/target-head/release/renderide-bench" && -x "$RUNNER_TEMP/target-base/release/renderide-bench" ]]; then
             mkdir -p "$out/cpu-base" "$out/cpu-head"
@@ -293,7 +293,7 @@ jobs:
               cd base
               CARGO_TARGET_DIR="$RUNNER_TEMP/target-base" \
                 "$RUNNER_TEMP/target-base/release/renderide-bench" run --suite cpu \
-                --bench-arg --quick --output "$out/cpu-base/run.json" --json \
+                --bench-arg=--quick --output "$out/cpu-base/run.json" --json \
                 >"$out/cpu-base/stdout.json" 2>"$out/cpu-base/stderr.log"
             )
             cpu_base_status=$?
@@ -301,7 +301,7 @@ jobs:
               cd head
               CARGO_TARGET_DIR="$RUNNER_TEMP/target-head" \
                 "$RUNNER_TEMP/target-head/release/renderide-bench" run --suite cpu \
-                --bench-arg --quick --output "$out/cpu-head/run.json" --json \
+                --bench-arg=--quick --output "$out/cpu-head/run.json" --json \
                 >"$out/cpu-head/stdout.json" 2>"$out/cpu-head/stderr.log"
             )
             cpu_head_status=$?
@@ -352,17 +352,28 @@ jobs:
           echo "gate_exit=$gate_status" >> "$GITHUB_OUTPUT"
           echo "wall_time_sec=$wall" >> "$GITHUB_OUTPUT"
           echo "summary_path=$summary" >> "$GITHUB_OUTPUT"
-          # Persist summary for the comment step
+          # Persist summary for the comment step. Assemble always exits 0 after writing
+          # bench-compare.json; the gate verdict is applied in a later step so Upload and
+          # Upsert still run on FAIL under set -e.
           cp "$summary" "$GITHUB_WORKSPACE/bench-pr-summary.md"
-          exit "$gate_status"
+          exit 0
 
       - name: Upload bench-compare.json
         if: always() && hashFiles('bench-compare.json') != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bench-compare
           path: bench-compare.json
           if-no-files-found: ignore
+
+      - name: Job summary trailer
+        if: always() && hashFiles('bench-pr-summary.md') != ''
+        run: |
+          set -euo pipefail
+          # Measure already wrote GITHUB_STEP_SUMMARY; re-append when that step was truncated.
+          if [[ -n "${{ steps.bench.outputs.wall_time_sec }}" ]]; then
+            echo "bench-pr wall_time_sec=${{ steps.bench.outputs.wall_time_sec }} gate_exit=${{ steps.bench.outputs.gate_exit }}" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Upsert PR comment
         if: always() && hashFiles('bench-pr-summary.md') != ''
@@ -391,3 +402,19 @@ jobs:
                 owner, repo, issue_number, body,
               });
             }
+
+      - name: Apply gate verdict
+        if: always()
+        run: |
+          set -euo pipefail
+          status="${{ steps.bench.outputs.gate_exit }}"
+          if [[ -z "$status" ]]; then
+            echo "Measure step did not report gate_exit (aborted before assemble)" >&2
+            exit 1
+          fi
+          if [[ "$status" -eq 0 ]]; then
+            echo "gate: pass"
+          else
+            echo "gate: fail (exit $status)"
+          fi
+          exit "$status"
