@@ -492,6 +492,28 @@ class DecideResult:
     deciding_round: int | None = None
 
 
+
+def format_summary_verdict(action: str, reason: str = "") -> str:
+    """One-line job-summary text for each post-drift gate_action (GITHUB_STEP_SUMMARY)."""
+    action = (action or "").strip()
+    reason = (reason or "").strip()
+    if action == "pass":
+        line = "gate_action=pass"
+    elif action == "fail":
+        line = "gate_action=fail (perf)"
+    elif action == "need_confirm":
+        line = "gate_action=need_confirm (need second consecutive drift-clean FAIL)"
+    elif action == "rerun":
+        line = "gate_action=rerun (disagreement or recurring drift → full gate rerun once)"
+    elif action == "unstable":
+        line = "gate_action=unstable → inconclusive: unstable runner"
+    else:
+        line = f"gate_action={action or 'unknown'}"
+    if reason:
+        line = f"{line}; verdict_reason={reason}"
+    return line
+
+
 def post_drift_policy(
     round_kinds: list[str],
     *,
