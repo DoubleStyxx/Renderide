@@ -1,4 +1,5 @@
 //! Renderide renderer process entry points.
+//! CANARY: gauge/b3-cpuhot-canary-noop (DO NOT MERGE) — trivial no-op for parallel cpu_hot.
 //!
 //! The supported external API intentionally stays small: [`run`] starts the renderer process,
 //! [`RunExit`] reports normal process exits, [`RunError`] reports fatal startup failures, and
