@@ -190,11 +190,19 @@ Owner: Bridge. ETA: done Oct 31.
 
 Candidate causes, each with its own experiment. Findings note Nov 7.
 
-**8a. DXC codegen.** The WARP logs already say `Using static DXC for shader compilation`.
+**8a. DXC codegen. Handed to Shader.** Bridge is not starting another FXC-versus-DXC or DXIL-versus-SPIR-V capture. Dumps already taken in this run stay as artifacts. They are listed here and not interpreted.
 
-**Experiment.** Rebuild the same lit shader with FXC if the Windows toolchain can select it, and capture `negative_light_physically_based` once under each compiler. A G=0 frame only under DXC confirms this cause. If FXC cannot be selected, dump the DXIL for the lit fragment from a channel-zero run and compare it with the SPIR-V from the llvmpipe job of the same commit.
+| Run | Job | Files |
+| --- | --- | --- |
+| [41198150721](https://github.com/DoubleStyxx/Renderide/actions/runs/41198150721), head `a364ae7f` | linux `124528407835` | `negative_light_parity/lit-production.wgsl`, `lit-production.hlsl`, `lit-production.spv`; the same three names under `negative_light_physically_based`. Artifact `warp216-debug-linux`. |
+| same run | windows-2 `124528407838` | the same six shader files, plus `target/renderide-test-out/lit-tools.txt`. Artifact `warp216-debug-windows-2`. |
+| same run | windows-1 `124528407662` | the same six shader files, plus `lit-tools.txt`. Artifact `warp216-debug-windows-1`. |
+| same run | windows-3 `124528407826` | cancelled, no artifact. |
+| [41196911300](https://github.com/DoubleStyxx/Renderide/actions/runs/41196911300), head `8d49e621` | linux `124524822293` | `lit-production.wgsl` only, under both production cases. No `.hlsl` or `.spv`. Artifact `warp216-debug-linux`. |
+| same run | windows-1 `124524822330`, windows-2 `124524822170` | `lit-production.wgsl` only, under both production cases, plus `lit-tools.txt`. Artifacts `warp216-debug-windows-1` and `warp216-debug-windows-2`. |
+| same run | windows-3 `124524822273` | `lit-production.wgsl` only, under both production cases, plus `lit-tools.txt`. Artifact `warp216-debug-windows-3`. |
 
-Owner: Bridge. ETA: Nov 5 for the two captures, or the DXIL dump if FXC is unavailable. Shader reads the dump if the bytes disagree.
+Owner: Shader, from Oct 31. The Nov 5 Bridge capture is withdrawn.
 
 **8b. Swizzle or packing. Ruled out.**
 
@@ -215,7 +223,7 @@ Position and range bits match across the two adapters as well (`pbs_lit` light 0
 
 Packing and upload are not the WARP failure. The storage buffer the shader reads has the same floats llvmpipe shades correctly.
 
-- **8a** stays open for a consumer that is not this debug shader. A DXC bug in the upload itself is closed.
+- **8a** is Shader's, for a consumer that is not this debug shader. A DXC bug in the upload itself is closed. The dumps above are the handoff.
 - **8c** and **8d** are measured on the debug group below.
 
 Owner: Bridge. ETA: done Oct 31.
@@ -249,11 +257,67 @@ The 2×2 `Rgba16Float` means match llvmpipe. The largest absolute channel differ
 | emission | those four | 0 of 3 | matches, and both sides are at 0 |
 | constant `(0.25, 0.5, 0.75)` | none | 0 of 3 | matches |
 
-No isolated term loses G. The composed debug frame does not lose it either. The channel-zero pixels in the earlier production captures are not reproduced by this debug shader. 8a remains the open consumer-side question for the production lit shader, which these scenes do not compile.
+No isolated term loses G. The composed debug frame does not lose it either. The channel-zero pixels in the earlier production captures are not reproduced by this debug shader. The production lit shader is 8a, and that dump belongs to Shader.
 
-Owner: Bridge for the captures, Shader for the debug group. ETA: done Oct 31.
+**The uniform 0.95 SSIM gap is the gate, scoring one-code quantisation of a sub-level linear error.**
+
+Measured on `warp216_constant` and `warp216_directional_composed` from run [41174993308](https://github.com/DoubleStyxx/Renderide/actions/runs/41174993308) at `04255c43`. The three WARP PNGs decode to the same pixels (the zip bytes differ). Linux is llvmpipe. The harness score is `image-compare` 0.5 `rgba_hybrid_compare`. Reimplementing that function reproduces the stored scores: constant `0.9581573030445724`, composed `0.9578630338655784`. Linux on the same goldens is `0.9966115383431317` and `0.9964522361406124`.
+
+The float targets agree. Per pixel, max |WARP − llvmpipe| is 0.002563 on both cases, mean absolute difference about 4.04e-4, and nothing exceeds 0.01. NaN and negative counts are zero. The quadrant-mean bound of 6.32e-4 from the full group is the same comparison, averaged.
+
+The PNG is 8-bit RGBA, color type 6, filter 0, no interlace. Decoding it is the texture. Rounding each float through the IEC sRGB curve and comparing that image to the WARP PNG with the same hybrid function scores 0.994290 (constant, 94.9% of pixels exact) and 0.994010 (composed, 92.9% exact). The misses are ±1. Truncation instead of rounding matches only 4–7% of pixels, so the copy rounds. A bilinear offset of the float sample, searched over ±0.45 texel, matches the PNG worse than the texel center. The sRGB copy and the PNG encode are not the 0.95 gap.
+
+Quantising both floats with that same curve still scores 0.968670 and 0.968641 against each other. About 31% of pixels differ by exactly one code, none by more. That is already under 0.985. The WARP PNG against the golden is 0.958, and swapping the PNG for the IEC image of the WARP float only moves it to 0.960. The extra hundredth is llvmpipe's own sRGB rounding against the IEC formula (linux PNG versus that formula is hybrid 0.983 on constant). It does not create the miss.
+
+What the gate does with a one-code error:
+
+- The score is the luma MSSIM. On both frames every pixel's minimum is the luma term. Chroma RMS and alpha never decide it. `diff.png` is that map: red is `(1 − window SSIM) × 255`, green and blue are 0, alpha is 255. Mean red is about 10.3. The sphere core is dark because those windows score 1. The field is 8×8 blocks.
+- Windows are non-overlapping 8×8. 256 divides by 8, so there is no clipped edge tile. Variance is the sum of squares, not the mean, while C1 and C2 are the usual `(0.01×255)²` and `(0.03×255)²`. On a low-contrast tile that sum is small, so a one-code phase shift moves the score. 68% of the 1024 windows are under 0.985. The windows under 0.95 have median luma variance 0.48. Dividing the same windows' variance by the pixel count scores 0.9979 and 0.9978, which would pass 0.985.
+- A constant shift of the observed mean bias (about −0.14, +0.05, −0.01 on constant) scores 1.000. The miss is not a flat tint. On row 0 of constant, R is a two-pixel-wide ramp and the WARP ramp is one column out of phase with the golden, so every other column differs by 1. The sphere core is a flat G of +1, `(137, 188, 225)` against `(137, 187, 225)`. An amplified abs-diff is those contours, not an MSAA edge and not a channel wipe. Pixel-diff already passes: max abs 2, failing fraction 0, threshold 8 and 0.03.
+
+Verdict: the floats match, the sRGB copy matches the PNG, and the 0.985 hybrid gate is tighter than one-code quantisation of that float error. The window is 8×8 and non-overlapping, and its flat-region constants do not absorb a phase-shifted ramp.
+
+Owner: Bridge for the captures, Shader for the debug group. ETA: done Oct 31. The SSIM verdict above is Oct 31.
+
+**Negparity. Signed light reaches the shader. No channel is dropped, and the PNG miss is the same SSIM gate.**
+
+Run [41201022858](https://github.com/DoubleStyxx/Renderide/actions/runs/41201022858) at canary `22647eae`, which is the merge of master `fbf2cd21` (#237). Linux job `124536681538` passed all 25 `warp216_negparity_*` cases. Windows jobs `124536681388` (windows-1), `124536681506` (windows-2), and `124536681467` (windows-3) each finished all 25 and uploaded the scene-color sidecars. Those three jobs exit non-zero because every case misses SSIM 0.985. The only failed criterion is SSIM. Max abs diff is 2 and the failing-pixel fraction is 0 on every WARP case. The three WARP PNGs decode to the same pixels. Linux matches each golden exactly (SSIM 1, max abs diff 0).
+
+Every capture is non-flat. There is no `flat_stable` exit. PNG stabilize times:
+
+| Sample | Min | Max |
+| --- | --- | --- |
+| windows-1 | 103.385s | 109.272s |
+| windows-2 | 108.216s | 161.806s |
+| windows-3 | 88.226s | 90.952s |
+
+Float quadrant means match llvmpipe. The largest absolute channel difference in any quadrant, any of the 25 cases, any WARP sample, is 6.285e-4. NaN and Inf counts are 0 on both adapters. Negative counts match on all three WARP samples. A single-channel isolate carries negatives only on that channel. Grey carries the same count on R, G, and B. No grey case has one float channel at 0 while another is not. No quadrant has a PNG channel near 0 while the float mean is still present. Ambient, indirect, fresnel, and emission have no negative samples, and their float means are still present on every channel, so that is a non-negative term rather than a dropped channel.
+
+SSIM below is the WARP score. It is the same number on all three samples.
+
+| Term | Channel | WARP SSIM | Float delta | Negatives R, G, B | NaN |
+| --- | --- | --- | --- | --- | --- |
+| composed | rgb | 0.956795 | 6.285e-4 | 600, 626, 826 | 0 |
+| diffuse | r | 0.956126 | 6.281e-4 | 606, 0, 0 | 0 |
+| diffuse | g | 0.955733 | 6.285e-4 | 0, 606, 0 | 0 |
+| diffuse | b | 0.957233 | 6.281e-4 | 0, 0, 606 | 0 |
+| diffuse | grey | 0.956059 | 6.285e-4 | 606, 606, 606 | 0 |
+| specular | r | 0.956268 | 6.281e-4 | 1563, 0, 0 | 0 |
+| specular | g | 0.953400 | 6.285e-4 | 0, 1563, 0 | 0 |
+| specular | b | 0.957685 | 6.281e-4 | 0, 0, 1563 | 0 |
+| specular | grey | 0.952304 | 6.285e-4 | 1563, 1563, 1563 | 0 |
+| ambient | r, g, b, grey | 0.958166 | 6.281e-4 | 0, 0, 0 | 0 |
+| indirect | r, g, b, grey | 0.958166 | 6.281e-4 | 0, 0, 0 | 0 |
+| fresnel | r | 0.958166 | 6.281e-4 | 0, 0, 0 | 0 |
+| fresnel | g | 0.958164 | 6.281e-4 | 0, 0, 0 | 0 |
+| fresnel | b | 0.958166 | 6.281e-4 | 0, 0, 0 | 0 |
+| fresnel | grey | 0.958157 | 6.281e-4 | 0, 0, 0 | 0 |
+| emission | r, g, b, grey | 0.958166 | 6.281e-4 | 0, 0, 0 | 0 |
+
+Verdict: the clamp-off intensity reaches WARP. The float frame matches llvmpipe, including which channel is negative. The PNG does not lose a channel the float still has. The case fails on the same 0.95 SSIM gate as the unsigned debug group.
 
 ## Order
 
-1. Bridge: FXC-versus-DXC or a DXIL compare of the production lit fragment (8a). 8b, 8c, 8d, hypothesis 5, and hypothesis 6 are recorded above.
-2. Gauge: #214 stall, after the Nov 7 color finding.
+1. Shader: read the 8a dumps listed above. Bridge is not running another production-shader capture.
+2. 8b, 8c, 8d (unsigned group and negparity), hypothesis 5, and hypothesis 6 are recorded above. The 0.95 SSIM gap is the gate.
+3. Gauge: #214 stall, after the Nov 7 color finding.
