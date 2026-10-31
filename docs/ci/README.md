@@ -61,7 +61,7 @@ The historical patterns are `.github/workflows/ci.yml`, `.github/actions/lavapip
 
 `.github/ci/**` is the scripts the suite jobs run and this gate. A change there runs the suites the gate judges.
 
-`docs/testing/material-coverage.md` is included as that exact path, not as `docs/**`. The gate treats a path skip as success, so a docs-only edit of material coverage would go green if this path were missing. Neighboring docs files, CodeQL, and bench-pr still do not select the suite. `test_material_coverage_doc_alone_selects_suite` is the fixture: a diff whose only path is that file publishes `suites=true`.
+`docs/testing/material-coverage.md` is included as that exact path, not as `docs/**`. The gate treats a path skip as success, so a docs-only edit of material coverage would go green if this path were missing. The same list names the coverage test `crates/renderide/src/materials/material_coverage.rs`, the allowlist `crates/renderide/material_coverage_allowlist.toml`, and `crates/renderide-test/src/scene_dsl/material_usage.rs` (the test and allowlist also sit under `crates/**`). Neighboring docs files, CodeQL, and bench-pr still do not select the suite. `test_material_coverage_paths_alone_select_suite` is the fixture: a diff whose only path is any one of those files publishes `suites=true`.
 
 Patterns are either an exact root path or `dir/**` (that directory and its files). A rename counts both the old and the new path, so moving a file out of `crates/` still selects the suites. Do not put a `paths` filter back on the workflow trigger.
 

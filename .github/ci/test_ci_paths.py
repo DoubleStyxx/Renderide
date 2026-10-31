@@ -75,20 +75,29 @@ class PatternTests(unittest.TestCase):
         )
         self.assertTrue(ci_paths.diff_selects_suites(ci_paths.paths_from_name_status_z(blob)))
 
-    def test_material_coverage_doc_alone_selects_suite(self) -> None:
-        # A path-skipped suite is a required success. This file must not take
-        # that path, even when it is the only change in the diff.
-        path = "docs/testing/material-coverage.md"
-        self.assertIn(path, ci_paths.SUITE_PATTERNS)
-        self.assertTrue(ci_paths.path_selects_suite(path))
+    def test_material_coverage_paths_alone_select_suite(self) -> None:
+        # A path-skipped suite is a required success. Each of these files must
+        # select the suite even when it is the only change in the diff.
+        # #286: the doc. #285: the coverage test, the allowlist, and the
+        # test-side usage index.
+        covered = (
+            "docs/testing/material-coverage.md",
+            "crates/renderide/material_coverage_allowlist.toml",
+            "crates/renderide/src/materials/material_coverage.rs",
+            "crates/renderide-test/src/scene_dsl/material_usage.rs",
+        )
+        for path in covered:
+            with self.subTest(path=path):
+                self.assertIn(path, ci_paths.SUITE_PATTERNS)
+                self.assertTrue(ci_paths.path_selects_suite(path))
+                blob = f"M\0{path}\0".encode()
+                parsed = ci_paths.paths_from_name_status_z(blob)
+                self.assertEqual(parsed, [path])
+                self.assertTrue(ci_paths.diff_selects_suites(parsed))
+                self.assertEqual(ci_paths.suites_output("pull_request", parsed), "true")
+                self.assertEqual(ci_paths.suites_output("push", parsed), "true")
         self.assertFalse(ci_paths.path_selects_suite("docs/testing/other.md"))
         self.assertFalse(ci_paths.path_selects_suite("docs/ci/README.md"))
-        blob = b"M\0docs/testing/material-coverage.md\0"
-        paths = ci_paths.paths_from_name_status_z(blob)
-        self.assertEqual(paths, [path])
-        self.assertTrue(ci_paths.diff_selects_suites(paths))
-        self.assertEqual(ci_paths.suites_output("pull_request", paths), "true")
-        self.assertEqual(ci_paths.suites_output("push", paths), "true")
 
     def test_docs_only_name_status_does_not_select(self) -> None:
         blob = b"M\0docs/ci/README.md\0A\0README.md\0"

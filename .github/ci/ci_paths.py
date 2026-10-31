@@ -4,9 +4,9 @@
 The patterns are the historical ``ci.yml`` trigger filters, plus
 ``.github/ci/**`` and the exact path ``docs/testing/material-coverage.md``.
 ``.github/ci/**`` holds the scripts the suite jobs run and this gate. The
-material-coverage document is the one docs path that must run the suites: a
-path skip is a ``required`` success, so leaving that file out would let a
-docs-only drift go green. The workflow trigger itself no longer uses a path
+material-coverage doc, its cargo test, and its allowlist must run the suites:
+a path skip is a ``required`` success, so leaving those paths out would let
+a coverage-only drift go green. The workflow trigger itself no longer uses a path
 filter: a trigger filter never creates check runs, so a required check would
 stay pending. This script runs inside the always-on ``changes`` job and
 publishes ``suites=true`` or ``suites=false``.
@@ -42,9 +42,14 @@ SUITE_PATTERNS: tuple[str, ...] = (
     "generators/**",
     "third_party/**",
     "RenderideMod/Shaders/**",
-    # Exact file, not docs/**. Other docs stay skipped. A path skip is a
-    # required success, so this file has to select the suite on its own.
+    # Exact files, not docs/**. Other docs stay skipped. A path skip is a
+    # required success, so these have to select the suite on their own.
+    # #286 puts the doc on the CI path filter. #285 adds the cargo test
+    # (material_coverage.rs), the allowlist, and the test-side usage index.
     "docs/testing/material-coverage.md",
+    "crates/renderide/material_coverage_allowlist.toml",
+    "crates/renderide/src/materials/material_coverage.rs",
+    "crates/renderide-test/src/scene_dsl/material_usage.rs",
 )
 
 SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
