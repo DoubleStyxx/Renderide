@@ -84,7 +84,9 @@
         "unknown-group",
         "bench-report-missing",
         "unknown-bench-scenario",
-        "suite-failed"
+        "suite-failed",
+        "channel-zero",
+        "region-mean"
       ]
     },
     "reason_text": { "type": "string", "minLength": 1 },
