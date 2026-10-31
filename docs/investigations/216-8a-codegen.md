@@ -346,7 +346,7 @@ error X3511: unable to unroll loop, loop does not appear to terminate in a timel
 error X3511: forced to unroll loop, but unrolling failed.
 ```
 
-preceded by `warning X3570: gradient instruction used in a loop with varying iteration`. The pipeline `embedded_raster_material__pbsmetallic_default__forward__…__fs_forward_base` is invalid, so nothing is shaded. FXC is trying to unroll the dynamic light loop because a gradient (`SampleBias` for cookies, shadows, or material maps reached from that loop) is inside it, and naga's `u32::MAX` countdown does not look like a timely bound. This arm does not compare shading. It shows FXC cannot build this fragment.
+preceded by `warning X3570: gradient instruction used in a loop with varying iteration`. The pipeline `embedded_raster_material__pbsmetallic_default__forward__…__fs_forward_base` is invalid, so nothing is shaded. The gradient is identified in the next section. FXC tries to unroll the dynamic light loop because of it, and naga's `u32::MAX` countdown does not look like a timely bound. This arm does not compare shading. It shows FXC cannot build this fragment.
 
 ### Scalar color, static DXC
 
@@ -361,6 +361,80 @@ preceded by `warning X3570: gradient instruction used in a loop with varying ite
 Eight of nine are flat black. The one lit frame is not the green-only wipe. Its linear R changes sign across the sphere (negative on the left, positive on the right) while G and B stay small and positive, and 4093 of 10374 PNG pixels have R=0 because negative linear R encodes as 0. No NaNs. Splitting the color `Load3` did not remove the black frames and did not reproduce a stable channel. It is not the fix.
 
 Rewrite 2 (Smith `max(0)` before `sqrt`) and rewrite 3 (directional `inverseSqrt`) were not run. The FXC failure says the next compile experiment is the gradient inside the dynamic light loop plus the `u32::MAX` bound, not another color-load shape. A WARP A/B that hoists the gradient out of that loop, or that gives the loop a real small bound FXC can unroll, would be the first arm on which FXC and DXC can both shade. `-Gis` is still not selectable in wgpu 30.
+
+## Gradient inside the clustered light loop
+
+`fs_forward_base` calls `shade_metallic_clustered`, which calls `direct_metallic_clustered`. That function's loop is dynamic (`i < count`, `count` loaded from the cluster buffer). Each iteration calls `direct_radiance_metallic_prepared` or `diffuse_only_metallic`, both of which call `eval_light`. `eval_light` always calls `cookies::multiplier` and `shadows::visibility` (`shaders/modules/pbs/light_eval.wgsl`).
+
+Two implicit-derivative samples sit on that path. `dpdx`/`dpdy` in `normal_derivative_variance` (`shaders/modules/pbs/brdf.wgsl`) run once per fragment, before the loop, via `filter_perceptual_roughness`. Material `textureSampleBias` runs in `sample_surface`, also before the loop. Those are not what FXC is unrolling.
+
+The calls inside the loop:
+
+```wgsl
+// shaders/modules/lighting/light_cookies.wgsl
+fn sample_2d_cookie(light: ft::GpuLight, uv: vec2<f32>) -> f32 {
+    return textureSample(
+        rg::light_cookie_2d_atlas,
+        rg::light_cookie_sampler,
+        atlas_cookie_uv(light.cookie_layer, wrap_cookie_uv(uv, light.cookie_reserved)),
+    ).r;
+}
+// and textureSample of light_cookie_point_atlas in point_cookie_multiplier
+```
+
+```wgsl
+// shaders/modules/lighting/shadows.wgsl
+fn sample_shadow_compare(...) -> f32 {
+    return textureSampleCompare(
+        rg::shadow_atlas,
+        rg::shadow_sampler,
+        atlas_uv(shadow_view, local_uv),
+        layer,
+        compare_depth
+    );
+}
+```
+
+`visibility` also has its own `for (i < shadow_view_count)` around `sample_shadow_compare`, and soft shadows add a fixed 3×3 of the same compare. The outer light loop is the one FXC cannot unroll: the HLSL is `while(true)` plus the `uint2(4294967295u, 4294967295u)` countdown from `force_loop_bounding`.
+
+HLSL from the production fragment (naga, before this arm):
+
+```hlsl
+float4 _e8_ = light_cookie_2d_atlas.Sample(light_cookie_sampler, _e5);
+float _e7_1 = shadow_atlas.SampleCmp(shadow_sampler, float3(_e4, layer), compare_depth);
+```
+
+DXIL (`ps_6_7`, `-O3`), implicit derivatives, not `SampleGrad` / `SampleCmpLevel`:
+
+```llvm
+%1449 = call %dx.types.ResRet.f32 @dx.op.sample.f32(...)  ; Sample(...)
+%2500 = call %dx.types.ResRet.f32 @dx.op.sampleCmp.f32(...) ; SampleCmp(...)
+```
+
+`ddx`/`ddy` of the shading normal are separate `DerivCoarseX`/`DerivCoarseY` calls and are not inside this loop.
+
+These three cases never take the sample. `cookie_texture_asset_id` is `-1` and `shadow_type` is `None` (`light_state` in `scene_state.rs`), so `multiplier` returns 1 and `has_shadow_views` returns before `textureSampleCompare`. The opcodes are still in the loop, which is enough for FXC.
+
+### Arm A
+
+`textureSample` on both cookie atlases is now `textureSampleLevel(..., 0.0)`. `textureSampleCompare` is now `textureSampleCompareLevel`. In naga 30 that builtin takes no level argument. The level is fixed at zero. A trailing `0.0` is parsed as an `i32` offset, which does not compile. WGSL has no `textureSampleCompareGrad`.
+
+LOD 0 is not the implicit-derivative LOD when a cookie or a shadow map is actually sampled. On these three cases the sample is not executed, so the fragment result should match the baseline on lavapipe.
+
+### Arm B, not run
+
+A WGSL `for (i < 32u)` does not reach FXC as a 32-iteration loop. wgpu 30 sets `force_loop_bounding: true`, and naga rewrites every loop into `while(true)` with a countdown from `u32::MAX`. That is the loop `X3511` refuses. Bounding the light count in WGSL does not remove it, so arm B was not built.
+
+### Runs
+
+| Arm | Compiler | Run | sha |
+| --- | --- | --- | --- |
+| baseline resample | static DXC | [41205727909](https://github.com/DoubleStyxx/Renderide/actions/runs/41205727909) | `b660d424` |
+| A explicit LOD | static DXC and FXC | [41205954817](https://github.com/DoubleStyxx/Renderide/actions/runs/41205954817) | `360331b1` |
+
+Counts for these two runs are filled in when the jobs finish. The earlier broken push `16dec2f1` ([41205754209](https://github.com/DoubleStyxx/Renderide/actions/runs/41205754209)) still passes a level argument to `textureSampleCompareLevel` and fails shader compose. Ignore it.
+
+The pipeline DXIL is the `IDxcBlob` from `GetOutput(DXC_OUT_OBJECT)` in `wgpu-hal` `compile_dxc`, stored as `CompiledShader::Dxc` and never written to disk. Capturing it means a debug write of that blob next to the existing HLSL dump inside wgpu-hal, or a D3D12 shader-tracing tool. There is no wgpu 30 device flag that dumps it. Not added here.
 
 ## What a later WARP capture still needs
 
