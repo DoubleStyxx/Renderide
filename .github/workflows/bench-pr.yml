@@ -30,7 +30,7 @@ name: Bench PR
 
 concurrency:
   group: bench-pr-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false  # noise collection: keep every canary run
 
 permissions:
   contents: read
