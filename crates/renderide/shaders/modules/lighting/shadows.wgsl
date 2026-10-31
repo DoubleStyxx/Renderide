@@ -151,7 +151,6 @@ fn sample_shadow_compare(shadow_view: ft::GpuShadowView, local_uv: vec2<f32>, la
         atlas_uv(shadow_view, local_uv),
         layer,
         compare_depth,
-        0.0,
     );
 }
 
