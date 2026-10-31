@@ -154,7 +154,15 @@ fn process_batch(ctx: DriverLoopContext<'_>, ring_depth: usize, batch: SubmitBat
         has_xr_finalize: xr_finalize.is_some(),
     };
 
-    submit_commands(ctx, summary, command_buffers);
+    let submission = submit_commands(ctx, summary, command_buffers);
+    // Registered before the batch wait is signaled, so a later flush sees this callback.
+    crate::gpu::warp_black_diag::watch_submission(
+        ctx.queue,
+        &submission,
+        "driver",
+        summary.frame_seq,
+        summary.command_buffers,
+    );
 
     if let Some(track) = frame_timing {
         // Capture the post-submit instant on this thread for the `submit_latency_ms`

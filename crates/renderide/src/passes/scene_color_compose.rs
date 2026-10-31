@@ -117,6 +117,19 @@ impl RasterPass for SceneColorComposePass {
         b.parameters(&self.resources)
     }
 
+    fn color_load_op_override(
+        &self,
+        _ctx: &RasterPassCtx<'_, '_>,
+        attachment_index: usize,
+    ) -> Option<wgpu::LoadOp<wgpu::Color>> {
+        if attachment_index != 0 || !crate::gpu::warp_black_diag::distinctive_clear_enabled() {
+            return None;
+        }
+        Some(wgpu::LoadOp::Clear(
+            crate::gpu::warp_black_diag::forward_clear_color(),
+        ))
+    }
+
     fn multiview_mask_override(
         &self,
         ctx: &RasterPassCtx<'_, '_>,

@@ -101,6 +101,7 @@ impl GpuContext {
                 | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
+        crate::gpu::warp_black_diag::log_capture_target(color_format, width, height);
         let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
         crate::profiling::note_resource_churn!(TextureView, "gpu::primary_offscreen_color_view");
         let depth_format = crate::gpu::main_forward_depth_stencil_format(self.device.features());

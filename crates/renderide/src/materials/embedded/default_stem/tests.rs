@@ -17,6 +17,14 @@ fn resolves_pbs_metallic_from_asset_name() {
 }
 
 #[test]
+fn resolves_pbs_specular_from_asset_name() {
+    assert_eq!(
+        embedded_default_stem_for_shader_asset_name("PBSSpecular").as_deref(),
+        Some("pbsspecular_default")
+    );
+}
+
+#[test]
 fn resolves_pbs_dual_sided_from_asset_name() {
     assert_eq!(
         embedded_default_stem_for_shader_asset_name("PBSDualSided").as_deref(),

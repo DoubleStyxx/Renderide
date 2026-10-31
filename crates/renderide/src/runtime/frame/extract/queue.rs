@@ -135,6 +135,7 @@ pub(super) fn queue_view_draws(
                 build_shadow_caster_draw_collection_contexts(setup, prepared, &dict, mesh_lod_bias);
             let world_draws =
                 queue_prepared_draws_for_views_with_parallelism(&contexts, inner_parallelism);
+            note_pbs_world_cull(&world_draws);
             let shadow_caster_draws = queue_prepared_draws_for_views_with_parallelism(
                 &shadow_contexts,
                 inner_parallelism,
@@ -433,6 +434,19 @@ pub(super) fn select_inner_parallelism_for_prepared_work_with_policy(
     } else {
         default_parallelism
     }
+}
+
+fn note_pbs_world_cull(world_draws: &[QueuedWorldMeshDraws]) {
+    if !crate::gpu::warp_black_diag::frame_log_armed() {
+        return;
+    }
+    let mut totals = [0u64; 4];
+    for draws in world_draws {
+        for (total, count) in totals.iter_mut().zip(draws.cull_counters()) {
+            *total = total.saturating_add(u64::try_from(count).unwrap_or(u64::MAX));
+        }
+    }
+    crate::gpu::warp_black_diag::note_world_cull(totals, world_draws.len());
 }
 
 #[cfg(test)]

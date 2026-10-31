@@ -52,6 +52,8 @@ pub struct RunnerConfig {
     pub renderer_stdout_to_stderr: bool,
     /// Test-output root. Defaults to `target/renderide-test-out`.
     pub output_root: std::path::PathBuf,
+    /// Copy the HDR scene-color target beside each PNG. Off unless a caller asks.
+    pub scene_color_readback: bool,
     /// ICD, backend, and Rayon choice applied to the renderer child.
     ///
     /// `None` leaves the child with the process environment. The CLI sets this.
@@ -68,6 +70,7 @@ impl RunnerConfig {
             verbose_renderer: false,
             renderer_stdout_to_stderr: false,
             output_root: default_output_root(),
+            scene_color_readback: false,
             harness_env: None,
         }
     }
@@ -155,9 +158,8 @@ pub fn run_integration_case(
             .map(|env| env.child_env.clone())
             .unwrap_or_default(),
         physically_based,
-        scene_color_readback: template_requests_scene_color_readback(
-            &prepared_template.session_template,
-        ),
+        scene_color_readback: runner.scene_color_readback
+            || template_requests_scene_color_readback(&prepared_template.session_template),
         template: prepared_template.session_template,
     };
 
@@ -255,6 +257,9 @@ fn prepare_template(
         }),
         CaseTemplate::PbsMetallicPremultiply => Ok(PreparedTemplate {
             session_template: SessionTemplate::PbsMetallicPremultiply,
+        }),
+        CaseTemplate::PbsSpecularPremultiply => Ok(PreparedTemplate {
+            session_template: SessionTemplate::PbsSpecularPremultiply,
         }),
         CaseTemplate::AlphaCutoutMaskedQuads => {
             let mask = alpha_rings_rgba(256, 256);

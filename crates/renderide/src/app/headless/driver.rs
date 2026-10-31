@@ -72,6 +72,10 @@ impl<'a> HeadlessDriver<'a> {
             params.interval_ms,
             params.scene_color_readback,
         );
+        crate::gpu::warp_black_diag::arm_frame_log(&params.output_path);
+        crate::gpu::warp_light_probe::arm(&params.output_path);
+        crate::gpu::warp_material_bind_probe::arm(&params.output_path);
+        crate::gpu::warp_shader_probe::arm(&params.output_path);
         crash_context::set_target_mode(TargetMode::Headless);
         crash_context::set_render_mode(RenderMode::Headless);
 
@@ -84,6 +88,7 @@ impl<'a> HeadlessDriver<'a> {
             gpu_config.graphics_api,
         ))
         .map_err(RunError::gpu)?;
+        crate::gpu::warp_black_diag::configure_for_adapter(gpu.adapter_info());
         runtime.attach_gpu(&gpu);
         #[cfg(feature = "control-api")]
         runtime.publish_control_meta(&gpu);
@@ -233,6 +238,8 @@ impl<'a> HeadlessDriver<'a> {
         self.note_control_presented(kind, render_skipped);
         if kind == HeadlessTickKind::FullFrame && !render_skipped {
             self.maybe_write_frame_png();
+        } else {
+            crate::gpu::warp_black_diag::discard_frame_log();
         }
         self.runtime
             .tick_frame_render_time_end(self.gpu.last_completed_gpu_render_time_seconds());
@@ -260,6 +267,7 @@ impl<'a> HeadlessDriver<'a> {
     }
 
     fn maybe_write_frame_png(&mut self) {
+        crate::gpu::warp_black_diag::flush_frame_log();
         if crate::app::frame_bench::active() {
             return;
         }
@@ -268,7 +276,10 @@ impl<'a> HeadlessDriver<'a> {
         }
         let atlas_passes =
             shadow_atlas_pass_log_enabled().then(|| self.runtime.shadow_atlas_pass_counts());
-        let pending_pipeline_draws = self.runtime.take_pending_pipeline_draws();
+        let pending_pipeline_draws = crate::gpu::warp_black_diag::pending_for_publish(
+            self.gpu.adapter_info(),
+            self.runtime.take_pending_pipeline_draws(),
+        );
         if let Err(e) = readback::readback_and_write_png_atomically(
             &self.gpu,
             &self.params.output_path,

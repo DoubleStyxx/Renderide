@@ -215,6 +215,7 @@ struct DepthLikePerDrawBind<'a> {
 /// bind groups are bound directly from the table; no cache lookups occur during recording.
 pub(crate) fn draw_subset(batch: ForwardDrawBatch<'_, '_, '_, '_>) {
     profiling::scope!("world_mesh::draw_subset");
+    let _forward_pass = crate::gpu::warp_black_diag::EncodePassGuard::forward();
     let ForwardDrawBatch {
         rpass,
         groups,
@@ -325,6 +326,16 @@ fn issue_forward_group(
     set_forward_scissor_if_changed(rpass, resources, state, representative);
 
     let inst_range = instance_range_for_draw_group(group, resources.supports_base_instance);
+    if crate::gpu::warp_black_diag::frame_log_armed() {
+        crate::gpu::warp_black_diag::note_bound_pipeline(
+            &format!("{:?}", representative_item.batch_key.pipeline),
+            representative_item.batch_key.shader_asset_id,
+            representative_item
+                .batch_key
+                .shader_specialization
+                .static_variant_bits(),
+        );
+    }
     issue_material_pipeline_passes(
         rpass,
         encode,
@@ -349,16 +360,29 @@ fn bind_material_packet_if_changed(
     match &packet.group1_binding {
         MaterialGroup1Binding::Empty => {
             rpass.set_bind_group(1, resources.empty_bg, &[]);
+            crate::gpu::warp_black_diag::note_group1_binding(false, None);
+            if crate::gpu::warp_material_bind_probe::armed() {
+                crate::gpu::warp_material_bind_probe::note_bind(batch_cursor, None, "empty", 0);
+            }
         }
         MaterialGroup1Binding::Embedded {
+            bind_key,
             bind_group,
             uniform_dynamic_offset,
-            ..
         } => {
             if let Some(offset) = uniform_dynamic_offset {
                 rpass.set_bind_group(1, bind_group.as_ref(), &[*offset]);
             } else {
                 rpass.set_bind_group(1, bind_group.as_ref(), &[]);
+            }
+            crate::gpu::warp_black_diag::note_group1_binding(true, *uniform_dynamic_offset);
+            if crate::gpu::warp_material_bind_probe::armed() {
+                crate::gpu::warp_material_bind_probe::note_bind(
+                    batch_cursor,
+                    *uniform_dynamic_offset,
+                    &format!("{bind_key:?}"),
+                    std::sync::Arc::as_ptr(bind_group) as usize,
+                );
             }
         }
     }
@@ -501,6 +525,7 @@ pub(crate) fn draw_normals_subset(batch: NormalDrawBatch<'_, '_, '_, '_>) {
 /// Records the safe opaque depth prepass draw subset.
 pub(crate) fn draw_depth_prepass_subset(batch: DepthPrepassDrawBatch<'_, '_, '_, '_>) {
     profiling::scope!("world_mesh::draw_depth_prepass_subset");
+    let _depth_pass = crate::gpu::warp_black_diag::EncodePassGuard::depth_prepass();
     let DepthPrepassDrawBatch {
         rpass,
         groups,

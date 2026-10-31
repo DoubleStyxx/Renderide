@@ -74,6 +74,10 @@ fn readback_color_texture(
         copy_padded_rows_to_tight(&view, &layout)
     };
     readback.unmap();
+    crate::gpu::warp_black_diag::log_readback_colors(&tight);
+    probe_second_readback(gpu, color_texture, &layout, &tight);
+    crate::gpu::warp_light_probe::roundtrip(gpu, gpu.adapter_info());
+    crate::gpu::warp_material_bind_probe::log_summary();
 
     if crate::debug_scene_color::readback_enabled()
         && let Err(err) = super::scene_color_dump::write_scene_color_sidecars(gpu, output_path)
@@ -162,6 +166,7 @@ fn submit_texture_to_buffer_copy(
     readback: &wgpu::Buffer,
 ) -> Result<Duration, HeadlessReadbackError> {
     gpu.flush_driver();
+    crate::gpu::warp_black_diag::log_after_flush(gpu.device());
     // `flush_driver` means the driver thread returned from `Queue::submit`, not
     // that the GPU finished the frame. Copying before `on_submitted_work_done`
     // reads the clear color during a long queue stall (#216). This wait runs
@@ -202,7 +207,9 @@ fn submit_texture_to_buffer_copy(
         profiling::scope!("CommandEncoder::finish::headless_readback");
         encoder.finish()
     };
-    gpu.queue().submit(std::iter::once(command_buffer));
+    let submission = gpu.queue().submit(std::iter::once(command_buffer));
+    crate::gpu::warp_black_diag::watch_submission(gpu.queue(), &submission, "readback-copy", 0, 1);
+    crate::gpu::warp_black_diag::log_copy_submitted(&submission);
     Ok(stall)
 }
 
@@ -256,6 +263,7 @@ pub(super) fn await_buffer_map(
     slice: wgpu::BufferSlice<'_>,
     device: &wgpu::Device,
 ) -> Result<(), HeadlessReadbackError> {
+    let _map_span = crate::gpu::warp_black_diag::MapAsyncSpan::start();
     let (sender, receiver) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |result| {
         let _ = sender.send(result);
@@ -272,6 +280,91 @@ pub(super) fn await_buffer_map(
             "map_async callback disconnected".to_owned(),
         )),
     }
+}
+
+/// One extra copy after `device.poll(Wait)`, for a drawn frame and a black frame.
+///
+/// The harness still publishes `first`. This only asks whether another wait and
+/// another submit see different pixels. A poll waits at most two seconds; the
+/// copy's own `map_async` uses the same indefinite device poll as the first read.
+fn probe_second_readback(
+    gpu: &GpuContext,
+    color_texture: &wgpu::Texture,
+    layout: &ReadbackLayout,
+    first: &[u8],
+) {
+    if !crate::gpu::warp_black_diag::claim_second_readback(first) {
+        return;
+    }
+    let (poll, poll_ms) = poll_for_second_readback(gpu.device());
+    match copy_color_for_diag(gpu, color_texture, layout) {
+        Ok(second) => {
+            crate::gpu::warp_black_diag::log_readback_retry(&poll, poll_ms, first, &second);
+        }
+        Err(err) => {
+            logger::info!("diag-readback-retry: poll={poll} poll_ms={poll_ms} error={err}");
+        }
+    }
+}
+
+fn poll_for_second_readback(device: &wgpu::Device) -> (String, u128) {
+    let started = Instant::now();
+    let poll = match device.poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: Some(Duration::from_secs(2)),
+    }) {
+        Ok(status) => format!("{status:?}"),
+        Err(wgpu::PollError::Timeout) => "timeout".to_owned(),
+        Err(err) => format!("error:{err}"),
+    };
+    (poll, started.elapsed().as_millis())
+}
+
+fn copy_color_for_diag(
+    gpu: &GpuContext,
+    color_texture: &wgpu::Texture,
+    layout: &ReadbackLayout,
+) -> Result<Vec<u8>, HeadlessReadbackError> {
+    let readback = create_readback_buffer(gpu, layout);
+    let mut encoder = gpu
+        .device()
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("renderide-headless-readback-retry"),
+        });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: color_texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(layout.bytes_per_row_padded),
+                rows_per_image: Some(layout.height),
+            },
+        },
+        wgpu::Extent3d {
+            width: layout.width,
+            height: layout.height,
+            depth_or_array_layers: 1,
+        },
+    );
+    let command_buffer = encoder.finish();
+    let submission = gpu.queue().submit(std::iter::once(command_buffer));
+    crate::gpu::warp_black_diag::watch_submission(gpu.queue(), &submission, "readback-retry", 0, 1);
+    let slice = readback.slice(..);
+    await_buffer_map(slice, gpu.device())?;
+    let tight = {
+        let view = slice
+            .get_mapped_range()
+            .map_err(|err| HeadlessReadbackError::Map(err.to_string()))?;
+        copy_padded_rows_to_tight(&view, layout)
+    };
+    readback.unmap();
+    Ok(tight)
 }
 
 fn copy_padded_rows_to_tight(bytes: &[u8], layout: &ReadbackLayout) -> Vec<u8> {

@@ -1,0 +1,147 @@
+# #284 WARP re-check. Not the default CI suite.
+#
+# One Linux llvmpipe run and three independent Windows WARP runs. Each run
+# executes every pbs_specular* case plus the five #216 production cases.
+# Probes stay off. Scene-color readback is the float sidecar only.
+# A docs-only commit does not match the path filter, so it does not restart this.
+# Sample 2 of 3. The renderer tree is 9e6f5633.
+
+name: WARP 216 debug
+
+on:
+  push:
+    branches:
+      - cursor/warp-black-diag-bb54
+    paths:
+      - ".github/workflows/warp-216-debug.yml"
+      - ".github/actions/lavapipe/**"
+      - ".github/ci/**"
+      - "crates/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
+
+jobs:
+  debug:
+    name: warp216 ${{ matrix.label }}
+    concurrency:
+      group: warp216-${{ matrix.label }}-${{ github.ref }}
+      cancel-in-progress: false
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            label: linux
+          - os: windows-latest
+            label: windows-1
+          - os: windows-latest
+            label: windows-2
+          - os: windows-latest
+            label: windows-3
+    env:
+      RAYON_NUM_THREADS: "1"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Restore mach-dxcompiler release cache
+        if: runner.os == 'Windows'
+        id: mach-dxc-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}\mach-dxcompiler\assets
+          key: mach-dxcompiler-rs-0.1.6-2026.09.16-48d5a66.1-x86_64-windows-msvc
+
+      - name: Prefetch mach-dxcompiler and prefer the cached curl
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          MACH_DXCOMPILER_CACHE: ${{ runner.temp }}\mach-dxcompiler\assets
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cache = $env:MACH_DXCOMPILER_CACHE
+          $bin = Join-Path $env:RUNNER_TEMP 'mach-dxcompiler\bin'
+          New-Item -ItemType Directory -Force -Path $cache, $bin | Out-Null
+          Copy-Item -Force .github/ci/mach_dxcompiler_curl.py (Join-Path $bin 'mach_dxcompiler_curl.py')
+          @(
+            '@echo off',
+            'python "%~dp0mach_dxcompiler_curl.py" %*',
+            'exit /b %ERRORLEVEL%'
+          ) | Set-Content -Encoding ascii (Join-Path $bin 'curl.bat')
+          Add-Content -Path $env:GITHUB_PATH -Value $bin
+          Add-Content -Path $env:GITHUB_ENV -Value "MACH_DXCOMPILER_CACHE=$cache"
+          if ('${{ steps.mach-dxc-cache.outputs.cache-hit }}' -eq 'true') {
+            Write-Host 'mach-dxcompiler cache hit: actions/cache restored the release assets'
+          } else {
+            Write-Host 'mach-dxcompiler cache miss: actions/cache had no release assets'
+          }
+          $tag = '2026.09.16+48d5a66.1'
+          $api = "https://api.github.com/repos/DouglasDwyer/mach-dxcompiler/releases/tags/$tag"
+          $base = "https://github.com/DouglasDwyer/mach-dxcompiler/releases/download/$tag"
+          $stage = Join-Path $env:RUNNER_TEMP 'mach-dxcompiler\stage'
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          $names = @(
+            'x86_64-windows-msvc_ReleaseFast_lib.tar.gz',
+            'x86_64-windows-msvc_ReleaseFast_Dynamic_lib.tar.gz'
+          )
+          python .github/ci/mach_dxcompiler_curl.py --location --fail --silent --show-error -o (Join-Path $stage 'release.json') $api
+          foreach ($name in $names) {
+            python .github/ci/mach_dxcompiler_curl.py --location --fail --silent --show-error -o (Join-Path $stage $name) "$base/$name"
+          }
+          $release = Get-Content -Raw (Join-Path $cache 'release.json')
+          if ($release -notmatch '"immutable"\s*:\s*true') {
+            throw 'mach-dxcompiler release JSON is not an immutable release'
+          }
+          $proof = Join-Path $env:RUNNER_TEMP 'mach-dxcompiler\proof'
+          New-Item -ItemType Directory -Force -Path $proof | Out-Null
+          $dynamic = "$base/x86_64-windows-msvc_ReleaseFast_Dynamic_lib.tar.gz"
+          $out = Join-Path $proof 'dynamic.tar.gz'
+          & cmd.exe /c "`"$bin\curl.bat`" --location -o `"$out`" `"$dynamic`""
+          if ($LASTEXITCODE -ne 0) { throw "curl shim exited $LASTEXITCODE" }
+          if (-not (Test-Path $out) -or (Get-Item $out).Length -le 0) {
+            throw 'curl shim did not write the cached archive'
+          }
+
+      - name: Install pinned lavapipe
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        uses: ./.github/actions/lavapipe
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          cache-bin: "false"
+
+      - name: Build renderer and harness
+        run: cargo build --locked -p renderide -p renderide-test
+
+      - name: Run the #284 production cases
+        timeout-minutes: 180
+        shell: bash
+        run: |
+          set -uo pipefail
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            bin=./target/debug/renderide-test.exe
+          else
+            bin=./target/debug/renderide-test
+          fi
+          "$bin" check-suite --jobs 1 --scene-color-readback \
+            --case pbs_specular_premultiply \
+            --case negative_light_parity \
+            --case negative_light_physically_based \
+            --case negative_color_physically_based \
+            --case pbs_lit_material_matrix \
+            --case pbs_metallic_premultiply
+
+      - name: Upload scene-color sidecars and logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: warp216-debug-${{ matrix.label }}
+          path: |
+            target/renderide-test-out/**
+            logs/renderer-test/**
+            logs/renderer/**

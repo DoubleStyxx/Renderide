@@ -139,10 +139,18 @@ impl Heartbeat {
     /// safe to invoke every frame.
     #[inline]
     pub fn pet(&self) {
+        let reported = self.slot.hang_reported_at_pet.load(Ordering::Acquire);
+        let previous = self.slot.last_pet_ns.load(Ordering::Acquire);
         let now = self.slot.now_ns();
         // `Release` so the watchdog's `Acquire` load on the same atomic sees a fresh value
         // ordered after any work the watched thread did before petting.
         self.slot.last_pet_ns.store(now, Ordering::Release);
+        // A hang report stores the pet timestamp that was already stale. The next pet
+        // is the thread moving again, which is when the watchdog goes quiet for real
+        // rather than merely deduping the same hang.
+        if reported != NEVER_REPORTED && reported == previous {
+            crate::gpu::warp_black_diag::note_watchdog_resumed(self.slot.name);
+        }
     }
 
     /// Begin a region in which the watchdog should ignore this slot. Returns a guard whose

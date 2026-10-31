@@ -273,7 +273,10 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "${RUNNER_OS}" == "Windows" ]]; then
-            ./target/debug/renderide-test.exe check-suite --jobs 1
+            # #216 experiment 8b. Off unless this is set. Logs the packed light
+            # rows and reads the light buffer plus the center cluster column back.
+            RENDERIDE_LIGHT_PACK_PROBE=1 \
+              ./target/debug/renderide-test.exe check-suite --jobs 1
           elif [[ "${RUNNER_OS}" == "Linux" ]]; then
             # Defer one non-Null material pipeline for 12s without blocking the
             # render thread. The suite must still match the lit golden, which
@@ -283,6 +286,7 @@ jobs:
             # pending>0 is not a substitute: that path used to set the same flag
             # and swallow this line, so the stall could pass without it. Release
             # builds ignore the env.
+            RENDERIDE_LIGHT_PACK_PROBE=1 \
             RENDERIDE_TEST_PIPELINE_STALL_MS=12000 \
               ./target/debug/renderide-test check-suite --jobs 1
             grep -R -q "pbs_lit_material_matrix/actual.png still has compiling or skipped material draws" logs/renderer-test

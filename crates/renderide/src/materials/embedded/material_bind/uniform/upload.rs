@@ -138,6 +138,13 @@ impl EmbeddedMaterialBindResources {
                     u64::from(binding.dynamic_offset),
                     &arena.pack_scratch,
                 );
+                diag_log_material_bytes(
+                    stem,
+                    layout,
+                    &arena.pack_scratch,
+                    binding.dynamic_offset,
+                    shader_variant_bits,
+                );
             } else {
                 let uniform_bytes = build_embedded_uniform_bytes_with_material_defaults(
                     &layout.reflected,
@@ -160,6 +167,13 @@ impl EmbeddedMaterialBindResources {
                     u64::from(binding.dynamic_offset),
                     &uniform_bytes,
                 );
+                diag_log_material_bytes(
+                    stem,
+                    layout,
+                    &uniform_bytes,
+                    binding.dynamic_offset,
+                    shader_variant_bits,
+                );
             }
             arena.mark_written(uniform_key, &binding, mutation_gen, texture_state_sig);
         } else {
@@ -167,4 +181,43 @@ impl EmbeddedMaterialBindResources {
         }
         Ok(binding)
     }
+}
+
+fn diag_log_material_bytes(
+    stem: &str,
+    layout: &StemMaterialLayout,
+    bytes: &[u8],
+    dynamic_offset: u32,
+    variant_bits: Option<u32>,
+) {
+    let frame_log = crate::gpu::warp_black_diag::frame_log_armed();
+    let bind_probe = crate::gpu::warp_material_bind_probe::armed();
+    if !frame_log && !bind_probe {
+        return;
+    }
+    if bind_probe {
+        crate::gpu::warp_material_bind_probe::note_uniform(stem, dynamic_offset, bytes);
+    }
+    if !frame_log {
+        return;
+    }
+    let fields = layout
+        .reflected
+        .material_uniform
+        .as_ref()
+        .map(|block| &block.fields);
+    let offset_of =
+        |name: &str| fields.and_then(|fields| fields.get(name).map(|field| field.offset));
+    crate::gpu::warp_black_diag_probe::log_material_bytes(
+        &crate::gpu::warp_black_diag_probe::MaterialBytes {
+            stem,
+            bytes,
+            dynamic_offset,
+            variant_bits,
+            color_offset: offset_of("_Color"),
+            metallic_offset: offset_of("_Metallic"),
+            gloss_offset: offset_of("_Glossiness"),
+            variant_offset: offset_of("_RenderideVariantBits"),
+        },
+    );
 }

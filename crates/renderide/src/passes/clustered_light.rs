@@ -192,6 +192,18 @@ impl ClusteredLightPass {
             return ClusteredLightRecordAction::Skip;
         };
 
+        if crate::gpu::warp_light_probe::armed() {
+            crate::gpu::warp_light_probe::note_cluster(crate::gpu::warp_light_probe::ClusterNote {
+                counts: cluster_light_counts.clone(),
+                indices: cluster_light_indices.clone(),
+                cluster_count_x: eye_params[0].cluster_count_x,
+                cluster_count_y: eye_params[0].cluster_count_y,
+                light_count,
+                viewport,
+                cleared: light_count == 0,
+            });
+        }
+
         if light_count == 0 {
             return ClusteredLightRecordAction::ClearZero(ClusteredLightClearData {
                 cluster_light_counts,

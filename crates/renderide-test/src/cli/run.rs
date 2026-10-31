@@ -489,6 +489,7 @@ fn suite_config(
     runner.verbose_renderer = opts.verbose_renderer;
     runner.renderer_stdout_to_stderr = opts.verbose_renderer && opts.json_stdout;
     runner.output_root = opts.output_root.clone().unwrap_or_else(default_output_root);
+    runner.scene_color_readback = opts.scene_color_readback;
     runner.harness_env = Some(harness);
     let jobs = opts
         .jobs

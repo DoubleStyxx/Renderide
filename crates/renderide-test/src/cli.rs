@@ -145,6 +145,11 @@ pub(super) struct SuiteOpts {
     /// Print renderer processes' stdout/stderr instead of swallowing them.
     #[arg(long, default_value_t = false)]
     verbose_renderer: bool,
+    /// Copy the HDR scene-color target beside each case PNG. Off by default.
+    ///
+    /// This is the #216 float sidecar, not a light, material, or shader probe.
+    #[arg(long, default_value_t = false)]
+    scene_color_readback: bool,
     /// Vulkan ICD: `auto`, `none`, or a manifest path.
     ///
     /// `auto` keeps `VK_DRIVER_FILES` or `VK_ICD_FILENAMES` when set, and otherwise

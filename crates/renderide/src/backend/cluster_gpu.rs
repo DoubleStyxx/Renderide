@@ -111,17 +111,18 @@ impl ClusterBufferCache {
         self.version = self.version.wrapping_add(1);
         self.cached_key = plan.new_key;
 
+        let usage = crate::gpu::warp_light_probe::storage_usage();
         self.cluster_light_counts = Some(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("cluster_light_counts"),
             size: plan.counts_bytes,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            usage,
             mapped_at_creation: false,
         }));
         crate::profiling::note_resource_churn!(Buffer, "backend::cluster_light_counts");
         self.cluster_light_indices = Some(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("cluster_light_indices"),
             size: plan.indices_bytes,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            usage,
             mapped_at_creation: false,
         }));
         crate::profiling::note_resource_churn!(Buffer, "backend::cluster_light_indices");
