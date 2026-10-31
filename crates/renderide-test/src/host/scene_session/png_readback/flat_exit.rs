@@ -22,7 +22,10 @@ pub(super) const QUARANTINE_FLAT_READBACKS: u32 = 3;
 /// twice, or taking the next frame, can still be that warm-up clear.
 pub(super) const QUARANTINE_FLAT_FRAME_GAP: u32 = 2;
 
-/// Wall-clock cap for a quarantined WARP flat wait. Other captures keep 300s.
+/// Wall-clock cap after the first settled flat frame. Other captures keep 300s.
+///
+/// The cap does not start at the beginning of the wait. A frame that is still
+/// compiling is not the known flat capture, so that wait keeps the full budget.
 pub(super) const QUARANTINE_FLAT_BACKSTOP: Duration = Duration::from_secs(60);
 
 /// `flat_stable` when K identical settled frames were seen.

@@ -319,8 +319,14 @@ pub(super) fn run_lockstep_until_png_stable(
             deadline_floor,
             &mut warp,
         );
-        arm_flat_backstop(&case_name, wait_started, deadline_floor, &mut warp);
-        progress.flat_armed = warp.flat_backstop;
+        progress.flat_armed = arm_flat_backstop(
+            &case_name,
+            &wait_timing,
+            wait_started,
+            deadline_floor,
+            &progress,
+            &mut warp,
+        );
         stats.sync(settle.longest_stall_ms(), warp.used);
         let _ = lockstep.tick(queues);
 
@@ -375,11 +381,7 @@ pub(super) fn run_lockstep_until_png_stable(
         std::thread::sleep(timing::POLL_INTERVAL);
     }
 
-    let wait = if warp.flat_backstop {
-        flat_exit::flat_exit_budget(true, Duration::ZERO, deadline_floor)
-    } else {
-        reported_wait(wait_timing.overall_timeout, warp.used, deadline_floor)
-    };
+    let wait = capture_wait(&warp, wait_started, &wait_timing, deadline_floor);
     stats.sync(settle.longest_stall_ms(), warp.used);
     timeout_outcome(
         output_path,
@@ -402,8 +404,10 @@ struct CaptureProgress {
     compiling_or_skipped_logged: bool,
     gpu_not_done_logged: bool,
     settle_hold_logged: bool,
-    /// The #216 60s backstop is active for this wait.
+    /// The #216 flat-frame counter is active for this wait.
     flat_armed: bool,
+    /// First settled flat frame. The 60s backstop is measured from here.
+    settled_flat_at: Option<Instant>,
     flat_watch: flat_exit::FlatExitWatch,
     last_observed: Option<ObservedSettleState>,
     chunks: ObservedChunks,
@@ -451,6 +455,15 @@ fn settle_stable_frame(
         progress,
     );
     stats.sync(settle.longest_stall_ms(), warp_used);
+    if flat_exit::frame_is_settled(&decoded.readiness)
+        && decoded
+            .image
+            .as_ref()
+            .is_some_and(crate::golden::is_flat_image)
+        && progress.settled_flat_at.is_none()
+    {
+        progress.settled_flat_at = Some(Instant::now());
+    }
     if progress.flat_armed
         && progress.flat_watch.observe(
             mtime,
@@ -833,19 +846,45 @@ fn log_still_waiting(
     *last_log_at = now;
 }
 
+fn capture_wait(
+    warp: &WarpBudgetWatch,
+    wait_started: Instant,
+    wait_timing: &PngStabilityWaitTiming,
+    deadline_floor: Duration,
+) -> Duration {
+    if warp.flat_backstop {
+        wait_started.elapsed().max(deadline_floor)
+    } else {
+        reported_wait(wait_timing.overall_timeout, warp.used, deadline_floor)
+    }
+}
+
 fn arm_flat_backstop(
     case_name: &str,
+    wait_timing: &PngStabilityWaitTiming,
     wait_started: Instant,
     deadline_floor: Duration,
+    progress: &CaptureProgress,
     warp: &mut WarpBudgetWatch,
-) {
-    if !warp.used || !crate::scene_dsl::early_flat_exit_applies(case_name, true, SystemTime::now())
-    {
-        return;
+) -> bool {
+    let applies =
+        warp.used && crate::scene_dsl::early_flat_exit_applies(case_name, true, SystemTime::now());
+    if !applies {
+        return false;
     }
-    warp.deadline =
-        wait_started + flat_exit::flat_exit_budget(true, Duration::ZERO, deadline_floor);
+    let Some(started) = progress.settled_flat_at else {
+        return true;
+    };
+    let warp_cap = wait_started
+        + flat_exit::flat_exit_budget(
+            false,
+            gpu_ready::warp_readiness_budget(true, wait_timing.overall_timeout),
+            deadline_floor,
+        );
+    let backstop = started + flat_exit::QUARANTINE_FLAT_BACKSTOP;
+    warp.deadline = backstop.min(warp_cap);
     warp.flat_backstop = true;
+    true
 }
 
 fn finish_flat_early_exit(
