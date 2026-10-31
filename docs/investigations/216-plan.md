@@ -344,3 +344,27 @@ Verdict: the clamp-off intensity reaches WARP. The float frame matches llvmpipe,
 1. Production: compile `shade_metallic_transparent_clustered` only into the `ALPHAPREMULTIPLY` variant, so the opaque `pbsmetallic` fragment matches the no-premul arm. PR pending. Re-check that pipeline with 3 WARP samples before any #216 quarantine is lifted.
 2. 8a is concluded (fast-math ruled out, gradients ruled out, full fragment unstable on DXC/WARP). 8b, 8c, 8d (unsigned group and negparity), hypothesis 5, and hypothesis 6 are recorded above. The 0.95 SSIM gap is the gate.
 3. Gauge: #214 stall, after the Nov 7 color finding.
+
+## #265 WARP re-check
+
+Canary `c1e47521` merges `622088a2` ([#265](https://github.com/DoubleStyxx/Renderide/pull/265)). Quarantine lists were not edited. Probes stayed off. `--scene-color-readback` was on, so the magenta clear stayed off and each case wrote `actual.scene_color.json`. Run [41218915744](https://github.com/DoubleStyxx/Renderide/actions/runs/41218915744). Linux job `124589195199`. Windows jobs `124589194925` (windows-1), `124589195320` (windows-2), `124589195234` (windows-3). All four jobs finished. The three WARP PNGs decode to the same pixels. There was no infra retry.
+
+The four quarantined production cases are `pbs_lit_material_matrix` (also the #212 case), `negative_light_parity`, `negative_light_physically_based`, and `negative_color_physically_based`, plus `pbs_metallic_premultiply`. That is 5 cases × 3 WARP samples = 15.
+
+**0 of 15 are flat.** No `flat_stable` exit. No sample has a G-only or other single-channel wipe. Channel-zero recorded no failing cell. Region-mean passed all 4 cells on every sample (limit 16). `pbs_lit_material_matrix` also passed its four region-color bands and its region floors. NaN counts are 0. Negative counts match llvmpipe on every sample. Parity is 565, 589, 633. The other four cases are 0, 0, 0.
+
+Float quadrant-mean max |WARP − llvmpipe|, the same number on all three samples:
+
+| Case | Flat | Channel-zero | Region-mean | Float max delta | WARP SSIM | Max abs | Settle w1 / w2 / w3 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `negative_light_parity` | no | pass | pass | 9.13e-7 | 0.998710541636683 | 1 | 27.581 / 27.212 / 26.535 s |
+| `negative_light_physically_based` | no | pass | pass | 7.97e-7 | 0.9987197807058692 | 1 | 26.861 / 27.341 / 26.236 s |
+| `negative_color_physically_based` | no | pass | pass | 7.97e-7 | 0.9987197807058692 | 1 | 27.369 / 27.308 / 26.349 s |
+| `pbs_lit_material_matrix` | no | pass | pass | 9.21e-5 | 0.9995011638104916 | 15 | 27.242 / 27.161 / 26.234 s |
+| `pbs_metallic_premultiply` | no | pass | pass | 2.20e-6 | 0.9996592155657708 | 1 | 22.951 / 22.952 / 21.717 s |
+
+Linux settle was 1.993–3.541 s. Linux max abs diff against the golden is 0 on four cases and 1 on `pbs_lit_material_matrix` (SSIM 0.9999999760091304). The only golden file this merge added is `pbs_metallic_premultiply.png`. The blobs of `pbs_lit_material_matrix.png`, `negative_light_parity.png`, `negative_light_physically_based.png`, and `negative_color_physically_based.png` are the same as on `8e7bfa0d`.
+
+The 8a baseline of the full production fragment was 19/27 flat. The same three cases here (parity, physically based, `pbs_lit`) are 0/9 flat.
+
+Every case would pass with the quarantine removed. SSIM is not the miss: every WARP score is above 0.998 and no other criterion failed. The three negative-light cases are stamped `WARP lit shading untrusted` because a finished WARP comparison is quarantined. `pbs_lit_material_matrix` is `unexpected pass (WARP, #212)`. `pbs_metallic_premultiply` passes with no stamp. The quarantine lists were left in place.
