@@ -122,7 +122,7 @@ Prism: the same four #216 cases do not pick the same exit on every Windows run. 
 | Case | Exit | What the artifact records |
 | --- | --- | --- |
 | `pbs_lit_material_matrix` | non-flat, `expected failure (WARP, #212)` | No `early_exit`. SSIM 0.856, fail fraction 0.155, max abs diff 255, 276 unique colors, luma range 177. PNG stabilized after 62.0651659s. |
-| `negative_light_parity` | non-flat, `WARP lit shading untrusted` | No `early_exit`. SSIM 0.833, fail fraction 0.148, max abs diff 216, 7 unique colors, luma range 31. PNG stabilized after 62.426s. |
+| `negative_light_parity` | non-flat, `WARP lit shading untrusted` | No `early_exit`. SSIM 0.833, fail fraction 0.148, max abs diff 216, 7 unique colors, luma range 31. PNG stabilized after 62.4257099s. |
 | `negative_light_physically_based` | `flat_stable`, k=3 | Log `settle=89.442s`, `k_window=2.016s`, `elapsed=91.4584658s`. `report.json` `settle_ms` 89442 and `elapsed_ms` 91458. |
 | `negative_color_physically_based` | `flat_stable`, k=3 | Log `settle=61.646s`, `k_window=2.005s`, `elapsed=63.6516323s`. `report.json` `settle_ms` 61646 and `elapsed_ms` 63651. |
 
