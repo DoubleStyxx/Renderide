@@ -308,6 +308,15 @@ jobs:
               exit 1
             fi
 
+            # Only first-pass FLAG scenes are confirmed in the real workflow; intersect
+            # so always-confirm noise collection does not fail-closed on unflagged scenes.
+            if [[ -s "$out/drift-suspects.txt" && -s "$out/suspects.txt" ]]; then
+              grep -Fxf "$out/suspects.txt" "$out/drift-suspects.txt" > "$out/drift-suspects.filt" || true
+              mv "$out/drift-suspects.filt" "$out/drift-suspects.txt"
+            elif [[ ! -s "$out/suspects.txt" ]]; then
+              : > "$out/drift-suspects.txt"
+            fi
+
             # Base-drift guard: one extra reversed confirm for INCONCLUSIVE scenes only.
             if [[ -s "$out/drift-suspects.txt" ]]; then
               mapfile -t drift_suspects < "$out/drift-suspects.txt"
@@ -351,10 +360,26 @@ jobs:
               fi
             fi
 
-            if [[ "$first_status" -eq 0 ]]; then
-              echo "noise collect: first pass ok — forcing gate_status=0 (workflow-faithful; confirm/drift samples still uploaded)" >> "$summary"
-              gate_status=0
-            fi
+            # Workflow-faithful exit: only FAIL/INCONCLUSIVE on first-pass FLAG scenes count.
+            # Always-confirm may mark unflagged scenes inconclusive; those are report-only here.
+            gate_status=$(python3 -c "
+import json, sys
+g = json.load(open(sys.argv[1]))
+suspects = set()
+try:
+    suspects = {ln.strip() for ln in open(sys.argv[2]) if ln.strip()}
+except OSError:
+    pass
+first = int(sys.argv[3])
+if first == 0:
+    print(0); raise SystemExit
+hit = [
+    r['scenario'] for r in g.get('rows') or []
+    if r.get('scenario') in suspects and str(r.get('status') or '').startswith(('FAIL', 'INCONCLUSIVE', 'FLAG'))
+]
+print(1 if hit else 0)
+" "$out/gate.json" "$out/suspects.txt" "$first_status")
+              echo "noise collect: workflow-faithful gate_status=$gate_status (first_status=$first_status; unflagged confirm rows ignored for exit)" >> "$summary"
           fi
 
           # Stage raw samples for offline NEW-rule + drift evaluation.
