@@ -388,16 +388,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 .github/ci/macos_capacity_note.py
 
-  # Always reports. Success only when every applicable suite job succeeded.
-  # A skipped suite job is success only when `changes` said the suites do not
-  # apply. failure and cancelled always fail. See .github/ci/required_check.py.
+  # Starts as soon as `changes` finishes and polls the suite jobs. It does not
+  # `needs` them: a concurrency cancellation completes the workflow before a
+  # job that is still waiting on `needs` is created, so that job would never
+  # report. `if: always()` keeps this job alive if the run is cancelled while
+  # it is already running, and the poll then exits 1. See required_check.py.
   required:
     name: required
-    needs: [changes, rust, dotnet, macos-capacity]
+    needs: changes
     if: always()
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 360
     permissions:
+      actions: read
       contents: read
     steps:
       - uses: actions/checkout@v7
@@ -405,6 +408,9 @@ jobs:
           persist-credentials: false
 
       - name: Evaluate required jobs
+        if: always()
         env:
-          NEEDS_JSON: ${{ toJson(needs) }}
-        run: python3 .github/ci/required_check.py
+          GH_TOKEN: ${{ github.token }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          SUITES: ${{ needs.changes.outputs.suites }}
+        run: python3 .github/ci/required_check.py --wait

@@ -146,6 +146,62 @@ class EvaluateTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertTrue(any("lint result is 'skipped'" in line for line in lines))
 
+    def test_aggregate_failure_wins_over_cancelled(self) -> None:
+        self.assertEqual(required_check.aggregate_conclusions(["success", "cancelled", "failure"]), "failure")
+
+    def test_aggregate_cancelled_with_success(self) -> None:
+        self.assertEqual(required_check.aggregate_conclusions(["success", "cancelled"]), "cancelled")
+
+    def test_aggregate_pending_until_complete(self) -> None:
+        self.assertEqual(required_check.aggregate_conclusions([]), "pending")
+        self.assertEqual(required_check.aggregate_conclusions(["success", "pending"]), "pending")
+
+    def test_group_matrix_and_unexpanded_skip(self) -> None:
+        jobs = [
+            {"name": "Rust / ubuntu-24.04", "status": "completed", "conclusion": "cancelled"},
+            {"name": "Rust / windows-latest", "status": "completed", "conclusion": "success"},
+            {"name": ".NET / ${{ matrix.os }}", "status": "completed", "conclusion": "skipped"},
+            {"name": "macOS capacity", "status": "completed", "conclusion": "cancelled"},
+            {"name": "required", "status": "in_progress", "conclusion": None},
+            {"name": "changes", "status": "completed", "conclusion": "success"},
+        ]
+        groups = required_check.group_conclusions(jobs)
+        self.assertEqual(required_check.aggregate_conclusions(groups["rust"]), "cancelled")
+        self.assertEqual(required_check.aggregate_conclusions(groups["dotnet"]), "skipped")
+        self.assertEqual(required_check.aggregate_conclusions(groups["macos-capacity"]), "cancelled")
+        self.assertNotIn("required", groups)
+
+    def test_wait_polls_until_cancelled_matrix_is_terminal(self) -> None:
+        snapshots = [
+            [
+                {"name": "Rust / ubuntu-24.04", "status": "in_progress", "conclusion": None},
+                {"name": ".NET / ubuntu-latest", "status": "queued", "conclusion": None},
+            ],
+            [
+                {"name": "Rust / ubuntu-24.04", "status": "completed", "conclusion": "cancelled"},
+                {"name": "Rust / windows-latest", "status": "completed", "conclusion": "success"},
+                {"name": ".NET / ubuntu-latest", "status": "completed", "conclusion": "cancelled"},
+                {"name": "macOS capacity", "status": "completed", "conclusion": "cancelled"},
+            ],
+        ]
+
+        def list_jobs():
+            return snapshots.pop(0)
+
+        sleeps: list[float] = []
+        payload = required_check.wait_for_needs(
+            changes_result="success",
+            suites="true",
+            list_jobs=list_jobs,
+            sleep=lambda seconds: sleeps.append(seconds),
+            now=lambda: 0,
+            deadline=10,
+        )
+        self.assertEqual(sleeps, [20])
+        code, lines = required_check.evaluate(payload)
+        self.assertEqual(code, 1)
+        self.assertTrue(any("rust result is 'cancelled'" in line for line in lines))
+
     def test_main_reads_needs_json(self) -> None:
         raw = json.dumps(_needs(suites="true", rust="success", dotnet="success", macos="success"))
         previous = os.environ.get("NEEDS_JSON")

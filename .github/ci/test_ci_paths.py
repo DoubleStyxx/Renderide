@@ -214,7 +214,8 @@ class WorkflowContractTests(unittest.TestCase):
     def test_trigger_has_no_path_filter_and_required_is_wired(self) -> None:
         text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         self.assertNotIn("\n    paths:", text)
-        self.assertIn("needs: [changes, rust, dotnet, macos-capacity]", text)
+        self.assertIn("needs: [changes, rust]", text)
+        self.assertIn("needs: changes\n", text)
         self.assertIn("if: needs.changes.outputs.suites == 'true'", text)
         self.assertIn("if: always() && needs.changes.outputs.suites == 'true'", text)
         self.assertIn("if: always()\n", text)
@@ -224,11 +225,12 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("name: macOS capacity", text)
         self.assertIn("check-suite", text)
         self.assertIn("./.github/actions/lavapipe", text)
-        self.assertIn("NEEDS_JSON:", text)
+        self.assertIn("CHANGES_RESULT:", text)
+        self.assertIn("actions: read", text)
         for line in (
             "        run: python3 -m unittest discover -s .github/ci -p 'test_*.py' -v",
             "        run: python3 .github/ci/ci_paths.py",
-            "        run: python3 .github/ci/required_check.py",
+            "        run: python3 .github/ci/required_check.py --wait",
         ):
             self.assertIn(line, text)
             self.assertNotIn("${{", line)

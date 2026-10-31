@@ -20,7 +20,7 @@ The trigger is `pull_request` (every branch), `push` to `master`, and `workflow_
 | `rust` | `Rust / ubuntu-24.04`, `Rust / windows-latest`, `Rust / macos-latest` | `suites=true` |
 | `dotnet` | `.NET / ubuntu-latest`, `.NET / windows-latest`, `.NET / macos-latest` | `suites=true` |
 | `macos-capacity` | `macOS capacity` | `suites=true`, including after the Rust matrix fails or is cancelled |
-| `required` | `required` | Always, after the jobs above have a result |
+| `required` | `required` | As soon as `changes` finishes. It polls the suite jobs until they have a conclusion. |
 
 No existing check name was renamed. `changes` and `required` are new.
 
@@ -31,6 +31,8 @@ The Rust job is still the suite that runs lavapipe goldens on `ubuntu-24.04`, WA
 On a docs-only diff, `changes` and `required` are the only jobs that take a runner. `required` finishes as soon as the skipped jobs are skipped. It does not stay pending.
 
 While a suite applies, `required` stays in progress until that suite finishes. That wait is the suite, not a missing check. A diff that cannot be read sets `suites=true`, so the suites run instead of being skipped.
+
+`required` does not list the suite jobs in `needs`. If it did, a concurrency cancellation would complete the workflow run before `required` was created, and the check would be missing. The job starts after `changes` and polls the run. Its step uses `if: always()`, so a cancellation that arrives while the poll is running does not skip the conclusion. The poll exits 1 when a covered job is `cancelled`. The job timeout is 360 minutes; a suite that is still unfinished then fails the gate closed.
 
 ## How a result is judged
 
@@ -65,13 +67,13 @@ Patterns are either an exact root path or `dir/**` (that directory and its files
 
 1. Add the job to `.github/workflows/ci.yml`. Keep `required`'s `if: always()`.
 2. Path-gated job: `needs: changes` (plus any real upstream) and `if: needs.changes.outputs.suites == 'true'`. If it must still run when an upstream suite job fails or is cancelled, follow `macos-capacity`: `always()` and the same `suites` comparison.
-3. Add the job id to `required`'s `needs`.
+3. Add the job id to `COVERED_JOBS` (next step) so the poll waits for it. Do not add it to `required`'s `needs`.
 4. Path-gated job: append the id to `COVERED_JOBS` in `.github/ci/required_check.py`. `skipped` is then accepted only for a real path skip.
 5. Job that must run on every pull request, including docs-only diffs: append the id to `ALWAYS_JOBS` instead. `skipped` fails the gate. `changes` is already required to be `success`; it is not in that tuple because the gate also reads its output.
 6. Add unit tests for success, failure, cancelled, and skipped. The `changes` job runs `python3 -m unittest discover -s .github/ci -p 'test_*.py'`.
-7. Leave the ruleset's required context as `required`. Do not add the new job name there.
+7. Leave the ruleset's required context as `required`. Do not add the new job name there. Teach `covered_job_id()` how to recognize the job's check name if it is not one of the existing prefixes.
 
-Pass `needs` into the evaluator with `NEEDS_JSON` set from `toJson(needs)` in the step `env`. Do not interpolate `needs` or event fields inside a `run` script.
+The poll reads `CHANGES_RESULT` and `SUITES` from the step environment and job conclusions from the Actions API. Do not interpolate those values inside the `run` script.
 
 ## Applying the ruleset
 

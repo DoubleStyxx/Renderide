@@ -16,13 +16,22 @@ failure. Those two skips are not the same.
 
 ``changes`` itself must be ``success``. A missing or non-boolean ``suites``
 output fails closed, so an unknown diff cannot turn the gate green.
+
+``required`` does not ``needs`` the suite jobs. A concurrency cancellation
+marks the workflow run cancelled before a job that is still waiting on
+``needs`` is created, so that job never reports. This job starts as soon as
+``changes`` finishes and polls the run's jobs until they reach a conclusion,
+including ``cancelled``. The step uses ``if: always()`` so a cancellation
+that arrives while the poll is running does not skip the conclusion.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
+import time
 
 # Job ids in ci.yml. The Rust matrix (ubuntu-24.04 lavapipe goldens,
 # windows-latest WARP, macos-latest) is one id. The .NET matrix is the other.
@@ -123,6 +132,130 @@ def _job_result(needs: dict[str, object], job_id: str) -> str:
     return "missing"
 
 
+TERMINAL_RESULTS = frozenset({"success", "failure", "cancelled", "skipped"})
+
+
+def aggregate_conclusions(conclusions: list[str]) -> str:
+    """Combine matrix legs the way the gate reads one job id.
+
+    ``failure`` wins over ``cancelled``. An unfinished leg stays ``pending``.
+    An empty group is ``pending`` so the waiter keeps polling until the job
+    exists.
+    """
+    if not conclusions or any(item not in TERMINAL_RESULTS for item in conclusions):
+        return "pending"
+    if any(item == "failure" for item in conclusions):
+        return "failure"
+    if any(item == "cancelled" for item in conclusions):
+        return "cancelled"
+    if all(item == "skipped" for item in conclusions):
+        return "skipped"
+    if all(item == "success" for item in conclusions):
+        return "success"
+    return "failure"
+
+
+def covered_job_id(name: str) -> str | None:
+    if name == "macOS capacity":
+        return "macos-capacity"
+    if name.startswith("Rust /"):
+        return "rust"
+    if name.startswith(".NET /"):
+        return "dotnet"
+    return None
+
+
+def job_conclusion(job: dict[str, object]) -> str:
+    if job.get("status") != "completed":
+        return "pending"
+    conclusion = job.get("conclusion")
+    if isinstance(conclusion, str) and conclusion in TERMINAL_RESULTS:
+        return conclusion
+    return "pending"
+
+
+def group_conclusions(jobs: list[dict[str, object]]) -> dict[str, list[str]]:
+    groups: dict[str, list[str]] = {job_id: [] for job_id in COVERED_JOBS}
+    for job in jobs:
+        name = job.get("name")
+        if not isinstance(name, str):
+            continue
+        job_id = covered_job_id(name)
+        if job_id is None:
+            continue
+        groups[job_id].append(job_conclusion(job))
+    return groups
+
+
+def needs_from_groups(
+    groups: dict[str, list[str]],
+    *,
+    changes_result: str,
+    suites: str,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "changes": {"result": changes_result, "outputs": {"suites": suites}},
+    }
+    for job_id in COVERED_JOBS:
+        payload[job_id] = {"result": aggregate_conclusions(groups.get(job_id, []))}
+    return payload
+
+
+def suites_ready(groups: dict[str, list[str]]) -> bool:
+    return all(aggregate_conclusions(groups.get(job_id, [])) != "pending" for job_id in COVERED_JOBS)
+
+
+def list_run_jobs(repository: str, run_id: str) -> list[dict[str, object]]:
+    completed = subprocess.run(
+        [
+            "gh",
+            "api",
+            f"repos/{repository}/actions/runs/{run_id}/jobs?per_page=100",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip()
+        raise RuntimeError(detail or f"gh api exited {completed.returncode}")
+    payload = json.loads(completed.stdout)
+    jobs = payload.get("jobs", [])
+    if not isinstance(jobs, list):
+        raise RuntimeError("jobs payload is not a list")
+    return [job for job in jobs if isinstance(job, dict)]
+
+
+def wait_for_needs(
+    *,
+    changes_result: str,
+    suites: str,
+    list_jobs,
+    sleep,
+    now,
+    deadline: float,
+) -> dict[str, object]:
+    """Poll until every covered job has a conclusion, or the deadline passes."""
+    groups: dict[str, list[str]] = {job_id: [] for job_id in COVERED_JOBS}
+    while True:
+        try:
+            groups = group_conclusions(list_jobs())
+        except (RuntimeError, json.JSONDecodeError, OSError) as exc:
+            print(f"waiting for job results: {exc}", file=sys.stderr)
+        else:
+            summary = ", ".join(
+                f"{job_id}={aggregate_conclusions(groups.get(job_id, []))}" for job_id in COVERED_JOBS
+            )
+            print(f"waiting: {summary}")
+            if suites_ready(groups):
+                break
+        if now() >= deadline:
+            print("timed out waiting for suite jobs", file=sys.stderr)
+            break
+        sleep(20)
+    return needs_from_groups(groups, changes_result=changes_result, suites=suites)
+
+
 def format_report(lines: list[str]) -> str:
     return "\n".join(lines) + "\n"
 
@@ -137,13 +270,30 @@ def write_summary(report: str) -> None:
         handle.write("```\n")
 
 
-def main() -> int:
-    raw = os.environ.get("NEEDS_JSON", "")
-    try:
-        payload = json.loads(raw) if raw else None
-    except json.JSONDecodeError as exc:
-        print(f"NEEDS_JSON is not valid JSON: {exc}", file=sys.stderr)
-        return 1
+def main(argv: list[str] | None = None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    if "--wait" in args:
+        repository = os.environ["GITHUB_REPOSITORY"]
+        run_id = os.environ["GITHUB_RUN_ID"]
+        # The suite can sit in the macOS queue for a long time. The job's own
+        # timeout is the hard stop; this deadline fails closed shortly before
+        # a 6 hour hosted-runner job limit.
+        deadline = time.time() + 350 * 60
+        payload = wait_for_needs(
+            changes_result=os.environ.get("CHANGES_RESULT", ""),
+            suites=os.environ.get("SUITES", ""),
+            list_jobs=lambda: list_run_jobs(repository, run_id),
+            sleep=time.sleep,
+            now=time.time,
+            deadline=deadline,
+        )
+    else:
+        raw = os.environ.get("NEEDS_JSON", "")
+        try:
+            payload = json.loads(raw) if raw else None
+        except json.JSONDecodeError as exc:
+            print(f"NEEDS_JSON is not valid JSON: {exc}", file=sys.stderr)
+            return 1
     code, lines = evaluate(payload)
     report = format_report(lines)
     sys.stdout.write(report)
