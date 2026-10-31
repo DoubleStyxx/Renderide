@@ -1,3 +1,8 @@
+# TEMPORARY noise-collection variant (gauge/b3-gate-noise-collect-drift).
+# Always runs a reversed-order confirm at n=RUNS for EVERY scenario (even when the
+# first pass is ok), uploads raw framebench JSON (incl. confirm2 when drift fires),
+# and skips cpu_hot. Gate uses NEW confirm-only + base-drift guard. DO NOT MERGE.
+#
 # Non-required PR frame + CPU bench compare (B3 follow-up).
 # Triggers when a PR touches crates/renderide/src/**. Two parallel jobs:
 #   - bench-pr-lavapipe: lavapipe framebench + frame_bench_gate.py (sole verdict)
@@ -32,7 +37,7 @@ name: Bench PR
 
 concurrency:
   group: bench-pr-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false  # noise collection: keep every canary run
 
 permissions:
   contents: read
@@ -269,13 +274,17 @@ jobs:
           gate_status="$first_status"
           cp "$out/gate-first.json" "$out/gate.json"
 
-          if [[ "$first_status" -eq 1 && "$CONFIRM_ROUNDS" -gt 0 ]]; then
-            mapfile -t suspects < "$out/suspects.txt"
-            echo "::group::Confirm reversed-order (head/base then head/base) for: ${suspects[*]}"
-            run_frame "$RUNNER_TEMP/target-head" "$out/confirm-head-a.json" "$half" "${suspects[@]}"
-            run_frame "$RUNNER_TEMP/target-base" "$out/confirm-base-a.json" "$half" "${suspects[@]}"
-            run_frame "$RUNNER_TEMP/target-head" "$out/confirm-head-b.json" "$rest" "${suspects[@]}"
-            run_frame "$RUNNER_TEMP/target-base" "$out/confirm-base-b.json" "$rest" "${suspects[@]}"
+          # NOISE COLLECTION: always run one reversed-order confirm at n=RUNS for
+          # every scenario, even when the first pass is ok, so NEW rule + drift can
+          # be judged offline on identical samples. Drift round-2 still fires when
+          # confirm-base drifts >15%. Job exit stays workflow-faithful: if first
+          # pass was ok, gate_status is forced back to 0 after collection.
+          if [[ "$CONFIRM_ROUNDS" -gt 0 ]]; then
+            echo "::group::Confirm reversed-order (ALWAYS, noise collection) for: ${scenarios[*]}"
+            run_frame "$RUNNER_TEMP/target-head" "$out/confirm-head-a.json" "$half" "${scenarios[@]}"
+            run_frame "$RUNNER_TEMP/target-base" "$out/confirm-base-a.json" "$half" "${scenarios[@]}"
+            run_frame "$RUNNER_TEMP/target-head" "$out/confirm-head-b.json" "$rest" "${scenarios[@]}"
+            run_frame "$RUNNER_TEMP/target-base" "$out/confirm-base-b.json" "$rest" "${scenarios[@]}"
             echo "::endgroup::"
 
             set +e
@@ -287,7 +296,7 @@ jobs:
               --flag-threshold "$FLAG_THRESHOLD" --fail-threshold "$FAIL_THRESHOLD" \
               --confirm-round 1 \
               --drift-out "$out/drift-suspects.txt" \
-              --title "Confirm round 1 (reversed-order, ${CONFIRM_ROUNDS} x $RUNS; confirm-only decides FAIL; pooled reported; base-drift guard)" \
+              --title "Confirm round 1 (ALWAYS noise collect; confirm-only + base-drift guard)" \
               --json-out "$out/gate.json" | tee "$out/confirm.md"
             gate_status=${PIPESTATUS[0]}
             set -e
@@ -341,7 +350,34 @@ jobs:
                 echo "gate after drift reconfirm: pass (deciding round = 2 for reconfirmed scenes)" >> "$summary"
               fi
             fi
+
+            if [[ "$first_status" -eq 0 ]]; then
+              echo "noise collect: first pass ok — forcing gate_status=0 (workflow-faithful; confirm/drift samples still uploaded)" >> "$summary"
+              gate_status=0
+            fi
           fi
+
+          # Stage raw samples for offline NEW-rule + drift evaluation.
+          mkdir -p "$GITHUB_WORKSPACE/raw-samples"
+          for f in base-a.json base-b.json head-a.json head-b.json \
+                   confirm-base-a.json confirm-base-b.json confirm-head-a.json confirm-head-b.json \
+                   confirm2-base-a.json confirm2-base-b.json confirm2-head-a.json confirm2-head-b.json \
+                   gate-first.json gate.json gate-confirm2.json first.md confirm.md confirm2.md \
+                   drift-suspects.txt suspects.txt; do
+            [[ -f "$out/$f" ]] && cp "$out/$f" "$GITHUB_WORKSPACE/raw-samples/$f" || true
+          done
+          {
+            echo "base_sha=$BASE_SHA"
+            echo "head_sha=$HEAD_SHA"
+            echo "runs=$RUNS"
+            echo "flag=$FLAG_THRESHOLD"
+            echo "fail=$FAIL_THRESHOLD"
+            echo "confirm_rounds=$CONFIRM_ROUNDS"
+            echo "gate_status=$gate_status"
+            echo "first_status=$first_status"
+            echo "collected_at_unix=$(date +%s)"
+            echo "rule=confirm-only+base-drift"
+          } > "$GITHUB_WORKSPACE/raw-samples/meta.env"
 
           end_ts=$(date +%s)
           wall=$((end_ts - start_ts))
@@ -375,6 +411,14 @@ jobs:
             frame-summary.md
           if-no-files-found: ignore
 
+      - name: Upload raw samples (noise study)
+        if: always() && hashFiles('raw-samples/**') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-pr-raw-samples
+          path: raw-samples/
+          if-no-files-found: ignore
+
       - name: Apply gate verdict
         if: always()
         run: |
@@ -396,6 +440,7 @@ jobs:
   # -------------------------------------------------------------------------
   cpu-hot:
     name: bench-pr-cpuhot
+    if: false  # noise-collection: skip cpu_hot
     runs-on: ubuntu-24.04
     # Criterion --quick still builds + samples; leave headroom.
     timeout-minutes: 35
