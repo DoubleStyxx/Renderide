@@ -12,6 +12,12 @@ name: CI
 # and are not on hosted runners, so CI does not build RenderideMod.csproj.
 # `RenderideMod/Shaders/**` is included: Rust `include_str!` compiles those WGSL
 # files into the renderer and the headless golden suite.
+#
+# The material-coverage cargo test also reads `docs/testing/material-coverage.md`.
+# That path stays in SUITE_PATTERNS (.github/ci/ci_paths.py), not on this
+# trigger. A trigger filter that missed the doc would skip the workflow and
+# create no check runs. With the path in SUITE_PATTERNS, a doc-only change
+# publishes suites=true, so the coverage gate runs and `required` still reports.
 "on":
   push:
     branches: [master]
