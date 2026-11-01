@@ -7,6 +7,10 @@ name: CI
 # Those jobs skip from their own `if` when the diff does not match. `required`
 # always runs and is the status check to require.
 #
+# `policy-guard` also always runs, including on a docs-only diff. `required`
+# fails unless that job succeeded. The poll in required_check.py does not
+# know the job. A step in `required` reads the result. Do not drop that step.
+#
 # The mod project stays out of the suite. It references FrooxEngine.dll and
 # Renderite.Shared.dll from a Resonite install. Those assemblies are proprietary
 # and are not on hosted runners, so CI does not build RenderideMod.csproj.
@@ -41,6 +45,34 @@ env:
   DOTNET_NOLOGO: "1"
 
 jobs:
+  # Always runs. Not path-filtered. A docs-only diff still runs this test, and
+  # `required` fails unless the result is success. Scoped to the logger
+  # integration test so the job does not build the renderer. Its cache key is
+  # separate from the suite job so a partial `target/` does not replace that cache.
+  policy-guard:
+    name: policy-guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: "1.99.1"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          cache-bin: "false"
+          key: policy-guard
+
+      - name: Retired policy name guard
+        run: cargo test --locked -p logger --test rsi_policy_guard
+
   # Always runs. Publishes suites=true or suites=false. A diff that cannot be
   # read publishes true, so the suites run instead of being skipped.
   changes:
@@ -404,14 +436,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 .github/ci/macos_capacity_note.py
 
-  # Starts as soon as `changes` finishes and polls the suite jobs. It does not
-  # `needs` them: a concurrency cancellation completes the workflow before a
-  # job that is still waiting on `needs` is created, so that job would never
-  # report. `if: always()` keeps this job alive if the run is cancelled while
-  # it is already running, and the poll then exits 1. See required_check.py.
+  # Starts as soon as `changes` and `policy-guard` finish and polls the suite
+  # jobs. It does not `needs` the suite jobs: a concurrency cancellation
+  # completes the workflow before a job that is still waiting on `needs` is
+  # created, so that job would never report. `if: always()` keeps this job
+  # alive if the run is cancelled while it is already running, and the poll
+  # then exits 1. See required_check.py.
+  #
+  # `policy-guard` is in `needs` because it always runs and is fast. The poll
+  # script rebuilds its payload from the path-filtered suite jobs only, so a
+  # failed guard would not fail this job by itself. The step below does.
   required:
     name: required
-    needs: changes
+    needs: [changes, policy-guard]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 360
@@ -430,3 +467,13 @@ jobs:
           CHANGES_RESULT: ${{ needs.changes.result }}
           SUITES: ${{ needs.changes.outputs.suites }}
         run: python3 .github/ci/required_check.py --wait
+
+      - name: Policy guard must have succeeded
+        env:
+          POLICY_GUARD_RESULT: ${{ needs['policy-guard'].result }}
+        run: |
+          set -euo pipefail
+          if [ "$POLICY_GUARD_RESULT" != "success" ]; then
+            echo "policy-guard result is ${POLICY_GUARD_RESULT}, expected success"
+            exit 1
+          fi

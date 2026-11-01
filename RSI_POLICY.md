@@ -7,10 +7,10 @@ Individual commits and files are not marked AI-assisted.
 
 ## Quality Ratchet -- Floors Only Tighten
 
-Each improvement cycle moves at least one measured floor forward and never regresses one.
+Each improvement step moves at least one measured floor forward and never regresses one.
 
 - Floors are only tightened, never lowered.
-- Regressions are fixed forward, never by reverting to or looping back to an earlier state.
+- Regressions are fixed forward, never by reverting to an earlier state.
 - Nothing is validated by the thing it changed. Judge artifacts (goldens, tolerances,
   baselines) land in a reviewed judge pull request before the code pull request they
   judge, and never in the same pull request.
