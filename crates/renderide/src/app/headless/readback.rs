@@ -161,8 +161,11 @@ fn submit_texture_to_buffer_copy(
     layout: &ReadbackLayout,
     readback: &wgpu::Buffer,
 ) -> Result<Duration, HeadlessReadbackError> {
-    gpu.flush_driver();
-    // `flush_driver` means the driver thread returned from `Queue::submit`, not
+    if !gpu.flush_driver() {
+        // The capture submit may still be inside Queue::submit on the driver thread.
+        return Err(HeadlessReadbackError::DriverFlushTimeout);
+    }
+    // `flush_driver` returning true means the driver thread returned from `Queue::submit`, not
     // that the GPU finished the frame. Copying before `on_submitted_work_done`
     // reads the clear color during a long queue stall (#216). This wait runs
     // inside the headless PNG readback. The windowed frame loop does not call
@@ -202,7 +205,16 @@ fn submit_texture_to_buffer_copy(
         profiling::scope!("CommandEncoder::finish::headless_readback");
         encoder.finish()
     };
-    gpu.queue().submit(std::iter::once(command_buffer));
+    let mut retained = crate::gpu::GpuRetainedResources::new();
+    retained.retain_texture(color_texture.clone());
+    retained.retain_buffer(readback.clone());
+    if !gpu.submit_background_and_wait(
+        vec![command_buffer],
+        retained,
+        crate::gpu::driver_thread::DRIVER_FLUSH_TIMEOUT,
+    ) {
+        return Err(HeadlessReadbackError::DriverFlushTimeout);
+    }
     Ok(stall)
 }
 
@@ -432,6 +444,9 @@ pub(crate) enum HeadlessReadbackError {
     /// `map_async` callback never delivered a result before the timeout.
     #[error("buffer.map_async timed out")]
     ReadbackTimeout,
+    /// The driver thread did not finish `Queue::submit` before the readback copy.
+    #[error("driver thread did not signal before the readback copy")]
+    DriverFlushTimeout,
     /// The frame submission did not finish inside the headless readback cap.
     #[error("frame submission was not gpu-done within {0:?}")]
     FrameSubmissionTimeout(Duration),
@@ -474,6 +489,10 @@ mod tests {
         assert_eq!(
             HeadlessReadbackError::ReadbackTimeout.to_string(),
             "buffer.map_async timed out"
+        );
+        assert_eq!(
+            HeadlessReadbackError::DriverFlushTimeout.to_string(),
+            "driver thread did not signal before the readback copy"
         );
         assert!(
             HeadlessReadbackError::FrameSubmissionTimeout(std::time::Duration::from_secs(300))

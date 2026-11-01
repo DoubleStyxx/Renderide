@@ -3,8 +3,9 @@
 use std::sync::LazyLock;
 
 use crate::embedded_shaders::embedded_wgsl;
-use crate::gpu::GpuContext;
 use crate::gpu::bind_layout::texture_layout_entry;
+use crate::gpu::driver_thread::DRIVER_FLUSH_TIMEOUT;
+use crate::gpu::{GpuContext, GpuRetainedResources};
 use crate::gpu_resource::{OnceGpu, RenderPipelineMap};
 use crate::render_graph::gpu_cache::create_wgsl_shader_module;
 
@@ -20,14 +21,14 @@ pub(in crate::runtime) fn depth_marks_coverage(reverse_z_depth: f32) -> bool {
 pub(in crate::runtime) fn apply_camera_task_alpha_coverage(
     gpu: &mut GpuContext,
     targets: &CameraTaskTargets,
-) {
+) -> Result<(), super::CameraReadbackError> {
     apply_alpha_coverage_to_target(
         gpu,
         targets.color_view.as_ref(),
         targets.depth_texture.as_ref(),
         targets.color_format,
         "camera_task_alpha_coverage",
-    );
+    )
 }
 
 /// Writes alpha 1 to covered pixels on an arbitrary camera-task render target.
@@ -37,7 +38,7 @@ pub(in crate::runtime) fn apply_alpha_coverage_to_target(
     depth_texture: &wgpu::Texture,
     color_format: wgpu::TextureFormat,
     label: &'static str,
-) {
+) -> Result<(), super::CameraReadbackError> {
     profiling::scope!("camera_task::alpha_coverage");
     let pipelines = pipeline_cache();
     let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor {
@@ -101,7 +102,17 @@ pub(in crate::runtime) fn apply_alpha_coverage_to_target(
         profiling::scope!("CommandEncoder::finish::camera_task_alpha_coverage");
         encoder.finish()
     };
-    gpu.queue().submit(std::iter::once(command_buffer));
+    // The caller can return on timeout and drop its targets while this batch is still
+    // queued. Retain every handle the command buffer references.
+    let mut retained = GpuRetainedResources::new();
+    retained.retain_texture_view(depth_view);
+    retained.retain_bind_group(bind_group);
+    retained.retain_texture_view(color_view.clone());
+    retained.retain_texture(depth_texture.clone());
+    if !gpu.submit_background_and_wait(vec![command_buffer], retained, DRIVER_FLUSH_TIMEOUT) {
+        return Err(super::CameraReadbackError::DriverFlushTimeout);
+    }
+    Ok(())
 }
 
 fn pipeline_cache() -> &'static CameraTaskAlphaCoveragePipelineCache {

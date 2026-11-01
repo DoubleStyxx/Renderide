@@ -99,14 +99,14 @@ pub(super) fn render_camera360_task(
         return Err(CameraReadbackError::Graph(error));
     }
     if planned.output_format.needs_alpha_coverage_repair() {
-        apply_camera360_alpha_coverage(ctx.gpu, &planned.cube_targets);
+        apply_camera360_alpha_coverage(ctx.gpu, &planned.cube_targets)?;
     }
     project_camera360_to_equirect(
         ctx.gpu,
         &planned.cube_targets,
         &planned.output_targets,
         ctx.task.rotation,
-    );
+    )?;
     let rgba =
         readback_camera_task_texture(ctx.gpu, planned.output_targets.color_texture.as_ref())?;
     write_camera_task_result(
@@ -248,7 +248,10 @@ fn camera360_target_error(error: CubeCaptureTargetError) -> CameraReadbackError 
 }
 
 /// Repairs alpha coverage on every rendered cubemap face before projection.
-fn apply_camera360_alpha_coverage(gpu: &mut GpuContext, targets: &CubeCaptureTargets) {
+fn apply_camera360_alpha_coverage(
+    gpu: &mut GpuContext,
+    targets: &CubeCaptureTargets,
+) -> Result<(), CameraReadbackError> {
     profiling::scope!("camera360_task::alpha_coverage");
     for face in CubeCaptureFace::ALL {
         alpha_coverage::apply_alpha_coverage_to_target(
@@ -257,8 +260,9 @@ fn apply_camera360_alpha_coverage(gpu: &mut GpuContext, targets: &CubeCaptureTar
             targets.face_depth_textures[face.index()].as_ref(),
             targets.color_format,
             "camera360_task_alpha_coverage",
-        );
+        )?;
     }
+    Ok(())
 }
 
 /// Projects the captured cubemap to the final equirectangular output texture.
@@ -267,7 +271,7 @@ fn project_camera360_to_equirect(
     cube_targets: &CubeCaptureTargets,
     output_targets: &CameraTaskTargets,
     rotation: glam::Quat,
-) {
+) -> Result<(), CameraReadbackError> {
     profiling::scope!("camera360_task::project_equirect");
     let pipelines = projection_pipeline_cache();
     let uniform = Camera360ProjectionUniform::from_task_rotation(rotation);
@@ -343,7 +347,21 @@ fn project_camera360_to_equirect(
         profiling::scope!("CommandEncoder::finish::camera360_projection");
         encoder.finish()
     };
-    gpu.queue().submit(std::iter::once(command_buffer));
+    let mut retained = crate::gpu::GpuRetainedResources::new();
+    retained.retain_buffer(uniform_buffer);
+    retained.retain_bind_group(bind_group);
+    retained.retain_texture_view(cube_view.as_ref().clone());
+    retained.retain_texture(cube_targets.cube_texture.as_ref().clone());
+    retained.retain_texture_view(output_targets.color_view.as_ref().clone());
+    retained.retain_texture(output_targets.color_texture.as_ref().clone());
+    if !gpu.submit_background_and_wait(
+        vec![command_buffer],
+        retained,
+        crate::gpu::driver_thread::DRIVER_FLUSH_TIMEOUT,
+    ) {
+        return Err(CameraReadbackError::DriverFlushTimeout);
+    }
+    Ok(())
 }
 
 /// Returns the process-wide Camera360 projection pipeline cache.

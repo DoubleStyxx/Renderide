@@ -25,7 +25,6 @@ struct Slot {
 
 struct Installed {
     device: Arc<wgpu::Device>,
-    queue: Arc<wgpu::Queue>,
     query_set: wgpu::QuerySet,
     resolve: wgpu::Buffer,
     readback: wgpu::Buffer,
@@ -84,7 +83,6 @@ pub(crate) fn install(device: &Arc<wgpu::Device>, queue: &Arc<wgpu::Queue>) {
     let inside_encoders = features.contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS);
     let installed = Installed {
         device: Arc::clone(device),
-        queue: Arc::clone(queue),
         query_set,
         resolve,
         readback,
@@ -174,8 +172,15 @@ pub(crate) fn resolve_pass_ms(gpu: &GpuContext) -> Option<BTreeMap<String, f64>>
         return None;
     }
     let count = (slots.len() as u32).saturating_mul(2).min(QUERY_CAPACITY);
-    gpu.flush_driver();
-    if !submit_resolve(installed, count) {
+    if !gpu.flush_driver() {
+        logger::warn!(
+            "frame bench: driver flush timed out before timestamp resolve; skipping copy"
+        );
+        poison();
+        return None;
+    }
+    if !submit_resolve(gpu, installed, count) {
+        logger::warn!("frame bench: driver did not submit timestamp resolve; skipping readback");
         poison();
         return None;
     }
@@ -213,7 +218,7 @@ fn alloc_pair(name: &str) -> Option<(u32, u32)> {
     Some((begin, begin + 1))
 }
 
-fn submit_resolve(installed: &Installed, count: u32) -> bool {
+fn submit_resolve(gpu: &GpuContext, installed: &Installed, count: u32) -> bool {
     let byte_len = u64::from(count) * TIMESTAMP_STRIDE;
     let mut encoder = installed
         .device
@@ -222,8 +227,14 @@ fn submit_resolve(installed: &Installed, count: u32) -> bool {
         });
     encoder.resolve_query_set(&installed.query_set, 0..count, &installed.resolve, 0);
     encoder.copy_buffer_to_buffer(&installed.resolve, 0, &installed.readback, 0, byte_len);
-    let _ = installed.queue.submit([encoder.finish()]);
-    true
+    let mut retained = crate::gpu::GpuRetainedResources::new();
+    retained.retain_buffer(installed.resolve.clone());
+    retained.retain_buffer(installed.readback.clone());
+    gpu.submit_background_and_wait(
+        vec![encoder.finish()],
+        retained,
+        crate::gpu::driver_thread::DRIVER_FLUSH_TIMEOUT,
+    )
 }
 
 fn read_timestamps(installed: &Installed, count: u32) -> Option<Vec<u8>> {

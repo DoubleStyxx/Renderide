@@ -1,8 +1,9 @@
 //! Lavapipe check that a double-buffered render texture keeps last frame's color.
 //!
-//! This is a unit test, not a frame submission. Passes record timestamp queries so the
-//! GPU instrumentation audit still sees real `timestamp_writes`. The copy and the queue
-//! submit are outside primary frame timing and are allowlisted in `gpu_instrumentation_audit`.
+//! This is a unit test, not a frame submission. It opens a private `wgpu::Device` and
+//! never touches the renderer's shared queue or `GpuQueueAccessGate`. Passes record
+//! timestamp queries so the GPU instrumentation audit still sees real `timestamp_writes`.
+//! The copy and the private-device submit are allowlisted in `gpu_instrumentation_audit`.
 
 use std::sync::Arc;
 

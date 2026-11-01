@@ -1,8 +1,9 @@
 //! Driver thread loop: drains [`super::ring::BoundedRing`] and runs one GPU frame per message.
 //!
-//! The loop is the only place in the renderer that calls [`wgpu::Queue::submit`] or
-//! [`wgpu::Queue::present`] for the main render-graph path. Errors are captured
-//! into [`super::DriverErrorState`] and surfaced to the main thread at the next
+//! The loop is the only production [`wgpu::Queue::submit`] on the renderer's shared
+//! queue. It also calls [`wgpu::Queue::present`] for the main render-graph path.
+//! Caller threads enqueue [`super::SubmitBatch`] values and do not submit this queue.
+//! Errors are captured into [`super::DriverErrorState`] and surfaced to the main thread at the next
 //! [`super::DriverThread::take_pending_error`] call.
 
 use std::sync::Arc;

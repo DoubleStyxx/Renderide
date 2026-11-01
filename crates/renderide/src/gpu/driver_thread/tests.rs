@@ -119,3 +119,29 @@ fn submit_wait_signal_tolerates_dropped_receiver() {
     drop(rx);
     wait.signal(); // must not panic
 }
+
+/// A flush timeout is not a signal, so the caller must skip work that overlaps the submit.
+#[test]
+fn flush_timeout_blocks_the_following_copy() {
+    let driver_signaled = super::flush_wait_signaled(true, false);
+    assert!(
+        !driver_signaled,
+        "a flush timeout must be visible so the caller can skip the copy"
+    );
+}
+
+/// A signaled flush, and a driver that has already exited, let the caller continue.
+#[test]
+fn flush_signal_and_dead_driver_let_the_caller_continue() {
+    assert!(super::flush_wait_signaled(true, true));
+    assert!(super::flush_wait_signaled(false, false));
+}
+
+/// The batch's own submit reports failure on timeout and when the driver never accepted it.
+#[test]
+fn background_submit_timeout_and_dead_driver_do_not_report_success() {
+    assert!(!super::submitted_batch_signaled(true, false));
+    assert!(!super::submitted_batch_signaled(false, false));
+    assert!(!super::submitted_batch_signaled(false, true));
+    assert!(super::submitted_batch_signaled(true, true));
+}

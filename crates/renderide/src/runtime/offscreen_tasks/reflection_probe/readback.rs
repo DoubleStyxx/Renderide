@@ -133,13 +133,15 @@ pub(in crate::runtime) fn readback_reflection_probe_cube(
 ) -> Result<Vec<u8>, ReflectionProbeBakeError> {
     profiling::scope!("reflection_probe_task::gpu_copy_and_map");
     let readback = create_probe_readback_buffer(gpu, layout);
-    gpu.flush_driver();
+    if !gpu.flush_driver() {
+        return Err(ReflectionProbeBakeError::DriverFlushTimeout);
+    }
     let mut encoder = gpu
         .device()
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("renderide-reflection-probe-task-readback"),
         });
-    let _convolve_resources = convolver
+    let convolve_resources = convolver
         .encode_existing_cube_mips(
             gpu,
             &mut encoder,
@@ -163,7 +165,16 @@ pub(in crate::runtime) fn readback_reflection_probe_cube(
         profiling::scope!("CommandEncoder::finish::reflection_probe_task_readback");
         encoder.finish()
     };
-    gpu.queue().submit(std::iter::once(command_buffer));
+    let mut retained = convolve_resources.into_retained();
+    retained.retain_texture(cube_texture.clone());
+    retained.retain_buffer(readback.clone());
+    if !gpu.submit_background_and_wait(
+        vec![command_buffer],
+        retained,
+        crate::gpu::driver_thread::DRIVER_FLUSH_TIMEOUT,
+    ) {
+        return Err(ReflectionProbeBakeError::DriverFlushTimeout);
+    }
     let slice = readback.slice(..);
     {
         profiling::scope!("reflection_probe_task::map_readback");

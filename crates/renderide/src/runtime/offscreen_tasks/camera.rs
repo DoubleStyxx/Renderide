@@ -148,6 +148,8 @@ pub(super) enum CameraReadbackError {
     DeviceLost(String),
     #[error("CameraRenderTask map_async timed out")]
     ReadbackTimeout,
+    #[error("CameraRenderTask driver thread did not signal before the readback copy")]
+    DriverFlushTimeout,
     #[error("CameraRenderTask map_async failed: {0}")]
     Map(String),
 }
@@ -377,7 +379,7 @@ fn render_camera_task(ctx: CameraTaskRenderCtx<'_>) -> Result<(), CameraReadback
     )?;
     render_camera_task_offscreen(ctx.gpu, ctx.backend, ctx.scene, planned.plan)?;
     if planned.output_format.needs_alpha_coverage_repair() {
-        alpha_coverage::apply_camera_task_alpha_coverage(ctx.gpu, &planned.targets);
+        alpha_coverage::apply_camera_task_alpha_coverage(ctx.gpu, &planned.targets)?;
     }
     let rgba = readback_camera_task_texture(ctx.gpu, planned.targets.color_texture.as_ref())?;
     write_camera_task_result(
@@ -538,7 +540,7 @@ fn readback_camera_task_texture(
         gpu.limits().max_buffer_size(),
     )?;
     let readback = create_readback_buffer(gpu, plan);
-    submit_texture_to_buffer_copy(gpu, color_texture, plan, &readback);
+    submit_texture_to_buffer_copy(gpu, color_texture, plan, &readback)?;
     let slice = readback.slice(..);
     {
         profiling::scope!("camera_task::map_readback");
@@ -571,9 +573,11 @@ fn submit_texture_to_buffer_copy(
     color_texture: &wgpu::Texture,
     plan: LinearTextureReadbackPlan,
     readback: &wgpu::Buffer,
-) {
+) -> Result<(), CameraReadbackError> {
     profiling::scope!("camera_task::gpu_copy");
-    gpu.flush_driver();
+    if !gpu.flush_driver() {
+        return Err(CameraReadbackError::DriverFlushTimeout);
+    }
     let mut encoder = gpu
         .device()
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -605,5 +609,15 @@ fn submit_texture_to_buffer_copy(
         profiling::scope!("CommandEncoder::finish::camera_task_readback");
         encoder.finish()
     };
-    gpu.queue().submit(std::iter::once(command_buffer));
+    let mut retained = crate::gpu::GpuRetainedResources::new();
+    retained.retain_texture(color_texture.clone());
+    retained.retain_buffer(readback.clone());
+    if !gpu.submit_background_and_wait(
+        vec![command_buffer],
+        retained,
+        crate::gpu::driver_thread::DRIVER_FLUSH_TIMEOUT,
+    ) {
+        return Err(CameraReadbackError::DriverFlushTimeout);
+    }
+    Ok(())
 }

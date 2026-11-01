@@ -255,11 +255,13 @@ impl DriverThread {
     /// Implemented by pushing a zero-work [`SubmitBatch`] that carries a [`SubmitWait`]
     /// oneshot and waiting for the driver to signal it. Because the ring is FIFO and
     /// processed by one thread, observing the trailing batch's signal implies every
-    /// earlier batch's `Queue::submit` (and present, if any) has already run. Used by
-    /// the headless readback path to establish a happens-before edge with the render
-    /// work before issuing the texture-to-buffer copy on the main thread.
-    pub fn flush(&self) {
-        let _ = self.flush_within(Duration::from_secs(5));
+    /// earlier batch's `Queue::submit` (and present, if any) has already run.
+    ///
+    /// Returns `false` when the driver does not signal before [`DRIVER_FLUSH_TIMEOUT`].
+    /// The caller must skip copies and maps that would overlap that in-flight submit.
+    #[must_use = "false means a driver submit may still be in flight; skip the copy"]
+    pub fn flush(&self) -> bool {
+        self.flush_within(DRIVER_FLUSH_TIMEOUT)
     }
 
     /// Like [`Self::flush`], but reports whether the driver signaled before `timeout`.
@@ -281,14 +283,38 @@ impl DriverThread {
             xr_finalize: None,
             frame_seq: 0,
         };
-        if self.submit(batch).is_none() {
+        let enqueued = self.submit(batch).is_some();
+        if !enqueued {
             // Driver thread is gone; no signal will ever arrive, so skip the wait.
-            return true;
+            return flush_wait_signaled(false, false);
         }
         // Any recv error (channel disconnected due to panic inside the driver) is treated
         // as "driver no longer running" -- callers handle that via the separate error slot.
-        rx.recv_timeout(timeout).is_ok()
+        let signaled = rx.recv_timeout(timeout).is_ok();
+        flush_wait_signaled(true, signaled)
     }
+}
+
+/// How long [`DriverThread::flush`] waits for the driver to leave `Queue::submit`.
+pub const DRIVER_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Result of a flush wait.
+///
+/// A driver thread that has already exited leaves nothing in flight, so the wait counts
+/// as signaled. A timeout (`enqueued && !signaled`) does not: the caller must not overlap
+/// that submit.
+#[must_use]
+pub(crate) const fn flush_wait_signaled(enqueued: bool, signaled: bool) -> bool {
+    !enqueued || signaled
+}
+
+/// Result of a batch that itself had to reach `Queue::submit`.
+///
+/// A dead driver did not submit the batch, so this is `false` when `enqueued` is `false`.
+/// Callers must not map or sample that batch's output.
+#[must_use]
+pub(crate) const fn submitted_batch_signaled(enqueued: bool, signaled: bool) -> bool {
+    enqueued && signaled
 }
 
 #[derive(Clone, Copy)]
