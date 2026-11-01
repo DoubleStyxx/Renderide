@@ -138,8 +138,8 @@ The workspace lives under `crates/`:
 | Crate | Purpose |
 | --- | --- |
 | [`bootstrapper`](crates/bootstrapper) | Builds the `renderide` launcher. Launches the Resonite host and renderer, owns bootstrap IPC (heartbeats, clipboard, renderer argv), and ties child process lifetimes together. |
-| [`renderide`](crates/renderide) | Builds the `renderide-renderer` process and `roundtrip` helper. Owns winit, wgpu, OpenXR, scene mirroring, asset integration, materials, particles, render graph, diagnostics, and presentation. |
-| [`renderide-shared`](crates/renderide-shared) | Generated IPC types, binary packing helpers, shared-memory accessors/writers, and dual-queue wrappers. |
+| [`renderide`](crates/renderide) | Builds the `renderide-renderer` process. Owns winit, wgpu, OpenXR, scene mirroring, asset integration, materials, particles, render graph, diagnostics, and presentation. |
+| [`renderide-shared`](crates/renderide-shared) | Generated IPC types, binary packing helpers, shared-memory accessors/writers, dual-queue wrappers, and the `roundtrip` helper used by the C#/Rust IPC tests. |
 | [`interprocess`](crates/interprocess) | Cloudtoid-compatible shared-memory ring queues used by every IPC channel. |
 | [`logger`](crates/logger) | File-first logging used by the bootstrapper, host capture, and renderer. |
 | [`renderide-test`](crates/renderide-test) | Integration test harness that drives the renderer end-to-end. |

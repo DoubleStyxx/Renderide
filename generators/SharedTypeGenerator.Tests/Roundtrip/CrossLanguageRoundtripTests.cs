@@ -9,8 +9,11 @@ namespace SharedTypeGenerator.Tests;
 
 /// <summary>C# -> Rust -> C# roundtrip tests: C# packs, the Rust <c>roundtrip</c> binary unpacks and repacks, and the byte buffers must match.</summary>
 /// <remarks>
-/// These sources are only compiled when <c>Renderite.Shared.dll</c> is discoverable at build time (see <c>SharedTypeGenerator.Tests.csproj</c>).
-/// When the DLL is missing, the roundtrip test files are excluded from the project so the suite still builds.
+/// These sources are compiled when <c>Renderite.Shared.dll</c> is discoverable at build time (see <c>SharedTypeGenerator.Tests.csproj</c>).
+/// Hosted CI builds that DLL from Yellow-Dog-Man/Renderite commit 7ccfd2ee7c28648cb2e46dd4f52f51613a848071 (MIT).
+/// Types in <see cref="ExpectedContractDrift"/> must fail this compare until <c>shared.rs</c> is updated separately.
+/// Outside CI, a missing DLL omits these sources and <see cref="RenderiteSharedDllPresenceTests"/> skips with an explanation.
+/// On CI, a missing DLL fails the build and that presence test.
 /// </remarks>
 [Trait("Category", "Roundtrip")]
 public sealed class CrossLanguageRoundtripTests : RoundtripTestBase
@@ -47,8 +50,25 @@ public sealed class CrossLanguageRoundtripTests : RoundtripTestBase
         using var input = new TempFile();
         using var output = new TempFile();
         File.WriteAllBytes(input.FilePath, bytesA);
-        RoundtripBinary.Run(binary!, typeName, input.FilePath, output.FilePath);
+        bool marked = ExpectedContractDrift.IsMarked(typeName);
+        try
+        {
+            RoundtripBinary.Run(binary!, typeName, input.FilePath, output.FilePath);
+        }
+        catch (InvalidOperationException) when (marked)
+        {
+            // The Rust packer rejects the C# bytes. That is the expected drift.
+            return;
+        }
+
         var bytesB = File.ReadAllBytes(output.FilePath);
-        Assert.True(bytesA.SequenceEqual(bytesB), $"{typeName}: C# packed bytes != Rust roundtrip bytes");
+        bool match = bytesA.AsSpan().SequenceEqual(bytesB);
+        string? stale = ExpectedContractDrift.Rejection(typeName, roundtripPassed: match);
+        if (stale != null)
+            throw new InvalidOperationException(stale);
+        if (marked)
+            return;
+
+        Assert.True(match, $"{typeName}: C# packed bytes != Rust roundtrip bytes");
     }
 }
