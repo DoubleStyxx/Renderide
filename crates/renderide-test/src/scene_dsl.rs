@@ -14,6 +14,7 @@ pub mod band_count;
 pub mod cases;
 pub(crate) mod channel_zero;
 pub mod host_info;
+pub mod material_usage;
 pub mod output;
 mod quarantine_216;
 pub mod region_color;
