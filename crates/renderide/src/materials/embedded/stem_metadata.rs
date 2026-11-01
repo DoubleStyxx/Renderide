@@ -457,7 +457,10 @@ pub(in crate::materials) fn build_embedded_wgsl(
 /// Other bits stay pipeline constants. The opaque path keeps the `composed` string with no extra
 /// allocation. Any other stem, including every unlit stem, returns that same string. Warmup only
 /// visits stems in the frame's draw plan.
-fn pbs_compile_time_premultiply_stem(composed: String, keyword_mask: u32) -> String {
+pub(in crate::materials) fn pbs_compile_time_premultiply_stem(
+    composed: String,
+    keyword_mask: u32,
+) -> String {
     if keyword_mask & PBS_ALPHAPREMULTIPLY_BIT == 0 {
         return composed;
     }

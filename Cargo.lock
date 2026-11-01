@@ -3483,6 +3483,7 @@ dependencies = [
  "rayon",
  "renderide-control-client",
  "renderide-shared",
+ "renderide-test",
  "serde",
  "serde_json",
  "signal-hook",
