@@ -14,7 +14,7 @@ Three labels are used below.
 
 ## Verification evidence
 
-Every pull request names the golden or test that fails without the change, and links the CI run that shows it. A golden is not blessed without a before/after diff in the pull request.
+Every pull request names the golden or test that fails without the change, and links the CI run that shows it. A golden is not blessed without a before/after diff in the pull request. Planned: a separate PR (the ratchet PR) will replace CONTRIBUTING §2.5's same-PR bless with a judge-then-code two-PR rule, so goldens, tolerances and baselines never land in the same PR as the code they judge.
 
 **Enforced now.** [`.github/pull_request_template.md`](.github/pull_request_template.md) carries the `## Verification evidence` section. [`scripts/ci/check_pr_body.py`](scripts/ci/check_pr_body.py) fails the `pr-body` job when that heading is absent, empty, or still contains the template markers `pr-body-lint:placeholder` or `TODO(pr-body):`. The same rule applies to `## Pillars advanced` and `## Ratchet metrics moved`. The ratchet section records before and after values for each ratchet metric the pull request moves. `None` plus a reason passes. A bare `None` fails. [`CONTRIBUTING.md`](CONTRIBUTING.md) (section 2.5) already requires a headless case under `crates/renderide-test` for a drawing, shading, lighting, culling, skinning, or Resonite-parity change, and requires that the capture fail on the parent commit and pass with the change. The suite writes `diff.png` and `side_by_side.png` next to the capture ([`crates/renderide-test/src/scene_dsl/side_by_side.rs`](crates/renderide-test/src/scene_dsl/side_by_side.rs)). `ci.yml` uploads `target/renderide-test-out/**` from the headless suite. `run --bless` refuses to overwrite an existing golden unless `--force` is passed ([`crates/renderide-test/tests/cli_contract.rs`](crates/renderide-test/tests/cli_contract.rs)). Cases on the #216 quarantine list refuse bless even with `--force` ([`crates/renderide-test/src/scene_dsl/quarantine_216.rs`](crates/renderide-test/src/scene_dsl/quarantine_216.rs)).
 
@@ -91,6 +91,6 @@ The tree builds on a pinned toolchain, formatting and Clippy are clean, `unsafe`
 
 **Planned (P0-3).** A mutation and negative suite. No workflow, crate, or script for it is on `master`.
 
-**Planned.** `docs/ci/ratchet.toml` is the RSI ratchet loop. Another agent is adding that file in a separate pull request. The file is not on `master`. This document names the path and does not link it. Until it lands, `## Ratchet metrics moved` can say `None` plus a reason.
+**Planned.** `docs/ci/ratchet.toml` is the acyclic RSI monotonic quality ratchet (docs/RSI.md, separate PR). Another agent is adding that file in a separate pull request. The file is not on `master`. This document names the path and does not link it. Until it lands, `## Ratchet metrics moved` can say `None` plus a reason.
 
 **Gap.** `pr-body` fails its own workflow when the sections are wrong. Merge stays open until branch protection requires that job name. The place to add it is the `required` aggregator in #277, which is still open. Hooks can be skipped with `--no-verify`.
