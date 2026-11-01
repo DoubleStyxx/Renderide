@@ -58,6 +58,8 @@ Observable behaviour matches Yellow Dog Man Studios' MIT reference implementatio
 
 **Planned, after 7 November 2026.** Numeric per-shader behaviour assertions ported from the MIT sources. No file holds them yet. Port behaviour, not code, and keep the MIT attribution.
 
+**Manual Resonite session.** [`docs/testing/resonite-smoke.md`](docs/testing/resonite-smoke.md) is a checklist for one real Resonite process on a physical GPU. Scene goldens and the IPC roundtrip above stay the automated parity gates. The pass log in that file is the session history. The 2026-10-31 entry is an unverified informal report from the project owner and is not a measured pass.
+
 ## Experimentation
 
 A new or experimental path is behind a Cargo feature, an `[experimental]` setting that defaults off, or an opt-in suite group. The default path stays on the golden suite and, when renderer source changes, on the frame gate.
@@ -92,5 +94,7 @@ The tree builds on a pinned toolchain, formatting and Clippy are clean, `unsafe`
 **Planned (P0-3).** A mutation and negative suite. No workflow, crate, or script for it is on `master`.
 
 **Planned.** `docs/ci/ratchet.toml` is the acyclic RSI monotonic quality ratchet (docs/RSI.md, separate PR). Another agent is adding that file in a separate pull request. The file is not on `master`. This document names the path and does not link it. Until it lands, `## Ratchet metrics moved` can say `None` plus a reason.
+
+**Manual host smoke.** The same checklist, [`docs/testing/resonite-smoke.md`](docs/testing/resonite-smoke.md), is the repeatable real-GPU session with Resonite. It is not a CI job. The pass log there records the 2026-10-31 informal report. A later pass uses the checklist and the result template. That report is not a reliability measurement.
 
 **Gap.** `pr-body` fails its own workflow when the sections are wrong. Merge stays open until branch protection requires that job name. The place to add it is the `required` aggregator in #277, which is still open. Hooks can be skipped with `--no-verify`.
