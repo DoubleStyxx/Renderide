@@ -318,6 +318,7 @@ The current workflows are:
 - `codeql.yml` runs CodeQL analysis for GitHub Actions, C#, and Rust on pushes and pull requests that target `master`, plus a weekly schedule.
 - `release.yml` builds nightly or manually requested release artifacts from the newest green CI run on `master`.
 - `static.yml` deploys the static site to GitHub Pages when the site files change on `master` or when manually dispatched.
+- `mutants.yml` runs cargo-mutants 27.1.0 on `interprocess` and `renderide-shared` (shared-memory IPC, the MemoryPack contract, and `roundtrip_dispatch`). It is scheduled nightly, can be dispatched by hand, and also runs on pull requests that touch those crates or the workflow. The job is report-only: missed mutants are written to the job summary and uploaded as `mutants.out`, and they do not fail the check. It is not part of the required suite. Windows-only modules are excluded because the job runs on Ubuntu. The file list is `.cargo/mutants.toml`.
 
 The CI workflow triggers on push to `master`, on pull requests, and on manual dispatch, but push and pull-request runs are path-filtered to files that affect builds, tests, or generated artifacts.
 

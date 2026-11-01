@@ -1,0 +1,36 @@
+# cargo-mutants 27.1.0 scope for the IPC and shared-contract crates.
+#
+# `interprocess` is the Cloudtoid shared-memory queue.
+# `renderide-shared` is the Renderite shared contract: generated types and
+# `roundtrip_dispatch` in `src/shared.rs`, the MemoryPack implementation in
+# `src/packing`, and the host/renderer queues plus shared-memory views in
+# `src/ipc`.
+#
+# The scheduled job runs on ubuntu. Modules compiled only for `cfg(windows)`
+# are excluded: a mutant there does not change the Linux build, so it would
+# be reported as missed without testing the Windows backend. Unix shared
+# memory and the platform-neutral contract stay in scope.
+#
+# `cap_lints` keeps a denied rustc lint from turning a behavior mutant into
+# an unviable build. `--locked` matches the rest of CI.
+
+timeout_multiplier = 5.0
+minimum_test_timeout = 30
+cap_lints = true
+
+additional_cargo_args = ["--locked"]
+
+examine_globs = [
+  "crates/interprocess/src/**/*.rs",
+  "crates/renderide-shared/src/**/*.rs",
+]
+
+exclude_globs = [
+  "crates/interprocess/src/test_env.rs",
+  "crates/interprocess/src/naming.rs",
+  "crates/interprocess/src/windows_security.rs",
+  "crates/interprocess/src/memory/windows.rs",
+  "crates/interprocess/src/semaphore/win.rs",
+  "crates/renderide-shared/src/ipc/shared_memory/windows.rs",
+  "crates/renderide-shared/src/ipc/shared_memory/writer/windows.rs",
+]

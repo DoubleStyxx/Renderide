@@ -1,0 +1,119 @@
+# Report-only mutation testing for the shared-memory IPC crate and the
+# Renderite shared contract.
+#
+# Crates and modules (see .cargo/mutants.toml):
+# - crates/interprocess: Cloudtoid shared-memory queue (layout, ring, publisher,
+#   subscriber, unix memory and semaphores).
+# - crates/renderide-shared: generated Renderite contract and roundtrip_dispatch
+#   (src/shared.rs), MemoryPack (src/packing), and host/renderer IPC including
+#   shared-memory views (src/ipc, src/buffer.rs, src/wire_writer, src/custom_shader_ipc).
+#
+# Windows-only modules are excluded. This job runs on ubuntu, and a mutant in
+# cfg(windows) code does not change that build.
+#
+# Non-blocking for pull requests. This workflow is not a job in ci.yml and it is
+# not part of the `required` aggregator (open PR #277, docs/ci). bench-pr.yml is
+# the same kind of extra workflow: path-filtered on pull_request, not required.
+# A docs-only pull request does not start this workflow, so GitHub creates no
+# check. That is safe because branch protection does not require this check.
+# Missed mutants are listed in the job summary and do not fail the job.
+# schedule and workflow_dispatch are not path-filtered.
+#
+# No secrets. The toolchain action is pinned to the same SHA as ci.yml, with
+# toolchain "1.99.1" (rust-toolchain.toml). cargo-mutants is pinned to 27.1.0.
+name: Mutants
+
+"on":
+  schedule:
+    # 05:41 UTC. Offset from the 07:17 release nightly and from the top of the hour.
+    - cron: "41 5 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/mutants.yml"
+      - ".cargo/mutants.toml"
+      - "scripts/ci/mutants_summary.py"
+      - "scripts/ci/test_mutants_summary.py"
+      - "crates/interprocess/**"
+      - "crates/renderide-shared/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+
+# A second push must not cancel the run that recorded the previous head.
+# Before and after counts need both runs to finish.
+concurrency:
+  group: mutants-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  mutants:
+    name: cargo-mutants
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: "1.99.1"
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          cache-bin: "false"
+
+      - name: Restore cargo-mutants 27.1.0
+        id: mutants-bin
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/cargo-mutants
+          key: cargo-mutants-27.1.0-1
+
+      - name: Install cargo-mutants 27.1.0
+        if: steps.mutants-bin.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          cargo install cargo-mutants --version 27.1.0 --locked --root "${HOME}/.local/cargo-mutants"
+
+      - name: Check cargo-mutants version
+        run: |
+          set -euo pipefail
+          echo "${HOME}/.local/cargo-mutants/bin" >> "${GITHUB_PATH}"
+          export PATH="${HOME}/.local/cargo-mutants/bin:${PATH}"
+          test -x "${HOME}/.local/cargo-mutants/bin/cargo-mutants"
+          version="$(cargo mutants --version)"
+          printf '%s\n' "${version}"
+          printf '%s\n' "${version}" | grep -F 'cargo-mutants 27.1.0'
+
+      - name: Run cargo-mutants
+        id: run
+        continue-on-error: true
+        timeout-minutes: 330
+        run: |
+          set -euo pipefail
+          # Two mutant jobs. The runner has 4 cores; each cargo test also
+          # compiles. The jobserver still caps rustc across those jobs.
+          cargo mutants --jobs 2 --no-times
+
+      - name: Summarize missed mutants
+        if: always()
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/mutants_summary.py --mutants-out mutants.out
+
+      - name: Upload mutants.out
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mutants-out
+          path: mutants.out
+          if-no-files-found: warn
+          retention-days: 14
