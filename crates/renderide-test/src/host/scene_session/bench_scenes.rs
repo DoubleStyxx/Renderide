@@ -19,7 +19,7 @@
 //! Pass order matches the Unity/Renderide forward graph (shadows → depth prepass → opaque →
 //! transparent → `hi_z_build`); see `CONTRIBUTING.md` § passes and Renderite.Unity
 //! `CameraPortal`/`CameraController` shadow + forward opaque staging
-//! (`/workspace/reference/Renderite` @ 7ccfd2ee).
+//! (https://github.com/Yellow-Dog-Man/Renderite @ `7ccfd2ee7c28648cb2e46dd4f52f51613a848071`).
 
 use glam::{Quat, Vec3};
 use renderide_shared::shared::{CameraClearMode, RenderBoundingBox, ShadowCastMode, ShadowType};
@@ -316,7 +316,8 @@ const OCCLUSION_VISIBLE: i32 = 16;
 const OCCLUSION_TRANSFORM_BASE: i32 = 10;
 
 /// Large near wall plus 4,096 spheres behind it and 16 visible accents. After warmup the
-/// previous-frame Hi-Z pyramid should cull most of the hidden grid; `draw_calls` is the signal.
+/// previous-frame Hi-Z pyramid should cull most of the hidden grid; `draw_calls` (submitted vs
+/// drawn) is the signal. The wall is sized to cover the grid's XY span so most draws are culled.
 pub(super) fn occlusion_heavy_setup() -> SceneSetup {
     let meshes = vec![mesh_asset(
         0,
@@ -344,12 +345,14 @@ pub(super) fn occlusion_heavy_setup() -> SceneSetup {
         sorting_order: 0,
         shadow_cast_mode: ShadowCastMode::Off,
     });
-    // Near occluder wall covering the central FOV (writes opaque depth before Hi-Z build).
+    // Near occluder wall covering the hidden grid FOV (writes opaque depth before Hi-Z build).
+    // Wide/tall enough that most of the 64×64 behind-wall grid is occluded after warmup;
+    // the prior 18×10 wall left ~3382/4114 draws live (only ~732 culled).
     renderables.push(SceneRenderable {
         transform_id: 1,
         pose: transform(
             Vec3::new(0.0, 2.0, 0.0),
-            Vec3::new(18.0, 10.0, 0.4),
+            Vec3::new(52.0, 32.0, 0.5),
             Quat::IDENTITY,
         ),
         mesh_asset_id: scene_mesh_id(0),
