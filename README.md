@@ -276,15 +276,15 @@ Linux, macOS, and Windows are all tier-1 targets and exercised in CI ([`.github/
 
 Contributions are welcome. The workspace builds with the standard Cargo commands listed above; lints (`cargo clippy --all-targets`, with feature coverage matching CI) and formatting (`cargo fmt`, plus `taplo fmt` when editing `Cargo.toml`) are expected to be clean before opening a pull request, and CI runs the same checks across all three platforms.
 
-Read [`CONTRIBUTING.md`](CONTRIBUTING.md) to learn how to get started. AI use is covered in [`SI_POLICY.md`](SI_POLICY.md).
+Read [`CONTRIBUTING.md`](CONTRIBUTING.md) to learn how to get started. AI use is covered in [`RSI_POLICY.md`](RSI_POLICY.md).
 
 ## Whitepaper
 
 For a longer overview of the renderer architecture and motivation, see the [Renderide whitepaper](renderide_whitepaper/renderide_whitepaper.pdf).
 
-## SI Policy
+## RSI Policy
 
-How AI is used to build Renderide, what ships in it, and the rules for AI-assisted contributions are in [`SI_POLICY.md`](SI_POLICY.md).
+How AI is used to build Renderide, what ships in it, and the rules for AI-assisted contributions are in [`RSI_POLICY.md`](RSI_POLICY.md). RSI means recursive self-improvement, done as an acyclic, monotonic quality ratchet.
 
 ## License
 

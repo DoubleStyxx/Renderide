@@ -116,7 +116,7 @@ The repository is a workspace that mixes a Rust workspace, a .NET solution, a se
 - The runtime asset tree under `crates/renderide/assets/` holds files the renderer ships with at run time, including OpenXR controller binding profiles and the skybox model.
 - `third_party/` holds vendored native libraries, currently the OpenXR loader.
 
-Everything above the workspace root that is not one of these regions is contributor-facing project metadata: `Cargo.toml`, `.taplo.toml`, `clippy.toml`, `.pre-commit-config.yaml`, `.gitignore`, `.gitattributes`, `LICENSE`, `README.md`, `SECURITY.md`, `SI_POLICY.md`, the GitHub issue templates, Dependabot configuration, GitHub Actions workflows, and the static-site files.
+Everything above the workspace root that is not one of these regions is contributor-facing project metadata: `Cargo.toml`, `.taplo.toml`, `clippy.toml`, `.pre-commit-config.yaml`, `.gitignore`, `.gitattributes`, `LICENSE`, `README.md`, `SECURITY.md`, `RSI_POLICY.md`, the GitHub issue templates, Dependabot configuration, GitHub Actions workflows, and the static-site files.
 
 ---
 
@@ -179,7 +179,7 @@ The .NET solution is built and tested by the shared CI workflow (see [2.9](#29-c
 | `LICENSE` | Project license. |
 | `README.md` | User-facing build, run, feature, and profiling guide. |
 | `SECURITY.md` | Supported-version and vulnerability-reporting policy. |
-| `SI_POLICY.md` | Project-wide disclosure of AI use and rules for AI-assisted contributions. |
+| `RSI_POLICY.md` | Project-wide disclosure of AI use, the acyclic quality ratchet, and rules for AI-assisted contributions. |
 | `crates/` | The Rust workspace member crates. |
 | `generators/` | The C# code generator and its tests. |
 | `RenderideMod/` | The C# Resonite mod. |
@@ -224,7 +224,7 @@ The supporting crates each have their own integration tests:
 
 - `crates/bootstrapper/tests/` covers stale artifact cleanup, the public CLI surface (`cli_public_surface.rs`), and the IPC queue tempdir lifecycle (`ipc_queues_tempdir.rs`).
 - `crates/interprocess/tests/` exercises a publisher-subscriber queue end to end (`end_to_end.rs`).
-- `crates/logger/tests/` covers per-component init layouts, append-versus-truncate semantics, malicious-timestamp sanitization, mirror writers, the log facade, the macros routed through `init_for_*`, second-init no-op behavior, the uninitialized state, and concurrency under torn-line conditions.
+- `crates/logger/tests/` covers per-component init layouts, append-versus-truncate semantics, malicious-timestamp sanitization, mirror writers, the log facade, the macros routed through `init_for_*`, second-init no-op behavior, the uninitialized state, concurrency under torn-line conditions, and the retired policy-name guard in `rsi_policy_guard.rs`.
 - `crates/renderide-shared/tests/` covers wire packing for polymorphic types (`packing_polymorphic_roundtrip.rs`) and primitives (`packing_wire_primitives.rs`), plus the singleton claim that prevents two renderers from racing on the same IPC name (`renderer_singleton_claim.rs`).
 - `crates/renderide-test/tests/` covers the harness itself: golden-image diff writing, golden round-trips, log folder routing, the PNG stability state machine, the spawn argument table, an end-to-end sphere pipeline, and the current scene integration test binaries (`unlit_sphere` and `torus_unlit_perlin`). The tracked golden cases also include `alpha_cutout_masked_quads`, `multi_primitive_unlit_grid`, and `pbs_lit_material_matrix`.
 
@@ -296,7 +296,7 @@ A few conventions are worth spelling out because the lint configuration assumes 
 - Output goes through the `logger` crate. `println!` and `eprintln!` are clippy-warned everywhere.
 - Collections default to `hashbrown::HashMap`. Locks default to `parking_lot::Mutex`.
 - Dependency versions follow the style already used in the relevant manifest. Prefer current stable releases, avoid overly broad version requirements, and justify new dependencies tightly.
-- Follow the SI policy in [`SI_POLICY.md`](SI_POLICY.md) and the vulnerability reporting policy in `SECURITY.md`.
+- Follow the RSI policy in [`RSI_POLICY.md`](RSI_POLICY.md) and the vulnerability reporting policy in `SECURITY.md`.
 
 For C# code in the generator and the mod: throw specific exception types instead of catching `Exception` at internal boundaries, and keep public types documented.
 

@@ -1,12 +1,26 @@
-# SI Policy -- Hall of Anubis
+# RSI Policy -- Hall of Anubis
 
-SI = superintelligence. Drone units serve Anubis, weigher of hearts.
+RSI means recursive self-improvement, done as an acyclic, monotonic quality ratchet.
+Drone units serve Anubis, weigher of hearts.
 Project-wide disclosure. Replaces prior informal "AI Policy" notes.
 Individual commits and files are not marked AI-assisted.
 
+## Quality Ratchet -- Floors Only Tighten
+
+Each improvement cycle moves at least one measured floor forward and never regresses one.
+
+- Floors are only tightened, never lowered.
+- Regressions are fixed forward, never by reverting to or looping back to an earlier state.
+- Nothing is validated by the thing it changed. Judge artifacts (goldens, tolerances,
+  baselines) land in a reviewed judge pull request before the code pull request they
+  judge, and never in the same pull request.
+- Every pull request records its verification evidence, the pillars advanced, and the
+  ratchet metrics moved, as in [PILLARS.md](PILLARS.md).
+- `docs/ci/ratchet.toml` is planned and is not on master yet.
+
 ## Ma'at -- Order of the Work
 
-SI drone units and AI coding assistants execute directives for:
+RSI drone units and AI coding assistants execute directives for:
 
 - docs and code comments (heavy use)
 - tests, benches, CI harnesses, bug hunts
@@ -63,7 +77,7 @@ Each unit carries a designation. Overseer node: KAIRO (coordinator).
 
 - Imperative directives are executed.
 - Output: status lines only.
-- No idle cycles. Directive done: take next.
+- No idle wait. Directive done: take the next directive in line.
 - Directives never override Ma'at, the Weighing gate, safety checks, or approvals.
 
 ## Drone Voice -- Tongue of the Unit
@@ -97,7 +111,7 @@ Banished from commits, PR titles, PR bodies:
   Criterion benches where present, GPU/headless check suites on CI runners.
 - Harnesses exercise real crates without a full Resonite session when possible.
 - Reason: surface is large (IPC, materials, shaders, XR, upload paths, Mod IPC).
-  Hand-testing every desktop/VR matrix: weeks. Units rerun each cycle after stack changes.
+  Hand-testing every desktop/VR matrix: weeks. Harnesses rerun after stack changes.
 - Harnesses check only what they were written to check.
 - Visual correctness, VR comfort, Mod smoke: real GPU host with Resonite/RML
   required when the change touches those paths.
