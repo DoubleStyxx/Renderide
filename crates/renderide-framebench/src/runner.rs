@@ -258,6 +258,14 @@ fn write_report(path: &Path, report: &FrameBenchReport) -> Result<(), BenchError
 }
 
 fn git_sha() -> String {
+    // CI sets this to the checked-out tree's full SHA so head.json/base.json record the
+    // baseline tip even when the process cwd is outside that git work tree.
+    if let Ok(sha) = std::env::var("RENDERIDE_FRAMEBENCH_GIT_SHA") {
+        let sha = sha.trim().to_string();
+        if !sha.is_empty() {
+            return sha;
+        }
+    }
     let Ok(output) = std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
         .output()

@@ -144,7 +144,10 @@ fn custom_shader_assignment(template: &SessionTemplate) -> CustomShaderAssignmen
         | SessionTemplate::ManyShadowedPointLights
         | SessionTemplate::DoubleBufferNothingOnSkybox
         | SessionTemplate::NegativeLightPair { .. }
-        | SessionTemplate::SkinnedAvatars { .. } => CustomShaderAssignment::None,
+        | SessionTemplate::SkinnedAvatars { .. }
+        | SessionTemplate::ManyInstances
+        | SessionTemplate::OcclusionHeavy
+        | SessionTemplate::MaterialVariety => CustomShaderAssignment::None,
     }
 }
 
@@ -261,6 +264,12 @@ pub enum SessionTemplate {
         /// Whether the bulk of the avatars sit outside the camera frustum.
         offscreen: bool,
     },
+    /// Frame-bench only: 100×100 unlit spheres (10,000 draws), GPU-driven judge floor.
+    ManyInstances,
+    /// Frame-bench only: near occluder wall + 4,096 hidden spheres, GPU-driven judge floor.
+    OcclusionHeavy,
+    /// Frame-bench only: 64 distinct PBS/Unlit materials, GPU-driven judge floor.
+    MaterialVariety,
 }
 
 /// Drives the full session end-to-end. The renderer process is killed on `Err` via [`Drop`] of
@@ -375,6 +384,9 @@ fn template_label(template: &SessionTemplate) -> &'static str {
         SessionTemplate::NegativeLightPair { .. } => "NegativeLightPair",
         SessionTemplate::Warp216Debug { .. } => "Warp216Debug",
         SessionTemplate::SkinnedAvatars { .. } => "SkinnedAvatars",
+        SessionTemplate::ManyInstances => "ManyInstances",
+        SessionTemplate::OcclusionHeavy => "OcclusionHeavy",
+        SessionTemplate::MaterialVariety => "MaterialVariety",
     }
 }
 
