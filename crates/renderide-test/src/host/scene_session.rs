@@ -119,7 +119,7 @@ pub(crate) fn material_draws(template: SessionTemplate) -> MaterialDraws {
 /// Every [`SessionTemplate`] is named. Do not use `_`: a new template that
 /// replaces its placeholder would keep that placeholder and look covered.
 /// A template that draws the shader it uploads joins the `None` group.
-/// #284 adds one line there: `| SessionTemplate::PbsSpecularPremultiply`.
+/// The specular premultiply and opaque templates join the non-replacing group.
 fn custom_shader_assignment(template: &SessionTemplate) -> CustomShaderAssignment {
     match template {
         SessionTemplate::CustomShaderPropertyUpdate => CustomShaderAssignment::PropertyUpdate,
@@ -130,6 +130,8 @@ fn custom_shader_assignment(template: &SessionTemplate) -> CustomShaderAssignmen
         | SessionTemplate::MultiPrimitiveUnlitGrid { .. }
         | SessionTemplate::PbsLitMaterialMatrix
         | SessionTemplate::PbsMetallicPremultiply
+        | SessionTemplate::PbsSpecularPremultiply
+        | SessionTemplate::PbsSpecularOpaque
         | SessionTemplate::ManyStaticMeshes
         | SessionTemplate::LightsShadows
         | SessionTemplate::AlphaCutoutMaskedQuads { .. }

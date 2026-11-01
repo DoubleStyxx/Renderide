@@ -31,7 +31,7 @@ const ALLOWLIST_FILE: &str = "material_coverage_allowlist.toml";
 ///
 /// The allowlist may only shrink. The only allowed edit to this constant is lowering
 /// it in the same change that deletes an entry. Raising it hides a new uncovered root.
-const MAX_ALLOWLIST_ROOTS: usize = 145;
+const MAX_ALLOWLIST_ROOTS: usize = 144;
 
 const DOC_RELATIVE: &str = "../../docs/testing/material-coverage.md";
 
