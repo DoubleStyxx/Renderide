@@ -121,7 +121,7 @@ unsafe fn write_loop_handle(handle: HANDLE, mut data: &[u8]) -> &[u8] {
                 handle,
                 data.as_ptr(),
                 len,
-                &mut written,
+                &raw mut written,
                 core::ptr::null_mut(),
             )
         };

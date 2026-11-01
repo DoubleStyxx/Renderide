@@ -130,7 +130,9 @@ fn current_exe_span() -> Option<(u64, u64)> {
     }
     // SAFETY: `base` is the mapped image of this executable. `pe_image_span` reads
     // only the DOS and NT headers, and only after the signatures check out.
-    unsafe { pe_image_span(base as usize) }
+    let (lo, hi) = unsafe { pe_image_span(base as usize) }?;
+    let anchor = module_anchor_addr() as u64;
+    (lo <= anchor && anchor < hi).then_some((lo, hi))
 }
 
 /// Reads `SizeOfImage` from a mapped PE image.
