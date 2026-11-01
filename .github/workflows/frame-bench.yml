@@ -138,7 +138,9 @@ jobs:
           path: base
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: "1.99.1"
 
       - name: Pin thread count
         env:
@@ -167,6 +169,7 @@ jobs:
           INPUT_RESOLUTION: ${{ inputs.resolution }}
           INPUT_CONFIRM_ROUNDS: ${{ inputs.confirm_rounds }}
           BASE_REF: ${{ inputs.base_ref }}
+          HEAD_REF: ${{ inputs.head_ref }}
         run: |
           set -euo pipefail
           threads="$INPUT_THREADS"
@@ -272,17 +275,22 @@ jobs:
           # Each tree is measured with ITS OWN renderide-framebench binary. Reports from different
           # trees are only ever compared through the report JSON (schema 1 or 2; the gate accepts
           # both, in any mix). The gate script comes from the dispatching ref.
-          # usage: run_tree <target dir> <out json> [scenario ...]
+          # usage: run_tree <tree dir> <target dir> <out json> [scenario ...]
+          # RENDERIDE_FRAMEBENCH_GIT_SHA stamps the checked-out tip into head.json/base.json.
           run_tree() {
-            local target="$1"
-            local report="$2"
-            shift 2
+            local tree="$1"
+            local target="$2"
+            local report="$3"
+            shift 3
             local args=()
             local scenario
+            local tree_sha
+            tree_sha="$(git -C "$tree" rev-parse HEAD)"
             for scenario in "$@"; do
               args+=(--scenario "$scenario")
             done
-            taskset -c "$cpuset" \
+            RENDERIDE_FRAMEBENCH_GIT_SHA="$tree_sha" \
+              taskset -c "$cpuset" \
               "$target/release/renderide-framebench" run \
               --renderer "$target/release/renderide-renderer" \
               --resolution "$resolution" \
@@ -319,8 +327,15 @@ jobs:
             echo "$1 tree defines $count framebench scenarios" >&2
           }
 
+          head_sha="$(git -C head rev-parse HEAD)"
+          base_sha="$(git -C base rev-parse HEAD)"
           {
             echo "# frame-bench-lavapipe"
+            echo
+            echo "head_git: \`$head_sha\`"
+            echo "base_git: \`$base_sha\`"
+            echo "head_ref_input: \`${HEAD_REF:-}\`"
+            echo "base_ref_input: \`${BASE_REF:-}\`"
             echo
           } > "$summary"
 
@@ -350,7 +365,7 @@ jobs:
             } | tee -a "$summary"
             finish 1
           fi
-          run_tree "$RUNNER_TEMP/target-head" "$out/head.json" "${head_scenarios[@]}"
+          run_tree "head" "$RUNNER_TEMP/target-head" "$out/head.json" "${head_scenarios[@]}"
 
           set +e
           build_tree "base" "$RUNNER_TEMP/target-base"
@@ -391,7 +406,7 @@ jobs:
             } | tee -a "$summary"
             finish 0
           fi
-          run_tree "$RUNNER_TEMP/target-base" "$out/base.json" "${base_scenarios[@]}"
+          run_tree "base" "$RUNNER_TEMP/target-base" "$out/base.json" "${base_scenarios[@]}"
 
           {
             echo "lavapipe via VK_ICD_FILENAMES=$VK_ICD_FILENAMES"
@@ -471,3 +486,15 @@ jobs:
             fi
           } >> "$summary"
           finish "$gate_status"
+
+      # JSON reports + summary for judge baselines (dispatch base_ref=head_ref=<sha> with the
+      # desired --scenarios to record a single-tree lavapipe baseline). Artifact name is stable
+      # so PR bodies can cite it; path is $RUNNER_TEMP/framebench written by Measure and compare.
+      - name: Upload framebench reports
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@v7
+        with:
+          name: frame-bench-reports
+          path: ${{ runner.temp }}/framebench/
+          if-no-files-found: warn
+          retention-days: 30

@@ -10,7 +10,7 @@ pub const DEFAULT_SCENARIOS: [&str; 2] = ["unlit_sphere", "multi_primitive_unlit
 
 /// Extra scenarios selectable with `--scenario`. They are not in the default CI gate set.
 #[cfg(test)]
-const EXTRA_SCENARIOS: [&str; 7] = [
+const EXTRA_SCENARIOS: [&str; 10] = [
     "pbs_lit_material_matrix",
     "many_static_meshes",
     "lights_shadows",
@@ -18,6 +18,9 @@ const EXTRA_SCENARIOS: [&str; 7] = [
     "onscreen_skinned_avatars",
     "secondary_camera_copy",
     "secondary_camera_double_buffer",
+    "many_instances",
+    "occlusion_heavy",
+    "material_variety",
 ];
 
 /// Transport name recorded in every report. The socket is not implemented.
@@ -102,6 +105,27 @@ const SECONDARY_CAMERA_DOUBLE_BUFFER: Scenario = Scenario {
     camera_rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
 };
 
+/// 100×100 unlit spheres (10,000 draws). GPU-driven judge floor; opt-in only.
+const MANY_INSTANCES: Scenario = Scenario {
+    name: "many_instances",
+    camera_position: [0.0, 0.0, -55.0],
+    camera_rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+};
+
+/// Near occluder wall with a dense grid behind it. GPU-driven / Hi-Z judge floor; opt-in only.
+const OCCLUSION_HEAVY: Scenario = Scenario {
+    name: "occlusion_heavy",
+    camera_position: [0.0, 3.0, -18.0],
+    camera_rotation_xyzw: [0.059_964, 0.0, 0.0, 0.998_200_5],
+};
+
+/// 64 distinct PBS + Unlit materials. GPU-driven material/pipeline judge floor; opt-in only.
+const MATERIAL_VARIETY: Scenario = Scenario {
+    name: "material_variety",
+    camera_position: [0.0, 0.0, -14.0],
+    camera_rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+};
+
 /// Thirty shadowed point lights. Opt-in: absent from [`DEFAULT_SCENARIOS`] so the default CI
 /// window stays on the unshadowed scenes. The host raises `per_pixel_lights` to 32 and asks for
 /// 128-texel shadow faces.
@@ -124,6 +148,9 @@ pub fn by_name(name: &str) -> Option<&'static Scenario> {
         "onscreen_skinned_avatars" => Some(&ONSCREEN_SKINNED_AVATARS),
         "secondary_camera_copy" => Some(&SECONDARY_CAMERA_COPY),
         "secondary_camera_double_buffer" => Some(&SECONDARY_CAMERA_DOUBLE_BUFFER),
+        "many_instances" => Some(&MANY_INSTANCES),
+        "occlusion_heavy" => Some(&OCCLUSION_HEAVY),
+        "material_variety" => Some(&MATERIAL_VARIETY),
         _ => None,
     }
 }
@@ -231,5 +258,14 @@ mod tests {
     fn many_shadowed_point_lights_is_opt_in() {
         assert!(by_name("many_shadowed_point_lights").is_some());
         assert!(!DEFAULT_SCENARIOS.contains(&"many_shadowed_point_lights"));
+    }
+
+    #[test]
+    fn gpu_driven_judge_scenes_are_opt_in() {
+        for name in ["many_instances", "occlusion_heavy", "material_variety"] {
+            assert!(by_name(name).is_some(), "{name}");
+            assert!(!DEFAULT_SCENARIOS.contains(&name));
+            assert!(EXTRA_SCENARIOS.contains(&name), "{name}");
+        }
     }
 }
