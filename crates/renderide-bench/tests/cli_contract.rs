@@ -38,7 +38,19 @@ fn list_json_parses_and_covers_catalog() {
     let cpu = doc["cpu"].as_array().expect("cpu array");
     let frame = doc["frame"].as_array().expect("frame array");
     assert_eq!(cpu.len(), 44, "{doc}");
-    assert_eq!(frame.len(), 10, "{doc}");
+    assert_eq!(frame.len(), 13, "{doc}");
+    assert!(
+        frame.iter().any(|v| v.as_str() == Some("many_instances")),
+        "{doc}"
+    );
+    assert!(
+        frame.iter().any(|v| v.as_str() == Some("occlusion_heavy")),
+        "{doc}"
+    );
+    assert!(
+        frame.iter().any(|v| v.as_str() == Some("material_variety")),
+        "{doc}"
+    );
     assert!(
         cpu.iter()
             .any(|v| v.as_str() == Some("culling/homogeneous_clip_aabb")),
