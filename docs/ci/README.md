@@ -1,6 +1,6 @@
 # Required CI check
 
-`ci.yml` reports one status check named `required` on every pull request and every push to `master`. That is the check to require before merging. It passes only when every applicable suite job succeeded, or when the path detector skipped those jobs because the diff does not touch them. It fails when any covered job failed or was cancelled, and it fails when a covered job was skipped for any reason other than that path detector.
+`ci.yml` reports one status check named `required` on every pull request and every push to `master`. That is the check to require before merging. It passes only when every applicable suite job succeeded, or when the path detector skipped those jobs because the diff does not touch them, and only when `policy-guard` succeeded. It fails when any covered job failed or was cancelled, and it fails when a covered job was skipped for any reason other than that path detector. It also fails when `policy-guard` did not succeed. That job is not path-filtered.
 
 CodeQL (`codeql.yml`) and the bench-pr workflow (`bench-pr.yml`) are not part of `required`.
 
@@ -16,11 +16,12 @@ The trigger is `pull_request` (every branch), `push` to `master`, and `workflow_
 
 | Job | Check name | When it runs |
 | --- | --- | --- |
+| `policy-guard` | `policy-guard` | Always, including a docs-only diff. Runs the retired policy-name test. |
 | `changes` | `changes` | Always. Decides `suites=true` or `suites=false`. |
 | `rust` | `Rust / ubuntu-24.04`, `Rust / windows-latest`, `Rust / macos-latest` | `suites=true` |
 | `dotnet` | `.NET / ubuntu-latest`, `.NET / windows-latest`, `.NET / macos-latest` | `suites=true` |
 | `macos-capacity` | `macOS capacity` | `suites=true`, including after the Rust matrix fails or is cancelled |
-| `required` | `required` | As soon as `changes` finishes. It polls the suite jobs until they have a conclusion. |
+| `required` | `required` | As soon as `changes` and `policy-guard` finish. It polls the suite jobs until they have a conclusion, then fails unless `policy-guard` succeeded. |
 
 No existing check name was renamed. `changes` and `required` are new.
 
@@ -28,11 +29,11 @@ The Rust job is still the suite that runs lavapipe goldens on `ubuntu-24.04`, WA
 
 `macos-capacity` used to declare `if: always()` with `needs: rust`. The workflow only started when the old path filter matched, so the note never ran for a docs-only diff. It now also requires `suites=true`, so a docs-only pull request does not start it. When the suites do run, `always()` still lets it explain a Rust cancellation.
 
-On a docs-only diff, `changes` and `required` are the only jobs that take a runner. `required` finishes as soon as the skipped jobs are skipped. It does not stay pending.
+On a docs-only diff, `changes`, `policy-guard`, and `required` are the jobs that take a runner. The suite jobs are skipped. `required` finishes as soon as those skipped jobs are skipped, and it fails if `policy-guard` did not succeed. It does not stay pending.
 
 While a suite applies, `required` stays in progress until that suite finishes. That wait is the suite, not a missing check. A diff that cannot be read sets `suites=true`, so the suites run instead of being skipped.
 
-`required` does not list the suite jobs in `needs`. If it did, a concurrency cancellation would complete the workflow run before `required` was created, and the check would be missing. The job starts after `changes` and polls the run. Its step uses `if: always()`, so a cancellation that arrives while the poll is running does not skip the conclusion. The poll exits 1 when a covered job is `cancelled`. The job timeout is 360 minutes; a suite that is still unfinished then fails the gate closed.
+`required` needs `changes` and `policy-guard`. It does not list the suite jobs in `needs`. If it did, a concurrency cancellation would complete the workflow run before `required` was created, and the check would be missing. The job starts after `changes` and `policy-guard` finish and polls the run. Its poll step uses `if: always()`, so a cancellation that arrives while the poll is running does not skip the conclusion. The poll exits 1 when a covered job is `cancelled`. The job timeout is 360 minutes; a suite that is still unfinished then fails the gate closed. A later step exits 1 unless `policy-guard` succeeded. The poll script does not read that job: `required_check.py` only aggregates `rust`, `dotnet`, and `macos-capacity`.
 
 ## How a result is judged
 
@@ -45,7 +46,7 @@ While a suite applies, `required` stays in progress until that suite finishes. T
 | `true` | `success` for every covered job | success |
 | `true` | `failure`, `cancelled`, or `skipped` | failure |
 
-`skipped` is a path skip only when `changes` succeeded and published `suites=false`. When `suites=true`, `skipped` means an upstream job failed or was cancelled and GitHub did not run the dependent job. That fails the gate.
+`skipped` is a path skip only when `changes` succeeded and published `suites=false`. When `suites=true`, `skipped` means an upstream job failed or was cancelled and GitHub did not run the dependent job. That fails the gate. The table is the suite poll. `policy-guard` is separate: a docs-only diff can skip the suites and still fail `required` when that job does not succeed.
 
 `workflow_dispatch`, a push whose `before` SHA is missing or all zeros, an unrecognized event, and a `git diff` that fails all publish `suites=true`.
 
