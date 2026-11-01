@@ -413,11 +413,36 @@ pub fn build_plan(draws: &[WorldMeshDrawItem], supports_base_instance: bool) -> 
 }
 
 /// Builds a per-view [`InstancePlan`] using the active shader permutation.
+///
+/// Passes no host instancing allowlist. [`build_plan_for_shader_with_instancing_allowlist`]
+/// with `instancing_enabled = None` is the same plan.
 pub fn build_plan_for_shader(
     draws: &[WorldMeshDrawItem],
     supports_base_instance: bool,
     shader_perm: ShaderPermutation,
 ) -> InstancePlan {
+    build_plan_for_shader_with_instancing_allowlist(
+        draws,
+        supports_base_instance,
+        shader_perm,
+        None,
+    )
+}
+
+/// Builds a per-view [`InstancePlan`] with an optional host instancing allowlist.
+///
+/// `instancing_enabled` is the value stored from a material `SetInstancing` row.
+/// `None` means that integer was not recorded. `Some(false)` is not an eligibility
+/// input yet: every arm keeps the device `supports_base_instance` bit the heuristic
+/// already uses. G0a changes the `Some(false)` arm so those draws stay uninstanced.
+pub fn build_plan_for_shader_with_instancing_allowlist(
+    draws: &[WorldMeshDrawItem],
+    supports_base_instance: bool,
+    shader_perm: ShaderPermutation,
+    instancing_enabled: Option<bool>,
+) -> InstancePlan {
+    let supports_base_instance =
+        instancing_allowlist_keeps_device_capability(supports_base_instance, instancing_enabled);
     profiling::scope!("mesh::build_plan");
     if draws.is_empty() {
         return InstancePlan::default();
@@ -711,6 +736,21 @@ fn merge_submission_group_chunks(
     merged
 }
 
+/// Returns the device base-instance bit unchanged.
+///
+/// The host `SetInstancing` integer is not an eligibility input yet, so `None`,
+/// `Some(true)`, and `Some(false)` all keep `supports_base_instance`.
+fn instancing_allowlist_keeps_device_capability(
+    supports_base_instance: bool,
+    instancing_enabled: Option<bool>,
+) -> bool {
+    match instancing_enabled {
+        None => supports_base_instance,
+        Some(true) => supports_base_instance,
+        Some(false) => supports_base_instance,
+    }
+}
+
 fn debug_assert_plan_group_order(plan: &InstancePlan) {
     for phase in WorldMeshPhase::ALL {
         debug_assert!(groups_are_monotonic(plan.phase(phase)));
@@ -723,5 +763,7 @@ fn groups_are_monotonic(groups: &[DrawGroup]) -> bool {
         .all(|w| w[0].representative_draw_idx <= w[1].representative_draw_idx)
 }
 
+#[cfg(test)]
+mod set_instancing_judge;
 #[cfg(test)]
 mod tests;
