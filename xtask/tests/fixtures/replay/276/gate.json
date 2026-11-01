@@ -1,0 +1,47 @@
+{
+  "schema": "frame-bench-gate/1",
+  "mode": "confirm",
+  "flag_threshold": 5.0,
+  "fail_threshold": 10.0,
+  "alpha": 0.05,
+  "abs_floor_ms": 0.0,
+  "base_drift_pct_threshold": 15.0,
+  "confirm_round": 1,
+  "rows": [
+    {
+      "scenario": "multi_primitive_unlit",
+      "base": 0.24630655,
+      "head": 0.3270729,
+      "delta_pct": 32.790987490994446,
+      "p_value": 1.5318321168365954e-09,
+      "n_base": 24,
+      "n_head": 24,
+      "confirm_delta_pct": 31.845515759240378,
+      "confirm_p": 1.8292276769485504e-05,
+      "confirm_n_base": 12,
+      "confirm_n_head": 12,
+      "base_drift_pct": 1.4886165783680532,
+      "confirm_round": 1,
+      "deciding_round": 1,
+      "status": "FAIL (confirm-only)"
+    },
+    {
+      "scenario": "unlit_sphere",
+      "base": 0.211169375,
+      "head": 0.2892859,
+      "delta_pct": 36.992355070426285,
+      "p_value": 1.5318321168365954e-09,
+      "n_base": 24,
+      "n_head": 24,
+      "confirm_delta_pct": 35.76458482037895,
+      "confirm_p": 1.8292276769485504e-05,
+      "confirm_n_base": 12,
+      "confirm_n_head": 12,
+      "base_drift_pct": 1.1667054011974927,
+      "confirm_round": 1,
+      "deciding_round": 1,
+      "status": "FAIL (confirm-only)"
+    }
+  ],
+  "exit_code": 1
+}

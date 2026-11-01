@@ -1,0 +1,29 @@
+{
+  "confirm_round": 1,
+  "rows": [
+    {
+      "scenario": "multi_primitive_unlit",
+      "status": "FAIL (confirm-only)",
+      "base_drift_pct": 1.49,
+      "confirm_round": 1,
+      "deciding_round": 1,
+      "confirm_delta_pct": 31.85
+    },
+    {
+      "scenario": "unlit_sphere",
+      "status": "FAIL (confirm-only)",
+      "base_drift_pct": 1.17,
+      "confirm_round": 1,
+      "deciding_round": 1,
+      "confirm_delta_pct": 35.76
+    }
+  ],
+  "gate_action": "fail",
+  "verdict_reason": "multi_primitive_unlit: confirm-only FAIL (no drift)",
+  "deciding_round": 1,
+  "exit_code": 1,
+  "hit": [
+    "multi_primitive_unlit",
+    "unlit_sphere"
+  ]
+}

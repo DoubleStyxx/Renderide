@@ -31,6 +31,8 @@ name: Bench PR
       - "scripts/ci/bench_pr_merge_confirm.py"
       - "scripts/ci/bench_pr_force_unstable.py"
       - "scripts/ci/bench_pr_echo_verdict.py"
+      - "xtask/**"
+      - ".cargo/**"
       - ".github/workflows/bench-pr.yml"
       - ".github/actions/lavapipe/**"
 
@@ -448,6 +450,49 @@ jobs:
           fi
           break
           done
+
+          # xtask shadow port (non-blocking). Python gate.json remains authoritative.
+          if [[ -d "$GITHUB_WORKSPACE/head/xtask" && -f "$out/gate.json" ]]; then
+            echo "::group::xtask shadow-diff (informational)"
+            set +e
+            rust_json="$out/gate.xtask.json"
+            if [[ -f "$out/gate-confirm1.json" ]]; then
+              shadow_args=(bench-gate-shadow-diff --compare merge --rerun-rust
+                --python-json "$out/gate.json" --rust-json "$rust_json"
+                --merge-gate "$out/gate-confirm1.json")
+              [[ -f "$out/gate-confirm2.json" ]] && shadow_args+=(--merge-gate "$out/gate-confirm2.json")
+              [[ -f "$out/gate-confirm3.json" ]] && shadow_args+=(--merge-gate "$out/gate-confirm3.json")
+              [[ "${after_rerun:-0}" -eq 1 ]] && shadow_args+=(--after-rerun)
+            else
+              shadow_args=(bench-gate-shadow-diff --compare gate --rerun-rust
+                --python-json "$out/gate.json" --rust-json "$rust_json"
+                --base "$out/base-a.json" --base "$out/base-b.json"
+                --head "$out/head-a.json" --head "$out/head-b.json"
+                --flag-threshold "$FLAG_THRESHOLD" --fail-threshold "$FAIL_THRESHOLD"
+                --mode first)
+            fi
+            (cd "$GITHUB_WORKSPACE/head" && cargo xtask "${shadow_args[@]}")
+            sc=$?
+            # If Python stamped unstable after merge/rerun, apply the same stamp before re-diff.
+            if [[ "$sc" -ne 0 && -f "$rust_json" ]]; then
+              py_action=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('gate_action',''))" "$out/gate.json" 2>/dev/null || echo "")
+              if [[ "$py_action" == "unstable" ]]; then
+                (cd "$GITHUB_WORKSPACE/head" && cargo xtask bench-pr-force-unstable "$rust_json")
+                (cd "$GITHUB_WORKSPACE/head" && cargo xtask bench-gate-shadow-diff --python-json "$out/gate.json" --rust-json "$rust_json")
+                sc=$?
+              fi
+            fi
+            set -e
+            if [[ "$sc" -eq 0 ]]; then
+              echo "xtask-shadow: OK" >> "$summary"
+            else
+              echo "xtask-shadow: MISMATCH (informational; Python remains authoritative)" >> "$summary"
+              echo "::warning::xtask shadow-diff mismatch (Python gate verdict still counts)"
+            fi
+            echo "::endgroup::"
+          else
+            echo "xtask-shadow: skipped" >> "$summary"
+          fi
 
           end_ts=$(date +%s)
           wall=$((end_ts - start_ts))

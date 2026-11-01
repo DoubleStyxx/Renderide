@@ -1,0 +1,51 @@
+{
+  "confirm_round": 2,
+  "rows": [
+    {
+      "scenario": "multi_primitive_unlit",
+      "status": "FAIL (confirm-only)",
+      "base_drift_pct": 3.1,
+      "confirm_round": 2,
+      "deciding_round": 2,
+      "confirm_delta_pct": 46.62,
+      "confirm_p": 0.0051,
+      "base_drift_rounds": [
+        {
+          "round": 1,
+          "base_drift_pct": 79.19
+        },
+        {
+          "round": 2,
+          "base_drift_pct": 3.1
+        }
+      ],
+      "base_drift_pct_round1": 79.19
+    },
+    {
+      "scenario": "unlit_sphere",
+      "status": "ok",
+      "base_drift_pct": 12.1,
+      "confirm_round": 2,
+      "deciding_round": 2,
+      "confirm_delta_pct": -8.11,
+      "confirm_p": 0.937,
+      "base_drift_rounds": [
+        {
+          "round": 1,
+          "base_drift_pct": 119.04
+        },
+        {
+          "round": 2,
+          "base_drift_pct": 12.1
+        }
+      ],
+      "base_drift_pct_round1": 119.04
+    }
+  ],
+  "gate_action": "need_confirm",
+  "verdict_reason": "multi_primitive_unlit: one drift-clean FAIL on round 2; need a second consecutive drift-clean confirm",
+  "exit_code": 5,
+  "hit": [
+    "multi_primitive_unlit"
+  ]
+}
