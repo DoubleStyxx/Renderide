@@ -24,10 +24,9 @@ pub(crate) const UNEXPECTED_PASS_LABEL: &str = "unexpected pass (WARP, #212)";
 /// Cases whose WARP image mismatch is an expected #212 failure.
 ///
 /// `pbs_lit_material_matrix` is not here. It passed on all three WARP samples.
-/// `pbs_specular_opaque` is here because the runtime-branch shader still contains
-/// both clustered loops, and WARP times out on a flat or unstable frame. The
-/// code pull request removes the name after the compile-time split.
-const WARP_EXPECTED_FAILURE_CASES: &[&str] = &["pbs_specular_opaque"];
+/// `pbs_specular_opaque` was here while both clustered loops shared one shader.
+/// The compile-time split removes that marker.
+const WARP_EXPECTED_FAILURE_CASES: &[&str] = &[];
 
 /// Kept so tests can show this name is not on [`WARP_EXPECTED_FAILURE_CASES`].
 #[cfg(test)]
@@ -650,8 +649,8 @@ wgpu adapter selected (headless): Microsoft Basic Render Driver type=Cpu backend
     }
 
     #[test]
-    fn flat_or_unstable_warp_frame_is_expected_only_for_a_listed_case() {
-        let listed = CaseSnapshot {
+    fn flat_or_unstable_warp_frame_is_not_excused_after_the_split() {
+        let opaque = CaseSnapshot {
             name: "pbs_specular_opaque",
             fault: CaseFault::FlatOrUnstable,
             frame_accepted: false,
@@ -659,11 +658,10 @@ wgpu adapter selected (headless): Microsoft Basic Render Driver type=Cpu backend
             dropped_draws: None,
             signature: ImageSignature::default(),
         };
-        assert!(excuse(true, &listed));
-        assert!(!excuse(false, &listed));
+        assert!(!excuse(true, &opaque));
         let unlisted = CaseSnapshot {
             name: PBS_LIT,
-            ..listed
+            ..opaque
         };
         assert!(!excuse(true, &unlisted));
     }
