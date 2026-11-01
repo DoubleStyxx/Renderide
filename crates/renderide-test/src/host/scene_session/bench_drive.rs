@@ -41,7 +41,8 @@ pub struct BenchDriveConfig {
     pub renderer_path: PathBuf,
     /// `unlit_sphere`, `multi_primitive_unlit`, `pbs_lit_material_matrix`, `many_static_meshes`,
     /// `lights_shadows`, `many_shadowed_point_lights`, `offscreen_skinned_avatars`,
-    /// `onscreen_skinned_avatars`, `secondary_camera_copy`, or `secondary_camera_double_buffer`.
+    /// `onscreen_skinned_avatars`, `many_instances`, `occlusion_heavy`, `material_variety`,
+    /// `secondary_camera_copy`, or `secondary_camera_double_buffer`.
     pub scenario: String,
     /// Raw per-frame JSON path the renderer writes when the measured window completes.
     pub report_path: PathBuf,
@@ -191,6 +192,9 @@ fn scenario_template(name: &str) -> Result<SessionTemplate, HarnessError> {
         "many_shadowed_point_lights" => Ok(SessionTemplate::ManyShadowedPointLights),
         "offscreen_skinned_avatars" => Ok(SessionTemplate::SkinnedAvatars { offscreen: true }),
         "onscreen_skinned_avatars" => Ok(SessionTemplate::SkinnedAvatars { offscreen: false }),
+        "many_instances" => Ok(SessionTemplate::ManyInstances),
+        "occlusion_heavy" => Ok(SessionTemplate::OcclusionHeavy),
+        "material_variety" => Ok(SessionTemplate::MaterialVariety),
         other => Err(HarnessError::UnknownBenchScenario(other.to_string())),
     }
 }

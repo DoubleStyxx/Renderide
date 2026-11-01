@@ -4,11 +4,22 @@
 //! - `lights_shadows`: lit spheres with a shadowed directional light and shadowed point lights.
 //! - `offscreen_skinned_avatars` / `onscreen_skinned_avatars`: one-bone skinned spheres, mostly
 //!   behind the camera (or in view as the control), with a shadowed sun so every avatar still casts.
+//! - `many_instances`: GPU-driven judge floor — 100×100 unlit spheres (10,000 draws), one mesh and
+//!   material. Stresses draw-prep, CPU cull, and instancing headroom Vertex phases must beat.
+//! - `occlusion_heavy`: GPU-driven judge floor — large near occluders in front of thousands of
+//!   spheres. Stresses temporal Hi-Z / occlusion (previous-frame pyramid) after warmup.
+//! - `material_variety`: GPU-driven judge floor — 64 distinct materials (48 PBS + 16 Unlit) on a
+//!   shared mesh. Stresses material bind groups and pipeline-family variety.
 //! - `secondary_camera_copy`: the `unlit_sphere` scene plus two enabled secondary cameras that
 //!   render into their own render textures, one with a `Depth` clear and one with `Nothing`
 //!   (see [`secondary_camera_copy_rig`]).
 //! - `secondary_camera_double_buffer`: the same sphere and pose, with two double-buffered
 //!   cameras (`Depth` then `Nothing`, flags `1 | 4`) writing one 512² texture.
+//!
+//! Pass order matches the Unity/Renderide forward graph (shadows → depth prepass → opaque →
+//! transparent → `hi_z_build`); see `CONTRIBUTING.md` § passes and Renderite.Unity
+//! `CameraPortal`/`CameraController` shadow + forward opaque staging
+//! (`/workspace/reference/Renderite` @ 7ccfd2ee).
 
 use glam::{Quat, Vec3};
 use renderide_shared::shared::{CameraClearMode, RenderBoundingBox, ShadowCastMode, ShadowType};
@@ -252,6 +263,231 @@ pub(super) fn skinned_avatars_setup(offscreen: bool) -> SceneSetup {
     }
 }
 
+/// 100×100 unlit spheres (10,000 draws), one shared mesh and material. Judge floor for
+/// GPU-driven / instancing work: submitted draw count stays at 10k when nothing is culled.
+const MANY_INSTANCES_SIDE: i32 = 100;
+
+/// Frame-bench only: 10,000 unlit draws in one plane.
+pub(super) fn many_instances_setup() -> SceneSetup {
+    let meshes = vec![mesh_asset(
+        0,
+        generate_sphere(6, 8),
+        centered_bounds(Vec3::splat(1.05)),
+    )];
+    let materials = vec![unlit_color_material_for_scene(0, [0.45, 0.7, 0.95, 1.0])];
+    let spacing = 0.55_f32;
+    let half = (MANY_INSTANCES_SIDE as f32 - 1.0) * 0.5;
+    let mut renderables = Vec::with_capacity((MANY_INSTANCES_SIDE * MANY_INSTANCES_SIDE) as usize);
+    for row in 0..MANY_INSTANCES_SIDE {
+        for col in 0..MANY_INSTANCES_SIDE {
+            let index = row * MANY_INSTANCES_SIDE + col;
+            let position = Vec3::new(
+                (col as f32 - half) * spacing,
+                (row as f32 - half) * spacing,
+                0.0,
+            );
+            renderables.push(SceneRenderable {
+                transform_id: index,
+                pose: transform(position, Vec3::splat(0.22), Quat::IDENTITY),
+                mesh_asset_id: scene_mesh_id(0),
+                material_asset_id: scene_material_id(0),
+                sorting_order: 0,
+                shadow_cast_mode: ShadowCastMode::Off,
+            });
+        }
+    }
+    SceneSetup {
+        meshes,
+        materials,
+        scene: SceneSubmission {
+            camera_world_pose: transform(Vec3::new(0.0, 0.0, -55.0), Vec3::ONE, Quat::IDENTITY),
+            renderables,
+            lights: Vec::new(),
+            skinned: Vec::new(),
+            cameras: Vec::new(),
+        },
+    }
+}
+
+/// Hidden-sphere grid behind the occluder wall.
+const OCCLUSION_HIDDEN_SIDE: i32 = 64;
+/// Visible spheres kept clear of the occluder so the scene is never zero-draw.
+const OCCLUSION_VISIBLE: i32 = 16;
+const OCCLUSION_TRANSFORM_BASE: i32 = 10;
+
+/// Large near wall plus 4,096 spheres behind it and 16 visible accents. After warmup the
+/// previous-frame Hi-Z pyramid should cull most of the hidden grid; `draw_calls` is the signal.
+pub(super) fn occlusion_heavy_setup() -> SceneSetup {
+    let meshes = vec![mesh_asset(
+        0,
+        generate_sphere(8, 12),
+        centered_bounds(Vec3::splat(1.05)),
+    )];
+    let materials = vec![
+        unlit_color_material_for_scene(0, [0.12, 0.12, 0.14, 1.0]),
+        unlit_color_material_for_scene(1, [0.85, 0.55, 0.25, 1.0]),
+        unlit_color_material_for_scene(2, [0.35, 0.8, 0.55, 1.0]),
+    ];
+    let mut renderables = Vec::with_capacity(
+        2 + (OCCLUSION_HIDDEN_SIDE * OCCLUSION_HIDDEN_SIDE) as usize + OCCLUSION_VISIBLE as usize,
+    );
+    // Floor (not an occluder for the grid; keeps depth continuity).
+    renderables.push(SceneRenderable {
+        transform_id: 0,
+        pose: transform(
+            Vec3::new(0.0, -1.2, 8.0),
+            Vec3::new(40.0, 0.08, 40.0),
+            Quat::IDENTITY,
+        ),
+        mesh_asset_id: scene_mesh_id(0),
+        material_asset_id: scene_material_id(0),
+        sorting_order: 0,
+        shadow_cast_mode: ShadowCastMode::Off,
+    });
+    // Near occluder wall covering the central FOV (writes opaque depth before Hi-Z build).
+    renderables.push(SceneRenderable {
+        transform_id: 1,
+        pose: transform(
+            Vec3::new(0.0, 2.0, 0.0),
+            Vec3::new(18.0, 10.0, 0.4),
+            Quat::IDENTITY,
+        ),
+        mesh_asset_id: scene_mesh_id(0),
+        material_asset_id: scene_material_id(0),
+        sorting_order: 0,
+        shadow_cast_mode: ShadowCastMode::Off,
+    });
+    let half = (OCCLUSION_HIDDEN_SIDE as f32 - 1.0) * 0.5;
+    let spacing = 0.55_f32;
+    for row in 0..OCCLUSION_HIDDEN_SIDE {
+        for col in 0..OCCLUSION_HIDDEN_SIDE {
+            let index = OCCLUSION_TRANSFORM_BASE + row * OCCLUSION_HIDDEN_SIDE + col;
+            // Behind the wall along +Z (camera looks from -Z).
+            let position = Vec3::new(
+                (col as f32 - half) * spacing,
+                (row as f32 - half) * spacing * 0.35 + 1.5,
+                4.0 + (row as f32) * 0.08,
+            );
+            renderables.push(SceneRenderable {
+                transform_id: index,
+                pose: transform(position, Vec3::splat(0.2), Quat::IDENTITY),
+                mesh_asset_id: scene_mesh_id(0),
+                material_asset_id: scene_material_id(1),
+                sorting_order: 0,
+                shadow_cast_mode: ShadowCastMode::Off,
+            });
+        }
+    }
+    let visible_base = OCCLUSION_TRANSFORM_BASE + OCCLUSION_HIDDEN_SIDE * OCCLUSION_HIDDEN_SIDE;
+    for i in 0..OCCLUSION_VISIBLE {
+        let side = if i % 2 == 0 { -1.0 } else { 1.0 };
+        let position = Vec3::new(
+            side * (10.5 + (i / 2) as f32 * 0.7),
+            0.5,
+            -2.0 + (i as f32) * 0.3,
+        );
+        renderables.push(SceneRenderable {
+            transform_id: visible_base + i,
+            pose: transform(position, Vec3::splat(0.35), Quat::IDENTITY),
+            mesh_asset_id: scene_mesh_id(0),
+            material_asset_id: scene_material_id(2),
+            sorting_order: 0,
+            shadow_cast_mode: ShadowCastMode::Off,
+        });
+    }
+    SceneSetup {
+        meshes,
+        materials,
+        scene: SceneSubmission {
+            camera_world_pose: transform(
+                Vec3::new(0.0, 3.0, -18.0),
+                Vec3::ONE,
+                Quat::from_rotation_x(0.12),
+            ),
+            renderables,
+            lights: Vec::new(),
+            skinned: Vec::new(),
+            cameras: Vec::new(),
+        },
+    }
+}
+
+/// Distinct PBS + Unlit materials on one shared mesh (64 draws). Indices stay under 100 so
+/// material / shader asset id ranges do not collide (`SCENE_MATERIAL_BASE` / `SCENE_SHADER_BASE`).
+const MATERIAL_VARIETY_COUNT: i32 = 64;
+const MATERIAL_VARIETY_PBS: i32 = 48;
+
+/// Frame-bench only: 64 unique materials (48 PBSMetallic + 16 Unlit color) in an 8×8 grid.
+pub(super) fn material_variety_setup() -> SceneSetup {
+    let meshes = vec![mesh_asset(
+        0,
+        generate_sphere(10, 14),
+        centered_bounds(Vec3::splat(1.05)),
+    )];
+    let mut materials = Vec::with_capacity(MATERIAL_VARIETY_COUNT as usize);
+    for i in 0..MATERIAL_VARIETY_PBS {
+        let t = i as f32 / (MATERIAL_VARIETY_PBS as f32);
+        let color = [
+            0.2 + 0.75 * t,
+            0.15 + 0.55 * (1.0 - t),
+            0.35 + 0.45 * ((i % 7) as f32 / 6.0),
+            1.0,
+        ];
+        let metallic = (i % 5) as f32 / 4.0;
+        let glossiness = 0.2 + 0.7 * ((i % 8) as f32 / 7.0);
+        materials.push(pbs_material_for_scene(
+            i as usize, color, metallic, glossiness,
+        ));
+    }
+    for i in MATERIAL_VARIETY_PBS..MATERIAL_VARIETY_COUNT {
+        let u = (i - MATERIAL_VARIETY_PBS) as f32 / 15.0;
+        let color = [0.9 * (1.0 - u), 0.3 + 0.5 * u, 0.85, 1.0];
+        materials.push(unlit_color_material_for_scene(i, color));
+    }
+    let side = 8_i32;
+    let half = (side as f32 - 1.0) * 0.5;
+    let spacing = 1.35_f32;
+    let mut renderables = Vec::with_capacity(MATERIAL_VARIETY_COUNT as usize);
+    for row in 0..side {
+        for col in 0..side {
+            let index = row * side + col;
+            let position = Vec3::new(
+                (col as f32 - half) * spacing,
+                (row as f32 - half) * spacing,
+                0.0,
+            );
+            renderables.push(SceneRenderable {
+                transform_id: index,
+                pose: transform(position, Vec3::splat(0.45), Quat::IDENTITY),
+                mesh_asset_id: scene_mesh_id(0),
+                material_asset_id: scene_material_id(index),
+                sorting_order: 0,
+                shadow_cast_mode: ShadowCastMode::Off,
+            });
+        }
+    }
+    let lights = vec![SceneLight {
+        transform_id: LIGHT_TRANSFORM_BASE,
+        pose: transform(
+            Vec3::new(0.0, 8.0, -4.0),
+            Vec3::ONE,
+            Quat::from_rotation_x(-0.8),
+        ),
+        state: directional_light([1.0, 0.95, 0.88], 1.3),
+    }];
+    SceneSetup {
+        meshes,
+        materials,
+        scene: SceneSubmission {
+            camera_world_pose: transform(Vec3::new(0.0, 0.0, -14.0), Vec3::ONE, Quat::IDENTITY),
+            renderables,
+            lights,
+            skinned: Vec::new(),
+            cameras: Vec::new(),
+        },
+    }
+}
+
 /// Render-texture asset id written by the `Depth`-clear secondary camera.
 const SECONDARY_RT_DEPTH_CLEAR: i32 = 900;
 /// Render-texture asset id written by the `Nothing`-clear secondary camera.
@@ -321,5 +557,54 @@ pub(super) fn secondary_camera_double_buffer_rig(scene: &SceneSubmission) -> Sec
             camera(0, CameraClearMode::Depth, 0.0),
             camera(1, CameraClearMode::Nothing, 1.0),
         ],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        MANY_INSTANCES_SIDE, MATERIAL_VARIETY_COUNT, MATERIAL_VARIETY_PBS, OCCLUSION_HIDDEN_SIDE,
+        OCCLUSION_VISIBLE, many_instances_setup, material_variety_setup, occlusion_heavy_setup,
+    };
+
+    #[test]
+    fn many_instances_submits_ten_thousand_draws() {
+        let setup = many_instances_setup();
+        assert_eq!(
+            setup.scene.renderables.len(),
+            (MANY_INSTANCES_SIDE * MANY_INSTANCES_SIDE) as usize
+        );
+        assert_eq!(setup.materials.len(), 1);
+        assert!(setup.scene.lights.is_empty());
+    }
+
+    #[test]
+    fn occlusion_heavy_has_wall_and_hidden_grid() {
+        let setup = occlusion_heavy_setup();
+        let expected = 2
+            + (OCCLUSION_HIDDEN_SIDE * OCCLUSION_HIDDEN_SIDE) as usize
+            + OCCLUSION_VISIBLE as usize;
+        assert_eq!(setup.scene.renderables.len(), expected);
+        assert_eq!(setup.materials.len(), 3);
+    }
+
+    #[test]
+    fn material_variety_has_sixty_four_distinct_materials() {
+        let setup = material_variety_setup();
+        assert_eq!(setup.materials.len(), MATERIAL_VARIETY_COUNT as usize);
+        assert_eq!(
+            setup.scene.renderables.len(),
+            MATERIAL_VARIETY_COUNT as usize
+        );
+        let mut ids: Vec<_> = setup
+            .materials
+            .iter()
+            .map(|material| material.asset_id)
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), MATERIAL_VARIETY_COUNT as usize);
+        assert_eq!(MATERIAL_VARIETY_PBS, 48);
+        assert_eq!(setup.scene.lights.len(), 1);
     }
 }

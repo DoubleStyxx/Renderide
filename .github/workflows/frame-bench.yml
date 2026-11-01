@@ -473,3 +473,15 @@ jobs:
             fi
           } >> "$summary"
           finish "$gate_status"
+
+      # JSON reports + summary for judge baselines (dispatch base_ref=head_ref=<sha> with the
+      # desired --scenarios to record a single-tree lavapipe baseline). Artifact name is stable
+      # so PR bodies can cite it; path is $RUNNER_TEMP/framebench written by Measure and compare.
+      - name: Upload framebench reports
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@v7
+        with:
+          name: frame-bench-reports
+          path: ${{ runner.temp }}/framebench/
+          if-no-files-found: warn
+          retention-days: 30

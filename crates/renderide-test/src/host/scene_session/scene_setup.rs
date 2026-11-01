@@ -151,6 +151,9 @@ pub(super) fn build_scene_setup(template: SessionTemplate) -> SceneSetup {
         SessionTemplate::SkinnedAvatars { offscreen } => {
             bench_scenes::skinned_avatars_setup(offscreen)
         }
+        SessionTemplate::ManyInstances => bench_scenes::many_instances_setup(),
+        SessionTemplate::OcclusionHeavy => bench_scenes::occlusion_heavy_setup(),
+        SessionTemplate::MaterialVariety => bench_scenes::material_variety_setup(),
     }
 }
 

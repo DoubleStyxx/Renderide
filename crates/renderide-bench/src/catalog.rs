@@ -212,6 +212,9 @@ pub const FRAME_SCENARIOS: &[&str] = &[
     "onscreen_skinned_avatars",
     "secondary_camera_copy",
     "secondary_camera_double_buffer",
+    "many_instances",
+    "occlusion_heavy",
+    "material_variety",
 ];
 
 #[cfg(test)]
@@ -238,8 +241,11 @@ mod tests {
             assert!(seen.insert(*name), "duplicate {name}");
             assert!(!name.is_empty());
         }
-        assert_eq!(FRAME_SCENARIOS.len(), 10);
+        assert_eq!(FRAME_SCENARIOS.len(), 13);
         assert!(FRAME_SCENARIOS.contains(&"unlit_sphere"));
         assert!(FRAME_SCENARIOS.contains(&"many_shadowed_point_lights"));
+        assert!(FRAME_SCENARIOS.contains(&"many_instances"));
+        assert!(FRAME_SCENARIOS.contains(&"occlusion_heavy"));
+        assert!(FRAME_SCENARIOS.contains(&"material_variety"));
     }
 }
