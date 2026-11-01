@@ -46,6 +46,9 @@ pub struct Args {
     /// Optional merged confirm gates for merge-confirm shadow (repeatable).
     #[arg(long = "merge-gate")]
     pub merge_gate: Vec<PathBuf>,
+    /// Newline-separated list of gate.json paths Python actually merged (preferred over existence checks).
+    #[arg(long = "merge-gates-list")]
+    pub merge_gates_list: Option<PathBuf>,
     #[arg(long = "after-rerun")]
     pub after_rerun: bool,
     /// Compare mode: `gate` (default) or `merge`.
@@ -54,6 +57,16 @@ pub struct Args {
 }
 
 pub fn run(args: Args) -> i32 {
+    let mut args = args;
+    if let Some(list_path) = args.merge_gates_list.clone() {
+        match load_gates_list(&list_path) {
+            Ok(extra) => args.merge_gate.extend(extra),
+            Err(e) => {
+                eprintln!("xtask shadow-diff: merge-gates-list: {e}");
+                return 1;
+            }
+        }
+    }
     if args.rerun_rust {
         if args.compare == "merge" {
             let rc = crate::bench_pr_merge_confirm::run(crate::bench_pr_merge_confirm::Args {
@@ -148,6 +161,20 @@ pub fn run(args: Args) -> i32 {
         // failing the Python gate step (workflow should use continue-on-error).
         1
     }
+}
+
+fn load_gates_list(path: &PathBuf) -> Result<Vec<PathBuf>, String> {
+    let text = fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let paths: Vec<PathBuf> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(PathBuf::from)
+        .collect();
+    if paths.is_empty() {
+        return Err("merge-gates-list is empty".into());
+    }
+    Ok(paths)
 }
 
 fn load_json(path: &PathBuf) -> Result<Value, String> {

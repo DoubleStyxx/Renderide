@@ -1,0 +1,20 @@
+{
+  "schema": "frame-bench-gate/1",
+  "mode": "confirm",
+  "confirm_round": 1,
+  "exit_code": 0,
+  "rows": [
+    {
+      "scenario": "multi_primitive_unlit",
+      "status": "ok",
+      "confirm_round": 1,
+      "base_drift_pct": 2.0
+    },
+    {
+      "scenario": "unlit_sphere",
+      "status": "ok",
+      "confirm_round": 1,
+      "base_drift_pct": 1.5
+    }
+  ]
+}

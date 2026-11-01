@@ -3,6 +3,7 @@ use super::*;
 use crate::bench_pr_merge_confirm;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::fs;
 
 const FLAG: f64 = 5.0;
 const FAIL: f64 = 10.0;
@@ -312,4 +313,121 @@ fn canary_artifacts_pass_action() {
     let out = bench_pr_merge_confirm::merge_confirm_gates(&[canary], false);
     assert_eq!(out["gate_action"], "pass");
     assert_eq!(out["exit_code"], 0);
+}
+
+/// Regression for #302 hold: after a full-gate rerun, a leftover `gate-confirm2.json`
+/// from attempt 1 must not be fed to shadow-diff. Python merged only confirm1 (list);
+/// existence-based discovery of confirm2 caused a false mismatch on
+/// `multi_primitive_unlit` (python ok vs rust FAIL inconclusive: base drift).
+#[test]
+fn shadow_stale_confirm2_from_prior_attempt() {
+    let dir = std::env::temp_dir().join(format!("xtask-stale-rerun-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+
+    let confirm1: Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/stale-rerun/gate-confirm1.json"
+    ))
+    .unwrap();
+    let stale2: Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/stale-rerun/gate-confirm2-stale.json"
+    ))
+    .unwrap();
+
+    let p1 = dir.join("gate-confirm1.json");
+    let p2 = dir.join("gate-confirm2.json"); // name mirrors CI leftover
+    fs::write(&p1, serde_json::to_vec_pretty(&confirm1).unwrap()).unwrap();
+    fs::write(&p2, serde_json::to_vec_pretty(&stale2).unwrap()).unwrap();
+
+    // Authoritative Python merge used ONLY confirm1 (attempt 2 had no drift → no round 2).
+    let py = bench_pr_merge_confirm::merge_confirm_gates(std::slice::from_ref(&confirm1), false);
+    assert_eq!(py["gate_action"], "pass", "confirm1-only merge must pass");
+    let py_path = dir.join("gate.json");
+    fs::write(&py_path, serde_json::to_vec_pretty(&py).unwrap()).unwrap();
+
+    // Bug reproduction: merging confirm1+stale confirm2 keeps gate_action=pass but
+    // overwrites row status to FAIL (inconclusive: base drift) — the #302 false mismatch.
+    let buggy = bench_pr_merge_confirm::merge_confirm_gates(&[confirm1, stale2], false);
+    let mpu = buggy["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["scenario"] == "multi_primitive_unlit")
+        .unwrap();
+    assert_eq!(
+        mpu["status"].as_str().unwrap(),
+        "FAIL (inconclusive: base drift)",
+        "stale confirm2 overwrites multi_primitive_unlit row status"
+    );
+    let py_mpu = py["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["scenario"] == "multi_primitive_unlit")
+        .unwrap();
+    assert_eq!(py_mpu["status"], "ok");
+    assert_ne!(
+        mpu["status"], py_mpu["status"],
+        "row-level mismatch is the false shadow failure mode"
+    );
+
+    // Correct shadow: merge-gates.list names only confirm1 even though confirm2 exists on disk.
+    let list_path = dir.join("merge-gates.list");
+    fs::write(&list_path, format!("{}\n", p1.display())).unwrap();
+    let rust_path = dir.join("gate.xtask.json");
+    let rc = crate::shadow_diff::run(crate::shadow_diff::Args {
+        python_json: py_path.clone(),
+        rust_json: rust_path,
+        rerun_rust: true,
+        base: vec![],
+        head: vec![],
+        confirm_base: vec![],
+        confirm_head: vec![],
+        flag_threshold: 5.0,
+        fail_threshold: 10.0,
+        mode: "first".into(),
+        fail_closed_drift: false,
+        confirm_round: 1,
+        alpha: DEFAULT_ALPHA,
+        abs_floor_ms: 0.0,
+        head_missing: vec![],
+        merge_gate: vec![],
+        merge_gates_list: Some(list_path),
+        after_rerun: true,
+        compare: "merge".into(),
+    });
+    assert_eq!(
+        rc, 0,
+        "shadow with merge-gates.list must match Python (ignore stale confirm2)"
+    );
+
+    // Existence-based misuse (both files) must mismatch — documents the failure mode.
+    let rust_bad = dir.join("gate.xtask.bad.json");
+    let rc_bad = crate::shadow_diff::run(crate::shadow_diff::Args {
+        python_json: py_path,
+        rust_json: rust_bad,
+        rerun_rust: true,
+        base: vec![],
+        head: vec![],
+        confirm_base: vec![],
+        confirm_head: vec![],
+        flag_threshold: 5.0,
+        fail_threshold: 10.0,
+        mode: "first".into(),
+        fail_closed_drift: false,
+        confirm_round: 1,
+        alpha: DEFAULT_ALPHA,
+        abs_floor_ms: 0.0,
+        head_missing: vec![],
+        merge_gate: vec![p1, p2],
+        merge_gates_list: None,
+        after_rerun: true,
+        compare: "merge".into(),
+    });
+    assert_eq!(
+        rc_bad, 1,
+        "feeding stale confirm2 must surface a shadow mismatch"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
 }
