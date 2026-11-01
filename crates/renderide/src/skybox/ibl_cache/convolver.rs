@@ -11,6 +11,7 @@ use super::encode::{
 };
 use super::errors::SkyboxIblConvolveError;
 use super::key::source_max_lod;
+use super::pipeline::ComputePipeline;
 use super::pipeline_store::{PipelineSlot, PipelineStore};
 use super::resources::{
     PendingBakeResources, copy_cube_mip0, create_full_array_sample_view, create_ibl_cube,
@@ -21,6 +22,37 @@ pub(crate) struct SkyboxIblConvolveResources {
     _resources: PendingBakeResources,
     _source_sample_view: Arc<wgpu::TextureView>,
     _sampler: Arc<wgpu::Sampler>,
+    _pipelines: Vec<wgpu::ComputePipeline>,
+}
+
+impl SkyboxIblConvolveResources {
+    /// Moves every handle the encoded passes reference into a driver-thread retain set.
+    ///
+    /// The batch may still be queued when the caller times out and drops the convolver's
+    /// stack frame. The driver thread drops this set only after `Queue::submit` returns.
+    pub(crate) fn into_retained(self) -> crate::gpu::GpuRetainedResources {
+        let mut retained = crate::gpu::GpuRetainedResources::new();
+        for texture in self._resources.textures {
+            retained.retain_texture(texture.as_ref().clone());
+        }
+        retained.retain_buffers(self._resources.buffers);
+        for bind_group in self._resources.bind_groups {
+            retained.retain_bind_group(bind_group);
+        }
+        retained.retain_texture_views(self._resources.texture_views);
+        for view in self._resources.source_views {
+            retained.retain_texture_view(view.as_ref().clone());
+        }
+        if let Some(view) = self._resources.source_sample_view {
+            retained.retain_texture_view(view.as_ref().clone());
+        }
+        retained.retain_texture_view(self._source_sample_view.as_ref().clone());
+        retained.retain_sampler(self._sampler.as_ref().clone());
+        for pipeline in self._pipelines {
+            retained.retain_compute_pipeline(pipeline);
+        }
+        retained
+    }
 }
 
 /// Texture set used while convolving a caller-owned cubemap.
@@ -81,6 +113,14 @@ impl ConvolverTextures {
     }
 }
 
+/// Pipelines and sampler a caller-owned cubemap convolve records into.
+struct PreparedConvolvePipelines<'a> {
+    sampler: Arc<wgpu::Sampler>,
+    convolve: &'a ComputePipeline,
+    downsample: &'a ComputePipeline,
+    stitch: &'a ComputePipeline,
+}
+
 /// Minimal GGX convolver for caller-owned cubemap textures.
 #[derive(Default)]
 pub(crate) struct SkyboxIblConvolver {
@@ -91,6 +131,45 @@ impl SkyboxIblConvolver {
     /// Creates an empty convolver with lazily-built GPU resources.
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// Builds the convolve, downsample, and stitch pipelines before recording.
+    fn prepare_convolve_pipelines(
+        &mut self,
+        device: &wgpu::Device,
+    ) -> Result<PreparedConvolvePipelines<'_>, SkyboxIblConvolveError> {
+        let sampler = self.pipelines.ensure_sampler(device);
+        self.ensure_convolve_slot(PipelineSlot::Convolve, device, "skybox_ibl_convolve_params")?;
+        self.ensure_convolve_slot(PipelineSlot::Downsample, device, "skybox_ibl_downsample")?;
+        self.ensure_convolve_slot(PipelineSlot::Stitch, device, "skybox_ibl_stitch")?;
+        Ok(PreparedConvolvePipelines {
+            sampler,
+            convolve: self.convolve_slot(PipelineSlot::Convolve, "skybox_ibl_convolve_params")?,
+            downsample: self.convolve_slot(PipelineSlot::Downsample, "skybox_ibl_downsample")?,
+            stitch: self.convolve_slot(PipelineSlot::Stitch, "skybox_ibl_stitch")?,
+        })
+    }
+
+    fn ensure_convolve_slot(
+        &mut self,
+        slot: PipelineSlot,
+        device: &wgpu::Device,
+        shader: &'static str,
+    ) -> Result<(), SkyboxIblConvolveError> {
+        self.pipelines
+            .ensure(slot, device)
+            .map_err(|_err| SkyboxIblConvolveError::MissingShader(shader))?;
+        Ok(())
+    }
+
+    fn convolve_slot(
+        &self,
+        slot: PipelineSlot,
+        shader: &'static str,
+    ) -> Result<&ComputePipeline, SkyboxIblConvolveError> {
+        self.pipelines
+            .get(slot)
+            .map_err(|_err| SkyboxIblConvolveError::MissingShader(shader))
     }
 
     /// Encodes GGX convolve passes for mips `1..mip_levels` of `texture`.
@@ -104,28 +183,7 @@ impl SkyboxIblConvolver {
         profiler: Option<&GpuProfilerHandle>,
     ) -> Result<SkyboxIblConvolveResources, SkyboxIblConvolveError> {
         profiling::scope!("skybox_ibl::encode_existing_cube_mips");
-        let sampler = self.pipelines.ensure_sampler(gpu.device());
-        self.pipelines
-            .ensure(PipelineSlot::Convolve, gpu.device())
-            .map_err(|_err| SkyboxIblConvolveError::MissingShader("skybox_ibl_convolve_params"))?;
-        self.pipelines
-            .ensure(PipelineSlot::Downsample, gpu.device())
-            .map_err(|_err| SkyboxIblConvolveError::MissingShader("skybox_ibl_downsample"))?;
-        self.pipelines
-            .ensure(PipelineSlot::Stitch, gpu.device())
-            .map_err(|_err| SkyboxIblConvolveError::MissingShader("skybox_ibl_stitch"))?;
-        let convolve_pipeline = self
-            .pipelines
-            .get(PipelineSlot::Convolve)
-            .map_err(|_err| SkyboxIblConvolveError::MissingShader("skybox_ibl_convolve_params"))?;
-        let downsample_pipeline = self
-            .pipelines
-            .get(PipelineSlot::Downsample)
-            .map_err(|_err| SkyboxIblConvolveError::MissingShader("skybox_ibl_downsample"))?;
-        let stitch_pipeline = self
-            .pipelines
-            .get(PipelineSlot::Stitch)
-            .map_err(|_err| SkyboxIblConvolveError::MissingShader("skybox_ibl_stitch"))?;
+        let prepared = self.prepare_convolve_pipelines(gpu.device())?;
 
         let textures = ConvolverTextures::create(gpu.device(), face_size, mip_levels);
         let mut resources = PendingBakeResources::default();
@@ -141,7 +199,7 @@ impl SkyboxIblConvolver {
             StitchEncodeContext {
                 device: gpu.device(),
                 encoder,
-                pipeline: stitch_pipeline,
+                pipeline: prepared.stitch,
                 src_texture: textures.source_scratch_cube.texture.as_ref(),
                 dst_texture: textures.source_cube.texture.as_ref(),
                 mip: 0,
@@ -156,7 +214,7 @@ impl SkyboxIblConvolver {
             StitchEncodeContext {
                 device: gpu.device(),
                 encoder,
-                pipeline: stitch_pipeline,
+                pipeline: prepared.stitch,
                 src_texture: textures.source_cube.texture.as_ref(),
                 dst_texture: texture,
                 mip: 0,
@@ -171,8 +229,8 @@ impl SkyboxIblConvolver {
             DownsampleEncodeContext {
                 device: gpu.device(),
                 encoder,
-                pipeline: downsample_pipeline,
-                stitch_pipeline,
+                pipeline: prepared.downsample,
+                stitch_pipeline: prepared.stitch,
                 texture: textures.source_cube.texture.as_ref(),
                 scratch_texture: textures.source_scratch_cube.texture.as_ref(),
                 face_size,
@@ -185,12 +243,12 @@ impl SkyboxIblConvolver {
             ConvolveEncodeContext {
                 device: gpu.device(),
                 encoder,
-                pipeline: convolve_pipeline,
-                stitch_pipeline,
+                pipeline: prepared.convolve,
+                stitch_pipeline: prepared.stitch,
                 texture,
                 scratch_texture: textures.filtered_scratch_cube.texture.as_ref(),
                 src_view: textures.source_sample_view.as_ref(),
-                sampler: sampler.as_ref(),
+                sampler: prepared.sampler.as_ref(),
                 face_size,
                 mip_levels,
                 src_max_lod: source_max_lod(mip_levels),
@@ -201,7 +259,12 @@ impl SkyboxIblConvolver {
         Ok(SkyboxIblConvolveResources {
             _resources: resources,
             _source_sample_view: textures.source_sample_view,
-            _sampler: sampler,
+            _sampler: prepared.sampler,
+            _pipelines: vec![
+                prepared.convolve.pipeline.clone(),
+                prepared.downsample.pipeline.clone(),
+                prepared.stitch.pipeline.clone(),
+            ],
         })
     }
 }

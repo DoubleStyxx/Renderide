@@ -319,11 +319,46 @@ impl GpuContext {
 
     /// Blocks until the driver thread has processed every previously-submitted batch.
     ///
-    /// Used by the headless readback path to establish ordering between the rendered
-    /// frame's submit (which runs on the driver thread) and the readback copy (which
-    /// runs on the main thread). Most code paths never need this.
-    pub fn flush_driver(&self) {
-        self.submission.driver_thread.flush();
+    /// Returns `false` when the driver does not signal before
+    /// [`crate::gpu::driver_thread::DRIVER_FLUSH_TIMEOUT`]. Callers must skip copies and
+    /// maps of resources that batch may still be submitting. A missing driver thread
+    /// returns `true`: no `Queue::submit` is left in flight.
+    #[must_use = "false means a driver submit may still be in flight; skip the copy"]
+    pub fn flush_driver(&self) -> bool {
+        self.submission.driver_thread.flush()
+    }
+
+    /// Enqueues background command buffers on the driver thread and waits until that
+    /// batch's `Queue::submit` returns.
+    ///
+    /// The ring is FIFO, so this batch is ordered behind every capture already queued.
+    /// `retained` keeps the command buffers' resources alive until that submit, including
+    /// when this wait times out and the caller drops its own handles. Returns `false`
+    /// when the driver is gone or does not signal before `timeout`. The caller must not
+    /// map or sample the batch's output in that case.
+    #[must_use = "false means this batch did not reach Queue::submit; do not map its output"]
+    pub(crate) fn submit_background_and_wait(
+        &self,
+        command_buffers: Vec<wgpu::CommandBuffer>,
+        retained_resources: GpuRetainedResources,
+        timeout: std::time::Duration,
+    ) -> bool {
+        let (wait, rx) = crate::gpu::driver_thread::SubmitWait::new();
+        let enqueued = self
+            .submit_frame_batch_with_retained_resources(
+                FrameSubmitKind::BackgroundGpuWork,
+                command_buffers,
+                None,
+                Some(wait),
+                Vec::new(),
+                retained_resources,
+            )
+            .is_some();
+        if !enqueued {
+            return crate::gpu::driver_thread::submitted_batch_signaled(false, false);
+        }
+        let signaled = rx.recv_timeout(timeout).is_ok();
+        crate::gpu::driver_thread::submitted_batch_signaled(true, signaled)
     }
 
     /// Blocks only until the most recently submitted surface-carrying batch has reached

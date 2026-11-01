@@ -80,7 +80,9 @@ fn copy_scene_color(
     height: u32,
     padded_stride: u32,
 ) -> Result<(), HeadlessReadbackError> {
-    gpu.flush_driver();
+    if !gpu.flush_driver() {
+        return Err(HeadlessReadbackError::DriverFlushTimeout);
+    }
     let mut encoder = gpu
         .device()
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -108,7 +110,16 @@ fn copy_scene_color(
         },
     );
     let command_buffer = encoder.finish();
-    gpu.queue().submit(std::iter::once(command_buffer));
+    let mut retained = crate::gpu::GpuRetainedResources::new();
+    retained.retain_texture(texture.clone());
+    retained.retain_buffer(readback.clone());
+    if !gpu.submit_background_and_wait(
+        vec![command_buffer],
+        retained,
+        crate::gpu::driver_thread::DRIVER_FLUSH_TIMEOUT,
+    ) {
+        return Err(HeadlessReadbackError::DriverFlushTimeout);
+    }
     Ok(())
 }
 

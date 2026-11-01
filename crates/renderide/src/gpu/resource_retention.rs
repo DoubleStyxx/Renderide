@@ -92,6 +92,11 @@ impl GpuRetainedResources {
         self.bind_groups.push(bind_group);
     }
 
+    /// Retains one compute pipeline referenced by a queued command buffer.
+    pub(crate) fn retain_compute_pipeline(&mut self, pipeline: wgpu::ComputePipeline) {
+        self.compute_pipelines.push(pipeline);
+    }
+
     /// Returns a new retained set with one additional buffer.
     pub(crate) fn with_buffer(mut self, buffer: wgpu::Buffer) -> Self {
         self.retain_buffer(buffer);

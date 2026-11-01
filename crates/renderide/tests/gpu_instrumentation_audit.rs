@@ -52,22 +52,13 @@ const DRIVER_SUBMIT_HELPERS: &[&str] = &[
     ".submit_frame_batch_untracked(",
 ];
 
-/// Direct queue-submit files that are intentionally outside primary frame timing.
+/// Direct `Queue::submit` sites.
+///
+/// Production submits of the shared renderer queue belong in the driver thread.
+/// The ping-pong file opens a private device and does not share that queue.
 const DIRECT_QUEUE_SUBMIT_FILES: &[&str] = &[
-    "src/app/headless/readback.rs",
-    // Same debug readback. The submit is outside primary frame timing and is
-    // skipped entirely unless the headless scene-color flag is on.
-    "src/app/headless/scene_color_dump.rs",
-    // Mesh upload staging flushes are queue-gated asset work outside primary frame submission.
-    "src/backend/asset_transfers/integrator/drain.rs",
     "src/gpu/driver_thread/worker.rs",
-    "src/runtime/offscreen_tasks/camera.rs",
-    "src/runtime/offscreen_tasks/camera/alpha_coverage.rs",
-    "src/runtime/offscreen_tasks/camera/camera360.rs",
-    "src/runtime/offscreen_tasks/reflection_probe/readback.rs",
-    // Readback submit runs after CPU frame time is sampled, outside primary frame timing.
-    "src/gpu/frame_bench_queries.rs",
-    // Lavapipe unit test of render-texture ping-pong. Not a frame submission.
+    // Lavapipe unit test. Private device, not the renderer queue or its access gate.
     "src/gpu_pools/pools/render_texture_ping_pong_gpu.rs",
 ];
 

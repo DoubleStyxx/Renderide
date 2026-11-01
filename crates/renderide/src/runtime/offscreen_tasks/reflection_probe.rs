@@ -178,6 +178,8 @@ enum ReflectionProbeBakeError {
     DeviceLost(String),
     #[error("ReflectionProbeRenderTask map_async timed out")]
     ReadbackTimeout,
+    #[error("ReflectionProbeRenderTask driver thread did not signal before the readback copy")]
+    DriverFlushTimeout,
     #[error("ReflectionProbeRenderTask map_async failed: {0}")]
     Map(String),
 }
