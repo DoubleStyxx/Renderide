@@ -391,4 +391,6 @@ fn template_label(template: &SessionTemplate) -> &'static str {
 }
 
 #[cfg(test)]
+mod g0_gpu_scene_buffers;
+#[cfg(test)]
 mod tests;
