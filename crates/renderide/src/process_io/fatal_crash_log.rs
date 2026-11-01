@@ -18,28 +18,33 @@
 //! machinery (see upstream docs). **Manual testing:** `kill -BUS <pid>` on Linux; Windows fault
 //! injection is environment-specific.
 //!
-//! **Stack traces (Linux + Windows):** after the signal-info line, two additional passes run.
-//! Phase 1 walks frames via [`backtrace::trace_unsynchronized`] into a stack array and formats
-//! hex instruction pointers into a 2 KB stack buffer (signal-safe, allocation-free). Phase 2
-//! best-effort symbolicates through [`backtrace::resolve`] (heap-allocating); both are guarded
-//! by a reentry flag plus [`std::panic::catch_unwind`] so a fault inside resolution cannot
-//! recurse. Stripped release binaries produce hex only from Phase 2. macOS keeps the
-//! signal-info line alone -- the Mach exception callback runs on a dedicated thread, so a plain
-//! `trace` walks the wrong stack; proper macOS support requires unwinding from
-//! `thread_get_state` and is tracked as follow-up work.
+//! **Stack traces (Linux, Android, and Windows):** the handler writes hex instruction
+//! pointers and the executable's address span. That write is allocation-free and
+//! lock-free: no [`backtrace::resolve`], no mutex, and [`std::panic::catch_unwind`] is
+//! not used as a safety fence. Symbol names are resolved on the next start, on a
+//! normal thread, from those saved addresses plus the span (the `symbolicate` module).
+//! Frames outside the executable are left unresolved so a libc address is not
+//! reported as a function in this binary. See the `symbolicate` module. macOS keeps the signal-info line alone:
+//! the Mach exception callback runs on a dedicated thread, so a plain `trace` walks
+//! the wrong stack.
 //!
-//! **Linux alt signal stack:** libstd's per-thread altstack (~8 KB) is too small for the
-//! gimli DWARF parser inside [`backtrace::resolve`] -- a fatal-signal handler running on it
-//! aborts Phase 2 partway through with no diagnostic. The Unix install path installs a
-//! 512 KB altstack on the main thread before [`crash_handler::CrashHandler::attach`] so
-//! Phase 2 has room to complete. Crashes on worker threads still use libstd's small altstack
-//! and may lose Phase 2 silently; Phase 1 (hex IPs) remains durable on every thread.
+//! **Linux alt signal stack:** libstd's per-thread altstack (~8 KB) is too small for
+//! the unwinder when the fault is a stack overflow. The Unix install path installs a
+//! 512 KB altstack on the main thread before [`crash_handler::CrashHandler::attach`]
+//! so the instruction-pointer list can still be written. Worker threads keep libstd's
+//! smaller altstack and may lose that list on a stack overflow.
 
 use std::path::Path;
 
 mod format;
 #[cfg(any(target_os = "linux", target_os = "android", windows))]
+mod module_span;
+#[cfg(any(target_os = "linux", target_os = "android", windows))]
 mod stack_trace;
+#[cfg(any(target_os = "linux", target_os = "android", windows))]
+mod symbolicate;
+#[cfg(any(unix, windows))]
+mod trip;
 #[cfg(unix)]
 mod unix;
 #[cfg(windows)]
@@ -60,17 +65,83 @@ pub(super) fn log_directory_footer_bytes() -> Box<[u8]> {
 ///
 /// Failures are logged and ignored so startup continues without fatal-crash logging.
 pub(crate) fn install(log_path: &Path) {
-    #[cfg(unix)]
-    if let Err(e) = unix::install_impl(log_path) {
+    if let Err(e) = try_install(log_path) {
         logger::warn!("Failed to install fatal crash log handler: {e}");
+    }
+}
+
+/// Publishes the executable span, symbolicates a previous raw trace, then attaches the handler.
+#[cfg(any(unix, windows))]
+pub(super) fn try_install(log_path: &Path) -> Result<(), String> {
+    #[cfg(any(target_os = "linux", target_os = "android", windows))]
+    {
+        module_span::publish_module_span();
+        if let Err(e) = symbolicate::append_deferred_symbolication(log_path) {
+            logger::warn!("failed to symbolicate previous fatal crash log: {e}");
+        }
+    }
+    #[cfg(unix)]
+    {
+        unix::install_impl(log_path)
     }
     #[cfg(windows)]
-    if let Err(e) = windows::install_impl(log_path) {
-        logger::warn!("Failed to install fatal crash log handler: {e}");
-    }
-    #[cfg(not(any(unix, windows)))]
     {
-        let _ = log_path;
+        windows::install_impl(log_path)
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn try_install(log_path: &Path) -> Result<(), String> {
+    let _ = log_path;
+    Ok(())
+}
+
+/// Hidden entry points for the fatal-crash handler tests.
+///
+/// Not part of the renderer process API.
+#[cfg(any(unix, windows))]
+#[doc(hidden)]
+pub mod test_support {
+    use std::path::Path;
+
+    /// Installs the process fatal-crash handler, writing records to `log_path`.
+    pub fn install_handler(log_path: &Path) -> Result<(), String> {
+        super::try_install(log_path)
+    }
+
+    /// Clears the one-shot handler reentry flag so a test can enter the writer again.
+    #[cfg(any(target_os = "linux", target_os = "android", windows))]
+    pub fn reset_handler_reentry_for_test() {
+        super::stack_trace::reset_reentry_for_test();
+    }
+
+    /// Publishes this process's executable address span before a measured handler write.
+    #[cfg(any(target_os = "linux", target_os = "android", windows))]
+    pub fn publish_module_span_for_test() {
+        super::module_span::publish_module_span();
+    }
+
+    /// Runs the signal-handler stack writer. Allocation-free after the span is published.
+    #[cfg(any(target_os = "linux", target_os = "android", windows))]
+    pub fn write_handler_stack(write_all: impl FnMut(&[u8])) {
+        super::stack_trace::write_signal_safe_stack(write_all);
+    }
+
+    /// Symbolicates a handler record on a normal thread.
+    #[cfg(any(target_os = "linux", target_os = "android", windows))]
+    pub fn symbolicate_saved_record(record: &str) -> String {
+        super::symbolicate::symbolicate_saved_record(record)
+    }
+
+    /// Appends deferred symbols for the last raw stack in `log_path`.
+    #[cfg(any(target_os = "linux", target_os = "android", windows))]
+    pub fn symbolicate_log(log_path: &Path) -> Result<(), String> {
+        super::symbolicate::append_deferred_symbolication(log_path)
+    }
+
+    /// Raises a fatal fault in this process. Does not return.
+    pub fn trip_fatal_fault() -> ! {
+        super::trip::trip_fatal_fault()
     }
 }
 

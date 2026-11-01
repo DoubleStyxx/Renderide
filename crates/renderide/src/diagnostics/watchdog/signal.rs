@@ -13,8 +13,8 @@
 //! 3. The watchdog reads the captured instruction pointers out of the static buffer and then
 //!    symbolicates them -- heap allocation is fine here because we are no longer in signal context.
 //!
-//! Uses the existing two-phase pattern in [`crate::fatal_crash_log`] (signal-safe IP
-//! capture, deferred symbolication via [`backtrace::resolve`]).
+//! Uses the same split as [`crate::fatal_crash_log`]: capture instruction pointers
+//! in the signal handler, then symbolicate with [`backtrace::resolve`] on this thread.
 
 use core::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -232,8 +232,9 @@ fn send_capture_signal(os_tid: i64, pthread_handle: usize) -> i32 {
 
 /// Best-effort symbolicate `frames` as a multi-line `"  #NN <name> at <file>:<line>"` string.
 ///
-/// Allocates freely -- only call from the watchdog thread, never from a signal handler. Mirrors
-/// the Phase-2 symbolication in [`crate::fatal_crash_log`].
+/// Allocates freely -- only call from the watchdog thread, never from a signal handler.
+/// The fatal-crash handler records raw instruction pointers and resolves them the same
+/// way, outside the handler.
 pub(super) fn symbolicate(frames: &[usize]) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(frames.len().saturating_mul(96));

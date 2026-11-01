@@ -84,6 +84,13 @@ pub use run_error::RunError;
 #[doc(hidden)]
 pub use diagnostics::hud_measure;
 
+/// Fatal-crash handler hooks for the allocation and signal tests.
+///
+/// Not part of the supported process API.
+#[cfg(any(unix, windows))]
+#[doc(hidden)]
+pub use process_io::fatal_crash_log::test_support as fatal_crash_test_support;
+
 /// Forwards native stdout/stderr into the active file logger after [`logger`] initialization.
 ///
 /// Idempotent. The main [`run`] path installs this after logging starts; entry points that skip

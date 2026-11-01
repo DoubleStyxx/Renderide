@@ -118,9 +118,9 @@ imgui = { version = "0.12", features = ["tables-api"] }
 imgui-wgpu = { git = "https://github.com/Yatekii/imgui-wgpu-rs", rev = "3c9a5e9331d36cd050592424216a07a64c78743f" }
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 crash-handler = "0.8"
-## Cross-platform stack frame capture and symbol resolution, used by the fatal crash handler to
-## emit a hex address list (signal-safe first pass) and a best-effort symbolicated trace
-## (second pass) for native faults that bypass Rust's panic hook.
+## Stack-frame capture for the fatal crash handler. The signal and vectored-exception
+## handlers only walk frames (`trace_unsynchronized`) and write raw instruction
+## pointers. `resolve` runs later, on a normal thread, from those saved addresses.
 backtrace = "0.3"
 bevy_mikktspace = "1.0"
 ## GPU timestamp query scopes; bridges per-phase GPU timing to Tracy when the `tracy` feature is on.
@@ -170,7 +170,10 @@ ctrlc = "3.4"
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Security",
+  "Win32_Storage_FileSystem",
   "Win32_System_Console",
+  "Win32_System_IO",
+  "Win32_System_LibraryLoader",
   "Win32_System_Memory",
   "Win32_System_Pipes",
 ] }

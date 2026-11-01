@@ -9,7 +9,7 @@ use crash_handler::{CrashEventResult, CrashHandler};
 
 use super::format::format_fatal_line_unix;
 #[cfg(any(target_os = "linux", target_os = "android"))]
-use super::stack_trace::write_stack_trace;
+use super::stack_trace::write_signal_safe_stack;
 
 /// Global state for raw [`libc::write`] targets (log file + optional terminal duplicate).
 struct UnixCrashFds {
@@ -27,10 +27,10 @@ static UNIX_CRASH_FDS: OnceLock<UnixCrashFds> = OnceLock::new();
 /// crash handler.
 ///
 /// libstd installs a small per-thread alt signal stack (~`SIGSTKSZ`, typically 8 KB) for
-/// stack-overflow detection. `crash-handler` reuses whatever altstack is in place, but the
-/// gimli DWARF parser inside [`backtrace::resolve`] consumes more than that and would
-/// silently abort Phase 2 partway through. 512 KB is well above the resolver's worst case
-/// while staying small enough that the leaked allocation is negligible.
+/// stack-overflow detection. `crash-handler` reuses whatever altstack is in place. The
+/// frame walk needs more than that when the fault itself is a stack overflow, or the
+/// instruction-pointer list is silently dropped. 512 KB is enough for the walk and is
+/// leaked once for the process lifetime.
 #[cfg(any(target_os = "linux", target_os = "android"))]
 const ALT_SIGNAL_STACK_SIZE: usize = 512 * 1024;
 
@@ -67,14 +67,17 @@ pub(super) fn install_impl(log_path: &Path) -> Result<(), String> {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     if let Err(e) = ensure_alt_signal_stack() {
         logger::warn!(
-            "failed to install enlarged alt signal stack ({e}); fatal-crash symbolication may abort partway"
+            "failed to install enlarged alt signal stack ({e}); a stack overflow may drop the instruction-pointer list"
         );
     }
 
-    // SAFETY: `CrashHandler::attach` installs a process-wide signal handler; the closure only
-    // calls async-signal-safe operations (`libc::write`, `__errno_location`) and touches global
-    // state via a `OnceLock`. Invoked once during process startup; the handle is `mem::forget`ed
-    // below so the handler stays installed for the process lifetime.
+    // SAFETY: `CrashHandler::attach` installs a process-wide signal handler. The closure
+    // formats into stack arrays (`format_fatal_line_unix`, `write_minimal_snapshot`,
+    // `write_signal_safe_stack`), loads the already-initialized `UNIX_CRASH_FDS` cell,
+    // and writes those bytes with `libc::write`. On Linux and Android it also walks
+    // frames with `backtrace::trace_unsynchronized` and loads the precomputed module
+    // span. It does not allocate, take a mutex, call `backtrace::resolve`, or use
+    // `catch_unwind`. The handle is leaked below so the handler stays installed until exit.
     let handler = unsafe {
         CrashHandler::attach(crash_handler::make_crash_event(|ctx| {
             let mut buf = [0u8; 224];
@@ -86,13 +89,7 @@ pub(super) fn install_impl(log_path: &Path) -> Result<(), String> {
                 let context_n = crate::crash_context::write_minimal_snapshot(&mut context_buf);
                 fds.write_all(&context_buf[..context_n]);
                 #[cfg(any(target_os = "linux", target_os = "android"))]
-                {
-                    // `ssi_signo` is `u32`; the stack-trace writer wants an `i32` so it can
-                    // compare against `libc::SIGABRT` and skip Phase 2 on allocator-originated
-                    // aborts. The cast is lossless for valid signal numbers.
-                    let signal = ctx.siginfo.ssi_signo as i32;
-                    write_stack_trace(signal, |chunk| fds.write_all(chunk));
-                }
+                write_signal_safe_stack(|chunk| fds.write_all(chunk));
                 fds.write_all(&fds.log_directory_footer);
             }
             CrashEventResult::from(false)
@@ -181,13 +178,13 @@ unsafe fn errno_value() -> libc::c_int {
 }
 
 /// Installs a [`ALT_SIGNAL_STACK_SIZE`]-byte alternate signal stack on the calling thread,
-/// replacing libstd's smaller default so [`backtrace::resolve`] has room to run inside the
-/// crash handler without silently aborting Phase 2.
+/// replacing libstd's smaller default so the frame walk still fits when the fault is a
+/// stack overflow.
 ///
 /// Idempotent: subsequent calls are no-ops once the flag is set. The stack memory is leaked
 /// for the process lifetime -- freeing it would invite use-after-free from the next signal.
 /// Affects only the thread that invokes this; worker threads keep libstd's default altstack
-/// and may lose Phase 2 if they crash, but Phase 1 (hex IPs) remains durable everywhere.
+/// and may lose the instruction-pointer list if they overflow; other faults still record it.
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn ensure_alt_signal_stack() -> Result<(), String> {
     use std::sync::atomic::Ordering;
