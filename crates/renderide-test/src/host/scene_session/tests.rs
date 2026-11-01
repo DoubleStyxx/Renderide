@@ -63,6 +63,52 @@ fn pbs_premultiply_sets_keyword_blend_and_queue() {
 }
 
 #[test]
+fn pbs_specular_premultiply_sets_keyword_blend_and_queue() {
+    let setup = build_scene_setup(SessionTemplate::PbsSpecularPremultiply);
+    let binding = setup.materials[0].binding.as_ref().expect("binding");
+    assert_eq!(binding.shader_name, "PBSSpecular.shader");
+    assert_eq!(
+        binding.shader_variant_bits,
+        Some(shader_variants::PBSSPECULAR_ALPHAPREMULTIPLY)
+    );
+    let floats: Vec<(&str, f32)> = binding
+        .floats
+        .iter()
+        .map(|value| (value.property_name, value.value))
+        .collect();
+    assert!(floats.contains(&("_SrcBlend", 1.0)));
+    assert!(floats.contains(&("_DstBlend", 10.0)));
+    assert!(floats.contains(&("_ZWrite", 0.0)));
+    assert!(floats.contains(&("_RenderQueue", 3000.0)));
+    assert!(floats.contains(&("_Glossiness", 0.55)));
+    assert_eq!(binding.float4s[0].property_name, "_Color");
+    assert!((binding.float4s[0].value[3] - 0.45).abs() < f32::EPSILON);
+    assert_eq!(binding.float4s[1].property_name, "_SpecColor");
+    assert_eq!(binding.float4s[1].value, [0.8, 0.75, 0.65, 1.0]);
+}
+
+#[test]
+fn pbs_specular_opaque_leaves_the_premultiply_keyword_off() {
+    let setup = build_scene_setup(SessionTemplate::PbsSpecularOpaque);
+    let binding = setup.materials[0].binding.as_ref().expect("binding");
+    assert_eq!(binding.shader_name, "PBSSpecular.shader");
+    assert_eq!(binding.shader_variant_bits, None);
+    assert!(
+        binding.floats.iter().all(
+            |value| value.property_name != "_SrcBlend" && value.property_name != "_RenderQueue"
+        )
+    );
+    let glossiness = binding
+        .floats
+        .iter()
+        .find(|value| value.property_name == "_Glossiness")
+        .expect("glossiness");
+    assert!((glossiness.value - 0.55).abs() < f32::EPSILON);
+    assert_eq!(binding.float4s[1].property_name, "_SpecColor");
+    assert_eq!(binding.float4s[1].value, [0.8, 0.75, 0.65, 1.0]);
+}
+
+#[test]
 fn pbs_matrix_builds_four_materials_against_one_mesh() {
     let setup = build_scene_setup(SessionTemplate::PbsLitMaterialMatrix);
     assert_eq!(setup.meshes.len(), 1);
