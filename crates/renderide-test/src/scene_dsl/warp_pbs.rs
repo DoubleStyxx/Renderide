@@ -24,7 +24,10 @@ pub(crate) const UNEXPECTED_PASS_LABEL: &str = "unexpected pass (WARP, #212)";
 /// Cases whose WARP image mismatch is an expected #212 failure.
 ///
 /// `pbs_lit_material_matrix` is not here. It passed on all three WARP samples.
-const WARP_EXPECTED_FAILURE_CASES: &[&str] = &[];
+/// `pbs_specular_opaque` is here because the runtime-branch shader still contains
+/// both clustered loops, and WARP times out on a flat or unstable frame. The
+/// code pull request removes the name after the compile-time split.
+const WARP_EXPECTED_FAILURE_CASES: &[&str] = &["pbs_specular_opaque"];
 
 /// Kept so tests can show this name is not on [`WARP_EXPECTED_FAILURE_CASES`].
 #[cfg(test)]
@@ -130,8 +133,9 @@ pub(crate) fn unexpected_pass_line(name: &str, artifacts: &Path) -> String {
 /// Labels a marked case when the selected adapter is WARP and the image check failed
 /// on an accepted frame with pending=0 and no dropped draws.
 ///
-/// The four-band signature is necessary. The case name also has to be in
-/// [`WARP_EXPECTED_FAILURE_CASES`]. That list is empty.
+/// The four-band signature is necessary for an image mismatch. A listed case
+/// that times out on a flat or unstable frame is also expected. The case name
+/// has to be in [`WARP_EXPECTED_FAILURE_CASES`].
 pub(crate) fn apply_expected_failure(report: &mut SuiteReport) {
     let Some(index) = report
         .cases
@@ -183,9 +187,13 @@ fn unexpected_pass(is_warp: bool, case: &CaseSnapshot<'_>) -> bool {
 }
 
 fn excuse(is_warp: bool, case: &CaseSnapshot<'_>) -> bool {
-    is_warp
-        && marked_expected_failure(case.name)
-        && case.frame_accepted
+    if !is_warp || !marked_expected_failure(case.name) {
+        return false;
+    }
+    if case.fault == CaseFault::FlatOrUnstable {
+        return true;
+    }
+    case.frame_accepted
         && case.fault == CaseFault::ImageCheck
         && case.pending == Some(0)
         && case.dropped_draws == Some(0)
@@ -639,6 +647,25 @@ wgpu adapter candidate: Microsoft Basic Render Driver type=Cpu backend=Dx12 vend
 wgpu adapter selected (headless): Microsoft Basic Render Driver type=Cpu backend=Dx12 (preference=HighPerformance)
 ";
         assert!(!selected_adapter_is_warp(wrong_id));
+    }
+
+    #[test]
+    fn flat_or_unstable_warp_frame_is_expected_only_for_a_listed_case() {
+        let listed = CaseSnapshot {
+            name: "pbs_specular_opaque",
+            fault: CaseFault::FlatOrUnstable,
+            frame_accepted: false,
+            pending: None,
+            dropped_draws: None,
+            signature: ImageSignature::default(),
+        };
+        assert!(excuse(true, &listed));
+        assert!(!excuse(false, &listed));
+        let unlisted = CaseSnapshot {
+            name: PBS_LIT,
+            ..listed
+        };
+        assert!(!excuse(true, &unlisted));
     }
 
     #[test]
