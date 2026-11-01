@@ -11,6 +11,7 @@ namespace SharedTypeGenerator.Tests;
 /// <remarks>
 /// These sources are compiled when <c>Renderite.Shared.dll</c> is discoverable at build time (see <c>SharedTypeGenerator.Tests.csproj</c>).
 /// Hosted CI builds that DLL from Yellow-Dog-Man/Renderite commit 7ccfd2ee7c28648cb2e46dd4f52f51613a848071 (MIT).
+/// <c>shared.rs</c> matches that reference, so every roundtrip case must pass.
 /// Outside CI, a missing DLL omits these sources and <see cref="RenderiteSharedDllPresenceTests"/> skips with an explanation.
 /// On CI, a missing DLL fails the build and that presence test.
 /// </remarks>
