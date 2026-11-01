@@ -31,8 +31,25 @@ name: Bench PR
       - "scripts/ci/bench_pr_merge_confirm.py"
       - "scripts/ci/bench_pr_force_unstable.py"
       - "scripts/ci/bench_pr_echo_verdict.py"
+      - "xtask/**"
+      - ".cargo/**"
       - ".github/workflows/bench-pr.yml"
       - ".github/actions/lavapipe/**"
+  # Test-only dispatch: prove full-gate rerun + shadow-diff without changing thresholds.
+  workflow_dispatch:
+    inputs:
+      force_full_gate_rerun:
+        description: >-
+          TEST ONLY (default false). After gate attempt 1, plant a stale
+          gate-confirm2.json then force one full-gate rerun. Attempt 2 must
+          rm per-attempt confirm artifacts; shadow must consume merge-gates.list
+          (not leftover files). Off by default; does not change gate thresholds.
+        type: boolean
+        default: false
+      base_ref:
+        description: Baseline git ref for dispatch runs (ignored on pull_request)
+        type: string
+        default: master
 
 concurrency:
   group: bench-pr-${{ github.event.pull_request.number || github.ref }}
@@ -104,14 +121,14 @@ jobs:
       - name: Checkout head
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: head
           persist-credentials: false
 
       - name: Checkout base (full 40-char PR base SHA)
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ github.event.pull_request.base.sha || github.event.inputs.base_ref || 'master' }}
           path: base
           persist-credentials: false
 
@@ -128,8 +145,9 @@ jobs:
       - name: Measure and gate
         id: bench
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_ref || 'master' }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          FORCE_FULL_GATE_RERUN: ${{ (github.event.inputs.force_full_gate_rerun == 'true' || github.event.inputs.force_full_gate_rerun == true) && '1' || '0' }}
         run: |
           set -euo pipefail
           gate_py="$GITHUB_WORKSPACE/tools/scripts/ci/frame_bench_gate.py"
@@ -246,9 +264,29 @@ jobs:
 
           # Full-gate attempt loop: original + at most one rerun on post-drift disagreement/recurring drift.
           after_rerun=0
+          # Record exactly which confirm gate.json files Python merge-confirm consumed
+          # so xtask shadow never picks up leftovers from a prior attempt by existence.
+          record_merge_gates() {
+            local list="$out/merge-gates.list"
+            : > "$list"
+            local g
+            for g in "$@"; do
+              printf '%s\n' "$g" >> "$list"
+            done
+          }
           for gate_attempt in 1 2; do
+          # Drop per-attempt confirm/merge artifacts so a full-gate rerun cannot leave
+          # stale gate-confirm2.json for shadow-diff (Prism #302 hold).
+          rm -f \
+            "$out"/gate-confirm*.json \
+            "$out"/merge-gates.list \
+            "$out"/gate.xtask.json \
+            "$out"/drift-suspects.txt \
+            "$out"/suspects.txt \
+            "$out"/gate-first.json
           half=$((RUNS / 2))
           rest=$((RUNS - half))
+          echo "gate_attempt=$gate_attempt after_rerun=$after_rerun (cleared per-attempt confirm artifacts)" >> "$summary"
 
           echo "::group::First pass (interleaved chunks, base/head then base/head, n=$RUNS)"
           run_frame "$RUNNER_TEMP/target-base" "$out/base-a.json" "$half" "${scenarios[@]}"
@@ -345,6 +383,7 @@ jobs:
                 cat "$summary" >> "$GITHUB_STEP_SUMMARY"
                 exit 1
               fi
+              record_merge_gates "$out/gate-confirm1.json" "$out/gate-confirm2.json"
               merge_args=(--gate "$out/gate-confirm1.json" --gate "$out/gate-confirm2.json" --out "$out/gate.json")
               if [[ "${after_rerun:-0}" -eq 1 ]]; then
                 merge_args+=(--after-rerun)
@@ -386,6 +425,7 @@ jobs:
                   cat "$summary" >> "$GITHUB_STEP_SUMMARY"
                   exit 1
                 fi
+                record_merge_gates "$out/gate-confirm1.json" "$out/gate-confirm2.json" "$out/gate-confirm3.json"
                 merge_args=(--gate "$out/gate-confirm1.json" --gate "$out/gate-confirm2.json" --gate "$out/gate-confirm3.json" --out "$out/gate.json")
                 if [[ "${after_rerun:-0}" -eq 1 ]]; then
                   merge_args+=(--after-rerun)
@@ -397,6 +437,7 @@ jobs:
               python3 "$GITHUB_WORKSPACE/tools/scripts/ci/bench_pr_echo_verdict.py" "$out/gate.json" >> "$summary"
               fi
             else
+              record_merge_gates "$out/gate-confirm1.json"
               merge_args=(--gate "$out/gate-confirm1.json" --out "$out/gate.json")
               if [[ "${after_rerun:-0}" -eq 1 ]]; then
                 merge_args+=(--after-rerun)
@@ -446,8 +487,72 @@ jobs:
               gate_status=1
             fi
           fi
+          # TEST ONLY: force whole-gate rerun once (workflow_dispatch force_full_gate_rerun).
+          # Plants a stale gate-confirm2.json that would false-mismatch shadow if attempt 2
+          # failed to rm leftovers / used existence checks instead of merge-gates.list.
+          if [[ "${FORCE_FULL_GATE_RERUN:-0}" == "1" && "$gate_attempt" -eq 1 ]]; then
+            {
+              echo
+              echo "test-only: FORCE_FULL_GATE_RERUN=1 → plant stale gate-confirm2.json and full-gate rerun once"
+            } >> "$summary"
+            if [[ ! -f "$out/gate-confirm1.json" && -f "$out/gate.json" ]]; then
+              cp "$out/gate.json" "$out/gate-confirm1.json"
+            fi
+            printf '%s\n' '{"schema":"frame-bench-gate/1","mode":"confirm","confirm_round":2,"exit_code":3,"gate_action":"rerun","rows":[{"scenario":"multi_primitive_unlit","status":"FAIL (inconclusive: base drift)","base_drift_pct":33.55,"confirm_round":2},{"scenario":"unlit_sphere","status":"FAIL (inconclusive: base drift)","base_drift_pct":32.48,"confirm_round":2}]}' > "$out/gate-confirm2.json"
+            after_rerun=1
+            continue
+          fi
           break
           done
+
+          # xtask shadow port (non-blocking). Python gate.json remains authoritative.
+          # Prefer merge-gates.list (exact files Python merged); never discover by existence
+          # alone — leftover gate-confirm2.json from attempt 1 caused false mismatches.
+          if [[ -d "$GITHUB_WORKSPACE/head/xtask" && -f "$out/gate.json" ]]; then
+            echo "::group::xtask shadow-diff (informational)"
+            set +e
+            rust_json="$out/gate.xtask.json"
+            if [[ -s "$out/merge-gates.list" ]]; then
+              shadow_args=(bench-gate-shadow-diff --compare merge --rerun-rust
+                --python-json "$out/gate.json" --rust-json "$rust_json"
+                --merge-gates-list "$out/merge-gates.list")
+              [[ "${after_rerun:-0}" -eq 1 ]] && shadow_args+=(--after-rerun)
+            elif [[ -f "$out/gate-confirm1.json" ]]; then
+              # Fallback: confirm1 only (never auto-add confirm2/3 by existence).
+              shadow_args=(bench-gate-shadow-diff --compare merge --rerun-rust
+                --python-json "$out/gate.json" --rust-json "$rust_json"
+                --merge-gate "$out/gate-confirm1.json")
+              [[ "${after_rerun:-0}" -eq 1 ]] && shadow_args+=(--after-rerun)
+            else
+              shadow_args=(bench-gate-shadow-diff --compare gate --rerun-rust
+                --python-json "$out/gate.json" --rust-json "$rust_json"
+                --base "$out/base-a.json" --base "$out/base-b.json"
+                --head "$out/head-a.json" --head "$out/head-b.json"
+                --flag-threshold "$FLAG_THRESHOLD" --fail-threshold "$FAIL_THRESHOLD"
+                --mode first)
+            fi
+            (cd "$GITHUB_WORKSPACE/head" && cargo xtask "${shadow_args[@]}")
+            sc=$?
+            # If Python stamped unstable after merge/rerun, apply the same stamp before re-diff.
+            if [[ "$sc" -ne 0 && -f "$rust_json" ]]; then
+              py_action=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('gate_action',''))" "$out/gate.json" 2>/dev/null || echo "")
+              if [[ "$py_action" == "unstable" ]]; then
+                (cd "$GITHUB_WORKSPACE/head" && cargo xtask bench-pr-force-unstable "$rust_json")
+                (cd "$GITHUB_WORKSPACE/head" && cargo xtask bench-gate-shadow-diff --python-json "$out/gate.json" --rust-json "$rust_json")
+                sc=$?
+              fi
+            fi
+            set -e
+            if [[ "$sc" -eq 0 ]]; then
+              echo "xtask-shadow: OK" >> "$summary"
+            else
+              echo "xtask-shadow: MISMATCH (informational; Python remains authoritative)" >> "$summary"
+              echo "::warning::xtask shadow-diff mismatch (Python gate verdict still counts)"
+            fi
+            echo "::endgroup::"
+          else
+            echo "xtask-shadow: skipped" >> "$summary"
+          fi
 
           end_ts=$(date +%s)
           wall=$((end_ts - start_ts))
@@ -530,14 +635,14 @@ jobs:
       - name: Checkout head
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: head
           persist-credentials: false
 
       - name: Checkout base (full 40-char PR base SHA)
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ github.event.pull_request.base.sha || github.event.inputs.base_ref || 'master' }}
           path: base
           persist-credentials: false
 
@@ -574,8 +679,9 @@ jobs:
       - name: Measure cpu_hot (report-only)
         id: cpu
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_ref || 'master' }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          FORCE_FULL_GATE_RERUN: ${{ (github.event.inputs.force_full_gate_rerun == 'true' || github.event.inputs.force_full_gate_rerun == true) && '1' || '0' }}
         run: |
           set -euo pipefail
           out="$RUNNER_TEMP/cpu-hot"
@@ -753,7 +859,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Upsert PR comment
-        if: always() && hashFiles('bench-pr-summary.md') != ''
+        if: always() && github.event_name == 'pull_request' && hashFiles('bench-pr-summary.md') != ''
         continue-on-error: true
         uses: actions/github-script@v7
         with:

@@ -1,0 +1,20 @@
+{
+  "schema": "frame-bench-gate/1",
+  "mode": "confirm",
+  "confirm_round": 2,
+  "exit_code": 1,
+  "rows": [
+    {
+      "scenario": "multi_primitive_unlit",
+      "status": "FAIL (inconclusive: base drift)",
+      "confirm_round": 2,
+      "base_drift_pct": 33.55
+    },
+    {
+      "scenario": "unlit_sphere",
+      "status": "FAIL (inconclusive: base drift)",
+      "confirm_round": 2,
+      "base_drift_pct": 32.48
+    }
+  ]
+}

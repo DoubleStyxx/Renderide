@@ -466,6 +466,9 @@ profile.json.gz
 !crates/renderide/src/bin/**
 *.lscache
 config.toml
+# Track the cargo xtask alias (blanket config.toml ignore would skip it).
+!.cargo/
+!.cargo/config.toml
 
 # Frame benchmark JSON written by scripts/bench.sh
 /results/
