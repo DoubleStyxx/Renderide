@@ -25,8 +25,8 @@ pub(crate) const UNEXPECTED_PASS_LABEL: &str = "unexpected pass (WARP, #212)";
 ///
 /// `pbs_lit_material_matrix` is not here. It passed on all three WARP samples.
 /// `pbs_specular_opaque` is here because the runtime-branch shader still contains
-/// both clustered loops, and WARP times out on a flat or unstable frame. The
-/// code pull request removes the name after the compile-time split.
+/// both clustered loops. WARP times out on a flat frame or compares a channel-zero
+/// frame (run 41263139845). The code pull request removes the name after the split.
 const WARP_EXPECTED_FAILURE_CASES: &[&str] = &["pbs_specular_opaque"];
 
 /// Kept so tests can show this name is not on [`WARP_EXPECTED_FAILURE_CASES`].
@@ -100,6 +100,8 @@ struct ImageSignature {
     band_failed: bool,
     /// A failed criterion outside the signature and the allowed co-failures.
     foreign_failure: bool,
+    /// Channel-zero failed. Not a #212 band, and not a foreign failure.
+    channel_zero_failed: bool,
 }
 
 impl ImageSignature {
@@ -133,9 +135,9 @@ pub(crate) fn unexpected_pass_line(name: &str, artifacts: &Path) -> String {
 /// Labels a marked case when the selected adapter is WARP and the image check failed
 /// on an accepted frame with pending=0 and no dropped draws.
 ///
-/// The four-band signature is necessary for an image mismatch. A listed case
-/// that times out on a flat or unstable frame is also expected. The case name
-/// has to be in [`WARP_EXPECTED_FAILURE_CASES`].
+/// The four-band signature still excuses a #212 mismatch. A listed case is also
+/// expected on a flat timeout or a channel-zero comparison. The name has to be
+/// in [`WARP_EXPECTED_FAILURE_CASES`].
 pub(crate) fn apply_expected_failure(report: &mut SuiteReport) {
     let Some(index) = report
         .cases
@@ -190,7 +192,9 @@ fn excuse(is_warp: bool, case: &CaseSnapshot<'_>) -> bool {
     if !is_warp || !marked_expected_failure(case.name) {
         return false;
     }
-    if case.fault == CaseFault::FlatOrUnstable {
+    if case.fault == CaseFault::FlatOrUnstable
+        || (case.fault == CaseFault::ImageCheck && case.signature.channel_zero_failed)
+    {
         return true;
     }
     case.frame_accepted
@@ -266,11 +270,12 @@ fn signature_from_criteria(criteria: &[super::tolerance::CriterionResult]) -> Im
             CriterionResult::RegionNonDominant { passed: false, .. } => {
                 signature.band_failed = true;
             }
-            // Region-mean and channel-zero tighten comparison. They do not
-            // count as region-color bands and they do not set `foreign_failure`,
-            // so the all-4-band #212 excuse is unchanged when they fail beside it.
+            CriterionResult::ChannelZero { passed: false, .. } => {
+                signature.channel_zero_failed = true;
+            }
+            // Region-mean does not set `foreign_failure`, so the #212 excuse is unchanged.
             CriterionResult::RegionMean { .. }
-            | CriterionResult::ChannelZero { .. }
+            | CriterionResult::ChannelZero { passed: true, .. }
             | CriterionResult::Ssim { passed: true, .. }
             | CriterionResult::PixelDiff { passed: true, .. }
             | CriterionResult::ImageCoverage { passed: true, .. }
@@ -666,6 +671,14 @@ wgpu adapter selected (headless): Microsoft Basic Render Driver type=Cpu backend
             ..listed
         };
         assert!(!excuse(true, &unlisted));
+        let mut channel_zero = listed;
+        channel_zero.fault = CaseFault::ImageCheck;
+        channel_zero.frame_accepted = true;
+        channel_zero.signature.channel_zero_failed = true;
+        assert!(excuse(true, &channel_zero));
+        assert!(!excuse(false, &channel_zero));
+        channel_zero.name = PBS_LIT;
+        assert!(!excuse(true, &channel_zero));
     }
 
     #[test]
