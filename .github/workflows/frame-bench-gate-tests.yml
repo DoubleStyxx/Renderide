@@ -1,6 +1,7 @@
-# Unit tests for the frame-bench gate script (scripts/ci/frame_bench_gate.py).
-# frame-bench.yml is workflow_dispatch only and ci.yml's path filters skip scripts/**, so
-# without this workflow a gate change is only tested when someone dispatches a frame bench.
+# Unit tests for scripts/ci (frame_bench_gate, bench-pr helpers, rust toolchain pin check).
+# frame-bench.yml is workflow_dispatch only and ci.yml historically skipped scripts/**, so
+# without this workflow a gate/pin change is only tested when someone dispatches a frame bench.
+# Also fails when any workflow floats or mismatches the rust-toolchain.toml pin.
 # Standard library only: no pip install.
 name: Frame bench gate tests
 
@@ -10,11 +11,17 @@ name: Frame bench gate tests
     paths:
       - ".github/workflows/frame-bench-gate-tests.yml"
       - ".github/workflows/frame-bench.yml"
+      - ".github/workflows/**"
+      - ".github/actions/**"
+      - "rust-toolchain.toml"
       - "scripts/ci/**"
   pull_request:
     paths:
       - ".github/workflows/frame-bench-gate-tests.yml"
       - ".github/workflows/frame-bench.yml"
+      - ".github/workflows/**"
+      - ".github/actions/**"
+      - "rust-toolchain.toml"
       - "scripts/ci/**"
   workflow_dispatch:
 
@@ -41,6 +48,9 @@ jobs:
         with:
           python-version: "3.12.15"
 
-      # Same invocation as the self-test step in frame-bench.yml.
-      - name: Run gate unit tests
+      # Same invocation as the self-test step in frame-bench.yml / bench-pr.yml.
+      - name: Run CI script unit tests
         run: python -m unittest discover -s scripts/ci -p 'test_*.py' -v
+
+      - name: Check Rust toolchain pin in workflows
+        run: python3 scripts/ci/check_rust_toolchain_pin.py
