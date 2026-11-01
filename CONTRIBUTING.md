@@ -314,23 +314,24 @@ The main check workflow lives under `.github/workflows/`.
 
 The current workflows are:
 
-- `ci.yml` builds and tests the Rust workspace and the .NET generator solution as independent jobs. The Rust matrix runs on Ubuntu, Windows, and macOS; Linux is the only entry that uses `--all-features`, because GStreamer dev packages are reliably installable from the system package manager only on Linux. Windows and macOS still check the `tracy` feature so it stays warning-free on those platforms. The Rust job checks formatting, Taplo, Clippy, targeted package builds, the full workspace test suite, and the headless renderer golden suite. The .NET job uses the .NET 10 SDK on Ubuntu, Windows, and macOS, restores `Generators.sln` in locked mode, verifies formatting on Linux only, builds `SharedTypeGenerator.Tests` with warnings as errors, and runs its tests. Hosted runners do not have `Renderite.Shared.dll`, so generator roundtrip sources are excluded there.
-- `codeql.yml` runs CodeQL analysis for GitHub Actions, C#, and Rust on pushes and pull requests that target `master`, plus a weekly schedule.
+- `ci.yml` builds and tests the Rust workspace and the .NET generator solution as independent jobs. The Rust matrix runs on Ubuntu, Windows, and macOS; Linux is the only entry that uses `--all-features`, because GStreamer dev packages are reliably installable from the system package manager only on Linux. Windows and macOS still check the `tracy` feature so it stays warning-free on those platforms. The Rust job checks formatting, Taplo, Clippy, targeted package builds, the full workspace test suite, and the headless renderer golden suite (lavapipe on Ubuntu, WARP on Windows). The .NET job uses the .NET 10 SDK on Ubuntu, Windows, and macOS, restores `Generators.sln` in locked mode, verifies formatting on Linux only, builds `SharedTypeGenerator.Tests` with warnings as errors, and runs its tests. Hosted runners do not have `Renderite.Shared.dll`, so generator roundtrip sources are excluded there. The workflow trigger has no path filter. A `changes` job decides whether those suites apply, and the `required` job always reports a conclusion.
+- `codeql.yml` runs CodeQL analysis for GitHub Actions, C#, and Rust on pushes and pull requests that target `master`, plus a weekly schedule. CodeQL is not part of `required`. The bench-pr workflow is not part of `required` either.
 - `release.yml` builds nightly or manually requested release artifacts from the newest green CI run on `master`.
 - `static.yml` deploys the static site to GitHub Pages when the site files change on `master` or when manually dispatched.
 
-The CI workflow triggers on push to `master`, on pull requests, and on manual dispatch, but push and pull-request runs are path-filtered to files that affect builds, tests, or generated artifacts.
+The CI workflow triggers on push to `master`, on pull requests, and on manual dispatch. Suite jobs are skipped from their own `if` when the diff does not touch build inputs. See [`docs/ci/README.md`](docs/ci/README.md).
 
-Local hooks catch failures before a push, but they are not the final gate because any git hook can be bypassed with `--no-verify`. Protect `master` with a GitHub branch protection rule or ruleset that requires pull requests and these status checks before merge:
+Local hooks catch failures before a push, but they are not the final gate because any git hook can be bypassed with `--no-verify`. The merge gate is the `required` check, not the individual Rust or .NET job names. A job skipped by `if` is reported to branch protection as success, including when an upstream failure caused the skip. `required` rejects that case. The check names below are unchanged and are what `required` aggregates:
 
-- `Rust / ubuntu-latest`
+- `Rust / ubuntu-24.04`
 - `Rust / windows-latest`
 - `Rust / macos-latest`
 - `.NET / ubuntu-latest`
 - `.NET / windows-latest`
 - `.NET / macos-latest`
+- `macOS capacity`
 
-Block force pushes and branch deletion on `master` so the hosted CI result remains the authoritative merge gate.
+[`docs/ci/master-ruleset.json`](docs/ci/master-ruleset.json) is the ruleset that requires `required`, blocks force-pushes, and blocks deletion of the default branch. It is not applied by CI. The apply command is in [`docs/ci/README.md`](docs/ci/README.md).
 
 ---
 
