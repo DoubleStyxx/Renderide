@@ -132,12 +132,9 @@ pub(crate) fn unexpected_pass_line(name: &str, artifacts: &Path) -> String {
     )
 }
 
-/// Labels a marked case when the selected adapter is WARP and the image check failed
-/// on an accepted frame with pending=0 and no dropped draws.
+/// Labels one marked case when [`excuse`] accepts that WARP failure.
 ///
-/// The four-band signature still excuses a #212 mismatch. A listed case is also
-/// expected on a flat timeout or a channel-zero comparison. The name has to be
-/// in [`WARP_EXPECTED_FAILURE_CASES`].
+/// The name has to be in [`WARP_EXPECTED_FAILURE_CASES`].
 pub(crate) fn apply_expected_failure(report: &mut SuiteReport) {
     let Some(index) = report
         .cases
@@ -188,20 +185,58 @@ fn unexpected_pass(is_warp: bool, case: &CaseSnapshot<'_>) -> bool {
     is_warp && marked_expected_failure(case.name) && case.fault == CaseFault::None
 }
 
+/// Whether a listed WARP failure is an expected #212 miss.
+///
+/// Channel-zero (`ImageCheck` with `channel_zero_failed`) is excused only when
+/// all of these hold: `!signature.foreign_failure`, `frame_accepted`, recorded
+/// `pending == 0`, and no recorded dropped draw. `None` means that count was
+/// not recorded. It is not a non-zero pending value and it is not a dropped
+/// draw. The four-band arm is unchanged and still requires `Some(0)` for both
+/// counts.
+///
+/// A `FlatOrUnstable` timeout has no accepted frame, so `frame_accepted` is not
+/// a precondition of that arm. [`snapshot_for`] sets the flag only for a pass
+/// or an `ImageCheck`; it is false by definition, and requiring it would make
+/// the arm unreachable. No tolerance criteria are loaded for that fault, so
+/// `foreign_failure` is not an evaluation result. The predicate still refuses
+/// a snapshot that sets the flag. `pending` and `dropped_draws` apply when
+/// they are `Some`. [`snapshot_for`] copies `frame_pending` and `dropped_draws`
+/// from the suite case and does not read a PNG chunk for an unaccepted frame.
+/// `None` on either count was not recorded.
 fn excuse(is_warp: bool, case: &CaseSnapshot<'_>) -> bool {
     if !is_warp || !marked_expected_failure(case.name) {
         return false;
     }
-    if case.fault == CaseFault::FlatOrUnstable
-        || (case.fault == CaseFault::ImageCheck && case.signature.channel_zero_failed)
-    {
-        return true;
+    if case.fault == CaseFault::FlatOrUnstable {
+        return flat_or_unstable_excuse(case);
+    }
+    if case.fault == CaseFault::ImageCheck && case.signature.channel_zero_failed {
+        return channel_zero_excuse(case);
     }
     case.frame_accepted
         && case.fault == CaseFault::ImageCheck
         && case.pending == Some(0)
         && case.dropped_draws == Some(0)
         && case.signature.is_expected_mismatch()
+}
+
+/// `None` was not recorded. A recorded count excuses these arms only at zero.
+const fn recorded_count_allows_excuse(count: Option<u64>) -> bool {
+    matches!(count, None | Some(0))
+}
+
+fn foreign_and_counts_allow(case: &CaseSnapshot<'_>) -> bool {
+    !case.signature.foreign_failure
+        && recorded_count_allows_excuse(case.pending)
+        && recorded_count_allows_excuse(case.dropped_draws)
+}
+
+fn channel_zero_excuse(case: &CaseSnapshot<'_>) -> bool {
+    case.frame_accepted && foreign_and_counts_allow(case)
+}
+
+fn flat_or_unstable_excuse(case: &CaseSnapshot<'_>) -> bool {
+    foreign_and_counts_allow(case)
 }
 
 fn marked_expected_failure(name: &str) -> bool {
@@ -218,6 +253,12 @@ fn snapshot_for(case: &SuiteCaseReport) -> CaseSnapshot<'_> {
             pending,
             dropped_draws,
             signature_from_report(&case.report_json),
+        )
+    } else if fault == CaseFault::FlatOrUnstable {
+        (
+            case.frame_pending,
+            case.dropped_draws,
+            ImageSignature::default(),
         )
     } else {
         (None, None, ImageSignature::default())
@@ -517,6 +558,9 @@ fn hex_field(line: &str, key: &str) -> Option<u32> {
         .next()?;
     u32::from_str_radix(digits, 16).ok()
 }
+
+#[cfg(test)]
+mod channel_zero_excuse;
 
 #[cfg(test)]
 mod tests {
@@ -918,80 +962,5 @@ wgpu adapter selected (headless): Microsoft Basic Render Driver type=Cpu backend
     #[test]
     fn full_signature_on_a_non_warp_adapter_is_not_excused() {
         assert!(!excuse(false, &image_failure()));
-    }
-
-    #[test]
-    fn a_warp_pass_is_labeled_and_does_not_fail_the_suite() {
-        let pass = CaseSnapshot {
-            name: PBS_LIT,
-            fault: CaseFault::None,
-            frame_accepted: true,
-            pending: Some(0),
-            dropped_draws: Some(0),
-            signature: ImageSignature::default(),
-        };
-        assert!(!unexpected_pass(true, &pass));
-        assert!(!unexpected_pass(false, &pass));
-        assert!(!excuse(true, &pass));
-        let mut other = pass;
-        other.name = "unlit_sphere";
-        assert!(!unexpected_pass(true, &other));
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let report_path = dir.path().join("report.json");
-        let integration = super::super::cases::pbs_lit_material_matrix();
-        let mut case_report = output::report_from_evaluation(
-            &integration,
-            crate::scene_dsl::tolerance::ToleranceEvaluation {
-                ssim: Some(1.0),
-                max_abs_diff_observed: Some(0),
-                failing_pixel_fraction: Some(0.0),
-                actual_coverage: crate::scene_dsl::tolerance::ImageCoverageStats {
-                    luma_min: 0,
-                    luma_max: 1,
-                    luma_range: 1,
-                    unique_rgb_colors: 2,
-                    dominant_rgb_fraction: 0.5,
-                    non_background_pixel_fraction: 0.5,
-                    transparent_pixel_fraction: 0.0,
-                },
-                golden_coverage: crate::scene_dsl::tolerance::ImageCoverageStats {
-                    luma_min: 0,
-                    luma_max: 1,
-                    luma_range: 1,
-                    unique_rgb_colors: 2,
-                    dominant_rgb_fraction: 0.5,
-                    non_background_pixel_fraction: 0.5,
-                    transparent_pixel_fraction: 0.0,
-                },
-                criteria: Vec::new(),
-                passed: true,
-                combine: crate::scene_dsl::tolerance::Combine::And,
-            },
-        );
-        case_report.passed = true;
-        fs::write(
-            &report_path,
-            serde_json::to_string_pretty(&case_report).expect("json"),
-        )
-        .expect("write");
-        stamp_outcome(&report_path, true, UNEXPECTED_PASS_LABEL).expect("stamp");
-        let text = fs::read_to_string(&report_path).expect("read");
-        assert!(text.contains(UNEXPECTED_PASS_LABEL), "{text}");
-        assert!(text.contains("\"passed\": true"), "{text}");
-
-        let mut case =
-            SuiteCaseReport::plain(PBS_LIT, true, dir.path().to_path_buf(), report_path, None);
-        case.result = Some(UNEXPECTED_PASS_LABEL.to_string());
-        let suite = SuiteReport::from_cases(vec![case]);
-        assert!(suite.passed());
-        assert_eq!(suite.failed, 0);
-        assert_eq!(suite.passed, 1);
-        assert_eq!(suite.unexpected_passes, 1);
-        assert_eq!(suite.expected_failures, 0);
-        assert!(case_is_unexpected_pass(&suite.cases[0]));
-        let line = unexpected_pass_line(PBS_LIT, dir.path());
-        assert!(line.starts_with("UNEXPECTED PASS pbs_lit_material_matrix"));
-        assert!(line.contains("#212"));
     }
 }
