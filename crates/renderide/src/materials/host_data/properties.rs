@@ -314,6 +314,19 @@ impl MaterialPropertyStore {
         self.shader_asset_by_material.get(&material_id).copied()
     }
 
+    /// Stored host `SetInstancing` flag for `material_id`.
+    ///
+    /// The opcode is dispatched only as an instance-changed bit. The integer on
+    /// that row is not written into this store, so the query returns `None`
+    /// whether or not a shader binding exists for the material. G0a records the
+    /// integer and removes the `cfg(test)` gate when the draw path reads it.
+    #[cfg(test)]
+    pub fn instancing_enabled_for_material(&self, material_id: i32) -> Option<bool> {
+        match self.shader_asset_for_material(material_id) {
+            Some(_) | None => None,
+        }
+    }
+
     /// Count of host materials with at least one stored property map entry.
     pub fn material_property_slot_count(&self) -> usize {
         self.material_properties.len()

@@ -201,3 +201,66 @@ fn begin_target_bit(
         *slot = target.is_property_block();
     }
 }
+
+/// Applies one material `SetInstancing` row for the G0a draw-count judge.
+///
+/// Returns the store and the instance-changed bit for that material target.
+#[cfg(test)]
+pub(crate) fn apply_material_set_instancing_for_test(
+    material_id: i32,
+    property_id: i32,
+) -> (MaterialPropertyStore, bool) {
+    let stream = [
+        set_instancing_row(material_id, MaterialPropertyUpdateType::SelectTarget),
+        set_instancing_row(property_id, MaterialPropertyUpdateType::SetInstancing),
+        set_instancing_row(0, MaterialPropertyUpdateType::UpdateBatchEnd),
+    ]
+    .concat();
+    let byte_len = stream.len() as i32;
+    let mut loader = SetInstancingBlobLoader { bytes: stream };
+    let batch = MaterialsUpdateBatch {
+        material_updates: vec![SharedMemoryBufferDescriptor {
+            buffer_id: 0,
+            buffer_capacity: byte_len,
+            offset: 0,
+            length: byte_len,
+        }],
+        material_update_count: 1,
+        ..Default::default()
+    };
+    let mut store = MaterialPropertyStore::new();
+    let mut instance_changed = [false];
+    parse_materials_update_batch_into_store_with_instance_changed(
+        &mut loader,
+        &batch,
+        &mut store,
+        &ParseMaterialBatchOptions::default(),
+        &mut instance_changed,
+    );
+    (store, instance_changed[0])
+}
+
+#[cfg(test)]
+struct SetInstancingBlobLoader {
+    bytes: Vec<u8>,
+}
+
+#[cfg(test)]
+impl MaterialBatchBlobLoader for SetInstancingBlobLoader {
+    fn load_blob(&mut self, descriptor: &SharedMemoryBufferDescriptor) -> Option<Vec<u8>> {
+        (descriptor.buffer_id == 0).then(|| self.bytes.clone())
+    }
+}
+
+#[cfg(test)]
+fn set_instancing_row(property_id: i32, ty: MaterialPropertyUpdateType) -> Vec<u8> {
+    let mut row = MaterialPropertyUpdate {
+        property_id,
+        update_type: ty,
+        _padding: [0; 3],
+    };
+    let mut buf = vec![0u8; MATERIAL_PROPERTY_UPDATE_HOST_ROW_BYTES];
+    let mut packer = crate::shared::packing::memory_packer::MemoryPacker::new(&mut buf);
+    row.pack(&mut packer);
+    buf
+}
