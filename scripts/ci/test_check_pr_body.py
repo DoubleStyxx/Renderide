@@ -30,6 +30,10 @@ Local run: `python3 -m unittest discover -s scripts/ci -p 'test_check_pr_body.py
 - reliability: the pr-body check fails a pull request that drops a required section.
 - No other pillar changes. Evidence is the unit test above.
 
+## Ratchet metrics moved
+
+example_metric: 10 before, 8 after.
+
 ## Rendering and parity
 
 - [x] This PR does not change rendering or parity.
@@ -43,6 +47,10 @@ The negative tests in `scripts/ci/test_check_pr_body.py` fail if the headings ar
 
 None, maintenance only. Documentation and the pull request template. No renderer default,
 golden, or frame-gate input changes, so no pillar regresses.
+
+## Ratchet metrics moved
+
+None: ratchet.toml not on master yet.
 """
 
 
@@ -83,19 +91,57 @@ class LintBody(unittest.TestCase):
         self.assertFalse(any("## Pillars advanced" in err and "missing" in err for err in errors))
 
     def test_missing_pillars_fails(self) -> None:
-        body = "## Verification evidence\n\nThe unit test fails without this section.\n"
+        body = (
+            "## Verification evidence\n\nThe unit test fails without this section.\n\n"
+            "## Ratchet metrics moved\n\nNone: ratchet.toml not on master yet.\n"
+        )
         errors = pr_body.lint_pr_body(body)
         self.assertTrue(any("missing heading '## Pillars advanced'" in err for err in errors))
         self.assertFalse(any("missing heading '## Verification evidence'" in err for err in errors))
+        self.assertFalse(any("## Ratchet metrics moved" in err and "missing" in err for err in errors))
 
-    def test_empty_body_fails_both_headings(self) -> None:
+    def test_missing_ratchet_fails(self) -> None:
+        body = MAINTENANCE.replace("## Ratchet metrics moved\n", "")
+        errors = pr_body.lint_pr_body(body)
+        self.assertTrue(any("missing heading '## Ratchet metrics moved'" in err for err in errors))
+        self.assertFalse(any("missing heading '## Verification evidence'" in err for err in errors))
+        self.assertFalse(any("missing heading '## Pillars advanced'" in err for err in errors))
+
+    def test_ratchet_none_with_reason_passes(self) -> None:
+        self.assertEqual(pr_body.lint_pr_body(MAINTENANCE), [])
+
+    def test_ratchet_before_after_passes(self) -> None:
+        self.assertIn("10 before, 8 after", FILLED)
+        self.assertEqual(pr_body.lint_pr_body(FILLED), [])
+
+    def test_ratchet_bare_none_fails(self) -> None:
+        body = MAINTENANCE.replace(
+            "None: ratchet.toml not on master yet.",
+            "None",
+        )
+        errors = pr_body.lint_pr_body(body)
+        self.assertTrue(
+            any("## Ratchet metrics moved" in err and "without a reason" in err for err in errors)
+        )
+
+    def test_ratchet_none_punctuation_only_fails(self) -> None:
+        for text in ("None.", "None:", "None,"):
+            body = MAINTENANCE.replace("None: ratchet.toml not on master yet.", text)
+            errors = pr_body.lint_pr_body(body)
+            self.assertTrue(
+                any("without a reason" in err for err in errors),
+                text,
+            )
+
+    def test_empty_body_fails_required_headings(self) -> None:
         errors = pr_body.lint_pr_body("")
         self.assertTrue(any("## Verification evidence" in err for err in errors))
         self.assertTrue(any("## Pillars advanced" in err for err in errors))
+        self.assertTrue(any("## Ratchet metrics moved" in err for err in errors))
 
     def test_whitespace_body_fails(self) -> None:
         errors = pr_body.lint_pr_body("\n\n  \n")
-        self.assertGreaterEqual(len(errors), 2)
+        self.assertGreaterEqual(len(errors), 3)
 
     def test_placeholder_todo_fails_even_with_other_text(self) -> None:
         body = FILLED.replace(
@@ -114,7 +160,9 @@ class LintBody(unittest.TestCase):
         body = (
             "## Verification evidence\n\n"
             "## Pillars advanced\n\n"
-            "None, maintenance only. Template wording only; no product change.\n"
+            "None, maintenance only. Template wording only; no product change.\n\n"
+            "## Ratchet metrics moved\n\n"
+            "None: ratchet.toml not on master yet.\n"
         )
         errors = pr_body.lint_pr_body(body)
         self.assertTrue(
@@ -126,7 +174,9 @@ class LintBody(unittest.TestCase):
             "## Verification evidence\n\n"
             "<!-- still empty after the comment is ignored -->\n\n"
             "## Pillars advanced\n\n"
-            "None, maintenance only, because this is a docs change.\n"
+            "None, maintenance only, because this is a docs change.\n\n"
+            "## Ratchet metrics moved\n\n"
+            "None: ratchet.toml not on master yet.\n"
         )
         errors = pr_body.lint_pr_body(body)
         self.assertTrue(
@@ -140,11 +190,14 @@ class LintBody(unittest.TestCase):
             "quoted\n"
             "## Pillars advanced\n\n"
             "quoted\n"
+            "## Ratchet metrics moved\n\n"
+            "None: quoted only.\n"
             "```\n"
         )
         errors = pr_body.lint_pr_body(body)
         self.assertTrue(any("missing heading '## Verification evidence'" in err for err in errors))
         self.assertTrue(any("missing heading '## Pillars advanced'" in err for err in errors))
+        self.assertTrue(any("missing heading '## Ratchet metrics moved'" in err for err in errors))
 
     def test_placeholder_inside_fence_is_ignored(self) -> None:
         body = (
@@ -173,6 +226,8 @@ class LintBody(unittest.TestCase):
         text = TEMPLATE.read_text(encoding="utf-8")
         self.assertIn("## Verification evidence", text)
         self.assertIn("## Pillars advanced", text)
+        self.assertIn("## Ratchet metrics moved", text)
+        self.assertIn("pr-body-lint:placeholder ratchet-metrics", text)
         errors = pr_body.lint_pr_body(text)
         self.assertTrue(any("pr-body-lint:placeholder" in err for err in errors))
         self.assertTrue(any("TODO(pr-body):" in err for err in errors))

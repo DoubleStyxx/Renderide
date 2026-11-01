@@ -5,6 +5,11 @@ Required headings, each followed by text the author wrote:
 
 - ``## Verification evidence``
 - ``## Pillars advanced``
+- ``## Ratchet metrics moved``
+
+``## Ratchet metrics moved`` records before and after values for each ratchet
+metric the pull request moves. ``None`` plus a reason is accepted. A bare
+``None`` fails.
 
 The template markers ``pr-body-lint:placeholder`` and ``TODO(pr-body):`` are failures
 anywhere outside a fenced code block. An empty section is a failure too. Fenced code
@@ -28,7 +33,12 @@ from pathlib import Path
 REQUIRED_TITLES: tuple[str, ...] = (
     "Verification evidence",
     "Pillars advanced",
+    "Ratchet metrics moved",
 )
+
+# ``## Ratchet metrics moved`` may be "None" only when a reason follows.
+RATCHET_TITLE = "Ratchet metrics moved"
+_RATCHET_NONE = re.compile(r"(?i)none\b[\s:.,;-]*(.*)")
 
 # Strings the pull request template leaves for the author to delete.
 PLACEHOLDER_MARKERS: tuple[str, ...] = (
@@ -124,10 +134,24 @@ def section_bodies(text: str) -> tuple[dict[str, str], list[str]]:
     return bodies, errors
 
 
+def visible_section_text(body: str) -> str:
+    """Section text with HTML comments removed and blank lines collapsed."""
+    visible = _HTML_COMMENT.sub("", body)
+    return " ".join(line.strip() for line in visible.split("\n") if line.strip())
+
+
 def has_substantive_text(body: str) -> bool:
     """True when the section has a non-whitespace line outside HTML comments."""
-    visible = _HTML_COMMENT.sub("", body)
-    return any(line.strip() for line in visible.split("\n"))
+    return bool(visible_section_text(body))
+
+
+def ratchet_none_without_reason(body: str) -> bool:
+    """True when the ratchet section is only the word None, with no reason."""
+    text = visible_section_text(body).strip()
+    match = _RATCHET_NONE.fullmatch(text)
+    if match is None:
+        return False
+    return match.group(1).strip() == ""
 
 
 def lint_pr_body(body: str) -> list[str]:
@@ -148,6 +172,9 @@ def lint_pr_body(body: str) -> list[str]:
             continue
         if not has_substantive_text(bodies[title]):
             errors.append(f"heading '{heading}' has no text under it")
+            continue
+        if title == RATCHET_TITLE and ratchet_none_without_reason(bodies[title]):
+            errors.append(f"heading '{heading}' says None without a reason")
     return errors
 
 

@@ -30,3 +30,12 @@ Tick or list which pillars this pull request advances (performance, fidelity, pa
 -->
 
 TODO(pr-body): replace this line with the pillars this pull request advances.
+
+## Ratchet metrics moved
+
+<!-- pr-body-lint:placeholder ratchet-metrics
+Record before and after values for each ratchet metric this pull request moves.
+`None` plus a reason is acceptable. See PILLARS.md.
+-->
+
+TODO(pr-body): replace this line with the ratchet metrics this pull request moves.

@@ -1,5 +1,6 @@
-# Fails a pull request whose body is missing ## Verification evidence or
-# ## Pillars advanced, or still has the template placeholder markers.
+# Fails a pull request whose body is missing ## Verification evidence,
+# ## Pillars advanced, or ## Ratchet metrics moved, or still has the template
+# placeholder markers. A bare "None" under the ratchet heading fails too.
 # The check reads pull_request.body from the Actions event payload
 # (GITHUB_EVENT_PATH). It does not call the GitHub API.
 #
@@ -11,7 +12,7 @@ name: PR body
 
 "on":
   pull_request:
-    types: [opened, edited, synchronize]
+    types: [opened, edited, synchronize, reopened]
   push:
     branches: [master]
     paths:
