@@ -376,10 +376,6 @@ root = "pbsslicetransparentspecular"
 reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
 
 [[entry]]
-root = "pbsspecular"
-reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
-
-[[entry]]
 root = "pbsstencil"
 reason = "No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants)."
 

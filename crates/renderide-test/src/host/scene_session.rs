@@ -119,7 +119,7 @@ pub(crate) fn material_draws(template: SessionTemplate) -> MaterialDraws {
 /// Every [`SessionTemplate`] is named. Do not use `_`: a new template that
 /// replaces its placeholder would keep that placeholder and look covered.
 /// A template that draws the shader it uploads joins the `None` group.
-/// #284 adds one line there: `| SessionTemplate::PbsSpecularPremultiply`.
+/// The specular premultiply and opaque templates join the non-replacing group.
 fn custom_shader_assignment(template: &SessionTemplate) -> CustomShaderAssignment {
     match template {
         SessionTemplate::CustomShaderPropertyUpdate => CustomShaderAssignment::PropertyUpdate,
@@ -130,6 +130,8 @@ fn custom_shader_assignment(template: &SessionTemplate) -> CustomShaderAssignmen
         | SessionTemplate::MultiPrimitiveUnlitGrid { .. }
         | SessionTemplate::PbsLitMaterialMatrix
         | SessionTemplate::PbsMetallicPremultiply
+        | SessionTemplate::PbsSpecularPremultiply
+        | SessionTemplate::PbsSpecularOpaque
         | SessionTemplate::ManyStaticMeshes
         | SessionTemplate::LightsShadows
         | SessionTemplate::AlphaCutoutMaskedQuads { .. }
@@ -142,7 +144,10 @@ fn custom_shader_assignment(template: &SessionTemplate) -> CustomShaderAssignmen
         | SessionTemplate::ManyShadowedPointLights
         | SessionTemplate::DoubleBufferNothingOnSkybox
         | SessionTemplate::NegativeLightPair { .. }
-        | SessionTemplate::SkinnedAvatars { .. } => CustomShaderAssignment::None,
+        | SessionTemplate::SkinnedAvatars { .. }
+        | SessionTemplate::ManyInstances
+        | SessionTemplate::OcclusionHeavy
+        | SessionTemplate::MaterialVariety => CustomShaderAssignment::None,
     }
 }
 
@@ -193,6 +198,10 @@ pub enum SessionTemplate {
     PbsLitMaterialMatrix,
     /// One PBS metallic sphere with `_ALPHAPREMULTIPLY_ON`, One/OneMinusSrcAlpha, and queue 3000.
     PbsMetallicPremultiply,
+    /// One PBS specular sphere with `_ALPHAPREMULTIPLY_ON`, One/OneMinusSrcAlpha, and queue 3000.
+    PbsSpecularPremultiply,
+    /// One opaque PBS specular sphere. The premultiply keyword is off.
+    PbsSpecularOpaque,
     /// Frame-bench only: a 40x40 grid of 1,600 unlit draws sharing one mesh and material.
     ManyStaticMeshes,
     /// Frame-bench only: 64 lit spheres on a floor with one shadowed directional and four shadowed point lights.
@@ -255,6 +264,12 @@ pub enum SessionTemplate {
         /// Whether the bulk of the avatars sit outside the camera frustum.
         offscreen: bool,
     },
+    /// Frame-bench only: 100×100 unlit spheres (10,000 draws), GPU-driven judge floor.
+    ManyInstances,
+    /// Frame-bench only: near occluder wall + 4,096 hidden spheres, GPU-driven judge floor.
+    OcclusionHeavy,
+    /// Frame-bench only: 64 distinct PBS/Unlit materials, GPU-driven judge floor.
+    MaterialVariety,
 }
 
 /// Drives the full session end-to-end. The renderer process is killed on `Err` via [`Drop`] of
@@ -351,6 +366,8 @@ fn template_label(template: &SessionTemplate) -> &'static str {
         SessionTemplate::MultiPrimitiveUnlitGrid { .. } => "MultiPrimitiveUnlitGrid",
         SessionTemplate::PbsLitMaterialMatrix => "PbsLitMaterialMatrix",
         SessionTemplate::PbsMetallicPremultiply => "PbsMetallicPremultiply",
+        SessionTemplate::PbsSpecularPremultiply => "PbsSpecularPremultiply",
+        SessionTemplate::PbsSpecularOpaque => "PbsSpecularOpaque",
         SessionTemplate::ManyStaticMeshes => "ManyStaticMeshes",
         SessionTemplate::LightsShadows => "LightsShadows",
         SessionTemplate::AlphaCutoutMaskedQuads { .. } => "AlphaCutoutMaskedQuads",
@@ -367,6 +384,9 @@ fn template_label(template: &SessionTemplate) -> &'static str {
         SessionTemplate::NegativeLightPair { .. } => "NegativeLightPair",
         SessionTemplate::Warp216Debug { .. } => "Warp216Debug",
         SessionTemplate::SkinnedAvatars { .. } => "SkinnedAvatars",
+        SessionTemplate::ManyInstances => "ManyInstances",
+        SessionTemplate::OcclusionHeavy => "OcclusionHeavy",
+        SessionTemplate::MaterialVariety => "MaterialVariety",
     }
 }
 
