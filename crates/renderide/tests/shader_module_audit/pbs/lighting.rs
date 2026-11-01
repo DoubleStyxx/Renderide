@@ -91,9 +91,10 @@ fn generic_pbs_premultiply_variants_use_unity_transparent_lighting() -> io::Resu
 
     let specular = material_source("pbsspecular.wgsl")?;
     for required in [
-        "fn alpha_premultiply_enabled() -> bool",
-        "if (alpha_premultiply_enabled())",
+        "//#keyword _ALPHAPREMULTIPLY_ON",
+        "#ifdef _ALPHAPREMULTIPLY_ON",
         "plight::shade_specular_transparent_clustered(",
+        "plight::shade_specular_clustered(",
         "return vec4<f32>(color, s.alpha);",
     ] {
         assert!(
@@ -101,6 +102,10 @@ fn generic_pbs_premultiply_variants_use_unity_transparent_lighting() -> io::Resu
             "pbsspecular.wgsl must contain `{required}`"
         );
     }
+    assert!(
+        !specular.contains("if (alpha_premultiply_enabled())"),
+        "pbsspecular.wgsl must select premultiply at compile time, not with a runtime branch"
+    );
     for forbidden in [
         "fn apply_premultiply(",
         "return select(color, color * alpha, alpha_premultiply_enabled());",
@@ -112,6 +117,93 @@ fn generic_pbs_premultiply_variants_use_unity_transparent_lighting() -> io::Resu
         );
     }
 
+    Ok(())
+}
+
+/// Packaged material fragments keep one clustered light loop in each compiled variant.
+///
+/// `pbsmetallic` and `pbsspecular` are the only materials that name both the opaque and
+/// transparent loops. Those calls sit in opposite `#ifdef _ALPHAPREMULTIPLY_ON` branches, so
+/// each packaged module contains one loop. A runtime `if` that calls both fails this test.
+#[test]
+fn material_fragments_keep_one_clustered_loop_per_variant() -> io::Result<()> {
+    let pairs = [
+        (
+            "shade_metallic_clustered(",
+            "shade_metallic_transparent_clustered(",
+        ),
+        (
+            "shade_specular_clustered(",
+            "shade_specular_transparent_clustered(",
+        ),
+    ];
+    for path in wgsl_files_recursive("shaders/materials")? {
+        let src = source_file(&path)?;
+        let label = file_label(&path);
+        let mut calls = Vec::new();
+        for (opaque, transparent) in pairs {
+            if src.contains(opaque) {
+                calls.push(opaque);
+            }
+            if src.contains(transparent) {
+                calls.push(transparent);
+            }
+        }
+        if src.contains("shade_clustered_diffuse(") {
+            calls.push("shade_clustered_diffuse(");
+        }
+        if calls.len() <= 1 {
+            continue;
+        }
+        assert!(
+            !src.contains("if (alpha_premultiply_enabled())"),
+            "{label} still branches between clustered loops at runtime: {calls:?}"
+        );
+        let start = src.find("#ifdef _ALPHAPREMULTIPLY_ON").unwrap_or_else(|| {
+            panic!("{label} calls {calls:?} without a compile-time _ALPHAPREMULTIPLY_ON split")
+        });
+        let rest = &src[start..];
+        let else_at = rest
+            .find("\n#else\n")
+            .unwrap_or_else(|| panic!("{label} premultiply split is missing #else"));
+        let endif_at = rest
+            .find("\n#endif")
+            .unwrap_or_else(|| panic!("{label} premultiply split is missing #endif"));
+        assert!(else_at < endif_at, "{label}");
+        let premultiply = &rest[..else_at];
+        let opaque = &rest[else_at..endif_at];
+        let premultiply_calls: Vec<_> = calls
+            .iter()
+            .copied()
+            .filter(|call| premultiply.contains(call))
+            .collect();
+        let opaque_calls: Vec<_> = calls
+            .iter()
+            .copied()
+            .filter(|call| opaque.contains(call))
+            .collect();
+        assert_eq!(
+            premultiply_calls,
+            vec![
+                calls
+                    .iter()
+                    .copied()
+                    .find(|call| call.contains("transparent"))
+                    .expect("transparent call")
+            ],
+            "{label} premultiply variant"
+        );
+        assert_eq!(
+            opaque_calls.len(),
+            1,
+            "{label} opaque calls {opaque_calls:?}"
+        );
+        assert!(
+            !opaque_calls[0].contains("transparent"),
+            "{label} opaque variant contains {}",
+            opaque_calls[0]
+        );
+    }
     Ok(())
 }
 

@@ -272,7 +272,7 @@ fn index_draws(
 
 fn root_for_draw(shader: &str, variant_bits: Option<u32>) -> String {
     let base = normalize_shader_key(shader);
-    let selected = crate::materials::embedded::stem_metadata::pbsmetallic_compile_time_stem(
+    let selected = crate::materials::embedded::stem_metadata::pbs_compile_time_premultiply_stem(
         format!("{base}_default"),
         variant_bits.unwrap_or(0),
     );
@@ -537,7 +537,12 @@ mod tests {
             roots.contains("pbsmetallic_alphapremultiply"),
             "keyword fan-out must stay a shipped root"
         );
+        assert!(
+            roots.contains("pbsspecular_alphapremultiply"),
+            "specular keyword fan-out must stay a shipped root"
+        );
         assert!(!files.contains("pbsmetallic_alphapremultiply"));
+        assert!(!files.contains("pbsspecular_alphapremultiply"));
     }
 
     #[test]
@@ -546,7 +551,12 @@ mod tests {
             root_for_draw("PBSMetallic.shader", Some(0x0000_0002)),
             "pbsmetallic_alphapremultiply"
         );
+        assert_eq!(
+            root_for_draw("PBSSpecular.shader", Some(0x0000_0002)),
+            "pbsspecular_alphapremultiply"
+        );
         assert_eq!(root_for_draw("PBSMetallic.shader", None), "pbsmetallic");
+        assert_eq!(root_for_draw("PBSSpecular.shader", None), "pbsspecular");
         assert_eq!(root_for_draw("Unlit.shader", Some(0x0000_0200)), "unlit");
     }
 

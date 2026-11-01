@@ -9,7 +9,7 @@ Regenerate it with:
 UPDATE_MATERIAL_COVERAGE=1 cargo test -p renderide --lib material_coverage::tests::material_coverage_doc_matches_sources -- --exact
 ```
 
-Shipped roots: 150. Covered: 6. Allowlisted: 144.
+Shipped roots: 151. Covered: 7. Allowlisted: 144.
 
 Suite cases that draw a custom shader, not a shipped material root:
 
@@ -114,7 +114,8 @@ Suite cases that draw a custom shader, not a shipped material root:
 | `pbsslicespecular` |  | No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants). |
 | `pbsslicetransparent` |  | No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants). |
 | `pbsslicetransparentspecular` |  | No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants). |
-| `pbsspecular` | `pbs_specular_opaque`, `pbs_specular_premultiply` |  |
+| `pbsspecular` | `pbs_specular_opaque` |  |
+| `pbsspecular_alphapremultiply` | `pbs_specular_premultiply` |  |
 | `pbsstencil` |  | No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants). |
 | `pbsstencilspecular` |  | No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants). |
 | `pbstriplanar` |  | No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants). |

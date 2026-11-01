@@ -24,10 +24,10 @@ pub(crate) const UNEXPECTED_PASS_LABEL: &str = "unexpected pass (WARP, #212)";
 /// Cases whose WARP image mismatch is an expected #212 failure.
 ///
 /// `pbs_lit_material_matrix` is not here. It passed on all three WARP samples.
-/// `pbs_specular_opaque` is here because the runtime-branch shader still contains
-/// both clustered loops. WARP times out on a flat frame or compares a channel-zero
-/// frame (run 41263139845). The code pull request removes the name after the split.
-const WARP_EXPECTED_FAILURE_CASES: &[&str] = &["pbs_specular_opaque"];
+/// `pbs_specular_opaque` was here while both clustered loops shared one shader.
+/// WARP timed out on a flat frame or compared a channel-zero frame. The split
+/// removes that marker.
+const WARP_EXPECTED_FAILURE_CASES: &[&str] = &[];
 
 /// Kept so tests can show this name is not on [`WARP_EXPECTED_FAILURE_CASES`].
 #[cfg(test)]
@@ -655,8 +655,8 @@ wgpu adapter selected (headless): Microsoft Basic Render Driver type=Cpu backend
     }
 
     #[test]
-    fn flat_or_unstable_warp_frame_is_expected_only_for_a_listed_case() {
-        let listed = CaseSnapshot {
+    fn flat_or_unstable_warp_frame_is_not_excused_after_the_split() {
+        let opaque = CaseSnapshot {
             name: "pbs_specular_opaque",
             fault: CaseFault::FlatOrUnstable,
             frame_accepted: false,
@@ -664,19 +664,17 @@ wgpu adapter selected (headless): Microsoft Basic Render Driver type=Cpu backend
             dropped_draws: None,
             signature: ImageSignature::default(),
         };
-        assert!(excuse(true, &listed));
-        assert!(!excuse(false, &listed));
+        assert!(!excuse(true, &opaque));
         let unlisted = CaseSnapshot {
             name: PBS_LIT,
-            ..listed
+            ..opaque
         };
         assert!(!excuse(true, &unlisted));
-        let mut channel_zero = listed;
+        let mut channel_zero = opaque;
         channel_zero.fault = CaseFault::ImageCheck;
         channel_zero.frame_accepted = true;
         channel_zero.signature.channel_zero_failed = true;
-        assert!(excuse(true, &channel_zero));
-        assert!(!excuse(false, &channel_zero));
+        assert!(!excuse(true, &channel_zero));
         channel_zero.name = PBS_LIT;
         assert!(!excuse(true, &channel_zero));
     }
