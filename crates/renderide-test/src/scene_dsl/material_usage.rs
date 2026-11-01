@@ -81,11 +81,8 @@ fn coverage_cases() -> Vec<IntegrationCase> {
 /// The material root is whatever shader [`material_draws`] finds on that
 /// session, not a second name table.
 ///
-/// #284 adds one line, next to the metallic premultiply arm:
-/// `CaseTemplate::PbsSpecularPremultiply => SessionTemplate::PbsSpecularPremultiply`.
-/// That session uploads `PBSSpecular.shader`, which normalizes to `pbsspecular`.
-/// The same template also needs one `| SessionTemplate::PbsSpecularPremultiply`
-/// line in [`crate::host::scene_session`]'s non-replacing assignment group.
+/// The specular premultiply and opaque arms upload `PBSSpecular.shader`, which
+/// normalizes to `pbsspecular`. Both join the non-replacing assignment group.
 fn session_template(template: &CaseTemplate) -> SessionTemplate {
     let (rgba, size) = dummy_rgba();
     match template {
@@ -101,6 +98,8 @@ fn session_template(template: &CaseTemplate) -> SessionTemplate {
         },
         CaseTemplate::PbsLitMaterialMatrix => SessionTemplate::PbsLitMaterialMatrix,
         CaseTemplate::PbsMetallicPremultiply => SessionTemplate::PbsMetallicPremultiply,
+        CaseTemplate::PbsSpecularPremultiply => SessionTemplate::PbsSpecularPremultiply,
+        CaseTemplate::PbsSpecularOpaque => SessionTemplate::PbsSpecularOpaque,
         CaseTemplate::AlphaCutoutMaskedQuads => SessionTemplate::AlphaCutoutMaskedQuads {
             mask_rgba: rgba,
             texture_size: size,

@@ -9,7 +9,7 @@ Regenerate it with:
 UPDATE_MATERIAL_COVERAGE=1 cargo test -p renderide --lib material_coverage::tests::material_coverage_doc_matches_sources -- --exact
 ```
 
-Shipped roots: 150. Covered: 5. Allowlisted: 145.
+Shipped roots: 150. Covered: 6. Allowlisted: 144.
 
 Suite cases that draw a custom shader, not a shipped material root:
 
@@ -114,7 +114,7 @@ Suite cases that draw a custom shader, not a shipped material root:
 | `pbsslicespecular` |  | No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants). |
 | `pbsslicetransparent` |  | No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants). |
 | `pbsslicetransparentspecular` |  | No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants). |
-| `pbsspecular` |  | No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants). |
+| `pbsspecular` | `pbs_specular_opaque`, `pbs_specular_premultiply` |  |
 | `pbsstencil` |  | No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants). |
 | `pbsstencilspecular` |  | No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants). |
 | `pbstriplanar` |  | No scene_dsl golden draws this root. Backfill bucket: PBS variants (metallic, specular, premultiply, and keyword variants). |
@@ -173,7 +173,7 @@ Suite cases that draw a custom shader, not a shipped material root:
 
 Premultiply is a keyword inside PBS stems, not its own root. No shipped stem is named tonemap or skinning; those buckets list the roots the classifier matches.
 
-### PBS variants (metallic, specular, premultiply, and keyword variants) (44)
+### PBS variants (metallic, specular, premultiply, and keyword variants) (43)
 
 - `paintpbs`
 - `pbscolormask`
@@ -209,7 +209,6 @@ Premultiply is a keyword inside PBS stems, not its own root. No shipped stem is 
 - `pbsslicespecular`
 - `pbsslicetransparent`
 - `pbsslicetransparentspecular`
-- `pbsspecular`
 - `pbsstencil`
 - `pbsstencilspecular`
 - `pbstriplanar`
