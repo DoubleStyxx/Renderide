@@ -18,9 +18,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import frame_bench_gate as gate  # noqa: E402
 
-# Workflow defaults (.github/workflows/frame-bench.yml).
+# Historical frame-bench.yml defaults (pre-parity); locked simulation rates below.
 RUNS = 9
 CONFIRM_ROUNDS = 3
+# Current bench-pr.yml / frame-bench.yml parity defaults.
+PARITY_RUNS = 12
+PARITY_CONFIRM_ROUNDS = 1
 FLAG = 5.0
 FAIL = 10.0
 # Opt-in absolute floor used by the explicit floor tests (the gate default is 0, off; O8 open).
@@ -565,10 +568,11 @@ class GateTests(unittest.TestCase):
                     verdict = self.decide(base, head, [base] * rounds, [head] * rounds)
                     self.assertEqual(verdict, "fail")
 
-    def duplicated_slips(self, runs: int) -> tuple[int, int]:
+    def duplicated_slips(self, runs: int, confirm_rounds: int | None = None) -> tuple[int, int]:
         # Cases whose first-pass delta is above the fail bar, re-"confirmed" with copies of the
         # first-pass runs. Path (b) then sees the same runs again, so a slip means both
         # Mann-Whitney tests stayed above alpha. Seeded, so the counts are fixed.
+        rounds = CONFIRM_ROUNDS if confirm_rounds is None else confirm_rounds
         rng = random.Random(3)
         eligible = slipped = 0
         for _ in range(4000):
@@ -577,9 +581,12 @@ class GateTests(unittest.TestCase):
             if gate.delta_percent(base, head) <= FAIL:
                 continue
             eligible += 1
-            if self.decide(base, head, [base] * CONFIRM_ROUNDS, [head] * CONFIRM_ROUNDS) != "fail":
+            if self.decide(base, head, [base] * rounds, [head] * rounds) != "fail":
                 slipped += 1
-                self.assertGreaterEqual(sum(v >= statistics.median(head) for v in base), 1)
+                # For small n the slip always coincides with at least one base >= head median;
+                # at n=12 that diagnostic is not always true, so only assert it for n<=9.
+                if runs <= 9:
+                    self.assertGreaterEqual(sum(v >= statistics.median(head) for v in base), 1)
         return eligible, slipped
 
     def test_duplicated_confirm_on_simulated_cases(self) -> None:
@@ -587,6 +594,12 @@ class GateTests(unittest.TestCase):
         # runs=9 (new default): 6 of 3605.
         self.assertEqual(self.duplicated_slips(5), (3511, 47))
         self.assertEqual(self.duplicated_slips(RUNS), (3605, 6))
+
+    def test_duplicated_confirm_parity_n12(self) -> None:
+        # Parity default n=12, confirm_rounds=1: path (b) on copied data; count is locked.
+        self.assertEqual(
+            self.duplicated_slips(PARITY_RUNS, PARITY_CONFIRM_ROUNDS), (3638, 28)
+        )
 
     # --- Mann-Whitney implementation ------------------------------------------------------
 
@@ -641,8 +654,8 @@ class GateTests(unittest.TestCase):
         self.assertTrue(15.0 <= median_spread <= 30.0, median_spread)
 
     def test_simulation_at_workflow_defaults(self) -> None:
-        # Confirm-only FAIL rule; runs=9, flag=5, fail=10, confirm_rounds=3; 4000 trials each,
-        # seeded (0%: seed 2, regressions: seed 1), true value 1 ms, abs floor off.
+        # Historical frame-bench defaults (runs=9, confirm_rounds=3). Parity n=12/1 is
+        # test_simulation_at_parity_defaults. Confirm-only FAIL; 4000 trials; seeds 2 then 1.
         # Measured: 0% passes 99.925%; +10% fails 38.675%; +12% fails 60.375%; +15% fails 85.3%.
         rates = {pct: simulate(pct, RUNS, CONFIRM_ROUNDS, FLAG, FAIL, trials=4000, seed=1) for pct in (10, 12, 15)}
         pass_0 = 1.0 - simulate(0.0, RUNS, CONFIRM_ROUNDS, FLAG, FAIL, trials=4000, seed=2)
@@ -654,6 +667,27 @@ class GateTests(unittest.TestCase):
         self.assertAlmostEqual(rates[12], 0.60375, places=5)
         self.assertAlmostEqual(rates[15], 0.853, places=5)
         self.assertTrue(0.30 <= rates[10] <= 0.55)
+
+    def test_simulation_at_parity_defaults(self) -> None:
+        # bench-pr / frame-bench parity: runs=12, confirm_rounds=1, flag=5, fail=10.
+        rates = {
+            pct: simulate(pct, PARITY_RUNS, PARITY_CONFIRM_ROUNDS, FLAG, FAIL, trials=4000, seed=1)
+            for pct in (10, 12, 15)
+        }
+        pass_0 = 1.0 - simulate(
+            0.0, PARITY_RUNS, PARITY_CONFIRM_ROUNDS, FLAG, FAIL, trials=4000, seed=2
+        )
+        print(
+            f"\n[sim parity runs={PARITY_RUNS} rounds={PARITY_CONFIRM_ROUNDS} "
+            f"flag={FLAG:g} fail={FAIL:g}] pass@0%={pass_0:.4f} "
+            + " ".join(f"fail@+{k}%={v:.4f}" for k, v in rates.items()),
+            file=sys.stderr,
+        )
+        self.assertGreaterEqual(pass_0, 0.95)
+        self.assertAlmostEqual(pass_0, 0.99325, places=5)
+        self.assertAlmostEqual(rates[10], 0.3985, places=5)
+        self.assertAlmostEqual(rates[12], 0.55075, places=5)
+        self.assertAlmostEqual(rates[15], 0.74825, places=5)
 
     def test_simulation_at_0_2_ms_floor_off_and_on(self) -> None:
         # Why the abs floor is opt-in (O8 open): today's lavapipe scenarios run at ~0.2-0.4 ms.
