@@ -455,7 +455,146 @@ def is_failure(status: str) -> bool:
 
 
 def is_inconclusive_drift(status: str) -> bool:
-    return status.startswith("INCONCLUSIVE (base drift)")
+    return status.startswith("INCONCLUSIVE (base drift)") or status.startswith(
+        "FAIL (inconclusive: base drift)"
+    )
+
+
+def is_unstable_runner(status: str) -> bool:
+    return status.startswith("FAIL (inconclusive: unstable runner)")
+
+
+def confirm_status_kind(status: str) -> str:
+    """Classify a confirm-row status for the post-drift policy: drift | fail | pass."""
+    if is_unstable_runner(status):
+        return "unstable"
+    if is_inconclusive_drift(status):
+        return "drift"
+    if status.startswith("FAIL"):
+        return "fail"
+    return "pass"
+
+
+@dataclass(frozen=True)
+class DecideResult:
+    """Whole-gate decision for one scenario under the post-drift two-clean-FAIL policy.
+
+    verdict:
+      pass — cleared (no confirm-only FAIL, or a drift-clean ok after a drift event)
+      fail — confirm-only FAIL on the no-drift path, or two consecutive drift-clean FAILs
+      need_confirm — after drift, exactly one drift-clean FAIL so far; caller must run another confirm
+      rerun — disagreement or recurring drift; whole gate should rerun once
+      unstable — after a prior full-gate rerun, still disagreement/recurring drift
+    """
+
+    verdict: str
+    reason: str = ""
+    deciding_round: int | None = None
+
+
+
+def format_summary_verdict(action: str, reason: str = "") -> str:
+    """One-line job-summary text for each post-drift gate_action (GITHUB_STEP_SUMMARY)."""
+    action = (action or "").strip()
+    reason = (reason or "").strip()
+    if action == "pass":
+        line = "gate_action=pass"
+    elif action == "fail":
+        line = "gate_action=fail (perf)"
+    elif action == "need_confirm":
+        line = "gate_action=need_confirm (need second consecutive drift-clean FAIL)"
+    elif action == "rerun":
+        line = "gate_action=rerun (disagreement or recurring drift → full gate rerun once)"
+    elif action == "unstable":
+        line = "gate_action=unstable → inconclusive: unstable runner"
+    else:
+        line = f"gate_action={action or 'unknown'}"
+    if reason:
+        line = f"{line}; verdict_reason={reason}"
+    return line
+
+
+def post_drift_policy(
+    round_kinds: list[str],
+    *,
+    after_rerun: bool = False,
+) -> DecideResult:
+    """Apply Prism post-drift policy to ordered confirm-round kinds (`drift`/`fail`/`pass`).
+
+    No-drift path (round 1 is not drift): decide on round 1 alone (#253).
+    After any drift: FAIL only if two consecutive later drift-clean rounds both FAIL.
+    A single drift-clean pass after drift clears. Disagreement (fail then pass among
+    consecutive clean rounds) or recurring drift → `rerun`, or `unstable` when
+    `after_rerun` is set.
+    """
+    if not round_kinds:
+        return DecideResult("pass", "no confirm rounds")
+
+    # No-drift path: first confirm decides immediately.
+    if round_kinds[0] != "drift":
+        if round_kinds[0] == "fail":
+            return DecideResult("fail", "confirm-only FAIL (no drift)", deciding_round=1)
+        return DecideResult("pass", "confirm clear (no drift)", deciding_round=1)
+
+    # Post-drift: walk subsequent rounds; ignore the drifting round itself for FAIL.
+    clean_fail_streak = 0
+    last_clean_round: int | None = None
+    saw_clean_fail = False
+    for idx, kind in enumerate(round_kinds):
+        round_no = idx + 1
+        if kind == "drift":
+            if round_no == 1:
+                continue  # opening drift event
+            # Recurring drift after the opening event.
+            if after_rerun:
+                return DecideResult(
+                    "unstable",
+                    f"recurring base drift on confirm round {round_no} after full-gate rerun",
+                    deciding_round=None,
+                )
+            return DecideResult(
+                "rerun",
+                f"recurring base drift on confirm round {round_no}",
+                deciding_round=None,
+            )
+        if kind == "fail":
+            if saw_clean_fail and last_clean_round == round_no - 1:
+                # Two consecutive drift-clean FAILs.
+                return DecideResult(
+                    "fail",
+                    f"two consecutive drift-clean confirm-only FAILs (rounds {round_no - 1}+{round_no})",
+                    deciding_round=round_no,
+                )
+            saw_clean_fail = True
+            clean_fail_streak = 1
+            last_clean_round = round_no
+            continue
+        # kind == pass (drift-clean ok)
+        if saw_clean_fail and last_clean_round == round_no - 1:
+            # Disagreement: clean FAIL immediately followed by clean pass.
+            if after_rerun:
+                return DecideResult(
+                    "unstable",
+                    f"disagreement after drift (FAIL round {last_clean_round}, ok round {round_no}) after full-gate rerun",
+                    deciding_round=None,
+                )
+            return DecideResult(
+                "rerun",
+                f"disagreement after drift (FAIL round {last_clean_round}, ok round {round_no})",
+                deciding_round=None,
+            )
+        # A clean pass with no prior unresolved clean FAIL clears the drift event.
+        return DecideResult("pass", f"drift-clean ok on confirm round {round_no}", deciding_round=round_no)
+
+    # Exhausted provided rounds after an opening drift.
+    if saw_clean_fail and clean_fail_streak == 1:
+        return DecideResult(
+            "need_confirm",
+            f"one drift-clean FAIL on round {last_clean_round}; need a second consecutive drift-clean confirm",
+            deciding_round=None,
+        )
+    # Only drifts so far and no further rounds supplied → fail-closed incomplete (caller should have run extra).
+    return DecideResult("fail", "base drift with no extra confirm supplied", deciding_round=None)
 
 
 def decide(
@@ -470,40 +609,102 @@ def decide(
     confirm_min_n: int = CONFIRM_MIN_N,
     confirm_base_2: list[list[float]] | None = None,
     confirm_head_2: list[list[float]] | None = None,
+    confirm_base_3: list[list[float]] | None = None,
+    confirm_head_3: list[list[float]] | None = None,
     drift_threshold: float = BASE_DRIFT_PCT,
+    after_rerun: bool = False,
 ) -> str:
-    """Whole-gate decision for one scenario, as the workflow runs it: `pass` or `fail`.
+    """Whole-gate decision for one scenario: pass/fail/need_confirm/rerun/unstable.
 
-    `confirm_base` / `confirm_head` are the confirm rounds. Empty means `confirm_rounds=0`:
+    `confirm_base` / `confirm_head` are confirm round 1. Empty means `confirm_rounds=0`:
     then the first pass runs at the fail threshold (a delta between the two thresholds passes).
     Confirm FAIL requires confirm-only significance with at least `confirm_min_n` samples per side.
-    On base drift, an optional second confirm round (`confirm_base_2` / `confirm_head_2`) is
-    evaluated fail-closed; without it, drift fails closed.
+
+    Post-drift (Prism): after any base-drift event, FAIL only if two consecutive drift-clean
+    confirm rounds both FAIL. Disagreement or recurring drift → `rerun` (or `unstable` when
+    `after_rerun`). A single drift-clean ok clears. No-drift path is unchanged (#253).
     """
+    return decide_detail(
+        first_base,
+        first_head,
+        confirm_base,
+        confirm_head,
+        flag_threshold,
+        fail_threshold,
+        alpha=alpha,
+        abs_floor_ms=abs_floor_ms,
+        confirm_min_n=confirm_min_n,
+        confirm_base_2=confirm_base_2,
+        confirm_head_2=confirm_head_2,
+        confirm_base_3=confirm_base_3,
+        confirm_head_3=confirm_head_3,
+        drift_threshold=drift_threshold,
+        after_rerun=after_rerun,
+    ).verdict
+
+
+def decide_detail(
+    first_base: list[float],
+    first_head: list[float],
+    confirm_base: list[list[float]],
+    confirm_head: list[list[float]],
+    flag_threshold: float,
+    fail_threshold: float,
+    alpha: float = DEFAULT_ALPHA,
+    abs_floor_ms: float = DEFAULT_ABS_FLOOR_MS,
+    confirm_min_n: int = CONFIRM_MIN_N,
+    confirm_base_2: list[list[float]] | None = None,
+    confirm_head_2: list[list[float]] | None = None,
+    confirm_base_3: list[list[float]] | None = None,
+    confirm_head_3: list[list[float]] | None = None,
+    drift_threshold: float = BASE_DRIFT_PCT,
+    after_rerun: bool = False,
+) -> DecideResult:
+    """Like `decide`, but returns a `DecideResult` with reason and deciding_round."""
     if not confirm_base and not confirm_head:
         first = evaluate_first({"s": first_base}, {"s": first_head}, fail_threshold, [], abs_floor_ms)[0]
-        return "fail" if first.status == "FLAG" else "pass"
+        if first.status == "FLAG":
+            return DecideResult("fail", "confirm_rounds=0 first-pass FAIL")
+        return DecideResult("pass", "confirm_rounds=0 first-pass clear")
     first = evaluate_first({"s": first_base}, {"s": first_head}, flag_threshold, [], abs_floor_ms)[0]
     if first.status != "FLAG":
-        return "pass"
-    row = evaluate_confirm(
-        {"s": first_base}, {"s": first_head},
-        {"s": [v for run in confirm_base for v in run]}, {"s": [v for run in confirm_head for v in run]},
-        fail_threshold, [], alpha, abs_floor_ms, confirm_min_n,
-        drift_threshold=drift_threshold, fail_closed_drift=False, confirm_round=1,
-    )[0]
-    if is_inconclusive_drift(row.status):
-        if confirm_base_2 is None or confirm_head_2 is None:
-            return "fail"
-        row2 = evaluate_confirm(
-            {"s": first_base}, {"s": first_head},
-            {"s": [v for run in confirm_base_2 for v in run]},
-            {"s": [v for run in confirm_head_2 for v in run]},
-            fail_threshold, [], alpha, abs_floor_ms, confirm_min_n,
-            drift_threshold=drift_threshold, fail_closed_drift=True, confirm_round=2,
+        return DecideResult("pass", "first pass not flagged")
+
+    rounds: list[tuple[list[list[float]], list[list[float]]]] = [
+        (confirm_base, confirm_head),
+    ]
+    if confirm_base_2 is not None and confirm_head_2 is not None:
+        rounds.append((confirm_base_2, confirm_head_2))
+    if confirm_base_3 is not None and confirm_head_3 is not None:
+        rounds.append((confirm_base_3, confirm_head_3))
+
+    kinds: list[str] = []
+    for i, (cb_runs, ch_runs) in enumerate(rounds):
+        round_no = i + 1
+        # Only the terminal incomplete-drift attempt uses fail_closed labeling when we have
+        # no further round and after_rerun demands unstable; otherwise keep INCONCLUSIVE.
+        fail_closed = False
+        row = evaluate_confirm(
+            {"s": first_base},
+            {"s": first_head},
+            {"s": [v for run in cb_runs for v in run]},
+            {"s": [v for run in ch_runs for v in run]},
+            fail_threshold,
+            [],
+            alpha,
+            abs_floor_ms,
+            confirm_min_n,
+            drift_threshold=drift_threshold,
+            fail_closed_drift=fail_closed,
+            confirm_round=round_no,
         )[0]
-        return "fail" if is_failure(row2.status) else "pass"
-    return "fail" if row.status.startswith("FAIL") else "pass"
+        kinds.append(confirm_status_kind(row.status))
+
+    result = post_drift_policy(kinds, after_rerun=after_rerun)
+    # Incomplete: drifted on last supplied round with no further data and policy returned
+    # need_confirm only applies after a clean FAIL. If we only have opening drift and no
+    # extra round, post_drift_policy returns fail — keep that fail-closed behavior.
+    return result
 
 
 def fmt_ms(value: float | None) -> str:
@@ -538,8 +739,10 @@ def render(
             "Gate: cpu_frame_ms.p95 (median of per-run p95). Confirm: FAIL only when confirm-rounds-only "
             f"delta > {fail_threshold:g}% AND one-sided Mann-Whitney U p < {alpha:g} (head slower) with "
             f"n>={CONFIRM_MIN_N} samples per side. Pooled delta/p are reported but do not decide FAIL. "
-            f"Confirm-base median drift > {BASE_DRIFT_PCT:g}% vs first-pass base → inconclusive "
-            "(one extra confirm; second drift fails closed as inconclusive: base drift)."
+            f"Confirm-base median drift > {BASE_DRIFT_PCT:g}% vs first-pass base → inconclusive. "
+            "After drift: FAIL only if two consecutive drift-clean confirms both FAIL; "
+            "disagreement/recurring drift → full gate rerun once; still unstable → "
+            "inconclusive: unstable runner."
             + floor_text,
             "",
             "| scenario | base p95 ms | head p95 ms | pooled delta | pooled runs base/head | pooled MW p "
