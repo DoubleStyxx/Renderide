@@ -173,6 +173,7 @@ pub fn build_frame_submit_data(
         output_state: None,
         render_spaces,
         render_tasks: Vec::new(),
+        readback_tasks: Vec::new(),
     }
 }
 
